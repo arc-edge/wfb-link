@@ -72,7 +72,7 @@ Initial implementation has started. The current code can:
 - Claim and release interface 0 for a supported adapter.
 - Emit human-readable or JSON `usb-probe` reports.
 - Inspect macOS IOKit USB state with `macos-usb-state`, including devices libusb cannot enumerate.
-- Read RTL8812AU registers, EFUSE, guarded power-on/RF-reset writes, firmware download/readiness, LLT programming, queue/DMA setup, and MAC/WMAC setup through macOS IOUSBHost default-control transfers when macOS has not created libusb-visible interfaces.
+- Read USB descriptors, RTL8812AU registers, EFUSE, guarded power-on/RF-reset writes, firmware download/readiness, LLT programming, queue/DMA setup, MAC/WMAC setup, BB tables, and RF tables through macOS IOUSBHost default-control transfers when macOS has not created libusb-visible interfaces.
 - Run a read-only RTL8812AU register smoke test after claiming the adapter.
 - Run guarded RTL8812AU software LED on/off/blink diagnostics across normal, antenna-diversity, and minicard LED paths.
 - Read RTL8812AU physical EFUSE bytes, decode the logical EFUSE map, and summarize identity/RFE/TX-power offsets without EFUSE programming.
@@ -201,6 +201,8 @@ cargo run -p wfb-radio-diag -- --json trace-compare --expected fixtures/traces/i
 `bb-smoke` is the guarded BB diagnostic: after MAC/WMAC setup, it parses `array_mp_8812a_phy_reg` and `array_mp_8812a_agc_tab` from an external Realtek `halhwimg8812a_bb.c` source file, evaluates the driver's condition markers with visible CLI parameters, powers the BB/RF gates, writes the selected PHY/AGC table entries, and applies the RTL8812A crystal-cap update. It requires `--i-understand-this-writes-registers` and still does not program RF radio tables, tune a channel, start RX, write bulk OUT, or transmit frames.
 
 `rf-smoke` is the guarded RF diagnostic: after BB setup, it parses `array_mp_8812a_radioa` and `array_mp_8812a_radiob` from an external Realtek `halhwimg8812a_rf.c` source file, evaluates condition markers, encodes each RF offset/data pair, and writes path A through `0x0c90` and path B through `0x0e90`. It requires `--i-understand-this-writes-registers` and still does not tune a channel, start RX, write bulk OUT, or transmit frames.
+
+The macOS IOUSBHost fallback now has matching `macos-descriptor-smoke`, `macos-bb-smoke`, and `macos-rf-smoke` stages for macOS 26 cases where libusb cannot enumerate the adapter. The descriptor stage is read-only and reports the AWUS036ACH layout as bulk IN `0x81`, bulk OUT `0x02/0x03/0x04`, and interrupt IN `0x85`; BB/RF stages run the same guarded table programming through default-control transfers.
 
 `init` is the integrated live bring-up diagnostic: it claims the adapter once, parses BB/RF table sources, runs power-on, firmware, LLT, queue/DMA, MAC, BB, RF, and selected channel setup, and emits phase-level counters plus `effective_channel`/`effective_bandwidth`. It requires `--firmware` and `--i-understand-this-writes-registers`. The live April 30, 2026 runs on macOS 15.7.4 passed with `0x0bda:0x8812`, channel 36 at 20, 40, and 80 MHz. It still does not start RX, write bulk OUT, or transmit frames.
 

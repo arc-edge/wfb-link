@@ -31,7 +31,7 @@ The system SHALL provide a macOS-only direct-control diagnostic path for RTL8812
 
 #### Scenario: Direct-control register access succeeds
 - **WHEN** the operator selects a matching VID/PID through the macOS direct-control path
-- **THEN** the system can issue bounded RTL8812AU vendor control reads, guarded EFUSE control sequences, guarded power-on/RF-reset control-write diagnostics, guarded firmware download/readiness polling, guarded LLT programming, guarded queue/DMA setup, and guarded MAC/WMAC setup while clearly reporting that bulk RX/TX endpoint access is not proven
+- **THEN** the system can issue bounded standard descriptor reads, RTL8812AU vendor control reads, guarded EFUSE control sequences, guarded power-on/RF-reset control-write diagnostics, guarded firmware download/readiness polling, guarded LLT programming, guarded queue/DMA setup, guarded MAC/WMAC setup, guarded BB PHY/AGC setup, and guarded RF radio table setup while clearly reporting that descriptor-visible bulk endpoints are not yet usable bulk RX/TX pipes
 
 ### Requirement: RTL8812AU Initialization
 The system SHALL initialize RTL8812AU hardware into a monitor-capable state using userspace USB control and bulk transfers.

@@ -11,6 +11,8 @@ use radio_core::{rtl8812au::Rtl8812auUsbTransport, UsbError};
 const RTL_USB_REQ: u8 = 0x05;
 const RTL_READ_REQUEST_TYPE: u8 = 0xc0;
 const RTL_WRITE_REQUEST_TYPE: u8 = 0x40;
+const USB_STANDARD_READ_REQUEST_TYPE: u8 = 0x80;
+const USB_REQUEST_GET_DESCRIPTOR: u8 = 0x06;
 const ERROR_BUF_LEN: usize = 512;
 
 #[repr(C)]
@@ -138,6 +140,26 @@ impl MacosUsbHostDevice {
         } else {
             Ok(transferred)
         }
+    }
+
+    pub fn get_descriptor(
+        &self,
+        descriptor_type: u8,
+        descriptor_index: u8,
+        len: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, String> {
+        let mut data = vec![0u8; len];
+        let transferred = self.control_read(
+            USB_STANDARD_READ_REQUEST_TYPE,
+            USB_REQUEST_GET_DESCRIPTOR,
+            u16::from(descriptor_type) << 8 | u16::from(descriptor_index),
+            0,
+            &mut data,
+            timeout,
+        )?;
+        data.truncate(transferred);
+        Ok(data)
     }
 }
 

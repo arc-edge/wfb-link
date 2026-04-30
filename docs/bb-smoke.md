@@ -32,6 +32,16 @@ Live run on April 30, 2026 with `0x0bda:0x8812` on macOS 15.7.4 passed:
 - USB counters: 12 control reads, 352 control writes, 0 bulk IN reads, 0 bulk OUT writes, 0 TX frames.
 - Post-run `reg-smoke` passed with `REG_SYS_FUNC_EN=0x1f`, `REG_MCUFWDL=0xc6`, and `REG_CR=0x06ff`.
 
+Remote macOS 26 IOUSBHost fallback run on April 30, 2026 also passed after power-on, firmware, LLT, queue/DMA, and MAC/WMAC smoke stages:
+
+- Command: `macos-bb-smoke`
+- Report: `/tmp/wfb-remote-macos-bb-smoke.json`
+- Source checkout: `aircrack-ng/rtl8812au` commit `7344855`
+- `PHY_REG` writes applied: 215
+- `AGC_TAB` writes applied: 132
+- USB counters: 12 control reads, 352 control writes, 0 bulk IN reads, 0 bulk OUT writes, 0 TX frames.
+- No libusb enumeration or interface claim was used.
+
 ## Source Mapping
 
 - BB power gate sequence: `hal/rtl8812a/rtl8812a_phycfg.c`, `PHY_BBConfig8812`.

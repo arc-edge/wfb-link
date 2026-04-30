@@ -11,6 +11,10 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-usb-state.j
   --vid 0x0bda \
   --pid 0x8812
 
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-descriptor-smoke.json macos-descriptor-smoke \
+  --vid 0x0bda \
+  --pid 0x8812
+
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-reg-smoke.json macos-reg-smoke \
   --vid 0x0bda \
   --pid 0x8812
@@ -48,6 +52,18 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-mac-smoke.j
   --vid 0x0bda \
   --pid 0x8812 \
   --i-understand-this-writes-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-bb-smoke.json macos-bb-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --bb-source /tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c \
+  --i-understand-this-writes-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-rf-smoke.json macos-rf-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --rf-source /tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c \
+  --i-understand-this-writes-registers
 ```
 
 ## April 30, 2026 Remote Result
@@ -63,6 +79,20 @@ On `rownd@rownds-macbook-pro`, `usb-probe --all` did not list the RTL8812AU thro
 - Configurations: `1`
 - Current configuration: absent before manual configuration, `1` after a direct IOUSBHost configure attempt
 - Interface children: absent
+
+The read-only IOUSBHost descriptor smoke test passed even though the IORegistry tree still lacked interface children:
+
+- Report: `/tmp/wfb-remote-macos-descriptor-smoke.json`
+- Control reads: 3
+- Device descriptor VID/PID: `0x0bda:0x8812`
+- Configurations: 1
+- Configuration value: 1
+- Interfaces in descriptor: 1
+- Total configuration descriptor length: 53 bytes
+- Bulk IN endpoints: `0x81`
+- Bulk OUT endpoints: `0x02`, `0x03`, `0x04`
+- Interrupt IN endpoint: `0x85`
+- Max packet size: 512 bytes for all bulk endpoints, 64 bytes for interrupt IN
 
 The integrated IOUSBHost transport then passed direct default-control register reads:
 
@@ -144,8 +174,30 @@ After fresh power-on, firmware, LLT, and queue/DMA smoke stages, the guarded IOU
 - Bulk IN reads: 0
 - Bulk OUT writes: 0
 
+After fresh power-on, firmware, LLT, queue/DMA, and MAC/WMAC smoke stages, the guarded IOUSBHost BB smoke test also passed using `aircrack-ng/rtl8812au` reference source commit `7344855`:
+
+- Report: `/tmp/wfb-remote-macos-bb-smoke.json`
+- `PHY_REG` writes applied: 215
+- `AGC_TAB` writes applied: 132
+- Delays applied: 0
+- Control reads: 12
+- Control writes: 352
+- Bulk IN reads: 0
+- Bulk OUT writes: 0
+
+After BB smoke, the guarded IOUSBHost RF smoke test also passed:
+
+- Report: `/tmp/wfb-remote-macos-rf-smoke.json`
+- `radioA` writes applied: 206
+- `radioB` writes applied: 193
+- Delays applied: 4
+- Control reads: 3
+- Control writes: 399
+- Bulk IN reads: 0
+- Bulk OUT writes: 0
+
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, and guarded register-write sequences can execute there through MAC/WMAC programming. The blocker is interface and endpoint materialization: without `IOUSBHostInterface` children or a libusb-visible configuration, the current code has no bulk IN/OUT pipes for RX or TX.
+The macOS 26 blocker is not raw USB device visibility, descriptor access, or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, and guarded register-write sequences can execute there through BB/RF programming. The blocker is pipe access: the descriptor advertises bulk endpoints, but without `IOUSBHostInterface` children, a libusb-visible configuration, or another pipe-opening mechanism, the current code still has no bulk IN/OUT pipes for RX or TX.
 
-The next useful implementation work is to move more guarded control-transfer diagnostics onto IOUSBHost, then investigate an IOUSBHost interface/pipe path or a DriverKit transport for bulk endpoints.
+The next useful implementation work is to investigate an IOUSBHost interface/pipe path or a DriverKit transport for those descriptor-confirmed bulk endpoints.

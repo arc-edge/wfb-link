@@ -18,6 +18,17 @@ The system SHALL verify USB discovery and interface claim without changing RF st
 - **WHEN** the adapter is absent or cannot be claimed
 - **THEN** the probe reports a failing result without attempting firmware or RF initialization
 
+### Requirement: macOS Descriptor Verification
+The system SHALL verify USB device and configuration descriptors through macOS IOUSBHost default-control reads when libusb cannot enumerate interfaces.
+
+#### Scenario: macOS descriptor smoke succeeds
+- **WHEN** a matching RTL8812AU `IOUSBHostDevice` is visible
+- **THEN** the verification command reports the device descriptor, configuration descriptor, interfaces, endpoint addresses, transfer types, max packet sizes, and derived bulk IN/OUT endpoint lists without claiming interfaces, issuing vendor register writes, or using bulk traffic
+
+#### Scenario: macOS descriptor smoke fails
+- **WHEN** IOUSBHost cannot open the device or descriptor reads are short, malformed, or rejected
+- **THEN** the verification command reports the failed descriptor phase and preserves any partial descriptor data read before failure
+
 ### Requirement: Firmware Smoke Verification
 The system SHALL verify RTL8812A firmware download independently from channel tuning, RX, and TX.
 

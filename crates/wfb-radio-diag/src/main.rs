@@ -49,6 +49,8 @@ enum Command {
     UsbProbe(UsbProbeArgs),
     /// Inspect macOS IOKit USB state, including devices libusb cannot enumerate.
     MacosUsbState(MacosUsbStateArgs),
+    /// Read USB descriptors through macOS IOUSBHost default-control transfers.
+    MacosDescriptorSmoke(MacosDescriptorSmokeArgs),
     /// Read RTL8812AU registers through macOS IOUSBHost direct control transfers.
     MacosRegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE through macOS IOUSBHost direct control transfers.
@@ -63,6 +65,10 @@ enum Command {
     MacosQueueDmaSmoke(MacosQueueDmaSmokeArgs),
     /// Program RTL8812A MAC/WMAC registers through macOS IOUSBHost direct control transfers.
     MacosMacSmoke(MacSmokeArgs),
+    /// Program RTL8812A BB PHY/AGC tables through macOS IOUSBHost direct control transfers.
+    MacosBbSmoke(BbSmokeArgs),
+    /// Program RTL8812A RF radioA/radioB tables through macOS IOUSBHost direct control transfers.
+    MacosRfSmoke(RfSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -113,6 +119,20 @@ struct UsbProbeArgs {
 struct MacosUsbStateArgs {
     #[command(flatten)]
     adapter: AdapterArgs,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosDescriptorSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Per-descriptor read timeout in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    timeout_ms: u64,
+
+    /// Configuration descriptor index to read.
+    #[arg(long, default_value_t = 0)]
+    configuration_index: u8,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -872,6 +892,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::MacosDescriptorSmoke(args) => {
+            let report = macos_descriptor_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_macos_descriptor_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::MacosRegSmoke(args) => {
             let report = macos_register_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -1017,6 +1047,26 @@ fn main() -> Result<()> {
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_mac_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosBbSmoke(args) => {
+            let report = macos_bb_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_bb_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosRfSmoke(args) => {
+            let report = macos_rf_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_rf_smoke_human(&report);
             }
             if let Some(code) = report.result.exit_code() {
                 std::process::exit(code);
@@ -1472,6 +1522,77 @@ struct MacosUsbDeviceState {
     enumeration_state: Option<u64>,
     has_current_configuration: bool,
     has_interface_children: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosDescriptorSmokeReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    timeout_ms: u64,
+    configuration_index: u8,
+    result: DiagnosticResult,
+    device_descriptor: Option<UsbDeviceDescriptorReport>,
+    configuration: Option<UsbConfigurationDescriptorReport>,
+    counters: DiagnosticCounters,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsbDeviceDescriptorReport {
+    raw_hex: String,
+    usb_version_bcd_hex: String,
+    device_class_hex: String,
+    device_subclass_hex: String,
+    device_protocol_hex: String,
+    max_packet_size0: u8,
+    vendor_id_hex: String,
+    product_id_hex: String,
+    device_version_bcd_hex: String,
+    manufacturer_index: u8,
+    product_index: u8,
+    serial_number_index: u8,
+    num_configurations: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct UsbConfigurationDescriptorReport {
+    raw_hex: String,
+    total_length: u16,
+    configuration_value: u8,
+    num_interfaces: u8,
+    attributes_hex: String,
+    max_power_ma: u16,
+    interfaces: Vec<UsbInterfaceDescriptorReport>,
+    endpoints: Vec<UsbEndpointDescriptorReport>,
+    bulk_in_endpoints: Vec<String>,
+    bulk_out_endpoints: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UsbInterfaceDescriptorReport {
+    interface_number: u8,
+    alternate_setting: u8,
+    endpoint_count: u8,
+    interface_class_hex: String,
+    interface_subclass_hex: String,
+    interface_protocol_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UsbEndpointDescriptorReport {
+    interface_number: Option<u8>,
+    alternate_setting: Option<u8>,
+    address: u8,
+    address_hex: String,
+    direction: &'static str,
+    transfer_type: &'static str,
+    attributes_hex: String,
+    max_packet_size: u16,
+    interval: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -2030,6 +2151,16 @@ const REGISTER_SMOKE_READS: &[RegisterSmokeSpec] = &[
         width: RegisterSmokeWidth::U16,
     },
 ];
+
+const USB_DESCRIPTOR_TYPE_DEVICE: u8 = 0x01;
+const USB_DESCRIPTOR_TYPE_CONFIGURATION: u8 = 0x02;
+const USB_DESCRIPTOR_TYPE_INTERFACE: u8 = 0x04;
+const USB_DESCRIPTOR_TYPE_ENDPOINT: u8 = 0x05;
+const USB_DEVICE_DESCRIPTOR_LEN: usize = 18;
+const USB_CONFIGURATION_DESCRIPTOR_LEN: usize = 9;
+const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
+const USB_ENDPOINT_TRANSFER_TYPE_MASK: u8 = 0x03;
+const USB_ENDPOINT_TRANSFER_TYPE_BULK: u8 = 0x02;
 
 const POWER_SOURCE_PWRSEQ: &str = "aircrack-ng/rtl8812au@7344855:include/Hal8812PwrSeq.h";
 const POWER_SOURCE_USB_HALINIT: &str =
@@ -7234,9 +7365,17 @@ fn bb_smoke_report(args: BbSmokeArgs) -> BbSmokeReport {
 }
 
 fn bb_smoke_failure(args: &BbSmokeArgs, input: BbSmokeFailureInput) -> BbSmokeReport {
+    bb_smoke_failure_with_command("bb-smoke", args, input)
+}
+
+fn bb_smoke_failure_with_command(
+    command: &'static str,
+    args: &BbSmokeArgs,
+    input: BbSmokeFailureInput,
+) -> BbSmokeReport {
     BbSmokeReport {
         schema_version: 1,
-        command: "bb-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -7258,6 +7397,201 @@ fn bb_smoke_failure(args: &BbSmokeArgs, input: BbSmokeFailureInput) -> BbSmokeRe
         notes: vec![
             "guarded BB smoke test stopped before RF radio table programming, channel tuning, bulk traffic, RX loop, or TX operation",
         ],
+    }
+}
+
+fn macos_bb_smoke_report(args: BbSmokeArgs) -> BbSmokeReport {
+    let selector = args.adapter.selector();
+    let condition_env = args.condition_env();
+    let mut setup_steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+    let mut stats = BbSmokeStats::default();
+
+    let (phy_plan, agc_plan) = match load_bb_table_plans(&args.bb_source, condition_env) {
+        Ok(plans) => plans,
+        Err(error) => {
+            return bb_smoke_failure_with_command(
+                "macos-bb-smoke",
+                &args,
+                BbSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    phy_plan: None,
+                    agc_plan: None,
+                    stats,
+                    counters,
+                    error,
+                },
+            );
+        }
+    };
+
+    if !args.i_understand_this_writes_registers {
+        return bb_smoke_failure_with_command(
+            "macos-bb-smoke",
+            &args,
+            BbSmokeFailureInput {
+                condition_env,
+                adapter: None,
+                endpoints: None,
+                setup_steps,
+                phy_plan: Some(phy_plan),
+                agc_plan: Some(agc_plan),
+                stats,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "missing_write_authorization",
+                    message: "macOS IOUSBHost BB smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return bb_smoke_failure_with_command(
+            "macos-bb-smoke",
+            &args,
+            BbSmokeFailureInput {
+                condition_env,
+                adapter: None,
+                endpoints: None,
+                setup_steps,
+                phy_plan: Some(phy_plan),
+                agc_plan: Some(agc_plan),
+                stats,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "unsupported_platform",
+                    message: "macos-bb-smoke requires macOS IOUSBHost".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return bb_smoke_failure_with_command(
+                "macos-bb-smoke",
+                &args,
+                BbSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    phy_plan: Some(phy_plan),
+                    agc_plan: Some(agc_plan),
+                    stats,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "macos-bb-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return bb_smoke_failure_with_command(
+                "macos-bb-smoke",
+                &args,
+                BbSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    phy_plan: Some(phy_plan),
+                    agc_plan: Some(agc_plan),
+                    stats,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "macos-bb-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return bb_smoke_failure_with_command(
+                    "macos-bb-smoke",
+                    &args,
+                    BbSmokeFailureInput {
+                        condition_env,
+                        adapter: None,
+                        endpoints: None,
+                        setup_steps,
+                        phy_plan: Some(phy_plan),
+                        agc_plan: Some(agc_plan),
+                        stats,
+                        counters,
+                        error: DiagnosticErrorReport {
+                            code: "macos_usbhost_open_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_bb_sequence(
+            &registers,
+            &args,
+            &phy_plan,
+            &agc_plan,
+            &mut counters,
+            &mut setup_steps,
+            &mut stats,
+        ) {
+            return bb_smoke_failure_with_command(
+                "macos-bb-smoke",
+                &args,
+                BbSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    phy_plan: Some(phy_plan),
+                    agc_plan: Some(agc_plan),
+                    stats,
+                    counters,
+                    error,
+                },
+            );
+        }
+
+        BbSmokeReport {
+            schema_version: 1,
+            command: "macos-bb-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            bb_source: args.bb_source,
+            condition_env,
+            crystal_cap_hex: format_value(args.crystal_cap, 2),
+            timeout_ms: args.timeout_ms,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            setup_steps,
+            phy_plan: Some(phy_plan),
+            agc_plan: Some(agc_plan),
+            phy_writes_applied: stats.phy_writes_applied,
+            agc_writes_applied: stats.agc_writes_applied,
+            delays_applied: stats.delays_applied,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded BB smoke test: RTL8812A PHY_REG and AGC_TAB tables were parsed from external Realtek source and written through default-control transfers",
+                "no libusb enumeration, USB interface claim, RF radio table programming, channel tuning, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
     }
 }
 
@@ -7765,9 +8099,17 @@ fn rf_smoke_report(args: RfSmokeArgs) -> RfSmokeReport {
 }
 
 fn rf_smoke_failure(args: &RfSmokeArgs, input: RfSmokeFailureInput) -> RfSmokeReport {
+    rf_smoke_failure_with_command("rf-smoke", args, input)
+}
+
+fn rf_smoke_failure_with_command(
+    command: &'static str,
+    args: &RfSmokeArgs,
+    input: RfSmokeFailureInput,
+) -> RfSmokeReport {
     RfSmokeReport {
         schema_version: 1,
-        command: "rf-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -7788,6 +8130,199 @@ fn rf_smoke_failure(args: &RfSmokeArgs, input: RfSmokeFailureInput) -> RfSmokeRe
         notes: vec![
             "guarded RF smoke test stopped before channel tuning, bulk traffic, RX loop, or TX operation",
         ],
+    }
+}
+
+fn macos_rf_smoke_report(args: RfSmokeArgs) -> RfSmokeReport {
+    let selector = args.adapter.selector();
+    let condition_env = args.condition_env();
+    let mut setup_steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+    let mut stats = RfSmokeStats::default();
+
+    let (radioa_plan, radiob_plan) = match load_rf_table_plans(&args.rf_source, condition_env) {
+        Ok(plans) => plans,
+        Err(error) => {
+            return rf_smoke_failure_with_command(
+                "macos-rf-smoke",
+                &args,
+                RfSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    radioa_plan: None,
+                    radiob_plan: None,
+                    stats,
+                    counters,
+                    error,
+                },
+            );
+        }
+    };
+
+    if !args.i_understand_this_writes_registers {
+        return rf_smoke_failure_with_command(
+            "macos-rf-smoke",
+            &args,
+            RfSmokeFailureInput {
+                condition_env,
+                adapter: None,
+                endpoints: None,
+                setup_steps,
+                radioa_plan: Some(radioa_plan),
+                radiob_plan: Some(radiob_plan),
+                stats,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "missing_write_authorization",
+                    message: "macOS IOUSBHost RF smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return rf_smoke_failure_with_command(
+            "macos-rf-smoke",
+            &args,
+            RfSmokeFailureInput {
+                condition_env,
+                adapter: None,
+                endpoints: None,
+                setup_steps,
+                radioa_plan: Some(radioa_plan),
+                radiob_plan: Some(radiob_plan),
+                stats,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "unsupported_platform",
+                    message: "macos-rf-smoke requires macOS IOUSBHost".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return rf_smoke_failure_with_command(
+                "macos-rf-smoke",
+                &args,
+                RfSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    radioa_plan: Some(radioa_plan),
+                    radiob_plan: Some(radiob_plan),
+                    stats,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "macos-rf-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return rf_smoke_failure_with_command(
+                "macos-rf-smoke",
+                &args,
+                RfSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    radioa_plan: Some(radioa_plan),
+                    radiob_plan: Some(radiob_plan),
+                    stats,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "macos-rf-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return rf_smoke_failure_with_command(
+                    "macos-rf-smoke",
+                    &args,
+                    RfSmokeFailureInput {
+                        condition_env,
+                        adapter: None,
+                        endpoints: None,
+                        setup_steps,
+                        radioa_plan: Some(radioa_plan),
+                        radiob_plan: Some(radiob_plan),
+                        stats,
+                        counters,
+                        error: DiagnosticErrorReport {
+                            code: "macos_usbhost_open_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_rf_sequence(
+            &registers,
+            &radioa_plan,
+            &radiob_plan,
+            &mut counters,
+            &mut setup_steps,
+            &mut stats,
+        ) {
+            return rf_smoke_failure_with_command(
+                "macos-rf-smoke",
+                &args,
+                RfSmokeFailureInput {
+                    condition_env,
+                    adapter: None,
+                    endpoints: None,
+                    setup_steps,
+                    radioa_plan: Some(radioa_plan),
+                    radiob_plan: Some(radiob_plan),
+                    stats,
+                    counters,
+                    error,
+                },
+            );
+        }
+
+        RfSmokeReport {
+            schema_version: 1,
+            command: "macos-rf-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            rf_source: args.rf_source,
+            condition_env,
+            timeout_ms: args.timeout_ms,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            setup_steps,
+            radioa_plan: Some(radioa_plan),
+            radiob_plan: Some(radiob_plan),
+            radioa_writes_applied: stats.radioa_writes_applied,
+            radiob_writes_applied: stats.radiob_writes_applied,
+            delays_applied: stats.delays_applied,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded RF smoke test: RTL8812A radioA/radioB tables were parsed from external Realtek source and written through default-control transfers",
+                "no libusb enumeration, USB interface claim, channel tuning, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
     }
 }
 
@@ -13491,6 +14026,427 @@ fn firmware_report_from_image(
     })
 }
 
+fn macos_descriptor_smoke_report(args: MacosDescriptorSmokeArgs) -> MacosDescriptorSmokeReport {
+    let selector = args.adapter.selector();
+    let counters = DiagnosticCounters::default();
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return macos_descriptor_smoke_failure(
+            &args,
+            selector,
+            counters,
+            None,
+            None,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-descriptor-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return macos_descriptor_smoke_failure(
+                &args,
+                selector,
+                counters,
+                None,
+                None,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-descriptor-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return macos_descriptor_smoke_failure(
+                &args,
+                selector,
+                counters,
+                None,
+                None,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-descriptor-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args,
+                    selector,
+                    counters,
+                    None,
+                    None,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let timeout = Duration::from_millis(args.timeout_ms);
+        let mut counters = counters;
+        let device_raw = match device.get_descriptor(
+            USB_DESCRIPTOR_TYPE_DEVICE,
+            0,
+            USB_DEVICE_DESCRIPTOR_LEN,
+            timeout,
+        ) {
+            Ok(raw) => {
+                counters.usb_control_reads += 1;
+                raw
+            }
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args,
+                    selector,
+                    counters,
+                    None,
+                    None,
+                    DiagnosticErrorReport {
+                        code: "device_descriptor_read_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+        let device_descriptor = match parse_usb_device_descriptor(&device_raw) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args, selector, counters, None, None, error,
+                );
+            }
+        };
+
+        let config_header = match device.get_descriptor(
+            USB_DESCRIPTOR_TYPE_CONFIGURATION,
+            args.configuration_index,
+            USB_CONFIGURATION_DESCRIPTOR_LEN,
+            timeout,
+        ) {
+            Ok(raw) => {
+                counters.usb_control_reads += 1;
+                raw
+            }
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args,
+                    selector,
+                    counters,
+                    Some(device_descriptor),
+                    None,
+                    DiagnosticErrorReport {
+                        code: "configuration_descriptor_header_read_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+        if config_header.len() < USB_CONFIGURATION_DESCRIPTOR_LEN {
+            return macos_descriptor_smoke_failure(
+                &args,
+                selector,
+                counters,
+                Some(device_descriptor),
+                None,
+                DiagnosticErrorReport {
+                    code: "short_configuration_descriptor_header",
+                    message: format!(
+                        "expected {USB_CONFIGURATION_DESCRIPTOR_LEN} bytes, got {}",
+                        config_header.len()
+                    ),
+                },
+            );
+        }
+        let total_len = le_u16(&config_header, 2).unwrap_or(0);
+        if usize::from(total_len) < USB_CONFIGURATION_DESCRIPTOR_LEN {
+            return macos_descriptor_smoke_failure(
+                &args,
+                selector,
+                counters,
+                Some(device_descriptor),
+                None,
+                DiagnosticErrorReport {
+                    code: "invalid_configuration_descriptor_length",
+                    message: format!(
+                        "configuration descriptor total length {} is shorter than header",
+                        total_len
+                    ),
+                },
+            );
+        }
+        let config_raw = match device.get_descriptor(
+            USB_DESCRIPTOR_TYPE_CONFIGURATION,
+            args.configuration_index,
+            usize::from(total_len),
+            timeout,
+        ) {
+            Ok(raw) => {
+                counters.usb_control_reads += 1;
+                raw
+            }
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args,
+                    selector,
+                    counters,
+                    Some(device_descriptor),
+                    None,
+                    DiagnosticErrorReport {
+                        code: "configuration_descriptor_read_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+        let configuration = match parse_usb_configuration_descriptor(&config_raw) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                return macos_descriptor_smoke_failure(
+                    &args,
+                    selector,
+                    counters,
+                    Some(device_descriptor),
+                    None,
+                    error,
+                );
+            }
+        };
+
+        MacosDescriptorSmokeReport {
+            schema_version: 1,
+            command: "macos-descriptor-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            timeout_ms: args.timeout_ms,
+            configuration_index: args.configuration_index,
+            result: DiagnosticResult::Pass,
+            device_descriptor: Some(device_descriptor),
+            configuration: Some(configuration),
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost descriptor smoke test: device and configuration descriptors were read through default-control transfers",
+                "no libusb enumeration, USB interface claim, hardware register writes, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+fn macos_descriptor_smoke_failure(
+    args: &MacosDescriptorSmokeArgs,
+    selector: DeviceSelector,
+    counters: DiagnosticCounters,
+    device_descriptor: Option<UsbDeviceDescriptorReport>,
+    configuration: Option<UsbConfigurationDescriptorReport>,
+    error: DiagnosticErrorReport,
+) -> MacosDescriptorSmokeReport {
+    MacosDescriptorSmokeReport {
+        schema_version: 1,
+        command: "macos-descriptor-smoke",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        timeout_ms: args.timeout_ms,
+        configuration_index: args.configuration_index,
+        result: DiagnosticResult::Fail,
+        device_descriptor,
+        configuration,
+        counters,
+        error: Some(error),
+        notes: vec![
+            "macOS IOUSBHost descriptor smoke test stopped before hardware register writes, bulk traffic, RX loop, or TX operation",
+        ],
+    }
+}
+
+fn parse_usb_device_descriptor(
+    raw: &[u8],
+) -> std::result::Result<UsbDeviceDescriptorReport, DiagnosticErrorReport> {
+    if raw.len() < USB_DEVICE_DESCRIPTOR_LEN {
+        return Err(DiagnosticErrorReport {
+            code: "short_device_descriptor",
+            message: format!(
+                "expected {USB_DEVICE_DESCRIPTOR_LEN} device descriptor bytes, got {}",
+                raw.len()
+            ),
+        });
+    }
+    if raw[0] < USB_DEVICE_DESCRIPTOR_LEN as u8 || raw[1] != USB_DESCRIPTOR_TYPE_DEVICE {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_device_descriptor",
+            message: format!(
+                "expected bLength=18/bDescriptorType=1, got bLength={} bDescriptorType={}",
+                raw[0], raw[1]
+            ),
+        });
+    }
+
+    Ok(UsbDeviceDescriptorReport {
+        raw_hex: encode_hex(&raw[..USB_DEVICE_DESCRIPTOR_LEN]),
+        usb_version_bcd_hex: format_value(le_u16(raw, 2).unwrap_or_default(), 4),
+        device_class_hex: format_value(raw[4], 2),
+        device_subclass_hex: format_value(raw[5], 2),
+        device_protocol_hex: format_value(raw[6], 2),
+        max_packet_size0: raw[7],
+        vendor_id_hex: format_value(le_u16(raw, 8).unwrap_or_default(), 4),
+        product_id_hex: format_value(le_u16(raw, 10).unwrap_or_default(), 4),
+        device_version_bcd_hex: format_value(le_u16(raw, 12).unwrap_or_default(), 4),
+        manufacturer_index: raw[14],
+        product_index: raw[15],
+        serial_number_index: raw[16],
+        num_configurations: raw[17],
+    })
+}
+
+fn parse_usb_configuration_descriptor(
+    raw: &[u8],
+) -> std::result::Result<UsbConfigurationDescriptorReport, DiagnosticErrorReport> {
+    if raw.len() < USB_CONFIGURATION_DESCRIPTOR_LEN {
+        return Err(DiagnosticErrorReport {
+            code: "short_configuration_descriptor",
+            message: format!(
+                "expected at least {USB_CONFIGURATION_DESCRIPTOR_LEN} configuration descriptor bytes, got {}",
+                raw.len()
+            ),
+        });
+    }
+    if raw[0] < USB_CONFIGURATION_DESCRIPTOR_LEN as u8
+        || raw[1] != USB_DESCRIPTOR_TYPE_CONFIGURATION
+    {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_configuration_descriptor",
+            message: format!(
+                "expected bLength=9/bDescriptorType=2, got bLength={} bDescriptorType={}",
+                raw[0], raw[1]
+            ),
+        });
+    }
+
+    let total_length = le_u16(raw, 2).unwrap_or_default();
+    if raw.len() < usize::from(total_length) {
+        return Err(DiagnosticErrorReport {
+            code: "truncated_configuration_descriptor",
+            message: format!(
+                "configuration descriptor advertised {} bytes but only {} were read",
+                total_length,
+                raw.len()
+            ),
+        });
+    }
+
+    let mut interfaces = Vec::new();
+    let mut endpoints = Vec::new();
+    let mut current_interface = None;
+    let mut current_alternate = None;
+    let mut offset = 0usize;
+    while offset + 2 <= usize::from(total_length) {
+        let len = raw[offset] as usize;
+        let descriptor_type = raw[offset + 1];
+        if len < 2 {
+            return Err(DiagnosticErrorReport {
+                code: "invalid_usb_descriptor_length",
+                message: format!("descriptor at offset {offset} has invalid length {len}"),
+            });
+        }
+        if offset + len > usize::from(total_length) {
+            return Err(DiagnosticErrorReport {
+                code: "usb_descriptor_overrun",
+                message: format!(
+                    "descriptor at offset {offset} length {len} exceeds total length {total_length}"
+                ),
+            });
+        }
+
+        match descriptor_type {
+            USB_DESCRIPTOR_TYPE_INTERFACE if len >= 9 => {
+                current_interface = Some(raw[offset + 2]);
+                current_alternate = Some(raw[offset + 3]);
+                interfaces.push(UsbInterfaceDescriptorReport {
+                    interface_number: raw[offset + 2],
+                    alternate_setting: raw[offset + 3],
+                    endpoint_count: raw[offset + 4],
+                    interface_class_hex: format_value(raw[offset + 5], 2),
+                    interface_subclass_hex: format_value(raw[offset + 6], 2),
+                    interface_protocol_hex: format_value(raw[offset + 7], 2),
+                });
+            }
+            USB_DESCRIPTOR_TYPE_ENDPOINT if len >= 7 => {
+                let address = raw[offset + 2];
+                let attributes = raw[offset + 3];
+                endpoints.push(UsbEndpointDescriptorReport {
+                    interface_number: current_interface,
+                    alternate_setting: current_alternate,
+                    address,
+                    address_hex: format_value(address, 2),
+                    direction: if address & USB_ENDPOINT_DIRECTION_IN != 0 {
+                        "in"
+                    } else {
+                        "out"
+                    },
+                    transfer_type: endpoint_transfer_type(attributes),
+                    attributes_hex: format_value(attributes, 2),
+                    max_packet_size: le_u16(raw, offset + 4).unwrap_or_default(),
+                    interval: raw[offset + 6],
+                });
+            }
+            _ => {}
+        }
+
+        offset += len;
+    }
+
+    let bulk_in_endpoints = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.transfer_type == "bulk" && endpoint.direction == "in")
+        .map(|endpoint| endpoint.address_hex.clone())
+        .collect();
+    let bulk_out_endpoints = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.transfer_type == "bulk" && endpoint.direction == "out")
+        .map(|endpoint| endpoint.address_hex.clone())
+        .collect();
+
+    Ok(UsbConfigurationDescriptorReport {
+        raw_hex: encode_hex(&raw[..usize::from(total_length)]),
+        total_length,
+        configuration_value: raw[5],
+        num_interfaces: raw[4],
+        attributes_hex: format_value(raw[7], 2),
+        max_power_ma: u16::from(raw[8]) * 2,
+        interfaces,
+        endpoints,
+        bulk_in_endpoints,
+        bulk_out_endpoints,
+    })
+}
+
+fn endpoint_transfer_type(attributes: u8) -> &'static str {
+    match attributes & USB_ENDPOINT_TRANSFER_TYPE_MASK {
+        0x00 => "control",
+        0x01 => "isochronous",
+        USB_ENDPOINT_TRANSFER_TYPE_BULK => "bulk",
+        0x03 => "interrupt",
+        _ => "unknown",
+    }
+}
+
+fn le_u16(raw: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([
+        *raw.get(offset)?,
+        *raw.get(offset + 1)?,
+    ]))
+}
+
 fn macos_usb_state_report(args: MacosUsbStateArgs) -> MacosUsbStateReport {
     let selector = args.adapter.selector();
     let started_at_unix_ms = started_at_unix_ms();
@@ -14099,6 +15055,13 @@ fn stages_report() -> StagesReport {
                 pass_signal: "The selected IOUSBHostDevice entry is reported with registered/matched/configured/interface state.",
             },
             VerificationStage {
+                id: "macos-descriptor-smoke",
+                command: "wfb-radio-diag macos-descriptor-smoke --vid 0x0bda --pid 0x8812",
+                purpose: "Read device and configuration descriptors through macOS IOUSBHost default-control transfers when libusb cannot enumerate the device.",
+                prerequisites: &["macOS host", "IOUSBHostDevice visible in macos-usb-state"],
+                pass_signal: "The descriptor tree reports interface and endpoint layout without interface claim or bulk traffic.",
+            },
+            VerificationStage {
                 id: "macos-reg-smoke",
                 command: "wfb-radio-diag macos-reg-smoke --vid 0x0bda --pid 0x8812",
                 purpose: "Read RTL8812AU registers through macOS IOUSBHost default-control transfers when libusb cannot enumerate the device.",
@@ -14278,6 +15241,28 @@ fn stages_report() -> StagesReport {
                     "operator write acknowledgement",
                 ],
                 pass_signal: "MAC/WMAC registers read back expected values through default-control transfers without bulk traffic.",
+            },
+            VerificationStage {
+                id: "macos-bb-smoke",
+                command: "wfb-radio-diag macos-bb-smoke --vid <vid> --pid <pid> --bb-source <halhwimg8812a_bb.c> --i-understand-this-writes-registers",
+                purpose: "Program RTL8812A BB PHY/AGC tables through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &[
+                    "macos-mac-smoke pass",
+                    "Realtek halhwimg8812a_bb.c source file",
+                    "operator write acknowledgement",
+                ],
+                pass_signal: "BB setup gates, PHY_REG writes, AGC_TAB writes, and crystal-cap update complete through default-control transfers without bulk traffic.",
+            },
+            VerificationStage {
+                id: "macos-rf-smoke",
+                command: "wfb-radio-diag macos-rf-smoke --vid <vid> --pid <pid> --rf-source <halhwimg8812a_rf.c> --i-understand-this-writes-registers",
+                purpose: "Program RTL8812A RF radioA/radioB tables through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &[
+                    "macos-bb-smoke pass",
+                    "Realtek halhwimg8812a_rf.c source file",
+                    "operator write acknowledgement",
+                ],
+                pass_signal: "RF radioA/radioB table writes and delay markers complete through default-control transfers without bulk traffic.",
             },
             VerificationStage {
                 id: "rx-scan",
@@ -14730,6 +15715,58 @@ fn print_macos_usb_state_human(report: &MacosUsbStateReport) {
             println!("  status: {status}");
         }
     }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_macos_descriptor_smoke_human(report: &MacosDescriptorSmokeReport) {
+    println!("macOS descriptor smoke: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    if let Some(device) = &report.device_descriptor {
+        println!(
+            "Device: vid={} pid={} usb={} configs={}",
+            device.vendor_id_hex,
+            device.product_id_hex,
+            device.usb_version_bcd_hex,
+            device.num_configurations
+        );
+    }
+    if let Some(configuration) = &report.configuration {
+        println!(
+            "Configuration: value={} interfaces={} total_len={} max_power_ma={}",
+            configuration.configuration_value,
+            configuration.num_interfaces,
+            configuration.total_length,
+            configuration.max_power_ma
+        );
+        println!(
+            "Bulk endpoints: in={:?} out={:?}",
+            configuration.bulk_in_endpoints, configuration.bulk_out_endpoints
+        );
+        for endpoint in &configuration.endpoints {
+            println!(
+                "  endpoint {} {} {} mps={} interval={} interface={:?}/alt={:?}",
+                endpoint.address_hex,
+                endpoint.direction,
+                endpoint.transfer_type,
+                endpoint.max_packet_size,
+                endpoint.interval,
+                endpoint.interface_number,
+                endpoint.alternate_setting
+            );
+        }
+    }
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
     if let Some(error) = &report.error {
         println!("Error: {}: {}", error.code, error.message);
     }
@@ -15454,6 +16491,45 @@ mod tests {
         assert!(parse_tx_rate_arg("mcs32").is_err());
         assert!(parse_tx_rate_arg("vht2ss-mcs10").is_err());
         assert!(parse_tx_rate_arg("vht5ss-mcs0").is_err());
+    }
+
+    #[test]
+    fn usb_descriptor_parser_extracts_awus036ach_endpoint_layout() {
+        let device = parse_usb_device_descriptor(&[
+            0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0xda, 0x0b, 0x12, 0x88, 0x00, 0x02,
+            0x01, 0x02, 0x03, 0x01,
+        ])
+        .expect("device descriptor parses");
+        assert_eq!(device.vendor_id_hex, "0x0bda");
+        assert_eq!(device.product_id_hex, "0x8812");
+        assert_eq!(device.num_configurations, 1);
+
+        let configuration = parse_usb_configuration_descriptor(&[
+            0x09, 0x02, 0x35, 0x00, 0x01, 0x01, 0x00, 0x80, 0xfa, 0x09, 0x04, 0x00, 0x00, 0x05,
+            0xff, 0xff, 0xff, 0x00, 0x07, 0x05, 0x81, 0x02, 0x00, 0x02, 0x00, 0x07, 0x05, 0x02,
+            0x02, 0x00, 0x02, 0x00, 0x07, 0x05, 0x03, 0x02, 0x00, 0x02, 0x00, 0x07, 0x05, 0x04,
+            0x02, 0x00, 0x02, 0x00, 0x07, 0x05, 0x85, 0x03, 0x40, 0x00, 0x01,
+        ])
+        .expect("configuration descriptor parses");
+        assert_eq!(configuration.total_length, 53);
+        assert_eq!(configuration.num_interfaces, 1);
+        assert_eq!(configuration.bulk_in_endpoints, vec!["0x81"]);
+        assert_eq!(
+            configuration.bulk_out_endpoints,
+            vec!["0x02", "0x03", "0x04"]
+        );
+        assert_eq!(configuration.endpoints.len(), 5);
+        assert_eq!(configuration.endpoints[4].transfer_type, "interrupt");
+        assert_eq!(configuration.endpoints[4].max_packet_size, 64);
+    }
+
+    #[test]
+    fn usb_descriptor_parser_rejects_truncated_configuration() {
+        let error = parse_usb_configuration_descriptor(&[
+            0x09, 0x02, 0x35, 0x00, 0x01, 0x01, 0x00, 0x80, 0xfa,
+        ])
+        .expect_err("advertised total length exceeds input");
+        assert_eq!(error.code, "truncated_configuration_descriptor");
     }
 
     #[test]
