@@ -201,3 +201,13 @@ After BB smoke, the guarded IOUSBHost RF smoke test also passed:
 The macOS 26 blocker is not raw USB device visibility, descriptor access, or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, and guarded register-write sequences can execute there through BB/RF programming. The blocker is pipe access: the descriptor advertises bulk endpoints, but without `IOUSBHostInterface` children, a libusb-visible configuration, or another pipe-opening mechanism, the current code still has no bulk IN/OUT pipes for RX or TX.
 
 The next useful implementation work is to investigate an IOUSBHost interface/pipe path or a DriverKit transport for those descriptor-confirmed bulk endpoints.
+
+## SDK Notes
+
+The macOS 26.4 Command Line Tools IOUSBHost headers confirm the public object split:
+
+- `IOUSBHostDevice` exposes default-control requests, `configureWithValue:matchInterfaces:error:`, the current `configurationDescriptor`, and reset.
+- `IOUSBHostInterface` exposes `copyPipeWithAddress:error:` for endpoint pipes.
+- `IOUSBHostPipe` exposes synchronous `sendIORequestWithData:bytesTransferred:completionTimeout:error:` for bulk/interrupt transfers and async enqueue APIs.
+
+So the next proof target is not endpoint discovery; that is done through descriptors. The target is obtaining an `IOUSBHostInterface` service for interface 0, or replacing that with a DriverKit path that can own the interface and create pipes for `0x81`, `0x02`, `0x03`, and `0x04`.
