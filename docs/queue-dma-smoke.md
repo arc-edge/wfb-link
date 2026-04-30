@@ -17,6 +17,16 @@ cargo run -p wfb-radio-diag -- --json queue-dma-smoke \
 
 Run `power-on-smoke`, `firmware-smoke`, and `llt-smoke` first after plugging in or resetting the adapter.
 
+On macOS 26, use the IOUSBHost fallback after `macos-power-on-smoke`, `macos-firmware-smoke`, and `macos-llt-smoke` if `usb-probe` cannot enumerate the adapter through libusb. The endpoint count must be supplied explicitly because this fallback path has no interface descriptors yet:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-queue-dma-smoke.json macos-queue-dma-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --bulk-out-endpoint-count 3 \
+  --i-understand-this-writes-registers
+```
+
 ## Guardrails
 
 - The command fails unless `--i-understand-this-writes-registers` is present.
@@ -46,6 +56,22 @@ On macOS 15.7.4 with `0x0bda:0x8812` at bus `1`, address `1`, `queue-dma-smoke` 
 - TX frames: `0`
 
 Post-queue `reg-smoke` also passed, with `REG_MCUFWDL = 0xc6` and `REG_CR = 0x063f`.
+
+On April 30, 2026, the remote macOS 26 hardware Mac passed `macos-queue-dma-smoke` after the IOUSBHost power-on, firmware, and LLT smoke stages against the attached `0x0bda:0x8812` adapter:
+
+- Report: `/tmp/wfb-remote-macos-queue-dma-smoke.json`.
+- Explicit bulk OUT endpoint count: `3`.
+- Queue select mask: `0x07`.
+- HPQ pages: `0x10`.
+- LPQ pages: `0x10`.
+- NPQ pages: `0x00`.
+- Public queue pages: `0xd8`.
+- `REG_RQPN` write value: `0x80d81010`.
+- Control reads: `22`.
+- Control writes: `10`.
+- Bulk reads/writes: `0`.
+
+This proves the IOUSBHost fallback can run queue/DMA register setup through default-control transfers when the known endpoint layout is supplied. It does not prove interface claim, bulk endpoints, RX, TX, or full init on macOS 26.
 
 ## Source Mapping
 

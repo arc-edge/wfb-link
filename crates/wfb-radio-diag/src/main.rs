@@ -59,6 +59,8 @@ enum Command {
     MacosLltSmoke(LltSmokeArgs),
     /// Download RTL8812A firmware through macOS IOUSBHost direct control transfers.
     MacosFirmwareSmoke(FirmwareSmokeArgs),
+    /// Program RTL8812A queue/DMA registers through macOS IOUSBHost direct control transfers.
+    MacosQueueDmaSmoke(MacosQueueDmaSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -307,6 +309,24 @@ struct QueueDmaSmokeArgs {
     /// Per-register read/write timeout in milliseconds.
     #[arg(long, default_value_t = 500)]
     timeout_ms: u64,
+
+    /// Required acknowledgement that this command writes hardware registers.
+    #[arg(long)]
+    i_understand_this_writes_registers: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosQueueDmaSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Per-register read/write timeout in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    timeout_ms: u64,
+
+    /// Bulk OUT endpoint count to use for Realtek queue layout planning.
+    #[arg(long, default_value_t = 3)]
+    bulk_out_endpoint_count: usize,
 
     /// Required acknowledgement that this command writes hardware registers.
     #[arg(long)]
@@ -962,6 +982,16 @@ fn main() -> Result<()> {
         }
         Command::QueueDmaSmoke(args) => {
             let report = queue_dma_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_queue_dma_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosQueueDmaSmoke(args) => {
+            let report = macos_queue_dma_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_queue_dma_smoke_human(&report);
@@ -5441,25 +5471,210 @@ fn queue_dma_smoke_failure(
     counters: DiagnosticCounters,
     error: DiagnosticErrorReport,
 ) -> QueueDmaSmokeReport {
-    QueueDmaSmokeReport {
-        schema_version: 1,
+    queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
         command: "queue-dma-smoke",
-        started_at_unix_ms: started_at_unix_ms(),
-        platform: platform_info(),
         selector: args.adapter.selector(),
         timeout_ms: args.timeout_ms,
-        result: DiagnosticResult::Fail,
         adapter,
         endpoints,
-        bulk_out_endpoint_count: layout.map(|layout| layout.bulk_out_endpoint_count),
-        out_ep_queue_sel_hex: layout.map(|layout| format_value(layout.out_ep_queue_sel, 2)),
+        layout,
+        steps,
+        counters,
+        error,
+    })
+}
+
+fn macos_queue_dma_smoke_report(args: MacosQueueDmaSmokeArgs) -> QueueDmaSmokeReport {
+    let selector = args.adapter.selector();
+    let mut steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+
+    let layout = match queue_layout_from_bulk_out_endpoint_count(args.bulk_out_endpoint_count) {
+        Ok(layout) => Some(layout),
+        Err(error) => {
+            return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+                command: "macos-queue-dma-smoke",
+                selector,
+                timeout_ms: args.timeout_ms,
+                adapter: None,
+                endpoints: None,
+                layout: None,
+                steps,
+                counters,
+                error,
+            });
+        }
+    };
+
+    if !args.i_understand_this_writes_registers {
+        return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+            command: "macos-queue-dma-smoke",
+            selector,
+            timeout_ms: args.timeout_ms,
+            adapter: None,
+            endpoints: None,
+            layout,
+            steps,
+            counters,
+            error: DiagnosticErrorReport {
+                code: "missing_write_authorization",
+                message: "macOS IOUSBHost queue/DMA smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+            },
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+            command: "macos-queue-dma-smoke",
+            selector,
+            timeout_ms: args.timeout_ms,
+            adapter: None,
+            endpoints: None,
+            layout,
+            steps,
+            counters,
+            error: DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-queue-dma-smoke requires macOS IOUSBHost".to_string(),
+            },
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+                command: "macos-queue-dma-smoke",
+                selector,
+                timeout_ms: args.timeout_ms,
+                adapter: None,
+                endpoints: None,
+                layout,
+                steps,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-queue-dma-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            });
+        };
+        let Some(pid) = selector.pid else {
+            return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+                command: "macos-queue-dma-smoke",
+                selector,
+                timeout_ms: args.timeout_ms,
+                adapter: None,
+                endpoints: None,
+                layout,
+                steps,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-queue-dma-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            });
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+                    command: "macos-queue-dma-smoke",
+                    selector,
+                    timeout_ms: args.timeout_ms,
+                    adapter: None,
+                    endpoints: None,
+                    layout,
+                    steps,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                });
+            }
+        };
+
+        let layout = layout.expect("validated queue layout is present");
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_queue_dma_sequence(&registers, &layout, &mut counters, &mut steps) {
+            return queue_dma_smoke_failure_report(QueueDmaSmokeFailureInput {
+                command: "macos-queue-dma-smoke",
+                selector,
+                timeout_ms: args.timeout_ms,
+                adapter: None,
+                endpoints: None,
+                layout: Some(layout),
+                steps,
+                counters,
+                error,
+            });
+        }
+
+        QueueDmaSmokeReport {
+            schema_version: 1,
+            command: "macos-queue-dma-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            timeout_ms: args.timeout_ms,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            bulk_out_endpoint_count: Some(layout.bulk_out_endpoint_count),
+            out_ep_queue_sel_hex: Some(format_value(layout.out_ep_queue_sel, 2)),
+            tx_total_page_number: TX_TOTAL_PAGE_NUMBER_8812,
+            tx_page_boundary: TX_PAGE_BOUNDARY_8812,
+            rx_dma_boundary_hex: format_value(RX_DMA_BOUNDARY_8812, 4),
+            queue_pages: Some(queue_page_report(layout)),
+            steps,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded queue/DMA smoke test: RTL8812A reserved-page, boundary, TXDMA map, and page-size registers were written through default-control transfers",
+                "bulk OUT endpoint count is operator-provided because macOS 26 has not exposed interface endpoint descriptors on this path",
+                "no libusb enumeration, USB interface claim, MAC receive enable, BB/RF table programming, channel tuning, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+struct QueueDmaSmokeFailureInput {
+    command: &'static str,
+    selector: DeviceSelector,
+    timeout_ms: u64,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    layout: Option<QueueLayout>,
+    steps: Vec<QueueDmaStepReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+}
+
+fn queue_dma_smoke_failure_report(input: QueueDmaSmokeFailureInput) -> QueueDmaSmokeReport {
+    QueueDmaSmokeReport {
+        schema_version: 1,
+        command: input.command,
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector: input.selector,
+        timeout_ms: input.timeout_ms,
+        result: DiagnosticResult::Fail,
+        adapter: input.adapter,
+        endpoints: input.endpoints,
+        bulk_out_endpoint_count: input.layout.map(|layout| layout.bulk_out_endpoint_count),
+        out_ep_queue_sel_hex: input
+            .layout
+            .map(|layout| format_value(layout.out_ep_queue_sel, 2)),
         tx_total_page_number: TX_TOTAL_PAGE_NUMBER_8812,
         tx_page_boundary: TX_PAGE_BOUNDARY_8812,
         rx_dma_boundary_hex: format_value(RX_DMA_BOUNDARY_8812, 4),
-        queue_pages: layout.map(queue_page_report),
-        steps,
-        counters,
-        error: Some(error),
+        queue_pages: input.layout.map(queue_page_report),
+        steps: input.steps,
+        counters: input.counters,
+        error: Some(input.error),
         notes: vec![
             "guarded queue/DMA smoke test stopped before MAC receive enable, BB/RF table programming, channel tuning, bulk traffic, RX loop, or TX operation",
         ],
@@ -5994,7 +6209,12 @@ fn queue_read_report16(spec: QueueRead16Spec) -> QueueDmaStepReport {
 fn queue_layout_from_endpoints(
     endpoints: &UsbEndpoints,
 ) -> std::result::Result<QueueLayout, DiagnosticErrorReport> {
-    let bulk_out_endpoint_count = endpoints.bulk_out_all.len();
+    queue_layout_from_bulk_out_endpoint_count(endpoints.bulk_out_all.len())
+}
+
+fn queue_layout_from_bulk_out_endpoint_count(
+    bulk_out_endpoint_count: usize,
+) -> std::result::Result<QueueLayout, DiagnosticErrorReport> {
     let out_ep_queue_sel = match bulk_out_endpoint_count {
         2 => TX_SELE_HQ | TX_SELE_NQ,
         3 => TX_SELE_HQ | TX_SELE_LQ | TX_SELE_NQ,
@@ -13877,6 +14097,18 @@ fn stages_report() -> StagesReport {
                 purpose: "Program RTL8812A LLT entries through IOUSBHost when libusb cannot enumerate the device.",
                 prerequisites: &["macos-power-on-smoke pass", "operator write acknowledgement"],
                 pass_signal: "All 256 LLT entries are written and every REG_LLT_INIT operation returns idle through default-control transfers.",
+            },
+            VerificationStage {
+                id: "macos-queue-dma-smoke",
+                command: "wfb-radio-diag macos-queue-dma-smoke --vid <vid> --pid <pid> --bulk-out-endpoint-count 3 --i-understand-this-writes-registers",
+                purpose: "Program RTL8812A queue/DMA registers through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &[
+                    "macos-firmware-smoke pass",
+                    "macos-llt-smoke pass",
+                    "known adapter bulk OUT endpoint count",
+                    "operator write acknowledgement",
+                ],
+                pass_signal: "Queue and DMA registers read back expected values through default-control transfers without bulk traffic.",
             },
             VerificationStage {
                 id: "rx-scan",
