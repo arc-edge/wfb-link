@@ -17,6 +17,15 @@ cargo run -p wfb-radio-diag -- --json llt-smoke \
 
 Run `power-on-smoke` first after plugging in or resetting the adapter. Firmware is not required for the LLT sequence in the audited Linux init path, but running it after `firmware-smoke` also passed in the current bench setup.
 
+On macOS 26, use the IOUSBHost fallback after `macos-power-on-smoke` if `usb-probe` cannot enumerate the adapter through libusb:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-llt-smoke.json macos-llt-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-writes-registers
+```
+
 ## Guardrails
 
 - The command fails unless `--i-understand-this-writes-registers` is present.
@@ -38,6 +47,17 @@ On macOS 15.7.4 with `0x0bda:0x8812` at bus `1`, address `1`, `llt-smoke` passed
 - TX frames: `0`
 
 Post-LLT `reg-smoke` also passed, with `REG_MCUFWDL = 0xc6` and `REG_CR = 0x063f`.
+
+On April 30, 2026, the remote macOS 26 hardware Mac passed `macos-llt-smoke` after `macos-power-on-smoke` against the attached `0x0bda:0x8812` adapter:
+
+- Report: `/tmp/wfb-remote-macos-llt-smoke.json`.
+- LLT entries written: `256`.
+- Max poll attempts observed: `1`.
+- Control reads: `257`.
+- Control writes: `256`.
+- Bulk reads/writes: `0`.
+
+This proves the IOUSBHost fallback can run LLT programming through default-control transfers. It does not prove interface claim, bulk endpoints, RX, TX, or full init on macOS 26.
 
 ## Source Mapping
 

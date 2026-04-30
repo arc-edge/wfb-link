@@ -55,6 +55,8 @@ enum Command {
     MacosEfuseDump(EfuseDumpArgs),
     /// Run guarded RTL8812AU power-on writes through macOS IOUSBHost direct control transfers.
     MacosPowerOnSmoke(PowerOnSmokeArgs),
+    /// Program RTL8812A LLT entries through macOS IOUSBHost direct control transfers.
+    MacosLltSmoke(LltSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -928,6 +930,16 @@ fn main() -> Result<()> {
         }
         Command::LltSmoke(args) => {
             let report = llt_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_llt_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosLltSmoke(args) => {
+            let report = macos_llt_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_llt_smoke_human(&report);
@@ -4657,9 +4669,202 @@ fn llt_smoke_failure(
     stats: LltRunStats,
     error: DiagnosticErrorReport,
 ) -> LltSmokeReport {
+    llt_smoke_failure_with_command(
+        "llt-smoke",
+        args,
+        LltSmokeFailureInput {
+            adapter,
+            endpoints,
+            steps,
+            counters,
+            stats,
+            error,
+        },
+    )
+}
+
+fn macos_llt_smoke_report(args: LltSmokeArgs) -> LltSmokeReport {
+    let selector = args.adapter.selector();
+    let mut steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+    let mut stats = LltRunStats::default();
+
+    if !args.i_understand_this_writes_registers {
+        return llt_smoke_failure_with_command(
+            "macos-llt-smoke",
+            &args,
+            LltSmokeFailureInput {
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "missing_write_authorization",
+                    message: "macOS IOUSBHost LLT smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+                },
+            },
+        );
+    }
+
+    if args.poll_attempts == 0 {
+        return llt_smoke_failure_with_command(
+            "macos-llt-smoke",
+            &args,
+            LltSmokeFailureInput {
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "invalid_poll_attempts",
+                    message: "--poll-attempts must be at least 1".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return llt_smoke_failure_with_command(
+            "macos-llt-smoke",
+            &args,
+            LltSmokeFailureInput {
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "unsupported_platform",
+                    message: "macos-llt-smoke requires macOS IOUSBHost".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return llt_smoke_failure_with_command(
+                "macos-llt-smoke",
+                &args,
+                LltSmokeFailureInput {
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error: DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "macos-llt-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return llt_smoke_failure_with_command(
+                "macos-llt-smoke",
+                &args,
+                LltSmokeFailureInput {
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error: DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "macos-llt-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return llt_smoke_failure_with_command(
+                    "macos-llt-smoke",
+                    &args,
+                    LltSmokeFailureInput {
+                        adapter: None,
+                        endpoints: None,
+                        steps,
+                        counters,
+                        stats,
+                        error: DiagnosticErrorReport {
+                            code: "macos_usbhost_open_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) =
+            run_llt_sequence(&registers, &args, &mut counters, &mut steps, &mut stats)
+        {
+            return llt_smoke_failure_with_command(
+                "macos-llt-smoke",
+                &args,
+                LltSmokeFailureInput {
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error,
+                },
+            );
+        }
+
+        LltSmokeReport {
+            schema_version: 1,
+            command: "macos-llt-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            timeout_ms: args.timeout_ms,
+            poll_attempts: args.poll_attempts,
+            poll_delay_us: args.poll_delay_us,
+            tx_page_boundary: TX_PAGE_BOUNDARY_8812,
+            last_tx_page_entry: LAST_ENTRY_OF_TX_PKT_BUFFER_8812,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            steps,
+            entries_written: stats.entries_written,
+            max_poll_attempts_observed: stats.max_poll_attempts_observed,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded LLT smoke test: RTL8812A linked-list table entries were written and polled idle through default-control transfers",
+                "no libusb enumeration, USB interface claim, firmware download, queue/DMA programming, channel tuning, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+struct LltSmokeFailureInput {
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    steps: Vec<LltStepReport>,
+    counters: DiagnosticCounters,
+    stats: LltRunStats,
+    error: DiagnosticErrorReport,
+}
+
+fn llt_smoke_failure_with_command(
+    command: &'static str,
+    args: &LltSmokeArgs,
+    input: LltSmokeFailureInput,
+) -> LltSmokeReport {
     LltSmokeReport {
         schema_version: 1,
-        command: "llt-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -4669,13 +4874,13 @@ fn llt_smoke_failure(
         tx_page_boundary: TX_PAGE_BOUNDARY_8812,
         last_tx_page_entry: LAST_ENTRY_OF_TX_PKT_BUFFER_8812,
         result: DiagnosticResult::Fail,
-        adapter,
-        endpoints,
-        steps,
-        entries_written: stats.entries_written,
-        max_poll_attempts_observed: stats.max_poll_attempts_observed,
-        counters,
-        error: Some(error),
+        adapter: input.adapter,
+        endpoints: input.endpoints,
+        steps: input.steps,
+        entries_written: input.stats.entries_written,
+        max_poll_attempts_observed: input.stats.max_poll_attempts_observed,
+        counters: input.counters,
+        error: Some(input.error),
         notes: vec![
             "guarded LLT smoke test stopped before queue/DMA programming, channel tuning, bulk traffic, RX loop, or TX operation",
         ],
@@ -13398,6 +13603,13 @@ fn stages_report() -> StagesReport {
                 purpose: "Run guarded RTL8812AU power-on/RF-reset control writes through IOUSBHost when libusb cannot enumerate the device.",
                 prerequisites: &["macos-reg-smoke pass", "operator write acknowledgement"],
                 pass_signal: "Power-on/RF-reset register sequence completes through default-control transfers without bulk traffic.",
+            },
+            VerificationStage {
+                id: "macos-llt-smoke",
+                command: "wfb-radio-diag macos-llt-smoke --vid <vid> --pid <pid> --i-understand-this-writes-registers",
+                purpose: "Program RTL8812A LLT entries through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &["macos-power-on-smoke pass", "operator write acknowledgement"],
+                pass_signal: "All 256 LLT entries are written and every REG_LLT_INIT operation returns idle through default-control transfers.",
             },
             VerificationStage {
                 id: "rx-scan",

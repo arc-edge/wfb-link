@@ -26,6 +26,11 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-power-on-sm
   --vid 0x0bda \
   --pid 0x8812 \
   --i-understand-this-writes-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-llt-smoke.json macos-llt-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-writes-registers
 ```
 
 ## April 30, 2026 Remote Result
@@ -75,8 +80,18 @@ The guarded IOUSBHost power-on smoke test also passed:
 - Bulk OUT writes: 0
 - Covered phases: card-emulation-to-active, command-register enable, RF path A/B reset
 
+After a fresh `macos-power-on-smoke`, the guarded IOUSBHost LLT smoke test also passed:
+
+- Report: `/tmp/wfb-remote-macos-llt-smoke.json`
+- Entries written: 256
+- Max poll attempts observed: 1
+- Control reads: 257
+- Control writes: 256
+- Bulk IN reads: 0
+- Bulk OUT writes: 0
+
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, and guarded register-write sequences can execute there. The blocker is interface and endpoint materialization: without `IOUSBHostInterface` children or a libusb-visible configuration, the current code has no bulk IN/OUT pipes for RX or TX.
+The macOS 26 blocker is not raw USB device visibility or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, and guarded register-write sequences can execute there through LLT programming. The blocker is interface and endpoint materialization: without `IOUSBHostInterface` children or a libusb-visible configuration, the current code has no bulk IN/OUT pipes for RX or TX.
 
 The next useful implementation work is to move more guarded control-transfer diagnostics onto IOUSBHost, then investigate an IOUSBHost interface/pipe path or a DriverKit transport for bulk endpoints.
