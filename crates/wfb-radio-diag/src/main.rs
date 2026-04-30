@@ -53,6 +53,8 @@ enum Command {
     MacosRegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE through macOS IOUSBHost direct control transfers.
     MacosEfuseDump(EfuseDumpArgs),
+    /// Run guarded RTL8812AU power-on writes through macOS IOUSBHost direct control transfers.
+    MacosPowerOnSmoke(PowerOnSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -879,6 +881,16 @@ fn main() -> Result<()> {
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_efuse_dump_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosPowerOnSmoke(args) => {
+            let report = macos_power_on_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_power_on_smoke_human(&report);
             }
             if let Some(code) = report.result.exit_code() {
                 std::process::exit(code);
@@ -4055,7 +4067,8 @@ fn power_on_smoke_report(args: PowerOnSmokeArgs) -> PowerOnSmokeReport {
     let mut counters = DiagnosticCounters::default();
 
     if !args.i_understand_this_writes_registers {
-        return power_on_smoke_failure(
+        return power_on_smoke_failure_with_command(
+            "power-on-smoke",
             &args,
             None,
             None,
@@ -4130,7 +4143,149 @@ fn power_on_smoke_report(args: PowerOnSmokeArgs) -> PowerOnSmokeReport {
     }
 }
 
+fn macos_power_on_smoke_report(args: PowerOnSmokeArgs) -> PowerOnSmokeReport {
+    let selector = args.adapter.selector();
+    let mut steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_writes_registers {
+        return power_on_smoke_failure_with_command(
+            "macos-power-on-smoke",
+            &args,
+            None,
+            None,
+            steps,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_write_authorization",
+                message: "macOS IOUSBHost power-on smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return power_on_smoke_failure_with_command(
+            "macos-power-on-smoke",
+            &args,
+            None,
+            None,
+            steps,
+            counters,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-power-on-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return power_on_smoke_failure_with_command(
+                "macos-power-on-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-power-on-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return power_on_smoke_failure_with_command(
+                "macos-power-on-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-power-on-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return power_on_smoke_failure_with_command(
+                    "macos-power-on-smoke",
+                    &args,
+                    None,
+                    None,
+                    steps,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_power_on_sequence(&registers, &args, &mut counters, &mut steps) {
+            return power_on_smoke_failure_with_command(
+                "macos-power-on-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                error,
+            );
+        }
+
+        PowerOnSmokeReport {
+            schema_version: 1,
+            command: "macos-power-on-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            timeout_ms: args.timeout_ms,
+            poll_attempts: args.poll_attempts,
+            poll_delay_us: args.poll_delay_us,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            steps,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded hardware write test: power-on/RF-reset registers were written through default-control transfers",
+                "no libusb enumeration, USB interface claim, firmware download, bulk traffic, channel tuning, or TX operation was issued",
+            ],
+        }
+    }
+}
+
 fn power_on_smoke_failure(
+    args: &PowerOnSmokeArgs,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    steps: Vec<PowerOnStepReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+) -> PowerOnSmokeReport {
+    power_on_smoke_failure_with_command(
+        "power-on-smoke",
+        args,
+        adapter,
+        endpoints,
+        steps,
+        counters,
+        error,
+    )
+}
+
+fn power_on_smoke_failure_with_command(
+    command: &'static str,
     args: &PowerOnSmokeArgs,
     adapter: Option<UsbDeviceInfo>,
     endpoints: Option<UsbEndpoints>,
@@ -4140,7 +4295,7 @@ fn power_on_smoke_failure(
 ) -> PowerOnSmokeReport {
     PowerOnSmokeReport {
         schema_version: 1,
-        command: "power-on-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -13236,6 +13391,13 @@ fn stages_report() -> StagesReport {
                     "bench authorization for hardware register writes",
                 ],
                 pass_signal: "Power, firmware, LLT, queue/DMA, MAC, BB, and RF phases report pass and the adapter remains responsive to register reads.",
+            },
+            VerificationStage {
+                id: "macos-power-on-smoke",
+                command: "wfb-radio-diag macos-power-on-smoke --vid <vid> --pid <pid> --i-understand-this-writes-registers",
+                purpose: "Run guarded RTL8812AU power-on/RF-reset control writes through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &["macos-reg-smoke pass", "operator write acknowledgement"],
+                pass_signal: "Power-on/RF-reset register sequence completes through default-control transfers without bulk traffic.",
             },
             VerificationStage {
                 id: "rx-scan",

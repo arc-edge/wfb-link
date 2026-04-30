@@ -21,6 +21,11 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-efuse-dump.
   --raw-out /tmp/wfb-remote-macos-efuse-raw.bin \
   --logical-map-out /tmp/wfb-remote-macos-efuse-logical.bin \
   --i-understand-this-writes-control-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-power-on-smoke.json macos-power-on-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-writes-registers
 ```
 
 ## April 30, 2026 Remote Result
@@ -60,8 +65,18 @@ The same IOUSBHost transport also passed the guarded EFUSE dump:
 - RFE option byte: `0x03`
 - TX power region: 84 bytes, 66 non-`0xff` bytes
 
+The guarded IOUSBHost power-on smoke test also passed:
+
+- Report: `/tmp/wfb-remote-macos-power-on-smoke.json`
+- Steps: 14 passed
+- Control reads: 25
+- Control writes: 11
+- Bulk IN reads: 0
+- Bulk OUT writes: 0
+- Covered phases: card-emulation-to-active, command-register enable, RF path A/B reset
+
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio. The blocker is interface and endpoint materialization: without `IOUSBHostInterface` children or a libusb-visible configuration, the current code has no bulk IN/OUT pipes for RX or TX.
+The macOS 26 blocker is not raw USB device visibility or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, and guarded register-write sequences can execute there. The blocker is interface and endpoint materialization: without `IOUSBHostInterface` children or a libusb-visible configuration, the current code has no bulk IN/OUT pipes for RX or TX.
 
-The next useful implementation work is to move guarded control-transfer diagnostics onto IOUSBHost, then investigate an IOUSBHost interface/pipe path or a DriverKit transport for bulk endpoints.
+The next useful implementation work is to move more guarded control-transfer diagnostics onto IOUSBHost, then investigate an IOUSBHost interface/pipe path or a DriverKit transport for bulk endpoints.

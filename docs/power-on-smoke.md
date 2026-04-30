@@ -17,6 +17,15 @@ cargo run -p wfb-radio-diag -- --json power-on-smoke \
 
 Use `--bus` and `--address` as well if multiple matching radios are attached.
 
+On macOS 26, use the IOUSBHost fallback if `usb-probe` cannot enumerate the adapter through libusb:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-power-on-smoke.json macos-power-on-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-writes-registers
+```
+
 ## Guardrails
 
 - The command fails unless `--i-understand-this-writes-registers` is present.
@@ -33,3 +42,16 @@ The sequence is derived from `aircrack-ng/rtl8812au` commit `734485506a30d6237c2
 - `hal/rtl8812a/usb/usb_halinit.c`: `_InitPowerOn_8812AU` command-register enable and RF reset writes
 
 Linux USB captures are still required before treating this as a complete initialization path.
+
+## macOS IOUSBHost Result
+
+On April 30, 2026, the remote macOS 26 hardware Mac passed `macos-power-on-smoke` against the attached `0x0bda:0x8812` adapter:
+
+- Report: `/tmp/wfb-remote-macos-power-on-smoke.json`.
+- Steps: 14 passed.
+- Control reads: 25.
+- Control writes: 11.
+- Bulk IN reads: 0.
+- Bulk OUT writes: 0.
+
+This proves the IOUSBHost fallback can run the guarded power-on/RF-reset register-write sequence. It does not prove firmware download, interface claim, bulk endpoints, RX, TX, or full init on macOS 26.
