@@ -17,6 +17,15 @@ cargo run -p wfb-radio-diag -- --json mac-smoke \
 
 Run `power-on-smoke`, `firmware-smoke`, `llt-smoke`, and `queue-dma-smoke` first after plugging in or resetting the adapter.
 
+On macOS 26, use the IOUSBHost fallback after the IOUSBHost power-on, firmware, LLT, and queue/DMA stages if `usb-probe` cannot enumerate the adapter through libusb:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-mac-smoke.json macos-mac-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-writes-registers
+```
+
 ## Guardrails
 
 - The command fails unless `--i-understand-this-writes-registers` is present.
@@ -40,6 +49,17 @@ On macOS 15.7.4 with `0x0bda:0x8812` at bus `1`, address `1`, `mac-smoke` passed
 - TX frames: `0`
 
 Post-MAC `reg-smoke` also passed, with `REG_MCUFWDL = 0xc6` and `REG_CR = 0x06ff`.
+
+On April 30, 2026, the remote macOS 26 hardware Mac passed `macos-mac-smoke` after the IOUSBHost power-on, firmware, LLT, and queue/DMA smoke stages against the attached `0x0bda:0x8812` adapter:
+
+- Report: `/tmp/wfb-remote-macos-mac-smoke.json`.
+- Receive configuration: `0x740060ce`.
+- Retry limit: `0x3030`.
+- Control reads: `50`.
+- Control writes: `24`.
+- Bulk reads/writes: `0`.
+
+This proves the IOUSBHost fallback can run MAC/WMAC register setup through default-control transfers. It does not prove interface claim, bulk endpoints, RX, TX, or full init on macOS 26.
 
 ## Source Mapping
 

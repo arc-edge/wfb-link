@@ -61,6 +61,8 @@ enum Command {
     MacosFirmwareSmoke(FirmwareSmokeArgs),
     /// Program RTL8812A queue/DMA registers through macOS IOUSBHost direct control transfers.
     MacosQueueDmaSmoke(MacosQueueDmaSmokeArgs),
+    /// Program RTL8812A MAC/WMAC registers through macOS IOUSBHost direct control transfers.
+    MacosMacSmoke(MacSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -1002,6 +1004,16 @@ fn main() -> Result<()> {
         }
         Command::MacSmoke(args) => {
             let report = mac_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_mac_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosMacSmoke(args) => {
+            let report = macos_mac_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_mac_smoke_human(&report);
@@ -6422,9 +6434,155 @@ fn mac_smoke_failure(
     counters: DiagnosticCounters,
     error: DiagnosticErrorReport,
 ) -> MacSmokeReport {
+    mac_smoke_failure_with_command(
+        "mac-smoke",
+        args,
+        adapter,
+        endpoints,
+        steps,
+        counters,
+        error,
+    )
+}
+
+fn macos_mac_smoke_report(args: MacSmokeArgs) -> MacSmokeReport {
+    let selector = args.adapter.selector();
+    let mut steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_writes_registers {
+        return mac_smoke_failure_with_command(
+            "macos-mac-smoke",
+            &args,
+            None,
+            None,
+            steps,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_write_authorization",
+                message: "macOS IOUSBHost MAC smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return mac_smoke_failure_with_command(
+            "macos-mac-smoke",
+            &args,
+            None,
+            None,
+            steps,
+            counters,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-mac-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return mac_smoke_failure_with_command(
+                "macos-mac-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message:
+                        "macos-mac-smoke requires --vid because IOUSBHost matching is VID/PID based"
+                            .to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return mac_smoke_failure_with_command(
+                "macos-mac-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message:
+                        "macos-mac-smoke requires --pid because IOUSBHost matching is VID/PID based"
+                            .to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return mac_smoke_failure_with_command(
+                    "macos-mac-smoke",
+                    &args,
+                    None,
+                    None,
+                    steps,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_mac_sequence(&registers, &mut counters, &mut steps) {
+            return mac_smoke_failure_with_command(
+                "macos-mac-smoke",
+                &args,
+                None,
+                None,
+                steps,
+                counters,
+                error,
+            );
+        }
+
+        MacSmokeReport {
+            schema_version: 1,
+            command: "macos-mac-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            timeout_ms: args.timeout_ms,
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            receive_config_hex: format_value(MAC_RECEIVE_CONFIG, 8),
+            retry_limit_hex: format_value(RETRY_LIMIT_STA, 4),
+            steps,
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded MAC smoke test: RTL8812A driver-info, network-type, WMAC filter, rate/retry, EDCA, HW sequence, BAR, and MAC TX/RX enable registers were written through default-control transfers",
+                "no libusb enumeration, USB interface claim, BB/RF table programming, channel tuning, bulk traffic, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+fn mac_smoke_failure_with_command(
+    command: &'static str,
+    args: &MacSmokeArgs,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    steps: Vec<QueueDmaStepReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+) -> MacSmokeReport {
     MacSmokeReport {
         schema_version: 1,
-        command: "mac-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -14109,6 +14267,17 @@ fn stages_report() -> StagesReport {
                     "operator write acknowledgement",
                 ],
                 pass_signal: "Queue and DMA registers read back expected values through default-control transfers without bulk traffic.",
+            },
+            VerificationStage {
+                id: "macos-mac-smoke",
+                command: "wfb-radio-diag macos-mac-smoke --vid <vid> --pid <pid> --i-understand-this-writes-registers",
+                purpose: "Program RTL8812A MAC/WMAC registers through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &[
+                    "macos-queue-dma-smoke pass",
+                    "macos-firmware-smoke pass",
+                    "operator write acknowledgement",
+                ],
+                pass_signal: "MAC/WMAC registers read back expected values through default-control transfers without bulk traffic.",
             },
             VerificationStage {
                 id: "rx-scan",
