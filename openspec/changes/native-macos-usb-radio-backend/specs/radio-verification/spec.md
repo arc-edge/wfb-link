@@ -29,6 +29,21 @@ The system SHALL verify USB device and configuration descriptors through macOS I
 - **WHEN** IOUSBHost cannot open the device or descriptor reads are short, malformed, or rejected
 - **THEN** the verification command reports the failed descriptor phase and preserves any partial descriptor data read before failure
 
+### Requirement: macOS Interface and Pipe Verification
+The system SHALL verify IOUSBHost interface matching and one-shot bulk pipe access when libusb cannot enumerate interfaces.
+
+#### Scenario: macOS interface smoke succeeds
+- **WHEN** a matching RTL8812AU `IOUSBHostDevice` is visible and the operator authorizes USB reconfiguration
+- **THEN** the verification command configures the device with interface matching, opens interface 0, copies descriptor-confirmed pipe objects, and reports the copied bulk endpoint descriptors without submitting bulk traffic
+
+#### Scenario: macOS bulk-IN smoke succeeds
+- **WHEN** interface smoke has passed and the operator authorizes USB reconfiguration
+- **THEN** the verification command submits one bounded bulk-IN request to endpoint `0x81` and treats either received data or a bounded no-traffic timeout as proof that the pipe accepted an IO request
+
+#### Scenario: macOS bulk-OUT smoke succeeds
+- **WHEN** interface smoke has passed and the operator authorizes a zero-length bulk OUT request
+- **THEN** the verification command submits one zero-length bulk OUT request to endpoint `0x02`, reports transfer completion, and does not submit an RTL8812AU TX descriptor or 802.11 frame
+
 ### Requirement: Firmware Smoke Verification
 The system SHALL verify RTL8812A firmware download independently from channel tuning, RX, and TX.
 

@@ -15,6 +15,22 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-descriptor-
   --vid 0x0bda \
   --pid 0x8812
 
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-interface-smoke.json macos-interface-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-may-reconfigure-usb
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-bulk-in-smoke.json macos-bulk-in-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-may-reconfigure-usb
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-bulk-out-smoke.json macos-bulk-out-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-may-reconfigure-usb \
+  --i-understand-this-submits-bulk-out
+
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-reg-smoke.json macos-reg-smoke \
   --vid 0x0bda \
   --pid 0x8812
@@ -93,6 +109,41 @@ The read-only IOUSBHost descriptor smoke test passed even though the IORegistry 
 - Bulk OUT endpoints: `0x02`, `0x03`, `0x04`
 - Interrupt IN endpoint: `0x85`
 - Max packet size: 512 bytes for all bulk endpoints, 64 bytes for interrupt IN
+
+The IOUSBHost interface/pipe smoke test then passed after issuing `configureWithValue:1 matchInterfaces:YES`:
+
+- Report: `/tmp/wfb-remote-macos-interface-smoke.json`
+- Configuration: 1
+- Interface: 0
+- Interface polls observed: 2
+- Matched interfaces: 1
+- Copied pipes: bulk IN `0x81`, bulk OUT `0x02`, `0x03`, `0x04`
+- Bulk max packet size: 512 bytes
+- Bulk IO submitted: none
+
+The bounded IOUSBHost bulk-IN smoke test passed against endpoint `0x81`:
+
+- Report: `/tmp/wfb-remote-macos-bulk-in-smoke.json`
+- Configuration: 1
+- Interface polls observed: 1
+- Matched interfaces: 1
+- Pipe copied: `0x81`
+- Request length: 512 bytes
+- Result: timed out after 100 ms with `IOUSBHostErrorDomain` code `-536870186`
+- Interpretation: acceptable for this smoke because no RF traffic was present; it proves the pipe accepted a synchronous bulk-IN request
+- Bulk OUT writes: 0
+
+The zero-length IOUSBHost bulk-OUT smoke test also passed against endpoint `0x02`:
+
+- Report: `/tmp/wfb-remote-macos-bulk-out-smoke.json`
+- Configuration: 1
+- Interface polls observed: 1
+- Matched interfaces: 1
+- Pipe copied: `0x02`
+- Request length: 0 bytes
+- Result: synchronous write completed
+- Bulk IN reads: 0
+- Bulk OUT writes: 1
 
 The integrated IOUSBHost transport then passed direct default-control register reads:
 
@@ -198,9 +249,9 @@ After BB smoke, the guarded IOUSBHost RF smoke test also passed:
 
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility, descriptor access, or default-control access. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, and guarded register-write sequences can execute there through BB/RF programming. The blocker is pipe access: the descriptor advertises bulk endpoints, but without `IOUSBHostInterface` children, a libusb-visible configuration, or another pipe-opening mechanism, the current code still has no bulk IN/OUT pipes for RX or TX.
+The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, or one-shot pipe IO. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute there through BB/RF programming, interface 0 can be opened after `configureWithValue:matchInterfaces:`, and descriptor-confirmed bulk pipes can accept synchronous IO requests.
 
-The next useful implementation work is to investigate an IOUSBHost interface/pipe path or a DriverKit transport for those descriptor-confirmed bulk endpoints.
+The next useful implementation work is to turn the one-shot IOUSBHost probes into a retained radio transport session: configure once, keep interface 0 and pipes open, run the existing RTL8812AU init through default control, then reuse the retained bulk IN/OUT pipes for `rx-scan`, `tx-once`, and bridge traffic.
 
 ## SDK Notes
 
@@ -210,4 +261,4 @@ The macOS 26.4 Command Line Tools IOUSBHost headers confirm the public object sp
 - `IOUSBHostInterface` exposes `copyPipeWithAddress:error:` for endpoint pipes.
 - `IOUSBHostPipe` exposes synchronous `sendIORequestWithData:bytesTransferred:completionTimeout:error:` for bulk/interrupt transfers and async enqueue APIs.
 
-So the next proof target is not endpoint discovery; that is done through descriptors. The target is obtaining an `IOUSBHostInterface` service for interface 0, or replacing that with a DriverKit path that can own the interface and create pipes for `0x81`, `0x02`, `0x03`, and `0x04`.
+Endpoint discovery and one-shot pipe IO are now proven. The remaining target is a long-lived IOUSBHost session that owns the interface and exposes reusable control, bulk IN, and bulk OUT methods to the shared RTL8812AU radio code.

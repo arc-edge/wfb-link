@@ -51,6 +51,12 @@ enum Command {
     MacosUsbState(MacosUsbStateArgs),
     /// Read USB descriptors through macOS IOUSBHost default-control transfers.
     MacosDescriptorSmoke(MacosDescriptorSmokeArgs),
+    /// Configure and probe IOUSBHost interface and pipe objects without submitting bulk traffic.
+    MacosInterfaceSmoke(MacosInterfaceSmokeArgs),
+    /// Configure IOUSBHost interface and issue one bounded bulk-IN read request.
+    MacosBulkInSmoke(MacosBulkInSmokeArgs),
+    /// Configure IOUSBHost interface and issue one zero-length bulk-OUT request.
+    MacosBulkOutSmoke(MacosBulkOutSmokeArgs),
     /// Read RTL8812AU registers through macOS IOUSBHost direct control transfers.
     MacosRegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE through macOS IOUSBHost direct control transfers.
@@ -133,6 +139,124 @@ struct MacosDescriptorSmokeArgs {
     /// Configuration descriptor index to read.
     #[arg(long, default_value_t = 0)]
     configuration_index: u8,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosInterfaceSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// USB configuration value to select before interface matching.
+    #[arg(long, default_value_t = 1)]
+    configuration_value: u8,
+
+    /// Whether configureWithValue should register interfaces for matching.
+    #[arg(long, default_value_t = true)]
+    match_interfaces: bool,
+
+    /// Interface number to match and open.
+    #[arg(long, default_value_t = 0)]
+    interface_number: u8,
+
+    /// Endpoint address to copy as an IOUSBHostPipe. Repeat to override defaults.
+    #[arg(long = "endpoint", value_name = "ADDR", value_parser = parse_u8)]
+    endpoints: Vec<u8>,
+
+    /// Number of interface-service polling attempts after configuration.
+    #[arg(long, default_value_t = 25)]
+    poll_attempts: u32,
+
+    /// Delay between interface-service polls in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    poll_delay_ms: u64,
+
+    /// Required acknowledgement that this command may issue SET_CONFIGURATION.
+    #[arg(long)]
+    i_understand_this_may_reconfigure_usb: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosBulkInSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// USB configuration value to select before interface matching.
+    #[arg(long, default_value_t = 1)]
+    configuration_value: u8,
+
+    /// Whether configureWithValue should register interfaces for matching.
+    #[arg(long, default_value_t = true)]
+    match_interfaces: bool,
+
+    /// Interface number to match and open.
+    #[arg(long, default_value_t = 0)]
+    interface_number: u8,
+
+    /// Bulk IN endpoint address to read.
+    #[arg(long, default_value = "0x81", value_parser = parse_u8)]
+    endpoint: u8,
+
+    /// Number of bytes to request from the bulk IN pipe.
+    #[arg(long, default_value_t = 512)]
+    length: usize,
+
+    /// Bulk transfer timeout in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    timeout_ms: u64,
+
+    /// Number of interface-service polling attempts after configuration.
+    #[arg(long, default_value_t = 25)]
+    poll_attempts: u32,
+
+    /// Delay between interface-service polls in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    poll_delay_ms: u64,
+
+    /// Required acknowledgement that this command may issue SET_CONFIGURATION.
+    #[arg(long)]
+    i_understand_this_may_reconfigure_usb: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosBulkOutSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// USB configuration value to select before interface matching.
+    #[arg(long, default_value_t = 1)]
+    configuration_value: u8,
+
+    /// Whether configureWithValue should register interfaces for matching.
+    #[arg(long, default_value_t = true)]
+    match_interfaces: bool,
+
+    /// Interface number to match and open.
+    #[arg(long, default_value_t = 0)]
+    interface_number: u8,
+
+    /// Bulk OUT endpoint address to write.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    endpoint: u8,
+
+    /// Bulk transfer timeout in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    timeout_ms: u64,
+
+    /// Number of interface-service polling attempts after configuration.
+    #[arg(long, default_value_t = 25)]
+    poll_attempts: u32,
+
+    /// Delay between interface-service polls in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    poll_delay_ms: u64,
+
+    /// Required acknowledgement that this command may issue SET_CONFIGURATION.
+    #[arg(long)]
+    i_understand_this_may_reconfigure_usb: bool,
+
+    /// Required acknowledgement that this command submits one bulk OUT request.
+    #[arg(long)]
+    i_understand_this_submits_bulk_out: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -902,6 +1026,36 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::MacosInterfaceSmoke(args) => {
+            let report = macos_interface_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_macos_interface_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosBulkInSmoke(args) => {
+            let report = macos_bulk_in_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_macos_bulk_in_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosBulkOutSmoke(args) => {
+            let report = macos_bulk_out_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_macos_bulk_out_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::MacosRegSmoke(args) => {
             let report = macos_register_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -1596,6 +1750,152 @@ struct UsbEndpointDescriptorReport {
 }
 
 #[derive(Debug, Serialize)]
+struct MacosInterfaceSmokeReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    configuration_value: u8,
+    match_interfaces: bool,
+    interface_number: u8,
+    endpoint_addresses: Vec<String>,
+    poll_attempts: u32,
+    poll_delay_ms: u64,
+    result: DiagnosticResult,
+    interface_probe: Option<MacosInterfaceProbeReport>,
+    counters: DiagnosticCounters,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosInterfaceProbeReport {
+    configure_attempted: bool,
+    configure_ok: bool,
+    match_interfaces: bool,
+    interface_found: bool,
+    interface_opened: bool,
+    poll_attempts_observed: u32,
+    matched_interface_count: u32,
+    pipes: Vec<MacosPipeProbeReport>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosPipeProbeReport {
+    address: u8,
+    address_hex: String,
+    requested: bool,
+    copied: bool,
+    descriptor_available: bool,
+    descriptor_address: u8,
+    descriptor_address_hex: String,
+    direction: &'static str,
+    transfer_type: &'static str,
+    attributes_hex: String,
+    max_packet_size: u16,
+    interval: u8,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosBulkInSmokeReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    configuration_value: u8,
+    match_interfaces: bool,
+    interface_number: u8,
+    endpoint: u8,
+    endpoint_hex: String,
+    length: usize,
+    timeout_ms: u64,
+    poll_attempts: u32,
+    poll_delay_ms: u64,
+    result: DiagnosticResult,
+    transfer: Option<MacosBulkInTransferReport>,
+    counters: DiagnosticCounters,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosBulkInTransferReport {
+    configure_attempted: bool,
+    configure_ok: bool,
+    interface_found: bool,
+    interface_opened: bool,
+    pipe_copied: bool,
+    descriptor_available: bool,
+    transfer_ok: bool,
+    timed_out: bool,
+    poll_attempts_observed: u32,
+    matched_interface_count: u32,
+    endpoint_address_hex: String,
+    descriptor_address_hex: String,
+    direction: &'static str,
+    transfer_type: &'static str,
+    attributes_hex: String,
+    max_packet_size: u16,
+    interval: u8,
+    requested_len: usize,
+    transferred_len: usize,
+    data_hex: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosBulkOutSmokeReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    configuration_value: u8,
+    match_interfaces: bool,
+    interface_number: u8,
+    endpoint: u8,
+    endpoint_hex: String,
+    payload_len: usize,
+    timeout_ms: u64,
+    poll_attempts: u32,
+    poll_delay_ms: u64,
+    result: DiagnosticResult,
+    transfer: Option<MacosBulkOutTransferReport>,
+    counters: DiagnosticCounters,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosBulkOutTransferReport {
+    configure_attempted: bool,
+    configure_ok: bool,
+    interface_found: bool,
+    interface_opened: bool,
+    pipe_copied: bool,
+    descriptor_available: bool,
+    transfer_ok: bool,
+    timed_out: bool,
+    poll_attempts_observed: u32,
+    matched_interface_count: u32,
+    endpoint_address_hex: String,
+    descriptor_address_hex: String,
+    direction: &'static str,
+    transfer_type: &'static str,
+    attributes_hex: String,
+    max_packet_size: u16,
+    interval: u8,
+    requested_len: usize,
+    transferred_len: usize,
+    payload_hex: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct RegisterSmokeReport {
     schema_version: u8,
     command: &'static str,
@@ -2161,6 +2461,7 @@ const USB_CONFIGURATION_DESCRIPTOR_LEN: usize = 9;
 const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
 const USB_ENDPOINT_TRANSFER_TYPE_MASK: u8 = 0x03;
 const USB_ENDPOINT_TRANSFER_TYPE_BULK: u8 = 0x02;
+const MACOS_DEFAULT_INTERFACE_PROBE_ENDPOINTS: &[u8] = &[0x81, 0x02, 0x03, 0x04];
 
 const POWER_SOURCE_PWRSEQ: &str = "aircrack-ng/rtl8812au@7344855:include/Hal8812PwrSeq.h";
 const POWER_SOURCE_USB_HALINIT: &str =
@@ -14269,6 +14570,778 @@ fn macos_descriptor_smoke_failure(
     }
 }
 
+fn macos_interface_smoke_report(args: MacosInterfaceSmokeArgs) -> MacosInterfaceSmokeReport {
+    let selector = args.adapter.selector();
+    let endpoints = macos_interface_smoke_endpoints(&args);
+    let endpoint_addresses = endpoints
+        .iter()
+        .copied()
+        .map(|endpoint| format_value(endpoint, 2))
+        .collect::<Vec<_>>();
+    let counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_may_reconfigure_usb {
+        return macos_interface_smoke_failure(
+            &args,
+            selector,
+            endpoint_addresses,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_reconfigure_authorization",
+                message: "macos-interface-smoke may issue SET_CONFIGURATION and requires --i-understand-this-may-reconfigure-usb".to_string(),
+            },
+        );
+    }
+
+    if endpoints.len() > 16 {
+        return macos_interface_smoke_failure(
+            &args,
+            selector,
+            endpoint_addresses,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "too_many_endpoints",
+                message: format!(
+                    "macos-interface-smoke supports at most 16 endpoint probes, got {}",
+                    endpoints.len()
+                ),
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return macos_interface_smoke_failure(
+            &args,
+            selector,
+            endpoint_addresses,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-interface-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return macos_interface_smoke_failure(
+                &args,
+                selector,
+                endpoint_addresses,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-interface-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return macos_interface_smoke_failure(
+                &args,
+                selector,
+                endpoint_addresses,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-interface-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return macos_interface_smoke_failure(
+                    &args,
+                    selector,
+                    endpoint_addresses,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let probe = match device.probe_interface(macos_usbhost::MacosUsbHostInterfaceProbeRequest {
+            vid,
+            pid,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            pipe_addresses: &endpoints,
+            poll_attempts: args.poll_attempts,
+            poll_delay: Duration::from_millis(args.poll_delay_ms),
+        }) {
+            Ok(probe) => probe,
+            Err(error) => {
+                return macos_interface_smoke_failure(
+                    &args,
+                    selector,
+                    endpoint_addresses,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_interface_probe_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let counters = DiagnosticCounters {
+            usb_control_writes: u64::from(probe.configure_attempted),
+            ..DiagnosticCounters::default()
+        };
+        let passed = probe.configure_ok
+            && probe.interface_found
+            && probe.interface_opened
+            && probe.pipes.iter().all(|pipe| pipe.copied);
+        let error = if passed {
+            None
+        } else {
+            Some(DiagnosticErrorReport {
+                code: macos_interface_probe_error_code(&probe),
+                message: probe.error.clone().unwrap_or_else(|| {
+                    "IOUSBHost interface or pipe probe did not satisfy all pass criteria"
+                        .to_string()
+                }),
+            })
+        };
+        let interface_probe = macos_interface_probe_report_from_probe(&probe);
+
+        MacosInterfaceSmokeReport {
+            schema_version: 1,
+            command: "macos-interface-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            endpoint_addresses,
+            poll_attempts: args.poll_attempts,
+            poll_delay_ms: args.poll_delay_ms,
+            result: if passed {
+                DiagnosticResult::Pass
+            } else {
+                DiagnosticResult::Fail
+            },
+            interface_probe: Some(interface_probe),
+            counters,
+            error,
+            notes: vec![
+                "macOS IOUSBHost interface smoke test: SET_CONFIGURATION may be issued, then interface 0 and descriptor-confirmed pipes are probed",
+                "no hardware register writes, firmware download, channel tuning, bulk IO request, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+fn macos_interface_smoke_endpoints(args: &MacosInterfaceSmokeArgs) -> Vec<u8> {
+    if args.endpoints.is_empty() {
+        MACOS_DEFAULT_INTERFACE_PROBE_ENDPOINTS.to_vec()
+    } else {
+        args.endpoints.clone()
+    }
+}
+
+fn macos_interface_smoke_failure(
+    args: &MacosInterfaceSmokeArgs,
+    selector: DeviceSelector,
+    endpoint_addresses: Vec<String>,
+    interface_probe: Option<MacosInterfaceProbeReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+) -> MacosInterfaceSmokeReport {
+    MacosInterfaceSmokeReport {
+        schema_version: 1,
+        command: "macos-interface-smoke",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        configuration_value: args.configuration_value,
+        match_interfaces: args.match_interfaces,
+        interface_number: args.interface_number,
+        endpoint_addresses,
+        poll_attempts: args.poll_attempts,
+        poll_delay_ms: args.poll_delay_ms,
+        result: DiagnosticResult::Fail,
+        interface_probe,
+        counters,
+        error: Some(error),
+        notes: vec![
+            "macOS IOUSBHost interface smoke test stopped before any bulk IO request, RX loop, or TX operation",
+        ],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_interface_probe_error_code(
+    probe: &macos_usbhost::MacosUsbHostInterfaceProbe,
+) -> &'static str {
+    if !probe.configure_ok {
+        "macos_usb_configure_failed"
+    } else if !probe.interface_found {
+        "macos_interface_not_found"
+    } else if !probe.interface_opened {
+        "macos_interface_open_failed"
+    } else if probe.pipes.iter().any(|pipe| !pipe.copied) {
+        "macos_pipe_copy_failed"
+    } else {
+        "macos_interface_probe_failed"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_interface_probe_report_from_probe(
+    probe: &macos_usbhost::MacosUsbHostInterfaceProbe,
+) -> MacosInterfaceProbeReport {
+    MacosInterfaceProbeReport {
+        configure_attempted: probe.configure_attempted,
+        configure_ok: probe.configure_ok,
+        match_interfaces: probe.match_interfaces,
+        interface_found: probe.interface_found,
+        interface_opened: probe.interface_opened,
+        poll_attempts_observed: probe.poll_attempts_observed,
+        matched_interface_count: probe.matched_interface_count,
+        pipes: probe
+            .pipes
+            .iter()
+            .map(|pipe| MacosPipeProbeReport {
+                address: pipe.address,
+                address_hex: format_value(pipe.address, 2),
+                requested: pipe.requested,
+                copied: pipe.copied,
+                descriptor_available: pipe.descriptor_available,
+                descriptor_address: pipe.descriptor_address,
+                descriptor_address_hex: format_value(pipe.descriptor_address, 2),
+                direction: if pipe.descriptor_address & USB_ENDPOINT_DIRECTION_IN != 0 {
+                    "in"
+                } else {
+                    "out"
+                },
+                transfer_type: endpoint_transfer_type(pipe.attributes),
+                attributes_hex: format_value(pipe.attributes, 2),
+                max_packet_size: pipe.max_packet_size,
+                interval: pipe.interval,
+                error: pipe.error.clone(),
+            })
+            .collect(),
+        error: probe.error.clone(),
+    }
+}
+
+fn macos_bulk_in_smoke_report(args: MacosBulkInSmokeArgs) -> MacosBulkInSmokeReport {
+    let selector = args.adapter.selector();
+    let counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_may_reconfigure_usb {
+        return macos_bulk_in_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_reconfigure_authorization",
+                message: "macos-bulk-in-smoke may issue SET_CONFIGURATION and requires --i-understand-this-may-reconfigure-usb".to_string(),
+            },
+        );
+    }
+
+    if args.length == 0 {
+        return macos_bulk_in_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "invalid_length",
+                message: "--length must be nonzero".to_string(),
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return macos_bulk_in_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-bulk-in-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return macos_bulk_in_smoke_failure(
+                &args,
+                selector,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-bulk-in-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return macos_bulk_in_smoke_failure(
+                &args,
+                selector,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-bulk-in-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return macos_bulk_in_smoke_failure(
+                    &args,
+                    selector,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let transfer = match device.bulk_read_once(macos_usbhost::MacosUsbHostBulkReadRequest {
+            vid,
+            pid,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            endpoint_address: args.endpoint,
+            len: args.length,
+            poll_attempts: args.poll_attempts,
+            poll_delay: Duration::from_millis(args.poll_delay_ms),
+            timeout: Duration::from_millis(args.timeout_ms),
+        }) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                return macos_bulk_in_smoke_failure(
+                    &args,
+                    selector,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_bulk_read_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let counters = DiagnosticCounters {
+            usb_control_writes: u64::from(transfer.configure_attempted),
+            usb_bulk_in_reads: u64::from(transfer.pipe_copied),
+            ..DiagnosticCounters::default()
+        };
+        let passed = transfer.configure_ok
+            && transfer.interface_found
+            && transfer.interface_opened
+            && transfer.pipe_copied
+            && (transfer.transfer_ok || transfer.timed_out);
+        let error = if passed {
+            None
+        } else {
+            Some(DiagnosticErrorReport {
+                code: macos_bulk_in_error_code(&transfer),
+                message: transfer.error.clone().unwrap_or_else(|| {
+                    "IOUSBHost bulk-IN smoke did not satisfy all pass criteria".to_string()
+                }),
+            })
+        };
+        let transfer = macos_bulk_in_transfer_report_from_transfer(&transfer);
+
+        MacosBulkInSmokeReport {
+            schema_version: 1,
+            command: "macos-bulk-in-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            endpoint: args.endpoint,
+            endpoint_hex: format_value(args.endpoint, 2),
+            length: args.length,
+            timeout_ms: args.timeout_ms,
+            poll_attempts: args.poll_attempts,
+            poll_delay_ms: args.poll_delay_ms,
+            result: if passed {
+                DiagnosticResult::Pass
+            } else {
+                DiagnosticResult::Fail
+            },
+            transfer: Some(transfer),
+            counters,
+            error,
+            notes: vec![
+                "macOS IOUSBHost bulk-IN smoke test: SET_CONFIGURATION may be issued, interface 0 and the selected pipe are opened, then one bounded bulk-IN request is submitted",
+                "a timeout is accepted as a pass signal for this smoke test because it proves the pipe accepted a bulk transfer request without requiring RF traffic",
+                "no hardware register writes, firmware download, channel tuning, bulk OUT request, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
+fn macos_bulk_in_smoke_failure(
+    args: &MacosBulkInSmokeArgs,
+    selector: DeviceSelector,
+    transfer: Option<MacosBulkInTransferReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+) -> MacosBulkInSmokeReport {
+    MacosBulkInSmokeReport {
+        schema_version: 1,
+        command: "macos-bulk-in-smoke",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        configuration_value: args.configuration_value,
+        match_interfaces: args.match_interfaces,
+        interface_number: args.interface_number,
+        endpoint: args.endpoint,
+        endpoint_hex: format_value(args.endpoint, 2),
+        length: args.length,
+        timeout_ms: args.timeout_ms,
+        poll_attempts: args.poll_attempts,
+        poll_delay_ms: args.poll_delay_ms,
+        result: DiagnosticResult::Fail,
+        transfer,
+        counters,
+        error: Some(error),
+        notes: vec![
+            "macOS IOUSBHost bulk-IN smoke test stopped before bulk OUT, RX loop, or TX operation",
+        ],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bulk_in_error_code(transfer: &macos_usbhost::MacosUsbHostBulkTransfer) -> &'static str {
+    if !transfer.configure_ok {
+        "macos_usb_configure_failed"
+    } else if !transfer.interface_found {
+        "macos_interface_not_found"
+    } else if !transfer.interface_opened {
+        "macos_interface_open_failed"
+    } else if !transfer.pipe_copied {
+        "macos_pipe_copy_failed"
+    } else if !transfer.transfer_ok && !transfer.timed_out {
+        "macos_bulk_in_request_failed"
+    } else {
+        "macos_bulk_in_smoke_failed"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bulk_in_transfer_report_from_transfer(
+    transfer: &macos_usbhost::MacosUsbHostBulkTransfer,
+) -> MacosBulkInTransferReport {
+    MacosBulkInTransferReport {
+        configure_attempted: transfer.configure_attempted,
+        configure_ok: transfer.configure_ok,
+        interface_found: transfer.interface_found,
+        interface_opened: transfer.interface_opened,
+        pipe_copied: transfer.pipe_copied,
+        descriptor_available: transfer.descriptor_available,
+        transfer_ok: transfer.transfer_ok,
+        timed_out: transfer.timed_out,
+        poll_attempts_observed: transfer.poll_attempts_observed,
+        matched_interface_count: transfer.matched_interface_count,
+        endpoint_address_hex: format_value(transfer.endpoint_address, 2),
+        descriptor_address_hex: format_value(transfer.descriptor_address, 2),
+        direction: if transfer.descriptor_address & USB_ENDPOINT_DIRECTION_IN != 0 {
+            "in"
+        } else {
+            "out"
+        },
+        transfer_type: endpoint_transfer_type(transfer.attributes),
+        attributes_hex: format_value(transfer.attributes, 2),
+        max_packet_size: transfer.max_packet_size,
+        interval: transfer.interval,
+        requested_len: transfer.requested_len,
+        transferred_len: transfer.transferred_len,
+        data_hex: encode_hex(&transfer.data),
+        error: transfer.error.clone(),
+    }
+}
+
+fn macos_bulk_out_smoke_report(args: MacosBulkOutSmokeArgs) -> MacosBulkOutSmokeReport {
+    let selector = args.adapter.selector();
+    let counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_may_reconfigure_usb {
+        return macos_bulk_out_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_reconfigure_authorization",
+                message: "macos-bulk-out-smoke may issue SET_CONFIGURATION and requires --i-understand-this-may-reconfigure-usb".to_string(),
+            },
+        );
+    }
+
+    if !args.i_understand_this_submits_bulk_out {
+        return macos_bulk_out_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "missing_bulk_out_authorization",
+                message: "macos-bulk-out-smoke submits one zero-length bulk OUT request and requires --i-understand-this-submits-bulk-out".to_string(),
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return macos_bulk_out_smoke_failure(
+            &args,
+            selector,
+            None,
+            counters,
+            DiagnosticErrorReport {
+                code: "unsupported_platform",
+                message: "macos-bulk-out-smoke requires macOS IOUSBHost".to_string(),
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return macos_bulk_out_smoke_failure(
+                &args,
+                selector,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_vid",
+                    message: "macos-bulk-out-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return macos_bulk_out_smoke_failure(
+                &args,
+                selector,
+                None,
+                counters,
+                DiagnosticErrorReport {
+                    code: "missing_pid",
+                    message: "macos-bulk-out-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return macos_bulk_out_smoke_failure(
+                    &args,
+                    selector,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_usbhost_open_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let transfer = match device.bulk_write_once(macos_usbhost::MacosUsbHostBulkWriteRequest {
+            vid,
+            pid,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            endpoint_address: args.endpoint,
+            data: &[],
+            poll_attempts: args.poll_attempts,
+            poll_delay: Duration::from_millis(args.poll_delay_ms),
+            timeout: Duration::from_millis(args.timeout_ms),
+        }) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                return macos_bulk_out_smoke_failure(
+                    &args,
+                    selector,
+                    None,
+                    counters,
+                    DiagnosticErrorReport {
+                        code: "macos_bulk_write_failed",
+                        message: error,
+                    },
+                );
+            }
+        };
+
+        let counters = DiagnosticCounters {
+            usb_control_writes: u64::from(transfer.configure_attempted),
+            usb_bulk_out_writes: u64::from(transfer.pipe_copied),
+            ..DiagnosticCounters::default()
+        };
+        let passed = transfer.configure_ok
+            && transfer.interface_found
+            && transfer.interface_opened
+            && transfer.pipe_copied
+            && transfer.transfer_ok;
+        let error = if passed {
+            None
+        } else {
+            Some(DiagnosticErrorReport {
+                code: macos_bulk_out_error_code(&transfer),
+                message: transfer.error.clone().unwrap_or_else(|| {
+                    "IOUSBHost bulk-OUT smoke did not satisfy all pass criteria".to_string()
+                }),
+            })
+        };
+        let transfer = macos_bulk_out_transfer_report_from_transfer(&transfer);
+
+        MacosBulkOutSmokeReport {
+            schema_version: 1,
+            command: "macos-bulk-out-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            endpoint: args.endpoint,
+            endpoint_hex: format_value(args.endpoint, 2),
+            payload_len: 0,
+            timeout_ms: args.timeout_ms,
+            poll_attempts: args.poll_attempts,
+            poll_delay_ms: args.poll_delay_ms,
+            result: if passed {
+                DiagnosticResult::Pass
+            } else {
+                DiagnosticResult::Fail
+            },
+            transfer: Some(transfer),
+            counters,
+            error,
+            notes: vec![
+                "macOS IOUSBHost bulk-OUT smoke test: SET_CONFIGURATION may be issued, interface 0 and the selected pipe are opened, then one zero-length bulk-OUT request is submitted",
+                "this smoke test does not submit an RTL8812AU TX descriptor, an 802.11 frame, a nonzero payload, register writes, firmware download, channel tuning, RX loop, or RF TX operation",
+            ],
+        }
+    }
+}
+
+fn macos_bulk_out_smoke_failure(
+    args: &MacosBulkOutSmokeArgs,
+    selector: DeviceSelector,
+    transfer: Option<MacosBulkOutTransferReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+) -> MacosBulkOutSmokeReport {
+    MacosBulkOutSmokeReport {
+        schema_version: 1,
+        command: "macos-bulk-out-smoke",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        configuration_value: args.configuration_value,
+        match_interfaces: args.match_interfaces,
+        interface_number: args.interface_number,
+        endpoint: args.endpoint,
+        endpoint_hex: format_value(args.endpoint, 2),
+        payload_len: 0,
+        timeout_ms: args.timeout_ms,
+        poll_attempts: args.poll_attempts,
+        poll_delay_ms: args.poll_delay_ms,
+        result: DiagnosticResult::Fail,
+        transfer,
+        counters,
+        error: Some(error),
+        notes: vec![
+            "macOS IOUSBHost bulk-OUT smoke test stopped before any bulk OUT request, RX loop, TX descriptor, 802.11 frame, or RF operation",
+        ],
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bulk_out_error_code(transfer: &macos_usbhost::MacosUsbHostBulkTransfer) -> &'static str {
+    if !transfer.configure_ok {
+        "macos_usb_configure_failed"
+    } else if !transfer.interface_found {
+        "macos_interface_not_found"
+    } else if !transfer.interface_opened {
+        "macos_interface_open_failed"
+    } else if !transfer.pipe_copied {
+        "macos_pipe_copy_failed"
+    } else if transfer.timed_out {
+        "macos_bulk_out_request_timed_out"
+    } else if !transfer.transfer_ok {
+        "macos_bulk_out_request_failed"
+    } else {
+        "macos_bulk_out_smoke_failed"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bulk_out_transfer_report_from_transfer(
+    transfer: &macos_usbhost::MacosUsbHostBulkTransfer,
+) -> MacosBulkOutTransferReport {
+    MacosBulkOutTransferReport {
+        configure_attempted: transfer.configure_attempted,
+        configure_ok: transfer.configure_ok,
+        interface_found: transfer.interface_found,
+        interface_opened: transfer.interface_opened,
+        pipe_copied: transfer.pipe_copied,
+        descriptor_available: transfer.descriptor_available,
+        transfer_ok: transfer.transfer_ok,
+        timed_out: transfer.timed_out,
+        poll_attempts_observed: transfer.poll_attempts_observed,
+        matched_interface_count: transfer.matched_interface_count,
+        endpoint_address_hex: format_value(transfer.endpoint_address, 2),
+        descriptor_address_hex: format_value(transfer.descriptor_address, 2),
+        direction: if transfer.descriptor_address & USB_ENDPOINT_DIRECTION_IN != 0 {
+            "in"
+        } else {
+            "out"
+        },
+        transfer_type: endpoint_transfer_type(transfer.attributes),
+        attributes_hex: format_value(transfer.attributes, 2),
+        max_packet_size: transfer.max_packet_size,
+        interval: transfer.interval,
+        requested_len: transfer.requested_len,
+        transferred_len: transfer.transferred_len,
+        payload_hex: encode_hex(&transfer.data),
+        error: transfer.error.clone(),
+    }
+}
+
 fn parse_usb_device_descriptor(
     raw: &[u8],
 ) -> std::result::Result<UsbDeviceDescriptorReport, DiagnosticErrorReport> {
@@ -15062,6 +16135,36 @@ fn stages_report() -> StagesReport {
                 pass_signal: "The descriptor tree reports interface and endpoint layout without interface claim or bulk traffic.",
             },
             VerificationStage {
+                id: "macos-interface-smoke",
+                command: "wfb-radio-diag macos-interface-smoke --vid 0x0bda --pid 0x8812 --i-understand-this-may-reconfigure-usb",
+                purpose: "Issue SET_CONFIGURATION through IOUSBHost, then try to open interface 0 and copy descriptor-confirmed pipe objects.",
+                prerequisites: &[
+                    "macos-descriptor-smoke pass",
+                    "bench authorization for USB reconfiguration",
+                ],
+                pass_signal: "IOUSBHostInterface opens and pipes 0x81, 0x02, 0x03, and 0x04 can be copied without bulk IO.",
+            },
+            VerificationStage {
+                id: "macos-bulk-in-smoke",
+                command: "wfb-radio-diag macos-bulk-in-smoke --vid 0x0bda --pid 0x8812 --i-understand-this-may-reconfigure-usb",
+                purpose: "Issue SET_CONFIGURATION through IOUSBHost, open interface 0, copy the bulk-IN pipe, and submit one bounded read request.",
+                prerequisites: &[
+                    "macos-interface-smoke pass",
+                    "bench authorization for USB reconfiguration",
+                ],
+                pass_signal: "Bulk-IN endpoint 0x81 accepts a synchronous IOUSBHost transfer request; either data or a bounded timeout is acceptable.",
+            },
+            VerificationStage {
+                id: "macos-bulk-out-smoke",
+                command: "wfb-radio-diag macos-bulk-out-smoke --vid 0x0bda --pid 0x8812 --i-understand-this-may-reconfigure-usb --i-understand-this-submits-bulk-out",
+                purpose: "Issue SET_CONFIGURATION through IOUSBHost, open interface 0, copy a bulk-OUT pipe, and submit one zero-length write request.",
+                prerequisites: &[
+                    "macos-interface-smoke pass",
+                    "bench authorization for USB reconfiguration and one zero-length bulk OUT request",
+                ],
+                pass_signal: "Bulk-OUT endpoint 0x02 accepts and completes a synchronous zero-length IOUSBHost request.",
+            },
+            VerificationStage {
                 id: "macos-reg-smoke",
                 command: "wfb-radio-diag macos-reg-smoke --vid 0x0bda --pid 0x8812",
                 purpose: "Read RTL8812AU registers through macOS IOUSBHost default-control transfers when libusb cannot enumerate the device.",
@@ -15758,6 +16861,177 @@ fn print_macos_descriptor_smoke_human(report: &MacosDescriptorSmokeReport) {
                 endpoint.interface_number,
                 endpoint.alternate_setting
             );
+        }
+    }
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_macos_interface_smoke_human(report: &MacosInterfaceSmokeReport) {
+    println!("macOS interface smoke: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Configuration: value={} match_interfaces={} interface={} endpoints={:?}",
+        report.configuration_value,
+        report.match_interfaces,
+        report.interface_number,
+        report.endpoint_addresses
+    );
+    if let Some(probe) = &report.interface_probe {
+        println!(
+            "Probe: configure_ok={} interface_found={} interface_opened={} polls={} matched_interfaces={}",
+            probe.configure_ok,
+            probe.interface_found,
+            probe.interface_opened,
+            probe.poll_attempts_observed,
+            probe.matched_interface_count
+        );
+        for pipe in &probe.pipes {
+            println!(
+                "  pipe {} copied={} descriptor={} {} {} mps={} interval={} error={}",
+                pipe.address_hex,
+                pipe.copied,
+                pipe.descriptor_available,
+                pipe.direction,
+                pipe.transfer_type,
+                pipe.max_packet_size,
+                pipe.interval,
+                pipe.error.as_deref().unwrap_or("-")
+            );
+        }
+        if let Some(error) = &probe.error {
+            println!("Probe error: {error}");
+        }
+    }
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_macos_bulk_in_smoke_human(report: &MacosBulkInSmokeReport) {
+    println!("macOS bulk-IN smoke: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Configuration: value={} match_interfaces={} interface={} endpoint={} length={} timeout_ms={}",
+        report.configuration_value,
+        report.match_interfaces,
+        report.interface_number,
+        report.endpoint_hex,
+        report.length,
+        report.timeout_ms
+    );
+    if let Some(transfer) = &report.transfer {
+        println!(
+            "Transfer: configure_ok={} interface_found={} interface_opened={} pipe_copied={} transfer_ok={} timed_out={} transferred={}/{}",
+            transfer.configure_ok,
+            transfer.interface_found,
+            transfer.interface_opened,
+            transfer.pipe_copied,
+            transfer.transfer_ok,
+            transfer.timed_out,
+            transfer.transferred_len,
+            transfer.requested_len
+        );
+        println!(
+            "Pipe: endpoint={} descriptor={} descriptor_available={} {} {} mps={} interval={}",
+            transfer.endpoint_address_hex,
+            transfer.descriptor_address_hex,
+            transfer.descriptor_available,
+            transfer.direction,
+            transfer.transfer_type,
+            transfer.max_packet_size,
+            transfer.interval
+        );
+        println!(
+            "Poll: attempts={} matched_interfaces={}",
+            transfer.poll_attempts_observed, transfer.matched_interface_count
+        );
+        if !transfer.data_hex.is_empty() {
+            println!("Data: {}", transfer.data_hex);
+        }
+        if let Some(error) = &transfer.error {
+            println!("Transfer error: {error}");
+        }
+    }
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_macos_bulk_out_smoke_human(report: &MacosBulkOutSmokeReport) {
+    println!("macOS bulk-OUT smoke: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Configuration: value={} match_interfaces={} interface={} endpoint={} payload_len={} timeout_ms={}",
+        report.configuration_value,
+        report.match_interfaces,
+        report.interface_number,
+        report.endpoint_hex,
+        report.payload_len,
+        report.timeout_ms
+    );
+    if let Some(transfer) = &report.transfer {
+        println!(
+            "Transfer: configure_ok={} interface_found={} interface_opened={} pipe_copied={} transfer_ok={} timed_out={} transferred={}/{}",
+            transfer.configure_ok,
+            transfer.interface_found,
+            transfer.interface_opened,
+            transfer.pipe_copied,
+            transfer.transfer_ok,
+            transfer.timed_out,
+            transfer.transferred_len,
+            transfer.requested_len
+        );
+        println!(
+            "Pipe: endpoint={} descriptor={} descriptor_available={} {} {} mps={} interval={}",
+            transfer.endpoint_address_hex,
+            transfer.descriptor_address_hex,
+            transfer.descriptor_available,
+            transfer.direction,
+            transfer.transfer_type,
+            transfer.max_packet_size,
+            transfer.interval
+        );
+        println!(
+            "Poll: attempts={} matched_interfaces={}",
+            transfer.poll_attempts_observed, transfer.matched_interface_count
+        );
+        if !transfer.payload_hex.is_empty() {
+            println!("Payload: {}", transfer.payload_hex);
+        }
+        if let Some(error) = &transfer.error {
+            println!("Transfer error: {error}");
         }
     }
     println!(
