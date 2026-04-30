@@ -1,0 +1,9 @@
+# Minimal usbmon text sample for trace-import tests and documentation.
+ffff 0 S Co:1:004:0 s 40 05 0002 0000 0001 1 = 00
+ffff 1 C Co:1:004:0 0 1 >
+ffff 2 S Ci:1:004:0 s c0 05 0002 0000 0004 4 <
+ffff 3 C Ci:1:004:0 0 4 = 01020304
+ffff 4 S Bo:1:004:2 -115 64 = 00010203
+ffff 5 C Bo:1:004:2 0 64 >
+ffff 6 S Bi:1:004:1 -115 512 <
+ffff 7 C Bi:1:004:1 0 64 = 00010203

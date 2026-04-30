@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "control_write",
+    "endpoint": null,
+    "request_type": 64,
+    "request": 5,
+    "value": 2,
+    "index": 0,
+    "length": 1
+  },
+  {
+    "kind": "control_read",
+    "endpoint": null,
+    "request_type": 192,
+    "request": 5,
+    "value": 2,
+    "index": 0,
+    "length": 1
+  }
+]
