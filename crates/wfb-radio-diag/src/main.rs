@@ -57,6 +57,8 @@ enum Command {
     MacosPowerOnSmoke(PowerOnSmokeArgs),
     /// Program RTL8812A LLT entries through macOS IOUSBHost direct control transfers.
     MacosLltSmoke(LltSmokeArgs),
+    /// Download RTL8812A firmware through macOS IOUSBHost direct control transfers.
+    MacosFirmwareSmoke(FirmwareSmokeArgs),
     /// Claim a supported adapter and perform read-only RTL8812AU register reads.
     RegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE physical bytes and decoded logical map.
@@ -920,6 +922,16 @@ fn main() -> Result<()> {
         }
         Command::FirmwareSmoke(args) => {
             let report = firmware_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_firmware_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosFirmwareSmoke(args) => {
+            let report = macos_firmware_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_firmware_smoke_human(&report);
@@ -4517,13 +4529,257 @@ fn firmware_smoke_report(args: FirmwareSmokeArgs) -> FirmwareSmokeReport {
     }
 }
 
+fn macos_firmware_smoke_report(args: FirmwareSmokeArgs) -> FirmwareSmokeReport {
+    let selector = args.adapter.selector();
+    let mut steps = Vec::new();
+    let mut counters = DiagnosticCounters::default();
+    let mut stats = FirmwareRunStats::default();
+
+    if !args.i_understand_this_writes_registers {
+        return firmware_smoke_failure_with_command(
+            "macos-firmware-smoke",
+            &args,
+            FirmwareSmokeFailureInput {
+                firmware: None,
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "missing_write_authorization",
+                    message: "macOS IOUSBHost firmware smoke writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+                },
+            },
+        );
+    }
+
+    if args.download_attempts == 0 {
+        return firmware_smoke_failure_with_command(
+            "macos-firmware-smoke",
+            &args,
+            FirmwareSmokeFailureInput {
+                firmware: None,
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "invalid_download_attempts",
+                    message: "--download-attempts must be at least 1".to_string(),
+                },
+            },
+        );
+    }
+
+    let (firmware_image, firmware) = match load_firmware_with_report(&args.firmware) {
+        Ok((image, report)) => (image, report),
+        Err(message) => {
+            return firmware_smoke_failure_with_command(
+                "macos-firmware-smoke",
+                &args,
+                FirmwareSmokeFailureInput {
+                    firmware: None,
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error: DiagnosticErrorReport {
+                        code: "firmware_load_failed",
+                        message,
+                    },
+                },
+            );
+        }
+    };
+    let firmware_payload = firmware_image.realtek_download_payload();
+    stats.firmware_payload_offset = Some(firmware_payload.offset);
+    stats.firmware_payload_len = Some(firmware_payload.bytes.len());
+    stats.firmware_signature = firmware_payload.signature;
+
+    if firmware_page_count(firmware_payload.bytes.len()) > MAX_FIRMWARE_DOWNLOAD_PAGES {
+        return firmware_smoke_failure_with_command(
+            "macos-firmware-smoke",
+            &args,
+            FirmwareSmokeFailureInput {
+                firmware: Some(firmware),
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "firmware_too_many_pages",
+                    message: format!(
+                        "firmware requires {} 4 KiB pages, but RTL8812A page selector exposes {} pages",
+                        firmware_page_count(firmware_payload.bytes.len()),
+                        MAX_FIRMWARE_DOWNLOAD_PAGES
+                    ),
+                },
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return firmware_smoke_failure_with_command(
+            "macos-firmware-smoke",
+            &args,
+            FirmwareSmokeFailureInput {
+                firmware: Some(firmware),
+                adapter: None,
+                endpoints: None,
+                steps,
+                counters,
+                stats,
+                error: DiagnosticErrorReport {
+                    code: "unsupported_platform",
+                    message: "macos-firmware-smoke requires macOS IOUSBHost".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return firmware_smoke_failure_with_command(
+                "macos-firmware-smoke",
+                &args,
+                FirmwareSmokeFailureInput {
+                    firmware: Some(firmware),
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error: DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "macos-firmware-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return firmware_smoke_failure_with_command(
+                "macos-firmware-smoke",
+                &args,
+                FirmwareSmokeFailureInput {
+                    firmware: Some(firmware),
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error: DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "macos-firmware-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+
+        let device = match macos_usbhost::MacosUsbHostDevice::open(vid, pid) {
+            Ok(device) => device,
+            Err(error) => {
+                return firmware_smoke_failure_with_command(
+                    "macos-firmware-smoke",
+                    &args,
+                    FirmwareSmokeFailureInput {
+                        firmware: Some(firmware),
+                        adapter: None,
+                        endpoints: None,
+                        steps,
+                        counters,
+                        stats,
+                        error: DiagnosticErrorReport {
+                            code: "macos_usbhost_open_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+
+        let registers = Rtl8812auRegisterAccess::new(&device)
+            .with_timeout(Duration::from_millis(args.timeout_ms));
+        if let Err(error) = run_firmware_sequence(
+            &registers,
+            &args,
+            firmware_payload.bytes,
+            &mut counters,
+            &mut steps,
+            &mut stats,
+        ) {
+            return firmware_smoke_failure_with_command(
+                "macos-firmware-smoke",
+                &args,
+                FirmwareSmokeFailureInput {
+                    firmware: Some(firmware),
+                    adapter: None,
+                    endpoints: None,
+                    steps,
+                    counters,
+                    stats,
+                    error,
+                },
+            );
+        }
+
+        FirmwareSmokeReport {
+            schema_version: 1,
+            command: "macos-firmware-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            firmware_path: args.firmware,
+            firmware: Some(firmware),
+            timeout_ms: args.timeout_ms,
+            download_attempts: args.download_attempts,
+            checksum_min_attempts: args.checksum_min_attempts,
+            checksum_timeout_ms: args.checksum_timeout_ms,
+            ready_min_attempts: args.ready_min_attempts,
+            ready_timeout_ms: args.ready_timeout_ms,
+            poll_delay_us: args.poll_delay_us,
+            firmware_payload_offset: stats.firmware_payload_offset,
+            firmware_payload_len: stats.firmware_payload_len,
+            firmware_signature_hex: stats.firmware_signature.map(|value| format_value(value, 4)),
+            result: DiagnosticResult::Pass,
+            adapter: None,
+            endpoints: None,
+            steps,
+            firmware_bytes_written: stats.firmware_bytes_written,
+            firmware_control_writes: stats.firmware_control_writes,
+            checksum_poll_attempts: stats.checksum_poll_attempts,
+            ready_poll_attempts: stats.ready_poll_attempts,
+            final_mcu_status_hex: stats.final_mcu_status.map(|value| format_value(value, 8)),
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost guarded firmware smoke test: RTL8812A firmware was written through default-control transfers",
+                "no libusb enumeration, USB interface claim, bulk traffic, channel tuning, RX loop, or TX operation was issued",
+            ],
+        }
+    }
+}
+
 fn firmware_smoke_failure(
+    args: &FirmwareSmokeArgs,
+    input: FirmwareSmokeFailureInput,
+) -> FirmwareSmokeReport {
+    firmware_smoke_failure_with_command("firmware-smoke", args, input)
+}
+
+fn firmware_smoke_failure_with_command(
+    command: &'static str,
     args: &FirmwareSmokeArgs,
     input: FirmwareSmokeFailureInput,
 ) -> FirmwareSmokeReport {
     FirmwareSmokeReport {
         schema_version: 1,
-        command: "firmware-smoke",
+        command,
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector: args.adapter.selector(),
@@ -13603,6 +13859,17 @@ fn stages_report() -> StagesReport {
                 purpose: "Run guarded RTL8812AU power-on/RF-reset control writes through IOUSBHost when libusb cannot enumerate the device.",
                 prerequisites: &["macos-reg-smoke pass", "operator write acknowledgement"],
                 pass_signal: "Power-on/RF-reset register sequence completes through default-control transfers without bulk traffic.",
+            },
+            VerificationStage {
+                id: "macos-firmware-smoke",
+                command: "wfb-radio-diag macos-firmware-smoke --vid <vid> --pid <pid> --firmware <rtl8812aefw.bin> --i-understand-this-writes-registers",
+                purpose: "Download RTL8812A firmware through IOUSBHost when libusb cannot enumerate the device.",
+                prerequisites: &[
+                    "macos-power-on-smoke pass",
+                    "RTL8812A firmware image",
+                    "operator write acknowledgement",
+                ],
+                pass_signal: "Checksum and WINTINI ready bits report success through default-control transfers without bulk traffic.",
             },
             VerificationStage {
                 id: "macos-llt-smoke",

@@ -18,6 +18,16 @@ cargo run -p wfb-radio-diag -- --json firmware-smoke \
 
 Run `power-on-smoke` first after plugging in or resetting the adapter.
 
+On macOS 26, use the IOUSBHost fallback after `macos-power-on-smoke` if `usb-probe` cannot enumerate the adapter through libusb:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-firmware-smoke.json macos-firmware-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --firmware /tmp/rtl8812aefw.bin \
+  --i-understand-this-writes-registers
+```
+
 ## Guardrails
 
 - The command fails unless `--i-understand-this-writes-registers` is present.
@@ -38,6 +48,19 @@ On macOS 15.7.4 with `0x0bda:0x8812` at bus `1`, address `1`, the downloaded Lin
 - payload length: `27484`
 
 The live pass wrote `27484` firmware payload bytes in `290` control writes, checksum polling passed on the first read, firmware-ready polling passed after `20` reads, and final `REG_MCUFWDL` was `0x000607c6`.
+
+On April 30, 2026, the remote macOS 26 hardware Mac passed `macos-firmware-smoke` after `macos-power-on-smoke` against the attached `0x0bda:0x8812` adapter:
+
+- Report: `/tmp/wfb-remote-macos-firmware-smoke.json`.
+- Firmware SHA-256: `d40396544ee56c9dab43a458344b8936aa3d878c1582e96a62e9346bdfbdf50f`.
+- Firmware payload written: `27484` bytes.
+- Firmware control writes: `290`.
+- Checksum poll attempts: `1`.
+- Ready poll attempts: `18`.
+- Final `REG_MCUFWDL`: `0x000607c6`.
+- Bulk reads/writes: `0`.
+
+This proves the IOUSBHost fallback can run firmware download and readiness polling through default-control transfers. It does not prove interface claim, bulk endpoints, RX, TX, or full init on macOS 26.
 
 ## Source Mapping
 

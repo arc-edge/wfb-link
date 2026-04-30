@@ -27,6 +27,12 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-power-on-sm
   --pid 0x8812 \
   --i-understand-this-writes-registers
 
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-firmware-smoke.json macos-firmware-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --firmware /tmp/rtl8812aefw.bin \
+  --i-understand-this-writes-registers
+
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-llt-smoke.json macos-llt-smoke \
   --vid 0x0bda \
   --pid 0x8812 \
@@ -79,6 +85,18 @@ The guarded IOUSBHost power-on smoke test also passed:
 - Bulk IN reads: 0
 - Bulk OUT writes: 0
 - Covered phases: card-emulation-to-active, command-register enable, RF path A/B reset
+
+After a fresh `macos-power-on-smoke`, the guarded IOUSBHost firmware smoke test also passed with a temporary Linux-firmware `rtlwifi/rtl8812aefw.bin` copy:
+
+- Firmware SHA-256: `d40396544ee56c9dab43a458344b8936aa3d878c1582e96a62e9346bdfbdf50f`
+- Report: `/tmp/wfb-remote-macos-firmware-smoke.json`
+- Firmware payload written: 27,484 bytes
+- Firmware control writes: 290
+- Checksum poll attempts: 1
+- Ready poll attempts: 18
+- Final `REG_MCUFWDL`: `0x000607c6`
+- Bulk IN reads: 0
+- Bulk OUT writes: 0
 
 After a fresh `macos-power-on-smoke`, the guarded IOUSBHost LLT smoke test also passed:
 
