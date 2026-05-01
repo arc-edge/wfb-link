@@ -15,6 +15,8 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-repeat.json tx-r
   --i-understand-this-transmits
 ```
 
+On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
+
 Optional descriptor flags can be added explicitly:
 
 ```sh
@@ -89,6 +91,8 @@ A later live run with `--tx-led --tx-status --tx-status-delay-ms 50` also passed
 A later live run after 80 MHz init also passed with `--bandwidth 80 --tx-led --tx-status --tx-status-delay-ms 50`. It submitted 3 of 3 packets to endpoint `0x02`, wrote 192 USB bytes, held the visible LED path across the burst, and reported no changed status registers in that post-burst window. Report: `/tmp/wfb-live-tx-repeat-80mhz.json`.
 
 A later live run after 80 MHz init with `--tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc --tx-led --tx-status --tx-status-delay-ms 50` also passed. It submitted 3 of 3 packets to endpoint `0x02`, wrote 192 USB bytes, reported `tx_options.rate.vht.mcs=9`, `tx_options.rate.vht.nss=2`, `tx_options.bandwidth=mhz80`, and all three optional descriptor flags. The status probe reported no changed registers in that post-burst window. Report: `/tmp/wfb-live-tx-repeat-vht-rate.json`.
+
+The remote macOS 26 retained IOUSBHost path also passed: `tx-repeat --macos-usbhost --count 3 --interval-ms 100` submitted 3 of 3 descriptor-prefixed packets to endpoint `0x02`, wrote 192 USB bytes, and reported 0 failed or short writes. Report: `/tmp/wfb-remote-macos-tx-repeat-usbhost.json`.
 
 This proves a bounded, paced bulk-OUT loop against the initialized adapter. It is not a packet-loss or RF throughput measurement until a second monitor receiver or Linux WFB peer records what arrived over the air.
 

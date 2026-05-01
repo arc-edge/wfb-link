@@ -13,6 +13,8 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-rx-scan.json rx-sca
   --frame-jsonl /tmp/wfb-live-rx-frames.jsonl
 ```
 
+On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
+
 ## Live Result
 
 Live run on April 30, 2026 with `0x0bda:0x8812` on macOS 15.7.4 passed as a bounded USB read test:
@@ -45,6 +47,15 @@ A later April 30, 2026 run after 80 MHz init also passed as a bounded USB read t
 - PCAP: `/tmp/wfb-live-rx-scan-80mhz.pcap`, header-only.
 - Frame JSONL: `/tmp/wfb-live-rx-frames-80mhz.jsonl`, empty because no frames were captured.
 - Report: `/tmp/wfb-live-rx-scan-80mhz.json`.
+
+The remote macOS 26 retained IOUSBHost path also passed as a bounded USB read test:
+
+- Command: `rx-scan --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --bandwidth 20`.
+- Bulk-IN read attempts: 10 clean timeouts over 1,000 ms on endpoint `0x81`.
+- Captured data: 0 buffers, 0 bytes, 0 parsed frames, 0 drops.
+- PCAP: `/tmp/wfb-remote-macos-rx-scan-usbhost.pcap`, header-only.
+- Frame JSONL: `/tmp/wfb-remote-macos-rx-scan-usbhost.jsonl`, empty because no frames were captured.
+- Report: `/tmp/wfb-remote-macos-rx-scan-usbhost.json`.
 
 When frames are parsed, each JSONL record includes:
 

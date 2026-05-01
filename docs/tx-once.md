@@ -14,6 +14,8 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once.json tx-onc
   --i-understand-this-transmits
 ```
 
+On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
+
 Optional TX descriptor flags are explicit:
 
 ```sh
@@ -94,6 +96,11 @@ A later live run with `--tx-led --tx-status --tx-status-delay-ms 50` also passed
 A later live run after 80 MHz init also passed with `--bandwidth 80 --tx-led --tx-status --tx-status-delay-ms 50`. It submitted one 64-byte packet with `tx_options.bandwidth=mhz80`, toggled the visible LED path, and reported `REG_TXPKT_EMPTY` changing from `0x0fff` to `0x0ffe`. Report: `/tmp/wfb-live-tx-once-80mhz.json`.
 
 A later live run after 80 MHz init with `--tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc --tx-led --tx-status --tx-status-delay-ms 50` also passed. It submitted one 64-byte packet with `tx_options.rate.vht.mcs=9`, `tx_options.rate.vht.nss=2`, `tx_options.bandwidth=mhz80`, and all three optional descriptor flags set. The status probe reported `REG_TXPKT_EMPTY` changing from `0x0fff` to `0x0ffe` and `REG_SCH_TX_CMD` changing from `0x00` to `0xc4`. Report: `/tmp/wfb-live-tx-once-vht-rate.json`.
+
+The remote macOS 26 retained IOUSBHost path also passed:
+
+- `tx-once --macos-usbhost`: one 64-byte descriptor-prefixed packet written to endpoint `0x02`, 1 attempted, 1 submitted, 0 failed, 0 short writes. Report: `/tmp/wfb-remote-macos-tx-once-usbhost.json`.
+- `tx-once --macos-usbhost --tx-led --tx-status`: LED on/off readback passed, 15 status registers were read before and after TX, and one 64-byte bulk-OUT packet was submitted. Report: `/tmp/wfb-remote-macos-tx-once-led-status-usbhost.json`.
 
 This proves the Mac can claim the initialized adapter and submit one TX packet to the RTL8812AU bulk-OUT endpoint. It does not yet prove RF radiation or peer reception; that needs an independent monitor receiver or Linux WFB peer on the same channel.
 

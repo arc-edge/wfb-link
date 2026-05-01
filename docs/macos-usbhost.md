@@ -86,6 +86,44 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-rf-smoke.js
   --pid 0x8812 \
   --rf-source /tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c \
   --i-understand-this-writes-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-init-usbhost.json init \
+  --macos-usbhost \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --channel 36 \
+  --bandwidth 20 \
+  --firmware /tmp/rtl8812aefw.bin \
+  --bb-source /tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c \
+  --rf-source /tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c \
+  --i-understand-this-writes-registers
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-rx-scan-usbhost.json rx-scan \
+  --macos-usbhost \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --channel 36 \
+  --duration-ms 1000 \
+  --pcap /tmp/wfb-remote-macos-rx-scan-usbhost.pcap \
+  --frame-jsonl /tmp/wfb-remote-macos-rx-scan-usbhost.jsonl
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-tx-once-usbhost.json tx-once \
+  --macos-usbhost \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --channel 36 \
+  --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" \
+  --i-understand-this-transmits
+
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-tx-repeat-usbhost.json tx-repeat \
+  --macos-usbhost \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --channel 36 \
+  --count 3 \
+  --interval-ms 100 \
+  --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" \
+  --i-understand-this-transmits
 ```
 
 ## April 30, 2026 Remote Result
@@ -268,11 +306,19 @@ After BB smoke, the guarded IOUSBHost RF smoke test also passed:
 - Bulk IN reads: 0
 - Bulk OUT writes: 0
 
+The integrated retained-session radio path then passed full init, RX, and TX diagnostics:
+
+- `init --macos-usbhost`: `/tmp/wfb-remote-macos-init-usbhost.json`, result `pass`, channel 36/20 MHz, 491 control reads, 1,396 control writes, all power, firmware, LLT, queue/DMA, MAC, BB, RF, and channel phases completed.
+- `rx-scan --macos-usbhost`: `/tmp/wfb-remote-macos-rx-scan-usbhost.json`, result `pass`, 10 bounded bulk-IN timeouts on endpoint `0x81`, 0 USB errors, header-only PCAP, empty frame JSONL because no RF traffic was present.
+- `tx-once --macos-usbhost`: `/tmp/wfb-remote-macos-tx-once-usbhost.json`, result `pass`, one 64-byte descriptor-prefixed packet written to endpoint `0x02`.
+- `tx-repeat --macos-usbhost`: `/tmp/wfb-remote-macos-tx-repeat-usbhost.json`, result `pass`, three 64-byte descriptor-prefixed packets written to endpoint `0x02` with no failed or short writes.
+- `tx-once --macos-usbhost --tx-led --tx-status`: `/tmp/wfb-remote-macos-tx-once-led-status-usbhost.json`, result `pass`, LED on/off register readback passed, TX status pre/post reads passed, and one 64-byte bulk-OUT packet was submitted.
+
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, one-shot pipe IO, or retaining interface and pipe objects across several operations. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute there through BB/RF programming, interface 0 can be opened after `configureWithValue:matchInterfaces:`, descriptor-confirmed bulk pipes can accept synchronous IO requests, and a retained session can combine register reads with bulk IN/OUT requests.
+The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, one-shot pipe IO, retaining interface and pipe objects, full RTL8812AU init, bounded RX reads, or bulk-OUT TX submission. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute through channel setup, interface 0 can be opened after `configureWithValue:matchInterfaces:`, and descriptor-confirmed bulk pipes can serve `rx-scan`, `tx-once`, and `tx-repeat`.
 
-The next useful implementation work is to turn the one-shot IOUSBHost probes into a retained radio transport session: configure once, keep interface 0 and pipes open, run the existing RTL8812AU init through default control, then reuse the retained bulk IN/OUT pipes for `rx-scan`, `tx-once`, and bridge traffic.
+The remaining macOS 26 proof target is not USB mechanics; it is RF and WFB behavior. A second monitor receiver or Linux WFB peer still needs to confirm over-the-air TX, real RX frames, packet loss, and bridge interoperability.
 
 ## SDK Notes
 
@@ -282,4 +328,4 @@ The macOS 26.4 Command Line Tools IOUSBHost headers confirm the public object sp
 - `IOUSBHostInterface` exposes `copyPipeWithAddress:error:` for endpoint pipes.
 - `IOUSBHostPipe` exposes synchronous `sendIORequestWithData:bytesTransferred:completionTimeout:error:` for bulk/interrupt transfers and async enqueue APIs.
 
-Endpoint discovery and one-shot pipe IO are now proven. The remaining target is a long-lived IOUSBHost session that owns the interface and exposes reusable control, bulk IN, and bulk OUT methods to the shared RTL8812AU radio code.
+Endpoint discovery, one-shot pipe IO, retained control access, full init, bounded RX, and descriptor-prefixed TX are now proven. The remaining implementation target is to reuse the retained IOUSBHost transport from the bridge loops and then verify with an independent WFB peer.

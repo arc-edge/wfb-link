@@ -8,14 +8,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use radio_core::rtl8812au::Rtl8812auUsbTransport;
 use radio_core::{
     build_tx_packet, compare_usb_traces, frame_type, import_usbmon_text, parse_realtek_u32_array,
     parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, submit_tx_frame,
-    validate_ieee80211_frame, Band, Bandwidth, Channel, DeviceSelector, FirmwareImage, FrameType,
-    InitDryRunPlan, InitPhaseCount, PcapWriter, PlannedInitTransfer, RealtekConditionEnv,
-    RealtekTableActionKind, RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess,
-    RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo,
-    UsbEndpoints, UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
+    validate_ieee80211_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector,
+    EndpointInfo, FirmwareImage, FrameType, InitDryRunPlan, InitPhaseCount, InterfaceInfo,
+    PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind, RealtekTableKind,
+    RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
+    UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison, UsbTraceEvent,
+    UsbTraceImport,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -727,6 +729,56 @@ impl AdapterArgs {
     }
 }
 
+#[derive(Debug, Parser, Clone, Copy)]
+struct MacosUsbHostArgs {
+    /// Use the macOS IOUSBHost retained-session fallback instead of libusb/rusb.
+    #[arg(long = "macos-usbhost")]
+    enabled: bool,
+
+    /// macOS IOUSBHost configuration value to select before interface matching.
+    #[arg(long = "macos-configuration-value", default_value_t = 1)]
+    configuration_value: u8,
+
+    /// macOS IOUSBHost interface number to match and open.
+    #[arg(long = "macos-interface-number", default_value_t = 0)]
+    interface_number: u8,
+
+    /// macOS IOUSBHost bulk IN endpoint to retain.
+    #[arg(long = "macos-bulk-in-endpoint", default_value = "0x81", value_parser = parse_u8)]
+    bulk_in_endpoint: u8,
+
+    /// macOS IOUSBHost bulk OUT endpoint to retain for later TX.
+    #[arg(long = "macos-bulk-out-endpoint", default_value = "0x02", value_parser = parse_u8)]
+    bulk_out_endpoint: u8,
+
+    /// macOS IOUSBHost bulk OUT endpoint count for RTL8812AU queue layout.
+    #[arg(long = "macos-bulk-out-endpoint-count", default_value_t = 3)]
+    bulk_out_endpoint_count: usize,
+
+    /// Number of macOS IOUSBHost interface-service polling attempts after configuration.
+    #[arg(long = "macos-poll-attempts", default_value_t = 25)]
+    poll_attempts: u32,
+
+    /// Delay between macOS IOUSBHost interface-service polls in milliseconds.
+    #[arg(long = "macos-poll-delay-ms", default_value_t = 100)]
+    poll_delay_ms: u64,
+}
+
+impl Default for MacosUsbHostArgs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            configuration_value: 1,
+            interface_number: 0,
+            bulk_in_endpoint: 0x81,
+            bulk_out_endpoint: 0x02,
+            bulk_out_endpoint_count: 3,
+            poll_attempts: 25,
+            poll_delay_ms: 100,
+        }
+    }
+}
+
 #[derive(Debug, Parser, Clone)]
 struct InitArgs {
     #[command(flatten)]
@@ -747,6 +799,9 @@ struct InitArgs {
     /// Per-register read/write timeout in milliseconds for live init.
     #[arg(long, default_value_t = 500)]
     timeout_ms: u64,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
 
     /// Realtek halhwimg8812a_bb.c source file for live BB table programming.
     #[arg(
@@ -833,6 +888,104 @@ impl InitArgs {
     }
 }
 
+enum InitUsbTransport {
+    Libusb(Box<ClaimedUsbDevice>),
+    #[cfg(target_os = "macos")]
+    Macos(macos_usbhost::MacosUsbHostSession),
+}
+
+impl Rtl8812auUsbTransport for InitUsbTransport {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        match self {
+            InitUsbTransport::Libusb(claimed) => {
+                claimed.as_ref().read_vendor(value, index, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            InitUsbTransport::Macos(session) => session.read_vendor(value, index, data, timeout),
+        }
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        match self {
+            InitUsbTransport::Libusb(claimed) => {
+                claimed.as_ref().write_vendor(value, index, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            InitUsbTransport::Macos(session) => session.write_vendor(value, index, data, timeout),
+        }
+    }
+}
+
+impl Rtl8812auUsbTransport for &InitUsbTransport {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        <InitUsbTransport as Rtl8812auUsbTransport>::read_vendor(*self, value, index, data, timeout)
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        <InitUsbTransport as Rtl8812auUsbTransport>::write_vendor(
+            *self, value, index, data, timeout,
+        )
+    }
+}
+
+impl UsbBulkTransfer for InitUsbTransport {
+    fn read_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        match self {
+            InitUsbTransport::Libusb(claimed) => {
+                claimed.as_mut().read_bulk_transfer(endpoint, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            InitUsbTransport::Macos(session) => session.read_bulk_transfer(endpoint, data, timeout),
+        }
+    }
+
+    fn write_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, radio_core::UsbError> {
+        match self {
+            InitUsbTransport::Libusb(claimed) => claimed
+                .as_mut()
+                .write_bulk_transfer(endpoint, data, timeout),
+            #[cfg(target_os = "macos")]
+            InitUsbTransport::Macos(session) => {
+                session.write_bulk_transfer(endpoint, data, timeout)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Parser, Clone)]
 struct RxScanArgs {
     #[command(flatten)]
@@ -853,6 +1006,9 @@ struct RxScanArgs {
     /// Per bulk-IN read timeout in milliseconds.
     #[arg(long, default_value_t = 100)]
     timeout_ms: u64,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
 
     /// Optional PCAP output path, once RX capture is wired in.
     #[arg(long)]
@@ -897,6 +1053,9 @@ struct TxOnceArgs {
     packet_out: Option<PathBuf>,
 
     #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+
+    #[command(flatten)]
     tx_options: TxOptionArgs,
 
     #[command(flatten)]
@@ -934,6 +1093,9 @@ struct TxRepeatArgs {
     /// Required acknowledgement for any repeated TX mode.
     #[arg(long)]
     i_understand_this_transmits: bool,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
 
     #[command(flatten)]
     tx_options: TxOptionArgs,
@@ -6803,6 +6965,190 @@ fn queue_layout_from_bulk_out_endpoint_count(
     })
 }
 
+fn macos_usbhost_endpoints(
+    args: &MacosUsbHostArgs,
+) -> std::result::Result<UsbEndpoints, DiagnosticErrorReport> {
+    if args.bulk_in_endpoint & 0x80 == 0 {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_macos_bulk_in_endpoint",
+            message: format!(
+                "macOS bulk IN endpoint must have the USB IN direction bit set, got 0x{:02x}",
+                args.bulk_in_endpoint
+            ),
+        });
+    }
+    if args.bulk_out_endpoint & 0x80 != 0 {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_macos_bulk_out_endpoint",
+            message: format!(
+                "macOS bulk OUT endpoint must not have the USB IN direction bit set, got 0x{:02x}",
+                args.bulk_out_endpoint
+            ),
+        });
+    }
+
+    queue_layout_from_bulk_out_endpoint_count(args.bulk_out_endpoint_count)?;
+    let bulk_out_all = match args.bulk_out_endpoint_count {
+        2 => vec![0x02, 0x03],
+        3 => vec![0x02, 0x03, 0x04],
+        4 => vec![0x02, 0x03, 0x04, 0x05],
+        other => {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_bulk_out_endpoint_count",
+                message: format!(
+                    "queue/DMA setup supports 2, 3, or 4 macOS bulk OUT endpoints, configured {other}"
+                ),
+            });
+        }
+    };
+
+    if !bulk_out_all.contains(&args.bulk_out_endpoint) {
+        return Err(DiagnosticErrorReport {
+            code: "macos_bulk_out_endpoint_not_in_layout",
+            message: format!(
+                "selected macOS bulk OUT endpoint 0x{:02x} is not in the derived RTL8812AU endpoint layout {:?}",
+                args.bulk_out_endpoint, bulk_out_all
+            ),
+        });
+    }
+
+    Ok(UsbEndpoints {
+        interface_number: args.interface_number,
+        bulk_in: Some(args.bulk_in_endpoint),
+        bulk_out: Some(args.bulk_out_endpoint),
+        bulk_in_all: vec![args.bulk_in_endpoint],
+        bulk_out_all,
+    })
+}
+
+fn macos_init_adapter_info(vid: u16, pid: u16, endpoints: &UsbEndpoints) -> UsbDeviceInfo {
+    let mut endpoint_infos = Vec::with_capacity(1 + endpoints.bulk_out_all.len());
+    if let Some(bulk_in) = endpoints.bulk_in {
+        endpoint_infos.push(EndpointInfo {
+            address: bulk_in,
+            direction: "in".to_string(),
+            transfer_type: "bulk".to_string(),
+            max_packet_size: 512,
+            interval: 0,
+        });
+    }
+    for bulk_out in &endpoints.bulk_out_all {
+        endpoint_infos.push(EndpointInfo {
+            address: *bulk_out,
+            direction: "out".to_string(),
+            transfer_type: "bulk".to_string(),
+            max_packet_size: 512,
+            interval: 0,
+        });
+    }
+
+    UsbDeviceInfo {
+        vid,
+        pid,
+        vid_hex: format!("0x{vid:04x}"),
+        pid_hex: format!("0x{pid:04x}"),
+        bus: 0,
+        address: 0,
+        speed: "high-speed (IOUSBHost)".to_string(),
+        class_code: 0,
+        sub_class_code: 0,
+        protocol_code: 0,
+        manufacturer: None,
+        product: Some("RTL8812AU via macOS IOUSBHost".to_string()),
+        serial_number: None,
+        known_adapter: radio_core::lookup_known_adapter(vid, pid),
+        interfaces: vec![InterfaceInfo {
+            number: endpoints.interface_number,
+            setting_number: 0,
+            class_code: 0xff,
+            sub_class_code: 0xff,
+            protocol_code: 0xff,
+            endpoints: endpoint_infos,
+        }],
+    }
+}
+
+struct LiveUsbTransportOpen {
+    transport: InitUsbTransport,
+    adapter: UsbDeviceInfo,
+    endpoints: UsbEndpoints,
+    counters: DiagnosticCounters,
+}
+
+fn open_macos_usbhost_transport(
+    args: &MacosUsbHostArgs,
+    selector: DeviceSelector,
+) -> std::result::Result<LiveUsbTransportOpen, DiagnosticErrorReport> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (args, selector);
+        Err(DiagnosticErrorReport {
+            code: "unsupported_platform",
+            message: "macOS IOUSBHost transport requires macOS".to_string(),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if selector.bus.is_some() || selector.address.is_some() {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_macos_selector_location",
+                message:
+                    "macOS IOUSBHost transport cannot yet select by USB bus/address; use --vid and --pid"
+                        .to_string(),
+            });
+        }
+        let vid = selector.vid.ok_or_else(|| DiagnosticErrorReport {
+            code: "missing_vid",
+            message: "macOS IOUSBHost transport requires --vid because matching is VID/PID based"
+                .to_string(),
+        })?;
+        let pid = selector.pid.ok_or_else(|| DiagnosticErrorReport {
+            code: "missing_pid",
+            message: "macOS IOUSBHost transport requires --pid because matching is VID/PID based"
+                .to_string(),
+        })?;
+        if radio_core::lookup_known_adapter(vid, pid).is_none() {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_adapter",
+                message: format!(
+                    "USB device 0x{vid:04x}:0x{pid:04x} is not registered as a supported RTL8812AU adapter"
+                ),
+            });
+        }
+
+        let endpoints = macos_usbhost_endpoints(args)?;
+        let session = macos_usbhost::MacosUsbHostSession::open(
+            macos_usbhost::MacosUsbHostSessionOpenRequest {
+                vid,
+                pid,
+                configuration_value: args.configuration_value,
+                match_interfaces: true,
+                interface_number: args.interface_number,
+                bulk_in_endpoint: args.bulk_in_endpoint,
+                bulk_out_endpoint: args.bulk_out_endpoint,
+                poll_attempts: args.poll_attempts,
+                poll_delay: Duration::from_millis(args.poll_delay_ms),
+            },
+        )
+        .map_err(|error| DiagnosticErrorReport {
+            code: "macos_session_open_failed",
+            message: error,
+        })?;
+        let counters = DiagnosticCounters {
+            usb_control_writes: u64::from(session.interface_probe.configure_attempted),
+            ..DiagnosticCounters::default()
+        };
+        let adapter = macos_init_adapter_info(vid, pid, &endpoints);
+        Ok(LiveUsbTransportOpen {
+            transport: InitUsbTransport::Macos(session),
+            adapter,
+            endpoints,
+            counters,
+        })
+    }
+}
+
 fn queue_map_for_endpoint_count(bulk_out_endpoint_count: usize) -> u16 {
     match bulk_out_endpoint_count {
         2 => queue_map(
@@ -11908,49 +12254,14 @@ fn init_live_report(
     };
 
     let before = counters;
-    let selected = match select_supported_adapter(selector) {
-        Ok(device) => device,
-        Err(error) => {
+    let transport = if args.macos_usbhost.enabled {
+        #[cfg(not(target_os = "macos"))]
+        {
             push_init_live_phase(
                 &mut phase_summaries,
                 "usb_claim",
                 DiagnosticPhaseStatus::Blocked,
-                "no supported adapter matched the selector",
-                before,
-                counters,
-            );
-            return init_live_pending_report(InitLivePendingReportInput {
-                args: &args,
-                selector,
-                adapter,
-                endpoints,
-                channel,
-                firmware_path,
-                firmware,
-                phase_summaries,
-                firmware_payload_len,
-                llt_stats: &llt_stats,
-                queue_layout,
-                bb_stats: &bb_stats,
-                rf_stats: &rf_stats,
-                counters,
-                result: DiagnosticResult::Fail,
-                phases: init_live_phases("usb_claim"),
-                error: Some(error),
-                notes: vec!["live init stopped before hardware register writes"],
-            });
-        }
-    };
-
-    let claimed = match radio_core::usb::claim_usb_device(&selected) {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            adapter = Some(selected);
-            push_init_live_phase(
-                &mut phase_summaries,
-                "usb_claim",
-                DiagnosticPhaseStatus::Blocked,
-                format!("USB claim failed: {error}"),
+                "macOS IOUSBHost init transport is only available on macOS",
                 before,
                 counters,
             );
@@ -11972,26 +12283,333 @@ fn init_live_report(
                 result: DiagnosticResult::Fail,
                 phases: init_live_phases("usb_claim"),
                 error: Some(DiagnosticErrorReport {
-                    code: "usb_claim_failed",
-                    message: error.to_string(),
+                    code: "unsupported_platform",
+                    message: "init --macos-usbhost requires macOS IOUSBHost".to_string(),
                 }),
                 notes: vec!["live init stopped before hardware register writes"],
             });
         }
-    };
-    adapter = Some(claimed.info.clone());
-    endpoints = Some(claimed.endpoints.clone());
-    push_init_live_phase(
-        &mut phase_summaries,
-        "usb_claim",
-        DiagnosticPhaseStatus::Completed,
-        "claimed adapter interface and discovered bulk endpoints",
-        before,
-        counters,
-    );
+        #[cfg(target_os = "macos")]
+        {
+            if selector.bus.is_some() || selector.address.is_some() {
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    "macOS IOUSBHost init transport currently matches devices by VID/PID only",
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(DiagnosticErrorReport {
+                        code: "unsupported_macos_selector_location",
+                        message:
+                            "init --macos-usbhost cannot yet select by USB bus/address; use --vid and --pid"
+                                .to_string(),
+                    }),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            }
 
-    let registers =
-        Rtl8812auRegisterAccess::new(&claimed).with_timeout(Duration::from_millis(args.timeout_ms));
+            let Some(vid) = selector.vid else {
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    "macOS IOUSBHost init transport requires --vid",
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "init --macos-usbhost requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    }),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            };
+            let Some(pid) = selector.pid else {
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    "macOS IOUSBHost init transport requires --pid",
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "init --macos-usbhost requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    }),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            };
+            if radio_core::lookup_known_adapter(vid, pid).is_none() {
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    "VID/PID is not in the supported RTL8812AU adapter registry",
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(DiagnosticErrorReport {
+                        code: "unsupported_adapter",
+                        message: format!(
+                            "USB device 0x{vid:04x}:0x{pid:04x} is not registered as a supported RTL8812AU adapter"
+                        ),
+                    }),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            }
+
+            let macos_endpoints = match macos_usbhost_endpoints(&args.macos_usbhost) {
+                Ok(endpoints) => endpoints,
+                Err(error) => {
+                    push_init_live_phase(
+                        &mut phase_summaries,
+                        "usb_claim",
+                        DiagnosticPhaseStatus::Blocked,
+                        format!("macOS endpoint layout invalid: {}", error.message),
+                        before,
+                        counters,
+                    );
+                    return init_live_pending_report(InitLivePendingReportInput {
+                        args: &args,
+                        selector,
+                        adapter,
+                        endpoints,
+                        channel,
+                        firmware_path,
+                        firmware,
+                        phase_summaries,
+                        firmware_payload_len,
+                        llt_stats: &llt_stats,
+                        queue_layout,
+                        bb_stats: &bb_stats,
+                        rf_stats: &rf_stats,
+                        counters,
+                        result: DiagnosticResult::Fail,
+                        phases: init_live_phases("usb_claim"),
+                        error: Some(error),
+                        notes: vec!["live init stopped before hardware register writes"],
+                    });
+                }
+            };
+            let session = match macos_usbhost::MacosUsbHostSession::open(
+                macos_usbhost::MacosUsbHostSessionOpenRequest {
+                    vid,
+                    pid,
+                    configuration_value: args.macos_usbhost.configuration_value,
+                    match_interfaces: true,
+                    interface_number: args.macos_usbhost.interface_number,
+                    bulk_in_endpoint: args.macos_usbhost.bulk_in_endpoint,
+                    bulk_out_endpoint: args.macos_usbhost.bulk_out_endpoint,
+                    poll_attempts: args.macos_usbhost.poll_attempts,
+                    poll_delay: Duration::from_millis(args.macos_usbhost.poll_delay_ms),
+                },
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    push_init_live_phase(
+                        &mut phase_summaries,
+                        "usb_claim",
+                        DiagnosticPhaseStatus::Blocked,
+                        format!("macOS IOUSBHost retained-session open failed: {error}"),
+                        before,
+                        counters,
+                    );
+                    return init_live_pending_report(InitLivePendingReportInput {
+                        args: &args,
+                        selector,
+                        adapter,
+                        endpoints,
+                        channel,
+                        firmware_path,
+                        firmware,
+                        phase_summaries,
+                        firmware_payload_len,
+                        llt_stats: &llt_stats,
+                        queue_layout,
+                        bb_stats: &bb_stats,
+                        rf_stats: &rf_stats,
+                        counters,
+                        result: DiagnosticResult::Fail,
+                        phases: init_live_phases("usb_claim"),
+                        error: Some(DiagnosticErrorReport {
+                            code: "macos_session_open_failed",
+                            message: error,
+                        }),
+                        notes: vec!["live init stopped before hardware register writes"],
+                    });
+                }
+            };
+            counters.usb_control_writes += u64::from(session.interface_probe.configure_attempted);
+            adapter = Some(macos_init_adapter_info(vid, pid, &macos_endpoints));
+            endpoints = Some(macos_endpoints);
+            push_init_live_phase(
+                &mut phase_summaries,
+                "usb_claim",
+                DiagnosticPhaseStatus::Completed,
+                "opened retained macOS IOUSBHost session and retained bulk pipes",
+                before,
+                counters,
+            );
+            InitUsbTransport::Macos(session)
+        }
+    } else {
+        let selected = match select_supported_adapter(selector) {
+            Ok(device) => device,
+            Err(error) => {
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    "no supported adapter matched the selector",
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(error),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            }
+        };
+
+        let claimed = match radio_core::usb::claim_usb_device(&selected) {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                adapter = Some(selected);
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Blocked,
+                    format!("USB claim failed: {error}"),
+                    before,
+                    counters,
+                );
+                return init_live_pending_report(InitLivePendingReportInput {
+                    args: &args,
+                    selector,
+                    adapter,
+                    endpoints,
+                    channel,
+                    firmware_path,
+                    firmware,
+                    phase_summaries,
+                    firmware_payload_len,
+                    llt_stats: &llt_stats,
+                    queue_layout,
+                    bb_stats: &bb_stats,
+                    rf_stats: &rf_stats,
+                    counters,
+                    result: DiagnosticResult::Fail,
+                    phases: init_live_phases("usb_claim"),
+                    error: Some(DiagnosticErrorReport {
+                        code: "usb_claim_failed",
+                        message: error.to_string(),
+                    }),
+                    notes: vec!["live init stopped before hardware register writes"],
+                });
+            }
+        };
+        adapter = Some(claimed.info.clone());
+        endpoints = Some(claimed.endpoints.clone());
+        push_init_live_phase(
+            &mut phase_summaries,
+            "usb_claim",
+            DiagnosticPhaseStatus::Completed,
+            "claimed adapter interface and discovered bulk endpoints",
+            before,
+            counters,
+        );
+        InitUsbTransport::Libusb(Box::new(claimed))
+    };
+
+    let registers = Rtl8812auRegisterAccess::new(transport)
+        .with_timeout(Duration::from_millis(args.timeout_ms));
     let power_args = PowerOnSmokeArgs {
         adapter: args.adapter.clone(),
         timeout_ms: args.timeout_ms,
@@ -12691,81 +13309,131 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     }
 
     let selector = args.adapter.selector();
-    let selected = match select_supported_adapter(selector) {
-        Ok(device) => device,
-        Err(error) => {
-            return pending_report(PendingReportInput {
-                command: "rx-scan",
-                selector,
-                adapter: None,
-                endpoints: None,
-                channel,
-                bandwidth: Some(args.bandwidth),
-                firmware_path: None,
-                firmware: None,
-                init_dry_run: None,
-                init_live: None,
-                duration_ms: Some(args.duration_ms),
-                pcap_path: args.pcap,
-                tx_frame_len: None,
-                tx_frame_source: None,
-                tx_dry_run: None,
-                tx_live: None,
-                rx_fixture: None,
-                repeat_tx: None,
-                counters: DiagnosticCounters::default(),
-                result: DiagnosticResult::Fail,
-                phases: vec![DiagnosticPhase {
-                    id: "usb_claim",
-                    status: DiagnosticPhaseStatus::Blocked,
-                    detail: "no supported adapter matched the selector",
-                }],
-                error: Some(error),
-                notes: vec!["live RX stopped before USB claim"],
-            });
-        }
-    };
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live RX",
+                ),
+                Err(error) => {
+                    return pending_report(PendingReportInput {
+                        command: "rx-scan",
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth: Some(args.bandwidth),
+                        firmware_path: None,
+                        firmware: None,
+                        init_dry_run: None,
+                        init_live: None,
+                        duration_ms: Some(args.duration_ms),
+                        pcap_path: args.pcap,
+                        tx_frame_len: None,
+                        tx_frame_source: None,
+                        tx_dry_run: None,
+                        tx_live: None,
+                        rx_fixture: None,
+                        repeat_tx: None,
+                        counters: DiagnosticCounters::default(),
+                        result: DiagnosticResult::Fail,
+                        phases: vec![DiagnosticPhase {
+                            id: "usb_claim",
+                            status: DiagnosticPhaseStatus::Blocked,
+                            detail: "macOS IOUSBHost retained-session open failed",
+                        }],
+                        error: Some(error),
+                        notes: vec!["live RX stopped before bulk IN reads"],
+                    });
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return pending_report(PendingReportInput {
+                        command: "rx-scan",
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth: Some(args.bandwidth),
+                        firmware_path: None,
+                        firmware: None,
+                        init_dry_run: None,
+                        init_live: None,
+                        duration_ms: Some(args.duration_ms),
+                        pcap_path: args.pcap,
+                        tx_frame_len: None,
+                        tx_frame_source: None,
+                        tx_dry_run: None,
+                        tx_live: None,
+                        rx_fixture: None,
+                        repeat_tx: None,
+                        counters: DiagnosticCounters::default(),
+                        result: DiagnosticResult::Fail,
+                        phases: vec![DiagnosticPhase {
+                            id: "usb_claim",
+                            status: DiagnosticPhaseStatus::Blocked,
+                            detail: "no supported adapter matched the selector",
+                        }],
+                        error: Some(error),
+                        notes: vec!["live RX stopped before USB claim"],
+                    });
+                }
+            };
 
-    let mut claimed = match radio_core::usb::claim_usb_device(&selected) {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            return pending_report(PendingReportInput {
-                command: "rx-scan",
-                selector,
-                adapter: Some(selected),
-                endpoints: None,
-                channel,
-                bandwidth: Some(args.bandwidth),
-                firmware_path: None,
-                firmware: None,
-                init_dry_run: None,
-                init_live: None,
-                duration_ms: Some(args.duration_ms),
-                pcap_path: args.pcap,
-                tx_frame_len: None,
-                tx_frame_source: None,
-                tx_dry_run: None,
-                tx_live: None,
-                rx_fixture: None,
-                repeat_tx: None,
-                counters: DiagnosticCounters::default(),
-                result: DiagnosticResult::Fail,
-                phases: vec![DiagnosticPhase {
-                    id: "usb_claim",
-                    status: DiagnosticPhaseStatus::Blocked,
-                    detail: "USB interface claim failed",
-                }],
-                error: Some(DiagnosticErrorReport {
-                    code: "usb_claim_failed",
-                    message: error.to_string(),
-                }),
-                notes: vec!["live RX stopped before bulk IN reads"],
-            });
-        }
-    };
-
-    let adapter = claimed.info.clone();
-    let endpoints = claimed.endpoints.clone();
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    return pending_report(PendingReportInput {
+                        command: "rx-scan",
+                        selector,
+                        adapter: Some(selected),
+                        endpoints: None,
+                        channel,
+                        bandwidth: Some(args.bandwidth),
+                        firmware_path: None,
+                        firmware: None,
+                        init_dry_run: None,
+                        init_live: None,
+                        duration_ms: Some(args.duration_ms),
+                        pcap_path: args.pcap,
+                        tx_frame_len: None,
+                        tx_frame_source: None,
+                        tx_dry_run: None,
+                        tx_live: None,
+                        rx_fixture: None,
+                        repeat_tx: None,
+                        counters: DiagnosticCounters::default(),
+                        result: DiagnosticResult::Fail,
+                        phases: vec![DiagnosticPhase {
+                            id: "usb_claim",
+                            status: DiagnosticPhaseStatus::Blocked,
+                            detail: "USB interface claim failed",
+                        }],
+                        error: Some(DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        }),
+                        notes: vec!["live RX stopped before bulk IN reads"],
+                    });
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live RX",
+            )
+        };
     let bulk_in = match endpoints.bulk_in {
         Some(endpoint) => endpoint,
         None => {
@@ -12788,7 +13456,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                 tx_live: None,
                 rx_fixture: None,
                 repeat_tx: None,
-                counters: DiagnosticCounters::default(),
+                counters: claim_counters,
                 result: DiagnosticResult::Fail,
                 phases: vec![DiagnosticPhase {
                     id: "bulk_in_loop",
@@ -12808,7 +13476,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     let frame_jsonl_path = args.frame_jsonl.clone();
     let channel = channel.expect("channel resolved before live RX");
     match run_rx_bulk_in_capture(
-        &mut claimed,
+        &mut transport,
         bulk_in,
         channel,
         args.duration_ms,
@@ -12816,50 +13484,53 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         pcap_path.as_deref(),
         frame_jsonl_path.as_deref(),
     ) {
-        Ok((rx_fixture, counters)) => pending_report(PendingReportInput {
-            command: "rx-scan",
-            selector,
-            adapter: Some(adapter),
-            endpoints: Some(endpoints),
-            channel: Some(channel),
-            bandwidth: Some(args.bandwidth),
-            firmware_path: None,
-            firmware: None,
-            init_dry_run: None,
-            init_live: None,
-            duration_ms: Some(args.duration_ms),
-            pcap_path,
-            tx_frame_len: None,
-            tx_frame_source: None,
-            tx_dry_run: None,
-            tx_live: None,
-            rx_fixture: Some(rx_fixture),
-            repeat_tx: None,
-            counters,
-            result: DiagnosticResult::Pass,
-            phases: vec![
-                DiagnosticPhase {
-                    id: "usb_claim",
-                    status: DiagnosticPhaseStatus::Completed,
-                    detail: "claimed initialized adapter for live RX",
-                },
-                DiagnosticPhase {
-                    id: "bulk_in_loop",
-                    status: DiagnosticPhaseStatus::Completed,
-                    detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
-                },
-                DiagnosticPhase {
-                    id: "pcap",
-                    status: DiagnosticPhaseStatus::Completed,
-                    detail: "optional PCAP output completed",
-                },
-            ],
-            error: None,
-            notes: vec![
+        Ok((rx_fixture, mut counters)) => {
+            counters.usb_control_writes += claim_counters.usb_control_writes;
+            pending_report(PendingReportInput {
+                command: "rx-scan",
+                selector,
+                adapter: Some(adapter),
+                endpoints: Some(endpoints),
+                channel: Some(channel),
+                bandwidth: Some(args.bandwidth),
+                firmware_path: None,
+                firmware: None,
+                init_dry_run: None,
+                init_live: None,
+                duration_ms: Some(args.duration_ms),
+                pcap_path,
+                tx_frame_len: None,
+                tx_frame_source: None,
+                tx_dry_run: None,
+                tx_live: None,
+                rx_fixture: Some(rx_fixture),
+                repeat_tx: None,
+                counters,
+                result: DiagnosticResult::Pass,
+                phases: vec![
+                    DiagnosticPhase {
+                        id: "usb_claim",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: claim_detail,
+                    },
+                    DiagnosticPhase {
+                        id: "bulk_in_loop",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
+                    },
+                    DiagnosticPhase {
+                        id: "pcap",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "optional PCAP output completed",
+                    },
+                ],
+                error: None,
+                notes: vec![
                 "live RX assumes the adapter has already completed init on the requested channel",
                 "no control writes, bulk OUT frame submissions, or TX operations were issued",
             ],
-        }),
+            })
+        }
         Err(error) => pending_report(PendingReportInput {
             command: "rx-scan",
             selector,
@@ -12879,7 +13550,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             tx_live: None,
             rx_fixture: None,
             repeat_tx: None,
-            counters: DiagnosticCounters::default(),
+            counters: claim_counters,
             result: DiagnosticResult::Fail,
             phases: vec![DiagnosticPhase {
                 id: "bulk_in_loop",
@@ -13443,47 +14114,82 @@ fn tx_once_live_report(
         }
     };
 
-    let selected = match select_supported_adapter(selector) {
-        Ok(device) => device,
-        Err(error) => {
-            return tx_once_live_failure(TxOnceLiveFailureInput {
-                selector,
-                adapter: None,
-                endpoints: None,
-                channel,
-                bandwidth,
-                tx_frame_len,
-                tx_frame_source,
-                counters: DiagnosticCounters::default(),
-                phase_id: "usb_claim",
-                phase_detail: "no supported adapter matched the selector",
-                error,
-            });
-        }
-    };
-    let mut claimed = match radio_core::usb::claim_usb_device(&selected) {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            return tx_once_live_failure(TxOnceLiveFailureInput {
-                selector,
-                adapter: Some(selected),
-                endpoints: None,
-                channel,
-                bandwidth,
-                tx_frame_len,
-                tx_frame_source,
-                counters: DiagnosticCounters::default(),
-                phase_id: "usb_claim",
-                phase_detail: "USB interface claim failed",
-                error: DiagnosticErrorReport {
-                    code: "usb_claim_failed",
-                    message: error.to_string(),
-                },
-            });
-        }
-    };
-    let adapter = claimed.info.clone();
-    let endpoints = claimed.endpoints.clone();
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live TX",
+                ),
+                Err(error) => {
+                    return tx_once_live_failure(TxOnceLiveFailureInput {
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "macOS IOUSBHost retained-session open failed",
+                        error,
+                    });
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return tx_once_live_failure(TxOnceLiveFailureInput {
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "no supported adapter matched the selector",
+                        error,
+                    });
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    return tx_once_live_failure(TxOnceLiveFailureInput {
+                        selector,
+                        adapter: Some(selected),
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "USB interface claim failed",
+                        error: DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    });
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live TX",
+            )
+        };
     let bulk_out = match endpoints.bulk_out {
         Some(endpoint) => endpoint,
         None => {
@@ -13495,7 +14201,7 @@ fn tx_once_live_report(
                 bandwidth,
                 tx_frame_len,
                 tx_frame_source,
-                counters: DiagnosticCounters::default(),
+                counters: claim_counters,
                 phase_id: "bulk_out",
                 phase_detail: "claimed interface has no bulk OUT endpoint",
                 error: DiagnosticErrorReport {
@@ -13510,12 +14216,12 @@ fn tx_once_live_report(
     let mut tx_activity_led = tx_activity_led_report(&args.tx_led);
     let mut tx_status = tx_status_probe_report(&args.tx_status);
     if tx_activity_led.is_some() || tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&claimed);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::On);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
     match submit_tx_frame(
-        &mut claimed,
+        &mut transport,
         bulk_out,
         &frame,
         channel,
@@ -13524,15 +14230,16 @@ fn tx_once_live_report(
     ) {
         Ok(bytes_written) => {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
+                usb_control_writes: claim_counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted,
                 tx_frames: submit_counters.submitted,
                 ..DiagnosticCounters::default()
@@ -13574,7 +14281,7 @@ fn tx_once_live_report(
                     DiagnosticPhase {
                         id: "usb_claim",
                         status: DiagnosticPhaseStatus::Completed,
-                        detail: "claimed initialized adapter for live TX",
+                        detail: claim_detail,
                     },
                     DiagnosticPhase {
                         id: "tx_descriptor",
@@ -13596,15 +14303,16 @@ fn tx_once_live_report(
         }
         Err(error) => {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
+                usb_control_writes: claim_counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
                 tx_frames: submit_counters.submitted,
                 ..DiagnosticCounters::default()
@@ -13874,63 +14582,106 @@ fn tx_repeat_live_report(
         }
     };
 
-    let selected = match select_supported_adapter(selector) {
-        Ok(device) => device,
-        Err(error) => {
-            return tx_repeat_live_failure(TxRepeatLiveFailureInput {
-                selector,
-                adapter: None,
-                endpoints: None,
-                channel,
-                bandwidth,
-                tx_frame_len,
-                tx_frame_source,
-                repeat: repeat_tx_report_base(
-                    &args,
-                    Some(frame.len()),
-                    Some(packet_len),
-                    None,
-                    None,
-                    Some(opts),
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live repeated TX",
                 ),
-                counters: DiagnosticCounters::default(),
-                phase_id: "usb_claim",
-                phase_detail: "no supported adapter matched the selector",
-                error,
-            });
-        }
-    };
-    let mut claimed = match radio_core::usb::claim_usb_device(&selected) {
-        Ok(claimed) => claimed,
-        Err(error) => {
-            return tx_repeat_live_failure(TxRepeatLiveFailureInput {
-                selector,
-                adapter: Some(selected),
-                endpoints: None,
-                channel,
-                bandwidth,
-                tx_frame_len,
-                tx_frame_source,
-                repeat: repeat_tx_report_base(
-                    &args,
-                    Some(frame.len()),
-                    Some(packet_len),
-                    None,
-                    None,
-                    Some(opts),
-                ),
-                counters: DiagnosticCounters::default(),
-                phase_id: "usb_claim",
-                phase_detail: "USB interface claim failed",
-                error: DiagnosticErrorReport {
-                    code: "usb_claim_failed",
-                    message: error.to_string(),
-                },
-            });
-        }
-    };
-    let adapter = claimed.info.clone();
-    let endpoints = claimed.endpoints.clone();
+                Err(error) => {
+                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        repeat: repeat_tx_report_base(
+                            &args,
+                            Some(frame.len()),
+                            Some(packet_len),
+                            None,
+                            None,
+                            Some(opts),
+                        ),
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "macOS IOUSBHost retained-session open failed",
+                        error,
+                    });
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
+                        selector,
+                        adapter: None,
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        repeat: repeat_tx_report_base(
+                            &args,
+                            Some(frame.len()),
+                            Some(packet_len),
+                            None,
+                            None,
+                            Some(opts),
+                        ),
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "no supported adapter matched the selector",
+                        error,
+                    });
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
+                        selector,
+                        adapter: Some(selected),
+                        endpoints: None,
+                        channel,
+                        bandwidth,
+                        tx_frame_len,
+                        tx_frame_source,
+                        repeat: repeat_tx_report_base(
+                            &args,
+                            Some(frame.len()),
+                            Some(packet_len),
+                            None,
+                            None,
+                            Some(opts),
+                        ),
+                        counters: DiagnosticCounters::default(),
+                        phase_id: "usb_claim",
+                        phase_detail: "USB interface claim failed",
+                        error: DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    });
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live repeated TX",
+            )
+        };
     let bulk_out = match endpoints.bulk_out {
         Some(endpoint) => endpoint,
         None => {
@@ -13950,7 +14701,7 @@ fn tx_repeat_live_report(
                     None,
                     Some(opts),
                 ),
-                counters: DiagnosticCounters::default(),
+                counters: claim_counters,
                 phase_id: "bulk_out_loop",
                 phase_detail: "claimed interface has no bulk OUT endpoint",
                 error: DiagnosticErrorReport {
@@ -13965,7 +14716,7 @@ fn tx_repeat_live_report(
     let mut tx_activity_led = tx_activity_led_report(&args.tx_led);
     let mut tx_status = tx_status_probe_report(&args.tx_status);
     if tx_activity_led.is_some() || tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&claimed);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::On);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
@@ -13973,7 +14724,7 @@ fn tx_repeat_live_report(
     let started = Instant::now();
     for index in 0..args.count {
         if let Err(error) = submit_tx_frame(
-            &mut claimed,
+            &mut transport,
             bulk_out,
             &frame,
             channel,
@@ -13981,15 +14732,16 @@ fn tx_repeat_live_report(
             &mut submit_counters,
         ) {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&claimed);
+                let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
+                usb_control_writes: claim_counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
                 tx_frames: submit_counters.submitted,
                 dropped_frames: submit_counters.failed + submit_counters.rejected,
@@ -14035,16 +14787,17 @@ fn tx_repeat_live_report(
         }
     }
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&claimed);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
     }
     tx_activity_led_hold(&tx_activity_led);
     if tx_activity_led.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&claimed);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
     }
     let elapsed_ms = elapsed_ms_u64(started);
     let mut counters = DiagnosticCounters {
+        usb_control_writes: claim_counters.usb_control_writes,
         usb_bulk_out_writes: submit_counters.submitted,
         tx_frames: submit_counters.submitted,
         ..DiagnosticCounters::default()
@@ -14090,7 +14843,7 @@ fn tx_repeat_live_report(
             DiagnosticPhase {
                 id: "usb_claim",
                 status: DiagnosticPhaseStatus::Completed,
-                detail: "claimed initialized adapter for live repeated TX",
+                detail: claim_detail,
             },
             DiagnosticPhase {
                 id: "repeat_gate",
@@ -18259,6 +19012,7 @@ mod tests {
             bandwidth,
             firmware,
             timeout_ms: 500,
+            macos_usbhost: MacosUsbHostArgs::default(),
             bb_source: PathBuf::from(
                 "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c",
             ),
@@ -18500,6 +19254,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: false,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs::default(),
             tx_led: TxActivityLedArgs::default(),
             tx_status: TxStatusProbeArgs::default(),
@@ -18522,6 +19277,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: true,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs {
                 tx_rate: TxRate::Ofdm6m,
                 short_gi: true,
@@ -18551,6 +19307,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: true,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs {
                 tx_rate: TxRate::Vht { mcs: 9, nss: 2 },
                 short_gi: true,
@@ -18577,6 +19334,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: true,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs::default(),
             tx_led: TxActivityLedArgs {
                 tx_led: true,
@@ -18602,6 +19360,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: true,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs::default(),
             tx_led: TxActivityLedArgs::default(),
             tx_status: TxStatusProbeArgs {
@@ -18673,6 +19432,7 @@ mod tests {
             i_understand_this_transmits: false,
             dry_run: false,
             packet_out: None,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs::default(),
             tx_led: TxActivityLedArgs::default(),
             tx_status: TxStatusProbeArgs::default(),
@@ -18695,6 +19455,7 @@ mod tests {
             interval_ms: 100,
             frame_hex: Some(encode_hex(&sample_data_frame())),
             i_understand_this_transmits: false,
+            macos_usbhost: MacosUsbHostArgs::default(),
             tx_options: TxOptionArgs::default(),
             tx_led: TxActivityLedArgs::default(),
             tx_status: TxStatusProbeArgs::default(),
@@ -18797,6 +19558,7 @@ mod tests {
             bandwidth: Bandwidth::Mhz20,
             duration_ms: 1,
             timeout_ms: 100,
+            macos_usbhost: MacosUsbHostArgs::default(),
             pcap: Some(pcap_path.clone()),
             frame_jsonl: Some(frame_jsonl_path.clone()),
             fixture_bulk_in: vec![fixture_path.clone()],

@@ -14,6 +14,8 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-init.json init \
 
 The live channel phase currently supports 20, 40, and selected 5 GHz 80 MHz channel groups. It programs the vendor path for band switch, basic rate, fc-area, RF channel byte, WMAC bandwidth bits, secondary-channel mapping, BB bandwidth fields, spur handling, and RF bandwidth bits.
 
+On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` when libusb cannot enumerate the adapter. This uses a retained IOUSBHost interface session for the same init sequence.
+
 ## Live Result
 
 Live run on April 30, 2026 with `0x0bda:0x8812` on macOS 15.7.4 passed:
@@ -51,6 +53,13 @@ A later April 30, 2026 run on channel 36 at 80 MHz also passed:
 - Channel phase: 19 steps, including 80 MHz WMAC bit, 80 MHz primary 40/20 subchannel mapping, BB RF mode, CCA-on-secondary, ADC buffer clock, L1 peak threshold, and RF bandwidth bits.
 - Aggregate USB counters: 466 control reads, 1,381 control writes, 0 bulk IN reads, 0 bulk OUT writes, 0 TX frames.
 - Report: `/tmp/wfb-live-init-channel80.json`.
+
+The remote macOS 26 IOUSBHost retained-session path also passed on April 30, 2026:
+
+- Command: `init --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --bandwidth 20`.
+- Result: all power-on, firmware, LLT, queue/DMA, MAC, BB, RF, and channel phases completed.
+- Aggregate USB counters: 491 control reads, 1,396 control writes, 0 bulk IN reads, 0 bulk OUT writes.
+- Report: `/tmp/wfb-remote-macos-init-usbhost.json`.
 
 ## Boundaries
 
