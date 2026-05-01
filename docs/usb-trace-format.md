@@ -58,6 +58,8 @@ cargo run -p wfb-radio-diag -- --json bridge-tx-bench \
 
 `--tx-status-registers-from` accepts the JSON written by `trace-registers --output` and merges those register addresses into the built-in TX status snapshot. It implies `--tx-status`, reads the extra registers before and after TX, and labels them as chip-side telemetry rather than RF confirmation. For each imported final write, the status report also keeps the Linux-final value as an expectation and emits `tx_status.trace_comparison` with pre/post mismatch counts and per-register observed/expected details. Adapter-specific values such as `REG_MACID`, volatile interrupt/state registers, and donor-trace channel or power differences can legitimately remain mismatched.
 
+`bridge-tx-bench --pre-tx-apply-registers-from PATH` is a guarded brute-force experiment for narrowing static register gaps. It reads the same `trace-registers --output` JSON, filters writes to `--pre-tx-apply-min-address..--pre-tx-apply-max-address` (default `0x0100..0x0fff`), applies supported 1-, 2-, and 4-byte writes before the TX loop, and reports a summary in `pre_tx_register_apply` plus individual read/write/read results in `pre_tx_register_writes`. Use narrow ranges first; Linux-final state includes volatile and adapter-specific registers, and matching final values is not equivalent to replaying runtime firmware sequencing.
+
 ## Capturing On Linux
 
 For a quick software capture, mount debugfs and capture the adapter's USB bus with usbmon:
