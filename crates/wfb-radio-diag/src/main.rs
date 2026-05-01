@@ -1457,7 +1457,7 @@ struct BridgeRunArgs {
     #[arg(long = "tx-bind", value_name = "ADDR")]
     tx_binds: Vec<SocketAddr>,
 
-    /// Bounded full-bridge runtime in milliseconds after init completes.
+    /// Bounded full-bridge runtime in milliseconds after init completes; 0 runs without a time bound.
     #[arg(long, default_value_t = 10000)]
     duration_ms: u64,
 
@@ -20706,17 +20706,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             },
         );
     }
-    if args.duration_ms == 0 {
-        return bridge_run_failure(
-            report,
-            "argument_validation",
-            "bridge run requires a nonzero duration",
-            DiagnosticErrorReport {
-                code: "invalid_duration",
-                message: "--duration-ms must be greater than zero".to_string(),
-            },
-        );
-    }
     if args.rx_timeout_ms == 0 {
         return bridge_run_failure(
             report,
@@ -21025,14 +21014,28 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
     let cpu_started = process_cpu_usage();
     let started = Instant::now();
-    let deadline = started + Duration::from_millis(args.duration_ms);
+    let deadline = if args.duration_ms == 0 {
+        None
+    } else {
+        Some(started + Duration::from_millis(args.duration_ms))
+    };
+    let max_datagrams = u64::from(args.tx.max_datagrams);
+    let unlimited_datagrams = args.tx.max_datagrams == 0;
     let mut datagram_bytes = 0u64;
     let mut frame_bytes = 0u64;
     let mut rx_buf = vec![0u8; 16 * 1024];
 
-    while Instant::now() < deadline {
+    loop {
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                break;
+            }
+        } else if !unlimited_datagrams && report.datagrams_received >= max_datagrams {
+            break;
+        }
+
         let mut tx_burst_count = 0u32;
-        while report.datagrams_received < u64::from(args.tx.max_datagrams)
+        while (unlimited_datagrams || report.datagrams_received < max_datagrams)
             && tx_burst_count < args.tx_burst_limit
         {
             let queued = match tx_receiver.receiver.try_recv() {
@@ -21153,11 +21156,16 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             }
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        let timeout = Duration::from_millis(args.rx_timeout_ms).min(remaining);
+        let timeout = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                Duration::from_millis(args.rx_timeout_ms).min(remaining)
+            }
+            None => Duration::from_millis(args.rx_timeout_ms),
+        };
         match transport.read_bulk_transfer(bulk_in, &mut rx_buf, timeout) {
             Ok(0) => {
                 report.rx.buffers_read += 1;
@@ -21243,7 +21251,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "operator supplied bounded bridge run arguments and live TX authorization",
+            detail: "operator supplied bridge run arguments and live TX authorization",
         },
         DiagnosticPhase {
             id: "usb_claim",
@@ -31808,6 +31816,36 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 .expect_err("missing link")
                 .code,
             "missing_wfb_rx_forward_link_id"
+        );
+    }
+
+    #[test]
+    fn bridge_run_accepts_zero_duration_as_unbounded_before_usb() {
+        let mut args = bridge_run_args();
+        args.tx.init_before_tx = true;
+        args.duration_ms = 0;
+
+        let report = bridge_run_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_firmware")
+        );
+    }
+
+    #[test]
+    fn bridge_run_accepts_zero_max_datagrams_as_unbounded_before_usb() {
+        let mut args = bridge_run_args();
+        args.tx.init_before_tx = true;
+        args.tx.max_datagrams = 0;
+
+        let report = bridge_run_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_firmware")
         );
     }
 
