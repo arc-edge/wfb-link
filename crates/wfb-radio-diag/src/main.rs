@@ -5,6 +5,11 @@ use std::{
     io::Write,
     net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -4453,6 +4458,7 @@ const MAX_TX_STATUS_DELAY_MS: u64 = 60_000;
 const MAX_TX_STATUS_POLL_COUNT: u32 = 64;
 const MAX_TX_STATUS_TOTAL_POLL_MS: u64 = 60_000;
 const BRIDGE_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
+const BRIDGE_RUN_TX_RECEIVE_TIMEOUT_MS: u64 = 100;
 const RTL8812_MAX_H2C_BOX_NUMS: u8 = 4;
 const RTL8812_MESSAGE_BOX_SIZE: u16 = 4;
 const RTL8812_EX_MESSAGE_BOX_SIZE: u16 = 4;
@@ -20521,6 +20527,27 @@ struct BridgeRunTxSocket {
     report_index: usize,
 }
 
+struct BridgeRunQueuedDatagram {
+    report_index: usize,
+    peer: SocketAddr,
+    data: Vec<u8>,
+}
+
+struct BridgeRunTxReceiver {
+    receiver: mpsc::Receiver<BridgeRunQueuedDatagram>,
+    stop: Arc<AtomicBool>,
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+impl Drop for BridgeRunTxReceiver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(unix)]
 fn set_udp_receive_buffer(socket: &UdpSocket, bytes: usize) -> std::io::Result<()> {
     let value: libc::c_int = bytes.try_into().unwrap_or(libc::c_int::MAX);
@@ -20577,12 +20604,6 @@ fn bridge_run_bind_tx_sockets(
             message: format!("failed to bind {bind_addr}: {error}"),
         })?;
         configure_bridge_tx_socket(&socket, bind_addr)?;
-        socket
-            .set_nonblocking(true)
-            .map_err(|error| DiagnosticErrorReport {
-                code: "udp_nonblocking_config_failed",
-                message: format!("failed to configure {bind_addr} as nonblocking: {error}"),
-            })?;
         sockets.push(BridgeRunTxSocket {
             bind_addr,
             socket,
@@ -20590,6 +20611,63 @@ fn bridge_run_bind_tx_sockets(
         });
     }
     Ok(sockets)
+}
+
+fn bridge_run_spawn_tx_receivers(
+    sockets: Vec<BridgeRunTxSocket>,
+) -> std::result::Result<BridgeRunTxReceiver, DiagnosticErrorReport> {
+    let (sender, receiver) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::with_capacity(sockets.len());
+
+    for tx_socket in sockets {
+        let bind_addr = tx_socket.bind_addr;
+        tx_socket
+            .socket
+            .set_read_timeout(Some(Duration::from_millis(
+                BRIDGE_RUN_TX_RECEIVE_TIMEOUT_MS,
+            )))
+            .map_err(|error| DiagnosticErrorReport {
+                code: "udp_timeout_config_failed",
+                message: format!("failed to configure {bind_addr} receive timeout: {error}"),
+            })?;
+        let sender = sender.clone();
+        let stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut buf = vec![0u8; u16::MAX as usize];
+            while !stop.load(Ordering::Relaxed) {
+                match tx_socket.socket.recv_from(&mut buf) {
+                    Ok((len, peer)) => {
+                        let queued = BridgeRunQueuedDatagram {
+                            report_index: tx_socket.report_index,
+                            peer,
+                            data: buf[..len].to_vec(),
+                        };
+                        if sender.send(queued).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        handles.push(handle);
+    }
+    drop(sender);
+
+    Ok(BridgeRunTxReceiver {
+        receiver,
+        stop,
+        handles,
+    })
 }
 
 fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
@@ -20705,6 +20783,17 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 report,
                 "socket_bind",
                 "failed to bind bridge TX UDP listener",
+                error,
+            );
+        }
+    };
+    let tx_receiver = match bridge_run_spawn_tx_receivers(tx_sockets) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "socket_bind",
+                "failed to start bridge TX UDP receiver thread",
                 error,
             );
         }
@@ -20939,170 +21028,128 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let deadline = started + Duration::from_millis(args.duration_ms);
     let mut datagram_bytes = 0u64;
     let mut frame_bytes = 0u64;
-    let mut udp_buf = vec![0u8; u16::MAX as usize];
     let mut rx_buf = vec![0u8; 16 * 1024];
 
     while Instant::now() < deadline {
-        let mut received_any = true;
         let mut tx_burst_count = 0u32;
         while report.datagrams_received < u64::from(args.tx.max_datagrams)
             && tx_burst_count < args.tx_burst_limit
-            && received_any
         {
-            received_any = false;
-            for tx_socket in &tx_sockets {
-                if report.datagrams_received >= u64::from(args.tx.max_datagrams) {
-                    break;
-                }
-                if tx_burst_count >= args.tx_burst_limit {
-                    break;
-                }
-                let (len, peer) = match tx_socket.socket.recv_from(&mut udp_buf) {
-                    Ok(received) => {
-                        received_any = true;
-                        received
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
-                    Err(error) => {
-                        bridge_run_update_counters(
-                            &mut report,
-                            pre_counters,
-                            bridge_counters,
-                            submit_counters,
-                        );
-                        bridge_run_set_runtime_metrics(
-                            &mut report,
-                            started,
-                            cpu_started,
-                            datagram_bytes,
-                            frame_bytes,
-                        );
-                        return bridge_run_failure(
-                            report,
-                            "bridge_tx_receive",
-                            "bridge run UDP receive failed",
-                            DiagnosticErrorReport {
-                                code: "udp_receive_failed",
-                                message: format!(
-                                    "UDP receive from {} failed: {error}",
-                                    tx_socket.bind_addr
-                                ),
-                            },
-                        );
-                    }
-                };
+            let queued = match tx_receiver.receiver.try_recv() {
+                Ok(queued) => queued,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            };
 
-                report.datagrams_received += 1;
-                tx_burst_count = tx_burst_count.saturating_add(1);
-                report.last_peer = Some(peer.to_string());
-                let datagram = &udp_buf[..len];
-                datagram_bytes = datagram_bytes.saturating_add(len as u64);
-                if let Some(bind_report) = report.tx_bind_reports.get_mut(tx_socket.report_index) {
-                    bind_report.datagrams_received =
-                        bind_report.datagrams_received.saturating_add(1);
-                    bind_report.datagram_bytes =
-                        bind_report.datagram_bytes.saturating_add(len as u64);
-                    bind_report.last_peer = Some(peer.to_string());
+            report.datagrams_received += 1;
+            tx_burst_count = tx_burst_count.saturating_add(1);
+            report.last_peer = Some(queued.peer.to_string());
+            let datagram = queued.data.as_slice();
+            let len = datagram.len();
+            datagram_bytes = datagram_bytes.saturating_add(len as u64);
+            if let Some(bind_report) = report.tx_bind_reports.get_mut(queued.report_index) {
+                bind_report.datagrams_received = bind_report.datagrams_received.saturating_add(1);
+                bind_report.datagram_bytes = bind_report.datagram_bytes.saturating_add(len as u64);
+                bind_report.last_peer = Some(queued.peer.to_string());
+            }
+            let parsed = match parse_tx_datagram(datagram) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    bridge_counters.incoming += 1;
+                    bridge_counters.dropped += 1;
+                    bridge_counters.malformed += 1;
+                    bridge_counters.unsupported_radiotap +=
+                        u64::from(bridge_tx_is_unsupported_radiotap(&error));
+                    continue;
                 }
-                let parsed = match parse_tx_datagram(datagram) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
+            };
+            frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
+            let tx_options = apply_bridge_tx_overrides(
+                &args.tx.tx_overrides,
+                args.tx.bandwidth,
+                parsed.tx_options,
+            );
+            let (packet_len, tx_descriptor_hex) =
+                match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+                    Ok(packet) => (
+                        packet.len(),
+                        Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+                    ),
+                    Err(_) => {
                         bridge_counters.incoming += 1;
                         bridge_counters.dropped += 1;
                         bridge_counters.malformed += 1;
-                        bridge_counters.unsupported_radiotap +=
-                            u64::from(bridge_tx_is_unsupported_radiotap(&error));
                         continue;
                     }
                 };
-                frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-                let tx_options = apply_bridge_tx_overrides(
-                    &args.tx.tx_overrides,
-                    args.tx.bandwidth,
-                    parsed.tx_options,
-                );
-                let (packet_len, tx_descriptor_hex) =
-                    match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
-                        Ok(packet) => (
-                            packet.len(),
-                            Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
-                        ),
-                        Err(_) => {
-                            bridge_counters.incoming += 1;
-                            bridge_counters.dropped += 1;
-                            bridge_counters.malformed += 1;
-                            continue;
-                        }
-                    };
-                report.last_datagram = Some(BridgeTxDatagramReport {
-                    source: "udp",
-                    datagram_len: len,
-                    fwmark: parsed.fwmark,
-                    fwmark_hex: format_value(parsed.fwmark, 8),
-                    radiotap_len: parsed.radiotap_len,
-                    frame_len: parsed.ieee80211_frame.len(),
-                    packet_len: Some(packet_len),
-                    tx_descriptor_hex,
+            report.last_datagram = Some(BridgeTxDatagramReport {
+                source: "udp",
+                datagram_len: len,
+                fwmark: parsed.fwmark,
+                fwmark_hex: format_value(parsed.fwmark, 8),
+                radiotap_len: parsed.radiotap_len,
+                frame_len: parsed.ieee80211_frame.len(),
+                packet_len: Some(packet_len),
+                tx_descriptor_hex,
+                tx_profile: args.tx.tx_overrides.tx_profile,
+                tx_options,
+            });
+            let submit_result = {
+                let mut radio = BridgeTxRadio {
+                    transport: &mut transport,
+                    bulk_out,
+                    channel,
+                    channel_bandwidth: args.tx.bandwidth,
+                    tx_rate: args.tx.tx_overrides.tx_rate,
+                    tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
+                    tx_channel_bandwidth: args.tx.tx_overrides.tx_channel_bandwidth,
                     tx_profile: args.tx.tx_overrides.tx_profile,
-                    tx_options,
-                });
-                let submit_result = {
-                    let mut radio = BridgeTxRadio {
-                        transport: &mut transport,
-                        bulk_out,
-                        channel,
-                        channel_bandwidth: args.tx.bandwidth,
-                        tx_rate: args.tx.tx_overrides.tx_rate,
-                        tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
-                        tx_channel_bandwidth: args.tx.tx_overrides.tx_channel_bandwidth,
-                        tx_profile: args.tx.tx_overrides.tx_profile,
-                        tx_queue: args.tx.tx_overrides.tx_queue.into(),
-                        tx_mac_id: args.tx.tx_overrides.mac_id,
-                        tx_rate_id: args.tx.tx_overrides.tx_rate_id,
-                        tx_retries: args.tx.tx_overrides.tx_retries,
-                        tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
-                        hardware_sequence: None,
-                        first_segment: None,
-                        disable_rate_fallback: args
-                            .tx
-                            .tx_overrides
-                            .enable_rate_fallback
-                            .then_some(false),
-                        aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
-                        submit_counters: &mut submit_counters,
-                    };
-                    submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+                    tx_queue: args.tx.tx_overrides.tx_queue.into(),
+                    tx_mac_id: args.tx.tx_overrides.mac_id,
+                    tx_rate_id: args.tx.tx_overrides.tx_rate_id,
+                    tx_retries: args.tx.tx_overrides.tx_retries,
+                    tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
+                    hardware_sequence: None,
+                    first_segment: None,
+                    disable_rate_fallback: args
+                        .tx
+                        .tx_overrides
+                        .enable_rate_fallback
+                        .then_some(false),
+                    aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
+                    submit_counters: &mut submit_counters,
                 };
-                if let Err(error) = submit_result {
-                    if tx_status.is_some() {
-                        let registers = Rtl8812auRegisterAccess::new(&transport);
-                        tx_status_probe_post(&registers, &mut tx_status);
-                        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
-                        report.tx_status = tx_status;
-                    }
-                    bridge_run_update_counters(
-                        &mut report,
-                        pre_counters,
-                        bridge_counters,
-                        submit_counters,
-                    );
-                    bridge_run_set_runtime_metrics(
-                        &mut report,
-                        started,
-                        cpu_started,
-                        datagram_bytes,
-                        frame_bytes,
-                    );
-                    return bridge_run_failure(
-                        report,
-                        "bridge_tx_submit",
-                        "bridge run TX submission failed",
-                        DiagnosticErrorReport {
-                            code: "bridge_tx_submit_failed",
-                            message: error.to_string(),
-                        },
-                    );
+                submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+            };
+            if let Err(error) = submit_result {
+                if tx_status.is_some() {
+                    let registers = Rtl8812auRegisterAccess::new(&transport);
+                    tx_status_probe_post(&registers, &mut tx_status);
+                    tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
+                    report.tx_status = tx_status;
                 }
+                bridge_run_update_counters(
+                    &mut report,
+                    pre_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                bridge_run_set_runtime_metrics(
+                    &mut report,
+                    started,
+                    cpu_started,
+                    datagram_bytes,
+                    frame_bytes,
+                );
+                return bridge_run_failure(
+                    report,
+                    "bridge_tx_submit",
+                    "bridge run TX submission failed",
+                    DiagnosticErrorReport {
+                        code: "bridge_tx_submit_failed",
+                        message: error.to_string(),
+                    },
+                );
             }
         }
 
