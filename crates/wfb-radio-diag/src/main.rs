@@ -21280,7 +21280,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         DiagnosticPhase {
             id: "socket_bind",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "bound nonblocking UDP socket(s) before radio init for WFB distributor-style TX datagrams",
+            detail: "bound UDP socket(s) and started TX receiver thread(s) before radio init",
         },
         DiagnosticPhase {
             id: "bridge_run",
@@ -21291,7 +21291,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     report.phases = phases;
     report.notes = vec![
         "bridge-run uses one retained radio session for same-session init, RX, and TX",
-        "the loop is bounded and single-threaded; it interleaves UDP TX input with bulk-IN RX reads",
+        "TX input is drained by socket receiver thread(s) while the main loop interleaves queued TX with bulk-IN RX reads",
     ];
     report
 }
