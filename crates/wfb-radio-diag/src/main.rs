@@ -1411,6 +1411,22 @@ struct BridgeTxListenArgs {
     /// Value to write when --clear-txdma-status-before-tx is enabled.
     #[arg(long, default_value = "0x00000000", value_parser = parse_u32)]
     txdma_status_clear_value: u32,
+
+    /// Generic pre-TX u8 register write in ADDR=VALUE form for guarded experiments.
+    #[arg(long = "pre-tx-write8", value_parser = parse_register_write_arg_u8)]
+    pre_tx_write8: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX u16 register write in ADDR=VALUE form for guarded experiments.
+    #[arg(long = "pre-tx-write16", value_parser = parse_register_write_arg_u16)]
+    pre_tx_write16: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX u32 register write in ADDR=VALUE form for guarded experiments.
+    #[arg(long = "pre-tx-write32", value_parser = parse_register_write_arg_u32)]
+    pre_tx_write32: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX masked u32 register update in ADDR:MASK=VALUE form.
+    #[arg(long = "pre-tx-rmw32", value_parser = parse_register_masked_write_arg_u32)]
+    pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2855,6 +2871,8 @@ struct BridgeTxListenReport {
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
+    pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
@@ -3114,13 +3132,13 @@ struct BridgeTxBenchRegisterClearReport {
     counters: DiagnosticCounters,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct PreTxRegisterWriteArg {
     address: u16,
     value: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct PreTxRegisterMaskedWriteArg {
     address: u16,
     mask: u32,
@@ -16998,10 +17016,10 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         txdma_offset_check_value: None,
         cr_value: None,
         trxdma_ctrl_value: None,
-        pre_tx_write8: Vec::new(),
-        pre_tx_write16: Vec::new(),
-        pre_tx_write32: Vec::new(),
-        pre_tx_rmw32: Vec::new(),
+        pre_tx_write8: args.pre_tx_write8.clone(),
+        pre_tx_write16: args.pre_tx_write16.clone(),
+        pre_tx_write32: args.pre_tx_write32.clone(),
+        pre_tx_rmw32: args.pre_tx_rmw32.clone(),
         pre_tx_apply_registers_from: Vec::new(),
         pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
@@ -19862,6 +19880,96 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if !args.pre_tx_write8.is_empty()
+        || !args.pre_tx_write16.is_empty()
+        || !args.pre_tx_write32.is_empty()
+        || !args.pre_tx_rmw32.is_empty()
+    {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_write8 {
+            match bridge_tx_bench_write8_register(
+                &registers,
+                "pre_tx_write8",
+                write.address,
+                write.value as u8,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX listener generic u8 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_write16 {
+            match bridge_tx_bench_write16_register(
+                &registers,
+                "pre_tx_write16",
+                write.address,
+                write.value as u16,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX listener generic u16 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_write32 {
+            match bridge_tx_bench_write32_register(
+                &registers,
+                "pre_tx_write32",
+                write.address,
+                write.value,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX listener generic u32 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_rmw32 {
+            match bridge_tx_bench_rmw32_register(
+                &registers,
+                "pre_tx_rmw32",
+                write.address,
+                write.mask,
+                write.value,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_masked_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX listener generic masked u32 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
     if args.tx_power.tx_power_index.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -20146,6 +20254,14 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             detail: "wrote REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment",
         });
     }
+    if !report.pre_tx_register_writes.is_empty() || !report.pre_tx_register_masked_writes.is_empty()
+    {
+        phases.push(DiagnosticPhase {
+            id: "pre_tx_register_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied generic pre-TX register writes as guarded experiments",
+        });
+    }
     if report.tx_power_control.is_some() {
         phases.push(DiagnosticPhase {
             id: "tx_power_control",
@@ -20199,6 +20315,8 @@ fn bridge_tx_listen_base_report(
         same_session_init: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        pre_tx_register_writes: Vec::new(),
+        pre_tx_register_masked_writes: Vec::new(),
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
@@ -27900,6 +28018,29 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
             clear.before_hex, clear.after_hex, clear.written_hex
         );
     }
+    for write in &report.pre_tx_register_writes {
+        println!(
+            "{} {}: {} -> {} (wrote {}, changed={})",
+            write.register_name,
+            write.address_hex,
+            write.before_hex,
+            write.after_hex,
+            write.written_hex,
+            write.changed
+        );
+    }
+    for write in &report.pre_tx_register_masked_writes {
+        println!(
+            "{} {} mask {}: {} -> {} (wrote {}, changed={})",
+            write.register_name,
+            write.address_hex,
+            write.mask_hex,
+            write.before_hex,
+            write.after_hex,
+            write.written_hex,
+            write.changed
+        );
+    }
     if let Some(tx_power) = &report.tx_power_control {
         print_tx_power_control_human(tx_power);
     }
@@ -29518,6 +29659,10 @@ mod tests {
             tx_power: TxPowerControlArgs::default(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
+            pre_tx_write8: Vec::new(),
+            pre_tx_write16: Vec::new(),
+            pre_tx_write32: Vec::new(),
+            pre_tx_rmw32: Vec::new(),
         }
     }
 
@@ -29677,9 +29822,30 @@ mod tests {
 
         let mut tx_args = bridge_tx_listen_args(true);
         tx_args.init_before_tx = true;
+        tx_args.pre_tx_write8.push(PreTxRegisterWriteArg {
+            address: 0x0522,
+            value: 0,
+        });
+        tx_args.pre_tx_write16.push(PreTxRegisterWriteArg {
+            address: 0x0422,
+            value: 0x1234,
+        });
+        tx_args.pre_tx_write32.push(PreTxRegisterWriteArg {
+            address: 0x0c90,
+            value: 0x01817d24,
+        });
+        tx_args.pre_tx_rmw32.push(PreTxRegisterMaskedWriteArg {
+            address: 0x08ac,
+            mask: 0x003003c3,
+            value: 0x00300201,
+        });
         let tx_init = bridge_tx_listen_init_bridge_args(&tx_args);
         assert!(tx_init.init_before_tx);
         assert!(tx_init.linux_init_order);
+        assert_eq!(tx_init.pre_tx_write8, tx_args.pre_tx_write8);
+        assert_eq!(tx_init.pre_tx_write16, tx_args.pre_tx_write16);
+        assert_eq!(tx_init.pre_tx_write32, tx_args.pre_tx_write32);
+        assert_eq!(tx_init.pre_tx_rmw32, tx_args.pre_tx_rmw32);
     }
 
     #[test]
