@@ -313,6 +313,8 @@ The integrated retained-session radio path then passed full init, RX, and TX dia
 - `tx-once --macos-usbhost`: `/tmp/wfb-remote-macos-tx-once-usbhost.json`, result `pass`, one 64-byte descriptor-prefixed packet written to endpoint `0x02`.
 - `tx-repeat --macos-usbhost`: `/tmp/wfb-remote-macos-tx-repeat-usbhost.json`, result `pass`, three 64-byte descriptor-prefixed packets written to endpoint `0x02` with no failed or short writes.
 - `tx-once --macos-usbhost --tx-led --tx-status`: `/tmp/wfb-remote-macos-tx-once-led-status-usbhost.json`, result `pass`, LED on/off register readback passed, TX status pre/post reads passed, and one 64-byte bulk-OUT packet was submitted.
+- `init --macos-usbhost --bandwidth 80`: `/tmp/wfb-remote-macos-init-80mhz-usbhost.json`, result `pass`, channel 36/80 MHz completed in 19 channel steps.
+- `tx-once --macos-usbhost --bandwidth 80 --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc`: `/tmp/wfb-remote-macos-tx-once-vht-usbhost.json`, result `pass`, one 64-byte descriptor-prefixed VHT packet was submitted.
 
 ## Interpretation
 

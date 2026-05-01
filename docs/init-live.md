@@ -61,6 +61,13 @@ The remote macOS 26 IOUSBHost retained-session path also passed on April 30, 202
 - Aggregate USB counters: 491 control reads, 1,396 control writes, 0 bulk IN reads, 0 bulk OUT writes.
 - Report: `/tmp/wfb-remote-macos-init-usbhost.json`.
 
+The same remote macOS 26 IOUSBHost path also passed channel 36 at 80 MHz:
+
+- Command: `init --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --bandwidth 80`.
+- Channel phase: 19 steps.
+- Aggregate USB counters: 462 control reads, 1,382 control writes, 0 bulk IN reads, 0 bulk OUT writes.
+- Report: `/tmp/wfb-remote-macos-init-80mhz-usbhost.json`.
+
 ## Boundaries
 
 `init` still does not start the RX bulk-IN loop, submit bulk-OUT TX frames, run IQK, or apply EFUSE-derived TX power tables. It proves that the Mac can claim the AWUS036ACH, drive the core RTL8812AU control-transfer bring-up sequence from userspace, and program conservative 20/40/80 MHz channel settings.

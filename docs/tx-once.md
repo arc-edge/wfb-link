@@ -101,6 +101,7 @@ The remote macOS 26 retained IOUSBHost path also passed:
 
 - `tx-once --macos-usbhost`: one 64-byte descriptor-prefixed packet written to endpoint `0x02`, 1 attempted, 1 submitted, 0 failed, 0 short writes. Report: `/tmp/wfb-remote-macos-tx-once-usbhost.json`.
 - `tx-once --macos-usbhost --tx-led --tx-status`: LED on/off readback passed, 15 status registers were read before and after TX, and one 64-byte bulk-OUT packet was submitted. Report: `/tmp/wfb-remote-macos-tx-once-led-status-usbhost.json`.
+- `tx-once --macos-usbhost --bandwidth 80 --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc`: one 64-byte descriptor-prefixed packet written to endpoint `0x02`, with the VHT rate and descriptor flags echoed in JSON. Report: `/tmp/wfb-remote-macos-tx-once-vht-usbhost.json`.
 
 This proves the Mac can claim the initialized adapter and submit one TX packet to the RTL8812AU bulk-OUT endpoint. It does not yet prove RF radiation or peer reception; that needs an independent monitor receiver or Linux WFB peer on the same channel.
 
