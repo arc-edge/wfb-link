@@ -59,7 +59,8 @@
 - [x] 6.3 Implement `wrxfwd_t` serialization compatible with WFB-ng aggregator network mode
 - [x] 6.4 Forward RX payloads to a configured WFB-ng aggregator UDP address
 - [x] 6.5 Add RX bridge counters for received, matched, forwarded, filtered, malformed, and send-failed packets
-- [ ] 6.6 Verify RX bridge with a Linux WFB peer transmitting low-rate test payloads
+- [x] 6.6 Verify RX bridge with a Linux WFB peer transmitting low-rate test payloads
+  - Live result: May 1, 2026 remote macOS 26 `rx-scan --macos-usbhost --init-before-rx --monitor-opmode-before-rx --wfb-link-id 0x000000 --wfb-radio-port 0x03 --rx-aggregator 127.0.0.1:5700` captured stock Linux `wfb_tx` traffic from `drone-2f389.local:wfb0`, matched 21 WFB frames, and forwarded 21 `wrxfwd_t` UDP datagrams with no send failures. The Mac parsed 848 frames total, including 147 data frames; the aggregator socket received 21 datagrams / 1,425 bytes. Reports/artifacts: `/tmp/wfb-agent-rx-forward-linux-wfbtx.json`, `/tmp/wfb-agent-rx-forward-linux-wfbtx.jsonl`, `/tmp/wfb-agent-rx-forward-linux-wfbtx.pcap`, `/tmp/wfb-agent-agg-rx-monitor.json`.
 
 ## 7. WFB Bridge TX
 
@@ -86,6 +87,7 @@
   - Progress: May 1, 2026 after EFUSE MACID programming, a fresh Linux peer capture on channel 36/HT20 saw 20/20 `WFBMACRF1` probe markers from the Mac and still saw 0/50 `MACIDDATA` WFB data markers, while the Mac reported 50/50 data submissions with no USB failures. This preserves the current diagnosis: management/probe RF TX works, data-frame RF decode remains gated by runtime chip state rather than by synthetic `REG_MACID`. Reports/capture: `/tmp/wfb-agent-probe-after-macid.json`, `/tmp/wfb-agent-data-after-macid.json`, `/tmp/mac-macid-rf.pcap` on `drone-2f389.local`.
 - [ ] 8.6 Run low-rate bidirectional WFB payload test against a Linux peer
   - Progress: May 1, 2026 remote macOS 26 `rx-scan --macos-usbhost --init-before-rx` ran while the Linux peer's stock `wfb_tx` processes were active and UDP test payloads were sent to port 5600. The Mac bulk-IN path captured 2,573 bytes and parsed 10 ambient management frames, proving live RX parsing on the bench channel, but captured zero WFB data frames from the Linux WFB stack. Reports/artifacts: `/tmp/wfb-agent-rx-linux-wfbtx.json`, `/tmp/wfb-agent-rx-linux-wfbtx.jsonl`, `/tmp/wfb-agent-rx-linux-wfbtx.pcap`.
+  - Progress: May 1, 2026 enabling `--monitor-opmode-before-rx` fixed the RX filter side: the Mac now receives and forwards Linux WFB data frames. The bidirectional test remains blocked on the opposite direction because Mac-submitted WFB data frames still do not decode on the Linux monitor/receiver.
 - [ ] 8.7 Run sustained WFB video/telemetry test only after low-rate tests pass
 
 ## 9. Performance and Radio Features

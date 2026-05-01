@@ -24,8 +24,8 @@ use radio_core::{
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use wfb_bridge::{
-    build_wfb_data_header, parse_tx_datagram, submit_tx_datagram, RadioTx, RadiotapError,
-    TxCounters, TxDatagramError, WfbChannelId,
+    build_rx_forward_datagram, build_wfb_data_header, parse_tx_datagram, submit_tx_datagram,
+    RadioTx, RadiotapError, RxCounters, RxForwardConfig, TxCounters, TxDatagramError, WfbChannelId,
 };
 
 #[cfg(target_os = "macos")]
@@ -1031,6 +1031,30 @@ struct RxScanArgs {
     /// Run full RTL8812AU init in this same USB session before the RX capture.
     #[arg(long)]
     init_before_rx: bool,
+
+    /// Set Linux-style monitor/no-link receive filtering before the RX capture.
+    #[arg(long)]
+    monitor_opmode_before_rx: bool,
+
+    /// WFB link ID to match and optionally forward during RX capture.
+    #[arg(long, value_parser = parse_u32)]
+    wfb_link_id: Option<u32>,
+
+    /// WFB radio port to match and optionally forward during RX capture.
+    #[arg(long, value_parser = parse_u8)]
+    wfb_radio_port: Option<u8>,
+
+    /// UDP aggregator address for matching WFB RX forwarding.
+    #[arg(long)]
+    rx_aggregator: Option<SocketAddr>,
+
+    /// WFB forwarding WLAN index metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_wlan_idx: u8,
+
+    /// WFB forwarding MCS metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_mcs_index: u8,
 
     /// RTL8812A firmware image path for --init-before-rx.
     #[arg(long)]
@@ -2565,6 +2589,7 @@ struct TxStatusDeltaReport {
 struct RxFixtureReport {
     fixture_paths: Vec<PathBuf>,
     frame_jsonl_path: Option<PathBuf>,
+    wfb_forward: Option<RxWfbForwardReport>,
     buffers_read: u64,
     read_timeouts: u64,
     bulk_bytes: u64,
@@ -2578,6 +2603,33 @@ struct RxFixtureReport {
     extension_frames: u64,
     pcap_frames_written: u64,
     frame_records_written: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RxScanWfbForwardConfig {
+    config: RxForwardConfig,
+    aggregator: Option<SocketAddr>,
+}
+
+#[derive(Debug, Serialize)]
+struct RxWfbForwardReport {
+    link_id: u32,
+    link_id_hex: String,
+    radio_port: u8,
+    radio_port_hex: String,
+    aggregator: Option<SocketAddr>,
+    wlan_idx: u8,
+    mcs_index: u8,
+    bandwidth_mhz: u8,
+    forwarded_bytes: u64,
+    counters: RxCounters,
+}
+
+struct RxWfbForwardRuntime {
+    config: RxForwardConfig,
+    socket: Option<UdpSocket>,
+    aggregator: Option<SocketAddr>,
+    report: RxWfbForwardReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -16166,6 +16218,12 @@ fn load_rx_scan_init_assets(
     args: &RxScanArgs,
 ) -> std::result::Result<Option<BridgeTxBenchInitAssets>, DiagnosticErrorReport> {
     if !args.init_before_rx {
+        if args.monitor_opmode_before_rx && !args.i_understand_this_writes_registers {
+            return Err(DiagnosticErrorReport {
+                code: "missing_write_authorization",
+                message: "rx-scan --monitor-opmode-before-rx writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+            });
+        }
         return Ok(None);
     }
     if !args.i_understand_this_writes_registers {
@@ -16397,6 +16455,38 @@ fn add_counters(left: &mut DiagnosticCounters, right: DiagnosticCounters) {
     left.dropped_frames += right.dropped_frames;
 }
 
+fn rx_scan_wfb_forward_config(
+    args: &RxScanArgs,
+) -> std::result::Result<Option<RxScanWfbForwardConfig>, DiagnosticErrorReport> {
+    match (args.wfb_link_id, args.wfb_radio_port) {
+        (None, None) if args.rx_aggregator.is_none() => Ok(None),
+        (None, None) => Err(DiagnosticErrorReport {
+            code: "missing_wfb_rx_filter",
+            message: "--rx-aggregator requires --wfb-link-id and --wfb-radio-port".to_string(),
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(DiagnosticErrorReport {
+            code: "incomplete_wfb_rx_filter",
+            message: "--wfb-link-id and --wfb-radio-port must be supplied together".to_string(),
+        }),
+        (Some(link_id), Some(radio_port)) => {
+            let channel_id =
+                WfbChannelId::new(link_id, radio_port).map_err(|error| DiagnosticErrorReport {
+                    code: "invalid_wfb_rx_channel_id",
+                    message: error.to_string(),
+                })?;
+            Ok(Some(RxScanWfbForwardConfig {
+                config: RxForwardConfig {
+                    channel_id,
+                    wlan_idx: args.rx_wlan_idx,
+                    mcs_index: args.rx_mcs_index,
+                    bandwidth_mhz: args.bandwidth.mhz() as u8,
+                },
+                aggregator: args.rx_aggregator,
+            }))
+        }
+    }
+}
+
 fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
     if !args.fixture_bulk_in.is_empty() && result != DiagnosticResult::Fail {
@@ -16434,6 +16524,41 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             notes: vec!["live RX aborted before claiming USB"],
         });
     }
+
+    let wfb_forward_config = match rx_scan_wfb_forward_config(&args) {
+        Ok(config) => config,
+        Err(error) => {
+            return pending_report(PendingReportInput {
+                command: "rx-scan",
+                selector: args.adapter.selector(),
+                adapter: None,
+                endpoints: None,
+                channel,
+                bandwidth: Some(args.bandwidth),
+                firmware_path: None,
+                firmware: None,
+                init_dry_run: None,
+                init_live: None,
+                duration_ms: Some(args.duration_ms),
+                pcap_path: args.pcap,
+                tx_frame_len: None,
+                tx_frame_source: None,
+                tx_dry_run: None,
+                tx_live: None,
+                rx_fixture: None,
+                repeat_tx: None,
+                counters: DiagnosticCounters::default(),
+                result: DiagnosticResult::Fail,
+                phases: vec![DiagnosticPhase {
+                    id: "argument_validation",
+                    status: DiagnosticPhaseStatus::Blocked,
+                    detail: "WFB RX forwarding arguments are invalid",
+                }],
+                error: Some(error),
+                notes: vec!["live RX aborted before claiming USB"],
+            });
+        }
+    };
 
     let init_assets = match load_rx_scan_init_assets(&args) {
         Ok(init_assets) => init_assets,
@@ -16701,6 +16826,51 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         }
     }
 
+    if args.monitor_opmode_before_rx {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        if let Err(error) = bridge_tx_bench_set_monitor_opmode(&registers, &mut pre_rx_counters) {
+            return pending_report(PendingReportInput {
+                command: "rx-scan",
+                selector,
+                adapter: Some(adapter),
+                endpoints: Some(endpoints),
+                channel: Some(channel),
+                bandwidth: Some(args.bandwidth),
+                firmware_path: init_firmware_path,
+                firmware: init_firmware,
+                init_dry_run: None,
+                init_live,
+                duration_ms: Some(args.duration_ms),
+                pcap_path: args.pcap,
+                tx_frame_len: None,
+                tx_frame_source: None,
+                tx_dry_run: None,
+                tx_live: None,
+                rx_fixture: None,
+                repeat_tx: None,
+                counters: pre_rx_counters,
+                result: DiagnosticResult::Fail,
+                phases: vec![
+                    DiagnosticPhase {
+                        id: "usb_claim",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: claim_detail,
+                    },
+                    DiagnosticPhase {
+                        id: "monitor_opmode",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "rx-scan monitor/no-link receive filter setup failed before the bulk IN loop",
+                    },
+                ],
+                error: Some(error),
+                notes: vec![
+                    "live RX stopped before bulk IN capture because monitor receive setup failed",
+                ],
+            });
+        }
+    }
+
     let pcap_path = args.pcap.clone();
     let frame_jsonl_path = args.frame_jsonl.clone();
     match run_rx_bulk_in_capture(
@@ -16711,54 +16881,52 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         args.timeout_ms,
         pcap_path.as_deref(),
         frame_jsonl_path.as_deref(),
+        wfb_forward_config,
     ) {
         Ok((rx_fixture, mut counters)) => {
             add_counters(&mut counters, pre_rx_counters);
-            let phases = if args.init_before_rx {
+            let mut phases = vec![DiagnosticPhase {
+                id: "usb_claim",
+                status: DiagnosticPhaseStatus::Completed,
+                detail: claim_detail,
+            }];
+            if args.init_before_rx {
+                phases.push(DiagnosticPhase {
+                    id: "init_before_rx",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "completed full RTL8812AU init inside the retained RX USB session",
+                });
+            }
+            if args.monitor_opmode_before_rx {
+                phases.push(DiagnosticPhase {
+                    id: "monitor_opmode",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "set Linux-style monitor/no-link receive filtering before capture",
+                });
+            }
+            phases.push(DiagnosticPhase {
+                id: "bulk_in_loop",
+                status: DiagnosticPhaseStatus::Completed,
+                detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
+            });
+            phases.push(DiagnosticPhase {
+                id: "pcap",
+                status: DiagnosticPhaseStatus::Completed,
+                detail: "optional PCAP output completed",
+            });
+            let notes = if args.init_before_rx && args.monitor_opmode_before_rx {
                 vec![
-                    DiagnosticPhase {
-                        id: "usb_claim",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: claim_detail,
-                    },
-                    DiagnosticPhase {
-                        id: "init_before_rx",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: "completed full RTL8812AU init inside the retained RX USB session",
-                    },
-                    DiagnosticPhase {
-                        id: "bulk_in_loop",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
-                    },
-                    DiagnosticPhase {
-                        id: "pcap",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: "optional PCAP output completed",
-                    },
+                    "live RX initialized the adapter, set monitor/no-link receive filtering, and captured bulk-IN traffic over one retained USB session",
+                    "no bulk OUT frame submissions or TX operations were issued",
                 ]
-            } else {
-                vec![
-                    DiagnosticPhase {
-                        id: "usb_claim",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: claim_detail,
-                    },
-                    DiagnosticPhase {
-                        id: "bulk_in_loop",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
-                    },
-                    DiagnosticPhase {
-                        id: "pcap",
-                        status: DiagnosticPhaseStatus::Completed,
-                        detail: "optional PCAP output completed",
-                    },
-                ]
-            };
-            let notes = if args.init_before_rx {
+            } else if args.init_before_rx {
                 vec![
                     "live RX initialized the adapter and captured bulk-IN traffic over one retained USB session",
+                    "no bulk OUT frame submissions or TX operations were issued",
+                ]
+            } else if args.monitor_opmode_before_rx {
+                vec![
+                    "live RX set monitor/no-link receive filtering on an already-initialized adapter before capture",
                     "no bulk OUT frame submissions or TX operations were issued",
                 ]
             } else {
@@ -16833,6 +17001,7 @@ fn run_rx_bulk_in_capture<T>(
     timeout_ms: u64,
     pcap_path: Option<&Path>,
     frame_jsonl_path: Option<&Path>,
+    wfb_forward_config: Option<RxScanWfbForwardConfig>,
 ) -> std::result::Result<(RxFixtureReport, DiagnosticCounters), DiagnosticErrorReport>
 where
     T: UsbBulkTransfer,
@@ -16843,6 +17012,7 @@ where
     };
     let mut pcap = create_optional_pcap(pcap_path)?;
     let mut frame_jsonl = create_optional_frame_jsonl(frame_jsonl_path)?;
+    let mut wfb_forward = create_optional_wfb_forward(wfb_forward_config)?;
     let timeout_ms = timeout_ms.clamp(1, duration_ms.max(1));
     let per_read_timeout = Duration::from_millis(timeout_ms);
     let deadline = Instant::now() + Duration::from_millis(duration_ms);
@@ -16865,6 +17035,7 @@ where
                     &mut report,
                     &mut pcap,
                     &mut frame_jsonl,
+                    &mut wfb_forward,
                     channel,
                     &buf[..len],
                 )?;
@@ -16885,6 +17056,7 @@ where
 
     flush_optional_pcap(&mut pcap)?;
     flush_optional_frame_jsonl(&mut frame_jsonl)?;
+    report.wfb_forward = wfb_forward.map(|runtime| runtime.report);
     let counters = DiagnosticCounters {
         usb_bulk_in_reads: report.buffers_read + report.read_timeouts,
         rx_frames: report.parsed_frames,
@@ -16926,10 +17098,46 @@ fn create_optional_frame_jsonl(
     }
 }
 
+fn create_optional_wfb_forward(
+    config: Option<RxScanWfbForwardConfig>,
+) -> std::result::Result<Option<RxWfbForwardRuntime>, DiagnosticErrorReport> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let socket = match config.aggregator {
+        Some(_) => Some(
+            UdpSocket::bind("0.0.0.0:0").map_err(|error| DiagnosticErrorReport {
+                code: "rx_forward_socket_bind_failed",
+                message: format!("failed to bind WFB RX forwarding UDP socket: {error}"),
+            })?,
+        ),
+        None => None,
+    };
+    let channel_id = config.config.channel_id;
+    Ok(Some(RxWfbForwardRuntime {
+        config: config.config,
+        socket,
+        aggregator: config.aggregator,
+        report: RxWfbForwardReport {
+            link_id: channel_id.link_id,
+            link_id_hex: format_value(channel_id.link_id, 6),
+            radio_port: channel_id.radio_port,
+            radio_port_hex: format_value(channel_id.radio_port, 2),
+            aggregator: config.aggregator,
+            wlan_idx: config.config.wlan_idx,
+            mcs_index: config.config.mcs_index,
+            bandwidth_mhz: config.config.bandwidth_mhz,
+            forwarded_bytes: 0,
+            counters: RxCounters::default(),
+        },
+    }))
+}
+
 fn process_rx_buffer(
     report: &mut RxFixtureReport,
     pcap: &mut Option<PcapWriter<File>>,
     frame_jsonl: &mut Option<File>,
+    wfb_forward: &mut Option<RxWfbForwardRuntime>,
     channel: Channel,
     buf: &[u8],
 ) -> std::result::Result<(), DiagnosticErrorReport> {
@@ -16941,6 +17149,7 @@ fn process_rx_buffer(
                 let frame = parsed.frame.expect("frame outcome includes frame");
                 report.parsed_frames += 1;
                 count_rx_frame_type(report, &frame.data);
+                process_wfb_rx_forward(wfb_forward, &frame)?;
                 if let Some(writer) = pcap.as_mut() {
                     writer
                         .write_frame(SystemTime::now(), &frame.data)
@@ -16965,6 +17174,32 @@ fn process_rx_buffer(
                 break;
             }
         }
+    }
+    Ok(())
+}
+
+fn process_wfb_rx_forward(
+    wfb_forward: &mut Option<RxWfbForwardRuntime>,
+    frame: &radio_core::RxFrame,
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    let Some(runtime) = wfb_forward.as_mut() else {
+        return Ok(());
+    };
+    let Some(packet) =
+        build_rx_forward_datagram(frame, runtime.config, &mut runtime.report.counters)
+    else {
+        return Ok(());
+    };
+    if let (Some(socket), Some(aggregator)) = (runtime.socket.as_ref(), runtime.aggregator) {
+        let bytes = socket.send_to(&packet, aggregator).map_err(|error| {
+            runtime.report.counters.send_failed += 1;
+            DiagnosticErrorReport {
+                code: "rx_forward_send_failed",
+                message: format!("failed to send WFB RX datagram to {aggregator}: {error}"),
+            }
+        })?;
+        runtime.report.counters.forwarded += 1;
+        runtime.report.forwarded_bytes += bytes as u64;
     }
     Ok(())
 }
@@ -17105,6 +17340,7 @@ fn parse_rx_fixture_files(
     };
     let mut pcap = create_optional_pcap(pcap_path)?;
     let mut frame_jsonl = create_optional_frame_jsonl(frame_jsonl_path)?;
+    let mut wfb_forward: Option<RxWfbForwardRuntime> = None;
 
     for path in paths {
         let buf = fs::read(path).map_err(|error| DiagnosticErrorReport {
@@ -17113,7 +17349,14 @@ fn parse_rx_fixture_files(
         })?;
         report.buffers_read += 1;
         report.bulk_bytes += buf.len() as u64;
-        process_rx_buffer(&mut report, &mut pcap, &mut frame_jsonl, channel, &buf)?;
+        process_rx_buffer(
+            &mut report,
+            &mut pcap,
+            &mut frame_jsonl,
+            &mut wfb_forward,
+            channel,
+            &buf,
+        )?;
     }
 
     flush_optional_pcap(&mut pcap)?;
@@ -27410,6 +27653,12 @@ mod tests {
             timeout_ms: 100,
             macos_usbhost: MacosUsbHostArgs::default(),
             init_before_rx: false,
+            monitor_opmode_before_rx: false,
+            wfb_link_id: None,
+            wfb_radio_port: None,
+            rx_aggregator: None,
+            rx_wlan_idx: 0,
+            rx_mcs_index: 0,
             firmware: None,
             init_timeout_ms: 500,
             mac_source: PathBuf::from(
@@ -28683,6 +28932,35 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(writes[0].event_index, Some(11));
         assert_eq!(writes[0].address, 0x0200);
         assert_eq!(writes[0].value, 0x1234);
+    }
+
+    #[test]
+    fn rx_scan_wfb_forward_config_requires_complete_channel_id() {
+        let mut args = rx_scan_args();
+        args.rx_aggregator = Some("127.0.0.1:5700".parse().expect("addr"));
+        assert_eq!(
+            rx_scan_wfb_forward_config(&args)
+                .expect_err("missing filter")
+                .code,
+            "missing_wfb_rx_filter"
+        );
+
+        args.wfb_link_id = Some(0x000001);
+        assert_eq!(
+            rx_scan_wfb_forward_config(&args)
+                .expect_err("incomplete filter")
+                .code,
+            "incomplete_wfb_rx_filter"
+        );
+
+        args.wfb_radio_port = Some(0x23);
+        let config = rx_scan_wfb_forward_config(&args)
+            .expect("config")
+            .expect("enabled");
+        assert_eq!(config.config.channel_id.link_id, 0x000001);
+        assert_eq!(config.config.channel_id.radio_port, 0x23);
+        assert_eq!(config.config.bandwidth_mhz, 20);
+        assert_eq!(config.aggregator, args.rx_aggregator);
     }
 
     #[test]

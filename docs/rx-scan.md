@@ -15,6 +15,20 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-rx-scan.json rx-sca
 
 On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
 
+For WFB RX bridge verification, add `--init-before-rx --monitor-opmode-before-rx` so the command performs init and then switches `REG_RCR`/RX filter maps into a no-link monitor receive mode before the bulk-IN loop. Add `--wfb-link-id`, `--wfb-radio-port`, and optional `--rx-aggregator HOST:PORT` to count matching WFB frames and forward them with WFB-ng's `wrxfwd_t` header:
+
+```sh
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-rx-forward.json rx-scan \
+  --macos-usbhost --vid 0x0bda --pid 0x8812 \
+  --init-before-rx --monitor-opmode-before-rx \
+  --firmware /tmp/rtl8812aefw.bin \
+  --channel 36 --bandwidth 20 \
+  --duration-ms 8000 \
+  --wfb-link-id 0x000000 --wfb-radio-port 0x03 \
+  --rx-aggregator 127.0.0.1:5700 \
+  --i-understand-this-writes-registers
+```
+
 ## Live Result
 
 Live run on April 30, 2026 with `0x0bda:0x8812` on macOS 15.7.4 passed as a bounded USB read test:
@@ -57,6 +71,15 @@ The remote macOS 26 retained IOUSBHost path also passed as a bounded USB read te
 - Frame JSONL: `/tmp/wfb-remote-macos-rx-scan-usbhost.jsonl`, empty because no frames were captured.
 - Report: `/tmp/wfb-remote-macos-rx-scan-usbhost.json`.
 
+A later May 1, 2026 remote macOS 26 run with `--init-before-rx --monitor-opmode-before-rx` verified the WFB RX bridge path against the Linux peer:
+
+- Linux source: stock `wfb_tx` on `drone-2f389.local:wfb0`, channel 36/HT20.
+- WFB filter: link ID `0x000000`, radio port `0x03`.
+- Mac capture: 848 parsed frames, including 147 data frames.
+- WFB bridge: 21 matched frames, 21 forwarded datagrams, 0 send failures.
+- Aggregator socket: 21 UDP datagrams, 1,425 bytes.
+- Reports/artifacts: `/tmp/wfb-agent-rx-forward-linux-wfbtx.json`, `/tmp/wfb-agent-rx-forward-linux-wfbtx.jsonl`, `/tmp/wfb-agent-rx-forward-linux-wfbtx.pcap`, `/tmp/wfb-agent-agg-rx-monitor.json`.
+
 When frames are parsed, each JSONL record includes:
 
 - Unix millisecond timestamp
@@ -67,4 +90,4 @@ When frames are parsed, each JSONL record includes:
 
 ## Boundaries
 
-`rx-scan` does not run init, issue control writes, submit bulk-OUT TX frames, or transmit. It reports the selected 20/40/80 MHz metadata path, but RF reception still requires traffic on the tuned channel.
+Without `--init-before-rx` or `--monitor-opmode-before-rx`, `rx-scan` does not run init or issue control writes. It never submits bulk-OUT TX frames or transmits. It reports the selected 20/40/80 MHz metadata path, but RF reception still requires traffic on the tuned channel.
