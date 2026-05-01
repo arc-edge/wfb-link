@@ -19917,6 +19917,26 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if !args.pre_tx_rf_write.is_empty() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_rf_write {
+            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
+            {
+                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_rf_write",
+                        "bridge TX listener RF 3-wire write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
     if !args.pre_tx_write8.is_empty()
         || !args.pre_tx_write16.is_empty()
         || !args.pre_tx_write32.is_empty()
@@ -20000,26 +20020,6 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                         report,
                         "pre_tx_register_write",
                         "bridge TX listener generic masked u32 register write failed before the TX loop",
-                        error,
-                    );
-                }
-            }
-        }
-    }
-
-    if !args.pre_tx_rf_write.is_empty() {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
-            .with_timeout(Duration::from_millis(args.init_timeout_ms));
-        for write in &args.pre_tx_rf_write {
-            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
-            {
-                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
-                Err(error) => {
-                    report.counters = pre_tx_counters;
-                    return bridge_tx_listen_failure(
-                        report,
-                        "pre_tx_rf_write",
-                        "bridge TX listener RF 3-wire write failed before the TX loop",
                         error,
                     );
                 }
@@ -23890,6 +23890,26 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if !args.pre_tx_rf_write.is_empty() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_rf_write {
+            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
+            {
+                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_rf_write",
+                        "bridge TX benchmark RF 3-wire write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
     if !args.pre_tx_write8.is_empty()
         || !args.pre_tx_write16.is_empty()
         || !args.pre_tx_write32.is_empty()
@@ -23973,26 +23993,6 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
                         report,
                         "pre_tx_register_write",
                         "bridge TX benchmark generic masked u32 register write failed before the TX loop",
-                        error,
-                    );
-                }
-            }
-        }
-    }
-
-    if !args.pre_tx_rf_write.is_empty() {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
-            .with_timeout(Duration::from_millis(args.init_timeout_ms));
-        for write in &args.pre_tx_rf_write {
-            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
-            {
-                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
-                Err(error) => {
-                    report.counters = pre_tx_counters;
-                    return bridge_tx_bench_failure(
-                        report,
-                        "pre_tx_rf_write",
-                        "bridge TX benchmark RF 3-wire write failed before the TX loop",
                         error,
                     );
                 }
