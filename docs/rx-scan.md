@@ -15,7 +15,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-rx-scan.json rx-sca
 
 On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
 
-For WFB RX bridge verification, add `--init-before-rx --monitor-opmode-before-rx` so the command performs init and then switches `REG_RCR`/RX filter maps into a no-link monitor receive mode before the bulk-IN loop. Add `--wfb-link-id`, `--wfb-radio-port`, and optional `--rx-aggregator HOST:PORT` to count matching WFB frames and forward them with WFB-ng's `wrxfwd_t` header:
+For WFB RX bridge verification, add `--init-before-rx --monitor-opmode-before-rx` so the command performs init and then switches `REG_RCR`/RX filter maps into a no-link monitor receive mode before the bulk-IN loop. The same-session bridge init uses the Linux RTL8812AU LLT-before-firmware order because that order is required for WFB-shaped data TX to radiate reliably on the current AWUS036ACH bench. Add `--wfb-link-id`, `--wfb-radio-port`, and optional `--rx-aggregator HOST:PORT` to count matching WFB frames and forward them with WFB-ng's `wrxfwd_t` header:
 
 ```sh
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-rx-forward.json rx-scan \

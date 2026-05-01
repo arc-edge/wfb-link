@@ -16303,7 +16303,7 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         fw_media_status: false,
         fw_media_status_role: 0x01,
         init_before_tx: args.init_before_rx,
-        linux_init_order: false,
+        linux_init_order: true,
         firmware: args.firmware.clone(),
         init_timeout_ms: args.init_timeout_ms,
         mac_source: args.mac_source.clone(),
@@ -16378,7 +16378,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         fw_media_status: false,
         fw_media_status_role: 0x01,
         init_before_tx: args.init_before_tx,
-        linux_init_order: false,
+        linux_init_order: true,
         firmware: args.firmware.clone(),
         init_timeout_ms: args.init_timeout_ms,
         mac_source: args.mac_source.clone(),
@@ -27686,6 +27686,21 @@ mod tests {
             frame_jsonl: None,
             fixture_bulk_in: Vec::new(),
         }
+    }
+
+    #[test]
+    fn bridge_same_session_init_uses_linux_order_for_wfb_paths() {
+        let mut rx_args = rx_scan_args();
+        rx_args.init_before_rx = true;
+        let rx_init = rx_scan_init_bridge_args(&rx_args);
+        assert!(rx_init.init_before_tx);
+        assert!(rx_init.linux_init_order);
+
+        let mut tx_args = bridge_tx_listen_args(true);
+        tx_args.init_before_tx = true;
+        let tx_init = bridge_tx_listen_init_bridge_args(&tx_args);
+        assert!(tx_init.init_before_tx);
+        assert!(tx_init.linux_init_order);
     }
 
     #[test]
