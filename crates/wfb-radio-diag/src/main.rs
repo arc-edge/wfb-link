@@ -19538,6 +19538,7 @@ fn apply_bridge_tx_overrides(
     channel_bandwidth: Bandwidth,
     mut options: TxOptions,
 ) -> TxOptions {
+    options = apply_wfb_monitor_tx_defaults(channel_bandwidth, options);
     options.channel_bandwidth = Some(overrides.tx_channel_bandwidth.unwrap_or(channel_bandwidth));
     if let Some(rate) = overrides.tx_rate {
         options.rate = rate;
@@ -19569,12 +19570,34 @@ fn apply_bridge_tx_overrides(
     options
 }
 
+fn apply_wfb_monitor_tx_defaults(
+    channel_bandwidth: Bandwidth,
+    mut options: TxOptions,
+) -> TxOptions {
+    options.channel_bandwidth = Some(channel_bandwidth);
+
+    if matches!(options.rate, TxRate::Mcs(_)) {
+        options.queue = TxQueue::Mgnt;
+        options.mac_id = 1;
+        options.rate_id = Some(7);
+        options.disable_rate_fallback = false;
+        options.rate_fallback_limit = 0;
+        options.aggregate_break = false;
+        if options.no_retry {
+            options.retries = 0;
+        }
+    }
+
+    options
+}
+
 impl RadioTx for BridgeTxRadio<'_> {
     fn submit_80211(
         &mut self,
         frame: &[u8],
         mut options: TxOptions,
     ) -> std::result::Result<(), String> {
+        options = apply_wfb_monitor_tx_defaults(self.channel_bandwidth, options);
         options.channel_bandwidth =
             Some(self.tx_channel_bandwidth.unwrap_or(self.channel_bandwidth));
         if let Some(rate) = self.tx_rate {
@@ -30953,6 +30976,13 @@ mod tests {
         assert_eq!(datagram.radiotap_len, 13);
         assert_eq!(datagram.frame_len, sample_data_frame().len());
         assert!(datagram.packet_len.is_some());
+        assert_eq!(datagram.tx_options.queue, TxQueue::Mgnt);
+        assert_eq!(datagram.tx_options.mac_id, 1);
+        assert_eq!(datagram.tx_options.rate_id, Some(7));
+        assert_eq!(datagram.tx_options.retries, 0);
+        assert!(!datagram.tx_options.disable_rate_fallback);
+        assert_eq!(datagram.tx_options.rate_fallback_limit, 0);
+        assert!(!datagram.tx_options.aggregate_break);
     }
 
     #[test]
