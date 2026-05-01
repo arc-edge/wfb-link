@@ -1407,6 +1407,10 @@ struct BridgeTxOverrideArgs {
     #[arg(long, value_parser = parse_u8)]
     tx_retries: Option<u8>,
 
+    /// Override TX descriptor rate-fallback-limit byte.
+    #[arg(long, value_parser = parse_u8)]
+    tx_fallback_limit: Option<u8>,
+
     /// Leave rate fallback enabled instead of setting the descriptor disable-fallback bit.
     #[arg(long)]
     enable_rate_fallback: bool,
@@ -1492,6 +1496,10 @@ struct BridgeTxBenchArgs {
     /// TX descriptor retry-limit value for synthetic WFB submissions.
     #[arg(long, default_value_t = 12)]
     tx_retries: u8,
+
+    /// TX descriptor rate-fallback-limit byte for synthetic WFB submissions.
+    #[arg(long, default_value = "0x1f", value_parser = parse_u8)]
+    tx_fallback_limit: u8,
 
     /// Preserve the injected 802.11 sequence number instead of enabling hardware sequence.
     #[arg(long)]
@@ -2607,6 +2615,8 @@ struct BridgeTxBenchReport {
     tx_rate_id: Option<u8>,
     tx_rate_id_hex: Option<String>,
     tx_retries: u8,
+    tx_fallback_limit: u8,
+    tx_fallback_limit_hex: String,
     hardware_sequence: bool,
     first_segment: bool,
     disable_rate_fallback: bool,
@@ -15699,6 +15709,7 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         mac_id: 0,
         tx_rate_id: None,
         tx_retries: 12,
+        tx_fallback_limit: 0x1f,
         no_hw_seq: false,
         no_first_seg: false,
         enable_rate_fallback: false,
@@ -15767,6 +15778,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         mac_id: args.tx_overrides.mac_id.unwrap_or(0),
         tx_rate_id: args.tx_overrides.tx_rate_id,
         tx_retries: args.tx_overrides.tx_retries.unwrap_or(12),
+        tx_fallback_limit: args.tx_overrides.tx_fallback_limit.unwrap_or(0x1f),
         no_hw_seq: false,
         no_first_seg: false,
         enable_rate_fallback: args.tx_overrides.enable_rate_fallback,
@@ -17892,6 +17904,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
             tx_mac_id: args.tx_overrides.mac_id,
             tx_rate_id: args.tx_overrides.tx_rate_id,
             tx_retries: args.tx_overrides.tx_retries,
+            tx_fallback_limit: args.tx_overrides.tx_fallback_limit,
             hardware_sequence: None,
             first_segment: None,
             disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
@@ -17969,6 +17982,7 @@ struct BridgeTxRadio<'a> {
     tx_mac_id: Option<u8>,
     tx_rate_id: Option<u8>,
     tx_retries: Option<u8>,
+    tx_fallback_limit: Option<u8>,
     hardware_sequence: Option<bool>,
     first_segment: Option<bool>,
     disable_rate_fallback: Option<bool>,
@@ -17997,6 +18011,9 @@ fn apply_bridge_tx_overrides(
     }
     if let Some(retries) = overrides.tx_retries {
         options.retries = retries;
+    }
+    if let Some(fallback_limit) = overrides.tx_fallback_limit {
+        options.rate_fallback_limit = fallback_limit;
     }
     if overrides.enable_rate_fallback {
         options.disable_rate_fallback = false;
@@ -18030,6 +18047,9 @@ impl RadioTx for BridgeTxRadio<'_> {
         }
         if let Some(retries) = self.tx_retries {
             options.retries = retries;
+        }
+        if let Some(fallback_limit) = self.tx_fallback_limit {
+            options.rate_fallback_limit = fallback_limit;
         }
         if let Some(hardware_sequence) = self.hardware_sequence {
             options.hardware_sequence = hardware_sequence;
@@ -18497,6 +18517,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 tx_mac_id: args.tx_overrides.mac_id,
                 tx_rate_id: args.tx_overrides.tx_rate_id,
                 tx_retries: args.tx_overrides.tx_retries,
+                tx_fallback_limit: args.tx_overrides.tx_fallback_limit,
                 hardware_sequence: None,
                 first_segment: None,
                 disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
@@ -20841,6 +20862,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             tx_mac_id: Some(args.mac_id),
             tx_rate_id: args.tx_rate_id,
             tx_retries: Some(args.tx_retries),
+            tx_fallback_limit: Some(args.tx_fallback_limit),
             hardware_sequence: Some(!args.no_hw_seq),
             first_segment: Some(!args.no_first_seg),
             disable_rate_fallback: Some(!args.enable_rate_fallback),
@@ -21126,6 +21148,7 @@ fn bridge_tx_bench_tx_options(args: &BridgeTxBenchArgs, mut options: TxOptions) 
         options.rate_id = Some(rate_id);
     }
     options.retries = args.tx_retries;
+    options.rate_fallback_limit = args.tx_fallback_limit;
     options.hardware_sequence = !args.no_hw_seq;
     options.first_segment = !args.no_first_seg;
     options.disable_rate_fallback = !args.enable_rate_fallback;
@@ -21169,6 +21192,8 @@ fn bridge_tx_bench_base_report(
         tx_rate_id: args.tx_rate_id,
         tx_rate_id_hex: args.tx_rate_id.map(|rate_id| format_value(rate_id, 2)),
         tx_retries: args.tx_retries,
+        tx_fallback_limit: args.tx_fallback_limit,
+        tx_fallback_limit_hex: format_value(args.tx_fallback_limit, 2),
         hardware_sequence: !args.no_hw_seq,
         first_segment: !args.no_first_seg,
         disable_rate_fallback: !args.enable_rate_fallback,
@@ -24688,7 +24713,7 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
     println!(
-        "Bench: count={} payload_len={} frame_kind={:?} marker={} interval_us={} link_id={} radio_port={} mcs={} tx_rate={:?} tx_queue={:?} mac_id={} first_segment={} aggregate_break={}",
+        "Bench: count={} payload_len={} frame_kind={:?} marker={} interval_us={} link_id={} radio_port={} mcs={} tx_rate={:?} tx_queue={:?} mac_id={} fallback_limit={} first_segment={} aggregate_break={}",
         report.count,
         report.payload_len,
         report.frame_kind,
@@ -24700,6 +24725,7 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
         report.tx_rate,
         report.tx_queue,
         report.mac_id_hex,
+        report.tx_fallback_limit_hex,
         report.first_segment,
         report.aggregate_break
     );
@@ -26071,6 +26097,7 @@ mod tests {
             mac_id: 0,
             tx_rate_id: None,
             tx_retries: 12,
+            tx_fallback_limit: 0x1f,
             no_hw_seq: false,
             no_first_seg: false,
             enable_rate_fallback: false,

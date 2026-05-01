@@ -114,6 +114,7 @@ pub struct TxOptions {
     pub hardware_sequence: bool,
     pub first_segment: bool,
     pub disable_rate_fallback: bool,
+    pub rate_fallback_limit: u8,
     pub aggregate_break: bool,
     pub short_gi: bool,
     pub ldpc: bool,
@@ -144,6 +145,7 @@ impl Default for TxOptions {
             hardware_sequence: true,
             first_segment: true,
             disable_rate_fallback: true,
+            rate_fallback_limit: 0x1f,
             aggregate_break: true,
             short_gi: false,
             ldpc: false,
@@ -273,7 +275,7 @@ pub fn build_tx_packet(
     }
 
     packet[0x10] = rate & 0x7f;
-    packet[0x11] = 0x1f;
+    packet[0x11] = opts.rate_fallback_limit & 0x1f;
     packet[0x12] = (1 << 1) | ((retries & 0x3f) << 2);
 
     match opts.bandwidth {
@@ -893,6 +895,7 @@ mod tests {
             channel,
             TxOptions {
                 retries: 0,
+                rate_fallback_limit: 0,
                 hardware_sequence: false,
                 disable_rate_fallback: false,
                 ..TxOptions::default()
@@ -901,6 +904,7 @@ mod tests {
         .expect("tx packet");
 
         assert_eq!(packet[0x0d] & (1 << 2), 0);
+        assert_eq!(packet[0x11], 0);
         assert_eq!(packet[0x12] & 0xfe, 0x02);
         assert_eq!(packet[0x21] & 0x80, 0);
         assert_eq!(packet[0x25] >> 4, 0x03);
