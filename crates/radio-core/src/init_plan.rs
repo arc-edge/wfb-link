@@ -1053,6 +1053,7 @@ fn control_write_event(value: u16, length: usize) -> UsbTraceEvent {
         value: Some(value),
         index: Some(0),
         length: Some(length),
+        data_hex: None,
     }
 }
 
@@ -1065,6 +1066,7 @@ fn control_read_event(value: u16, length: usize) -> UsbTraceEvent {
         value: Some(value),
         index: Some(0),
         length: Some(length),
+        data_hex: None,
     }
 }
 

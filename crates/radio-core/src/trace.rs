@@ -9,6 +9,8 @@ pub struct UsbTraceEvent {
     pub value: Option<u16>,
     pub index: Option<u16>,
     pub length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,6 +195,7 @@ fn parse_control_submit(direction_and_address: &str, fields: &[&str]) -> UsbmonL
         value: Some(value),
         index: Some(index),
         length: Some(length),
+        data_hex: parse_usbmon_data_hex(fields),
     })
 }
 
@@ -224,6 +227,7 @@ fn parse_bulk_submit(direction_and_address: &str, fields: &[&str]) -> UsbmonLine
         value: None,
         index: None,
         length: Some(length),
+        data_hex: parse_usbmon_data_hex(fields),
     })
 }
 
@@ -243,6 +247,22 @@ fn find_usbmon_bulk_length(fields: &[&str]) -> Option<usize> {
         .skip(5)
         .find_map(|field| field.parse::<isize>().ok().filter(|value| *value >= 0))
         .map(|value| value as usize)
+}
+
+fn parse_usbmon_data_hex(fields: &[&str]) -> Option<String> {
+    let equals_idx = fields.iter().position(|field| *field == "=")?;
+    let mut data = String::new();
+    for field in fields.iter().skip(equals_idx + 1) {
+        if !field.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            break;
+        }
+        data.push_str(field);
+    }
+    if data.is_empty() {
+        None
+    } else {
+        Some(data.to_ascii_lowercase())
+    }
 }
 
 fn parse_hex_u8(input: &str) -> Result<u8, String> {
@@ -319,6 +339,15 @@ fn compare_event(
         &observed.length,
         mismatches,
     );
+    if expected.data_hex.is_some() {
+        push_mismatch(
+            event_index,
+            "data_hex",
+            &expected.data_hex,
+            &observed.data_hex,
+            mismatches,
+        );
+    }
 }
 
 fn push_mismatch<T: PartialEq + std::fmt::Debug>(
@@ -351,6 +380,7 @@ mod tests {
             value: Some(value),
             index: Some(0),
             length: Some(1),
+            data_hex: None,
         }
     }
 
@@ -377,6 +407,32 @@ mod tests {
     }
 
     #[test]
+    fn trace_comparison_treats_missing_expected_payload_as_unknown() {
+        let expected = [event(0x0001)];
+        let mut observed_event = event(0x0001);
+        observed_event.data_hex = Some("00".to_string());
+        let observed = [observed_event];
+
+        let comparison = compare_usb_traces(&expected, &observed);
+
+        assert_eq!(comparison.result, UsbTraceComparisonResult::Pass);
+        assert!(comparison.mismatches.is_empty());
+    }
+
+    #[test]
+    fn trace_comparison_reports_known_payload_mismatch() {
+        let mut expected_event = event(0x0001);
+        expected_event.data_hex = Some("00".to_string());
+        let mut observed_event = event(0x0001);
+        observed_event.data_hex = Some("01".to_string());
+
+        let comparison = compare_usb_traces(&[expected_event], &[observed_event]);
+
+        assert_eq!(comparison.result, UsbTraceComparisonResult::Fail);
+        assert_eq!(comparison.mismatches[0].field, "data_hex");
+    }
+
+    #[test]
     fn imports_usbmon_control_submit_lines() {
         let imported = import_usbmon_text(
             "\
@@ -392,9 +448,11 @@ ffff 1 S Ci:1:004:0 s c0 05 0002 0000 0004 4 <
         assert_eq!(imported.events[0].request, Some(0x05));
         assert_eq!(imported.events[0].value, Some(0x0002));
         assert_eq!(imported.events[0].length, Some(1));
+        assert_eq!(imported.events[0].data_hex.as_deref(), Some("00"));
         assert_eq!(imported.events[1].kind, UsbTraceKind::ControlRead);
         assert_eq!(imported.events[1].request_type, Some(0xc0));
         assert_eq!(imported.events[1].length, Some(4));
+        assert_eq!(imported.events[1].data_hex, None);
     }
 
     #[test]
@@ -412,9 +470,29 @@ ffff 2 C Bi:1:004:1 0 64 = 01020304
         assert_eq!(imported.events[0].kind, UsbTraceKind::BulkOut);
         assert_eq!(imported.events[0].endpoint, Some(0x02));
         assert_eq!(imported.events[0].length, Some(64));
+        assert_eq!(imported.events[0].data_hex.as_deref(), Some("01020304"));
         assert_eq!(imported.events[1].kind, UsbTraceKind::BulkIn);
         assert_eq!(imported.events[1].endpoint, Some(0x81));
         assert_eq!(imported.events[1].length, Some(512));
+        assert_eq!(imported.events[1].data_hex, None);
         assert_eq!(imported.ignored_lines, 1);
+    }
+
+    #[test]
+    fn imports_spaced_usbmon_payload_tokens() {
+        let imported = import_usbmon_text(
+            "\
+ffff 0 S Co:1:004:0 s 40 05 0cb0 0000 0004 4 = 17773354
+ffff 1 S Bo:1:004:2 -115 91 = 3300288d 01120800 00000000
+",
+        );
+
+        assert!(imported.errors.is_empty());
+        assert_eq!(imported.events.len(), 2);
+        assert_eq!(imported.events[0].data_hex.as_deref(), Some("17773354"));
+        assert_eq!(
+            imported.events[1].data_hex.as_deref(),
+            Some("3300288d0112080000000000")
+        );
     }
 }

@@ -13,7 +13,8 @@ Each trace file is a JSON array:
     "request": 5,
     "value": 2,
     "index": 0,
-    "length": 1
+    "length": 1,
+    "data_hex": "00"
   }
 ]
 ```
@@ -21,6 +22,7 @@ Each trace file is a JSON array:
 Supported `kind` values are `control_read`, `control_write`, `bulk_in`, and `bulk_out`.
 
 Use `request_type`, `request`, `value`, and `index` for USB control transfers. Use `endpoint` for bulk transfers. `length` is the transfer payload length, not including USB framing.
+When usbmon submit lines include payload bytes after `=`, the importer preserves them as lowercase compact `data_hex`. Linux submit lines usually contain control-write and bulk-OUT payloads; control-read and bulk-IN payloads normally appear on completion lines and remain omitted by the importer.
 
 Example:
 
@@ -32,7 +34,23 @@ cargo run -p wfb-radio-diag -- --json trace-import \
 cargo run -p wfb-radio-diag -- --json trace-compare \
   --expected fixtures/traces/init-minimal-expected.json \
   --observed fixtures/traces/init-minimal-observed.json
+
+cargo run -p wfb-radio-diag -- trace-registers \
+  --input linux-awus036ach-init.usbmon \
+  --output /tmp/linux-awus036ach-register-final.json \
+  --min-address 0x0000 \
+  --max-address 0x0fff
+
+cargo run -p wfb-radio-diag -- --json bridge-tx-bench \
+  --macos-usbhost \
+  --tx-status-registers-from /tmp/linux-awus036ach-register-final.json \
+  --tx-status-delay-ms 100 \
+  --frame-kind wfb-data \
+  --payload-marker LINUXMAP1 \
+  --i-understand-this-transmits
 ```
+
+`--tx-status-registers-from` accepts the JSON written by `trace-registers --output` and merges those register addresses into the built-in TX status snapshot. It implies `--tx-status`, reads the extra registers before and after TX, and labels them as chip-side telemetry rather than RF confirmation.
 
 ## Capturing On Linux
 
@@ -53,6 +71,6 @@ The importer currently reads usbmon text submit lines:
 - `S Bo...` -> `bulk_out`
 - `S Bi...` -> `bulk_in`
 
-Completion lines and comments are ignored. Payload bytes are intentionally not imported yet; the first comparison axis is transfer order, request fields, endpoints, and lengths.
+Completion lines and comments are ignored. Submit-line payload bytes after `=` are preserved when present. The register-summary command reduces `control_write` events for Realtek vendor request `0x05` into final per-register payload bytes for 1-, 2-, and 4-byte writes. Longer vendor writes, such as firmware chunks, are excluded from that register map.
 
-The current comparison is strict and positional. That is useful for early init work because transfer ordering matters. If Linux captures show harmless polling-length variance, add a normalization script rather than weakening the core comparator first.
+The current comparison is strict and positional for known fields because transfer ordering matters during init. Omitted `data_hex` in an expected trace means payload bytes are unknown, so older generated traces can still compare against imported Linux submit lines. When an expected trace includes `data_hex`, payload comparison is strict.

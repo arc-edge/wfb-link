@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     fs::File,
     io::Write,
@@ -20,7 +21,7 @@ use radio_core::{
     TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison,
     UsbTraceEvent, UsbTraceImport,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use wfb_bridge::{
     build_wfb_data_header, parse_tx_datagram, submit_tx_datagram, RadioTx, RadiotapError,
@@ -122,6 +123,8 @@ enum Command {
     TraceCompare(TraceCompareArgs),
     /// Import Linux usbmon text into normalized USB trace JSON.
     TraceImport(TraceImportArgs),
+    /// Summarize RTL8812AU vendor register writes from Linux usbmon text.
+    TraceRegisters(TraceRegistersArgs),
     /// List staged verification commands and their prerequisites.
     Stages,
 }
@@ -1804,6 +1807,10 @@ struct TxStatusProbeArgs {
     #[arg(long)]
     tx_status: bool,
 
+    /// Add registers from a trace-registers final map JSON file to the TX status snapshot.
+    #[arg(long = "tx-status-registers-from", value_name = "PATH")]
+    tx_status_registers_from: Vec<PathBuf>,
+
     /// Delay after TX submission before reading post-TX status registers.
     #[arg(long, default_value_t = DEFAULT_TX_STATUS_DELAY_MS)]
     tx_status_delay_ms: u64,
@@ -1821,6 +1828,7 @@ impl Default for TxStatusProbeArgs {
     fn default() -> Self {
         Self {
             tx_status: false,
+            tx_status_registers_from: Vec::new(),
             tx_status_delay_ms: DEFAULT_TX_STATUS_DELAY_MS,
             tx_status_poll_ms: 0,
             tx_status_poll_count: 0,
@@ -1848,6 +1856,29 @@ struct TraceImportArgs {
     /// JSON output path for normalized USB trace events.
     #[arg(long, value_name = "PATH")]
     output: PathBuf,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct TraceRegistersArgs {
+    /// Linux usbmon text file.
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Optional JSON output path for final per-register write state.
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// Include every register write in the report instead of only the final map.
+    #[arg(long)]
+    include_writes: bool,
+
+    /// Lowest register address to include.
+    #[arg(long, value_parser = parse_u16, value_name = "ADDR")]
+    min_address: Option<u16>,
+
+    /// Highest register address to include.
+    #[arg(long, value_parser = parse_u16, value_name = "ADDR")]
+    max_address: Option<u16>,
 }
 
 fn main() -> Result<()> {
@@ -2212,6 +2243,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::TraceRegisters(args) => {
+            let report = trace_registers_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_trace_registers_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::Stages => {
             let report = stages_report();
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -2428,6 +2469,8 @@ struct TxStatusProbeReport {
     delay_ms: u64,
     poll_ms: u64,
     poll_count: u32,
+    register_count: usize,
+    register_source_paths: Vec<PathBuf>,
     semantics: &'static str,
     pre: Vec<TxStatusRegisterReport>,
     post: Vec<TxStatusRegisterReport>,
@@ -2435,6 +2478,8 @@ struct TxStatusProbeReport {
     changed: Vec<TxStatusDeltaReport>,
     counters: DiagnosticCounters,
     error: Option<DiagnosticErrorReport>,
+    #[serde(skip)]
+    registers: Vec<TxStatusRegisterRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2447,7 +2492,7 @@ struct TxStatusSampleReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct TxStatusRegisterReport {
-    name: &'static str,
+    name: String,
     address: u16,
     address_hex: String,
     width: &'static str,
@@ -2457,7 +2502,7 @@ struct TxStatusRegisterReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct TxStatusDeltaReport {
-    name: &'static str,
+    name: String,
     address: u16,
     address_hex: String,
     width: &'static str,
@@ -2847,6 +2892,49 @@ struct TraceImportReport {
     result: DiagnosticResult,
     import: Option<UsbTraceImport>,
     error: Option<DiagnosticErrorReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceRegistersReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    input_path: PathBuf,
+    output_path: Option<PathBuf>,
+    min_address_hex: Option<String>,
+    max_address_hex: Option<String>,
+    result: DiagnosticResult,
+    imported_events: usize,
+    ignored_lines: usize,
+    register_write_count: usize,
+    unique_register_count: usize,
+    final_writes: Vec<TraceRegisterFinalWriteReport>,
+    writes: Option<Vec<TraceRegisterWriteReport>>,
+    error: Option<DiagnosticErrorReport>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TraceRegisterWriteReport {
+    event_index: usize,
+    address: u16,
+    address_hex: String,
+    width: usize,
+    data_hex: String,
+    value_le_hex: String,
+    value_be_hex: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TraceRegisterFinalWriteReport {
+    address: u16,
+    address_hex: String,
+    width: usize,
+    data_hex: String,
+    value_le_hex: String,
+    value_be_hex: String,
+    write_count: usize,
+    last_event_index: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -5605,7 +5693,7 @@ fn add_tx_activity_led_counters(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxStatusRegisterWidth {
     U8,
     U16,
@@ -5635,6 +5723,23 @@ struct TxStatusRegisterSpec {
     name: &'static str,
     address: u16,
     width: TxStatusRegisterWidth,
+}
+
+#[derive(Debug, Clone)]
+struct TxStatusRegisterRequest {
+    name: String,
+    address: u16,
+    width: TxStatusRegisterWidth,
+}
+
+impl From<TxStatusRegisterSpec> for TxStatusRegisterRequest {
+    fn from(spec: TxStatusRegisterSpec) -> Self {
+        Self {
+            name: spec.name.to_string(),
+            address: spec.address,
+            width: spec.width,
+        }
+    }
 }
 
 const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
@@ -5834,6 +5939,26 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
+        name: "REG_RRSR",
+        address: REG_RRSR,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RRSR_2",
+        address: REG_RRSR + 2,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CCK_CHECK_8812",
+        address: REG_CCK_CHECK_8812,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_DATA_SC_8812",
+        address: REG_DATA_SC_8812,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
         name: "REG_TXPAUSE",
         address: REG_TXPAUSE,
         width: TxStatusRegisterWidth::U8,
@@ -5869,6 +5994,11 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U8,
     },
     TxStatusRegisterSpec {
+        name: "REG_WMAC_TRXPTCL_CTL",
+        address: REG_WMAC_TRXPTCL_CTL,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
         name: "REG_RCR",
         address: REG_RCR,
         width: TxStatusRegisterWidth::U32,
@@ -5894,6 +6024,21 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
+        name: "REG_AGC_TABLE_JAGUAR",
+        address: REG_AGC_TABLE_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_PWED_TH_JAGUAR",
+        address: REG_PWED_TH_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_BW_INDICATION_JAGUAR",
+        address: REG_BW_INDICATION_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
         name: "REG_CCA_ON_SEC_JAGUAR",
         address: REG_CCA_ON_SEC_JAGUAR,
         width: TxStatusRegisterWidth::U32,
@@ -5909,8 +6054,33 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
+        name: "REG_ADC_BUF_CLK_JAGUAR",
+        address: REG_ADC_BUF_CLK_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
         name: "REG_CCK_CCA_JAGUAR",
         address: REG_CCK_CCA_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CCK_RX_JAGUAR",
+        address: REG_CCK_RX_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_L1_PEAK_TH_JAGUAR",
+        address: REG_L1_PEAK_TH_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_FC_AREA_JAGUAR",
+        address: REG_FC_AREA_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_ANTSEL_SW_JAGUAR",
+        address: REG_ANTSEL_SW_JAGUAR,
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
@@ -6126,19 +6296,107 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
 ];
 
 fn tx_status_probe_report(args: &TxStatusProbeArgs) -> Option<TxStatusProbeReport> {
-    args.tx_status.then(|| TxStatusProbeReport {
+    tx_status_enabled(args).then(|| {
+        let (registers, error) = tx_status_register_requests(args);
+        TxStatusProbeReport {
         enabled: true,
         delay_ms: args.tx_status_delay_ms,
         poll_ms: args.tx_status_poll_ms,
         poll_count: args.tx_status_poll_count,
+        register_count: registers.len(),
+        register_source_paths: args.tx_status_registers_from.clone(),
         semantics: "read-only RTL8812AU register deltas around USB TX submission; this does not prove RF radiation",
         pre: Vec::new(),
         post: Vec::new(),
         samples: Vec::new(),
         changed: Vec::new(),
         counters: DiagnosticCounters::default(),
-        error: None,
+        error,
+        registers,
+        }
     })
+}
+
+fn tx_status_enabled(args: &TxStatusProbeArgs) -> bool {
+    args.tx_status || !args.tx_status_registers_from.is_empty()
+}
+
+fn tx_status_register_requests(
+    args: &TxStatusProbeArgs,
+) -> (Vec<TxStatusRegisterRequest>, Option<DiagnosticErrorReport>) {
+    let mut requests = TX_STATUS_REGISTERS
+        .iter()
+        .copied()
+        .map(TxStatusRegisterRequest::from)
+        .collect::<Vec<_>>();
+
+    for path in &args.tx_status_registers_from {
+        let input = match fs::read_to_string(path) {
+            Ok(input) => input,
+            Err(error) => {
+                return (
+                    requests,
+                    Some(DiagnosticErrorReport {
+                        code: "tx_status_register_source_read_failed",
+                        message: format!("read {}: {error}", path.display()),
+                    }),
+                );
+            }
+        };
+        let final_writes = match parse_trace_register_final_writes_json(&input) {
+            Ok(final_writes) => final_writes,
+            Err(error) => {
+                return (
+                    requests,
+                    Some(DiagnosticErrorReport {
+                        code: "tx_status_register_source_parse_failed",
+                        message: format!("parse {}: {error}", path.display()),
+                    }),
+                );
+            }
+        };
+        for final_write in final_writes {
+            let Some(width) = tx_status_width_from_trace_width(final_write.width) else {
+                continue;
+            };
+            if requests
+                .iter()
+                .any(|request| request.address == final_write.address && request.width == width)
+            {
+                continue;
+            }
+            requests.push(TxStatusRegisterRequest {
+                name: format!("TRACE_{}", final_write.address_hex),
+                address: final_write.address,
+                width,
+            });
+        }
+    }
+
+    (requests, None)
+}
+
+fn parse_trace_register_final_writes_json(
+    input: &str,
+) -> std::result::Result<Vec<TraceRegisterFinalWriteReport>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct TraceRegisterFinalWriteEnvelope {
+        final_writes: Vec<TraceRegisterFinalWriteReport>,
+    }
+
+    serde_json::from_str::<Vec<TraceRegisterFinalWriteReport>>(input).or_else(|_| {
+        serde_json::from_str::<TraceRegisterFinalWriteEnvelope>(input)
+            .map(|report| report.final_writes)
+    })
+}
+
+fn tx_status_width_from_trace_width(width: usize) -> Option<TxStatusRegisterWidth> {
+    match width {
+        1 => Some(TxStatusRegisterWidth::U8),
+        2 => Some(TxStatusRegisterWidth::U16),
+        4 => Some(TxStatusRegisterWidth::U32),
+        _ => None,
+    }
 }
 
 fn tx_status_total_poll_ms(args: &TxStatusProbeArgs) -> u64 {
@@ -6156,7 +6414,7 @@ fn tx_status_probe_pre<T>(
         if report.error.is_some() {
             return;
         }
-        match tx_status_snapshot(registers, &mut report.counters) {
+        match tx_status_snapshot(registers, &report.registers, &mut report.counters) {
             Ok(snapshot) => report.pre = snapshot,
             Err(error) => report.error = Some(error),
         }
@@ -6176,7 +6434,7 @@ fn tx_status_probe_post<T>(
         if report.delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(report.delay_ms));
         }
-        match tx_status_snapshot(registers, &mut report.counters) {
+        match tx_status_snapshot(registers, &report.registers, &mut report.counters) {
             Ok(snapshot) => {
                 report.changed = tx_status_deltas(&report.pre, &snapshot);
                 report.post = snapshot.clone();
@@ -6185,7 +6443,7 @@ fn tx_status_probe_post<T>(
                     if report.poll_ms > 0 {
                         std::thread::sleep(Duration::from_millis(report.poll_ms));
                     }
-                    match tx_status_snapshot(registers, &mut report.counters) {
+                    match tx_status_snapshot(registers, &report.registers, &mut report.counters) {
                         Ok(sample) => {
                             let changed_from_previous = tx_status_deltas(&previous, &sample);
                             previous = sample.clone();
@@ -6219,21 +6477,22 @@ fn add_tx_status_probe_counters(
 
 fn tx_status_snapshot<T>(
     registers: &Rtl8812auRegisterAccess<T>,
+    specs: &[TxStatusRegisterRequest],
     counters: &mut DiagnosticCounters,
 ) -> std::result::Result<Vec<TxStatusRegisterReport>, DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    TX_STATUS_REGISTERS
+    specs
         .iter()
-        .map(|spec| tx_status_read_register(registers, counters, *spec))
+        .map(|spec| tx_status_read_register(registers, counters, spec))
         .collect()
 }
 
 fn tx_status_read_register<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
-    spec: TxStatusRegisterSpec,
+    spec: &TxStatusRegisterRequest,
 ) -> std::result::Result<TxStatusRegisterReport, DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
@@ -6251,7 +6510,7 @@ where
             .map_err(|error| tx_status_read_error(spec, error))?,
     };
     Ok(TxStatusRegisterReport {
-        name: spec.name,
+        name: spec.name.clone(),
         address: spec.address,
         address_hex: format_address(spec.address),
         width: spec.width.label(),
@@ -6261,7 +6520,7 @@ where
 }
 
 fn tx_status_read_error(
-    spec: TxStatusRegisterSpec,
+    spec: &TxStatusRegisterRequest,
     error: radio_core::Rtl8812auRegisterError,
 ) -> DiagnosticErrorReport {
     DiagnosticErrorReport {
@@ -6282,7 +6541,7 @@ fn tx_status_deltas(
         .zip(post.iter())
         .filter(|(before, after)| before.value != after.value)
         .map(|(before, after)| TxStatusDeltaReport {
-            name: before.name,
+            name: before.name.clone(),
             address: before.address,
             address_hex: before.address_hex.clone(),
             width: before.width,
@@ -16636,7 +16895,7 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
             message: "--tx-led is only valid for live TX commands".to_string(),
         });
     }
-    if args.tx_status.tx_status && args.dry_run && result != DiagnosticResult::Fail {
+    if tx_status_enabled(&args.tx_status) && args.dry_run && result != DiagnosticResult::Fail {
         result = DiagnosticResult::Fail;
         error = Some(DiagnosticErrorReport {
             code: "tx_status_requires_live_tx",
@@ -16653,7 +16912,7 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
             message: format!("--tx-led-hold-ms must be <= {MAX_TX_LED_HOLD_MS}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS
         && result != DiagnosticResult::Fail
     {
@@ -16663,7 +16922,7 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
             message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
         && result != DiagnosticResult::Fail
     {
@@ -16673,7 +16932,7 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
             message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
         && result != DiagnosticResult::Fail
     {
@@ -17174,7 +17433,7 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
             message: format!("--tx-led-hold-ms must be <= {MAX_TX_LED_HOLD_MS}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS
         && result != DiagnosticResult::Fail
     {
@@ -17184,7 +17443,7 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
             message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
         && result != DiagnosticResult::Fail
     {
@@ -17194,7 +17453,7 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
             message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
         });
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
         && result != DiagnosticResult::Fail
     {
@@ -18172,7 +18431,9 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             },
         );
     }
-    if args.tx_status.tx_status && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS {
+    if tx_status_enabled(&args.tx_status)
+        && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS
+    {
         return bridge_tx_listen_failure(
             report,
             "argument_validation",
@@ -18183,7 +18444,9 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             },
         );
     }
-    if args.tx_status.tx_status && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT {
+    if tx_status_enabled(&args.tx_status)
+        && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
+    {
         return bridge_tx_listen_failure(
             report,
             "argument_validation",
@@ -18194,7 +18457,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             },
         );
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
     {
         return bridge_tx_listen_failure(
@@ -20337,7 +20600,9 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             },
         );
     }
-    if args.tx_status.tx_status && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS {
+    if tx_status_enabled(&args.tx_status)
+        && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS
+    {
         return bridge_tx_bench_failure(
             report,
             "argument_validation",
@@ -20348,7 +20613,9 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             },
         );
     }
-    if args.tx_status.tx_status && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT {
+    if tx_status_enabled(&args.tx_status)
+        && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
+    {
         return bridge_tx_bench_failure(
             report,
             "argument_validation",
@@ -20359,7 +20626,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             },
         );
     }
-    if args.tx_status.tx_status
+    if tx_status_enabled(&args.tx_status)
         && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
     {
         return bridge_tx_bench_failure(
@@ -23669,6 +23936,230 @@ fn trace_import_report(args: TraceImportArgs) -> TraceImportReport {
     }
 }
 
+fn trace_registers_report(args: TraceRegistersArgs) -> TraceRegistersReport {
+    let started_at_unix_ms = started_at_unix_ms();
+    let platform = platform_info();
+    let min_address_hex = args.min_address.map(|address| format!("0x{address:04x}"));
+    let max_address_hex = args.max_address.map(|address| format!("0x{address:04x}"));
+
+    let input = match fs::read_to_string(&args.input) {
+        Ok(input) => input,
+        Err(error) => {
+            return TraceRegistersReport {
+                schema_version: 1,
+                command: "trace-registers",
+                started_at_unix_ms,
+                platform,
+                input_path: args.input,
+                output_path: args.output,
+                min_address_hex,
+                max_address_hex,
+                result: DiagnosticResult::Fail,
+                imported_events: 0,
+                ignored_lines: 0,
+                register_write_count: 0,
+                unique_register_count: 0,
+                final_writes: Vec::new(),
+                writes: None,
+                error: Some(DiagnosticErrorReport {
+                    code: "trace_input_read_failed",
+                    message: error.to_string(),
+                }),
+            };
+        }
+    };
+
+    let imported = import_usbmon_text(&input);
+    if !imported.errors.is_empty() {
+        return TraceRegistersReport {
+            schema_version: 1,
+            command: "trace-registers",
+            started_at_unix_ms,
+            platform,
+            input_path: args.input,
+            output_path: args.output,
+            min_address_hex,
+            max_address_hex,
+            result: DiagnosticResult::Fail,
+            imported_events: imported.events.len(),
+            ignored_lines: imported.ignored_lines,
+            register_write_count: 0,
+            unique_register_count: 0,
+            final_writes: Vec::new(),
+            writes: None,
+            error: Some(DiagnosticErrorReport {
+                code: "trace_import_failed",
+                message: "usbmon text contained malformed recognized transfer lines".to_string(),
+            }),
+        };
+    }
+
+    let mut writes = Vec::new();
+    let mut final_by_address: BTreeMap<u16, (usize, TraceRegisterWriteReport)> = BTreeMap::new();
+    for (event_index, event) in imported.events.iter().enumerate() {
+        let Some(write) =
+            trace_register_write_from_event(event_index, event, args.min_address, args.max_address)
+        else {
+            continue;
+        };
+        final_by_address
+            .entry(write.address)
+            .and_modify(|(count, final_write)| {
+                *count += 1;
+                *final_write = write.clone();
+            })
+            .or_insert_with(|| (1, write.clone()));
+        writes.push(write);
+    }
+
+    let final_writes = final_by_address
+        .into_iter()
+        .map(
+            |(_address, (write_count, write))| TraceRegisterFinalWriteReport {
+                address: write.address,
+                address_hex: write.address_hex,
+                width: write.width,
+                data_hex: write.data_hex,
+                value_le_hex: write.value_le_hex,
+                value_be_hex: write.value_be_hex,
+                write_count,
+                last_event_index: write.event_index,
+            },
+        )
+        .collect::<Vec<_>>();
+
+    if let Some(path) = &args.output {
+        match serde_json::to_string_pretty(&final_writes) {
+            Ok(output_json) => {
+                if let Err(error) = fs::write(path, output_json) {
+                    return TraceRegistersReport {
+                        schema_version: 1,
+                        command: "trace-registers",
+                        started_at_unix_ms,
+                        platform,
+                        input_path: args.input,
+                        output_path: args.output,
+                        min_address_hex,
+                        max_address_hex,
+                        result: DiagnosticResult::Fail,
+                        imported_events: imported.events.len(),
+                        ignored_lines: imported.ignored_lines,
+                        register_write_count: writes.len(),
+                        unique_register_count: final_writes.len(),
+                        final_writes,
+                        writes: args.include_writes.then_some(writes),
+                        error: Some(DiagnosticErrorReport {
+                            code: "trace_register_output_write_failed",
+                            message: error.to_string(),
+                        }),
+                    };
+                }
+            }
+            Err(error) => {
+                return TraceRegistersReport {
+                    schema_version: 1,
+                    command: "trace-registers",
+                    started_at_unix_ms,
+                    platform,
+                    input_path: args.input,
+                    output_path: args.output,
+                    min_address_hex,
+                    max_address_hex,
+                    result: DiagnosticResult::Fail,
+                    imported_events: imported.events.len(),
+                    ignored_lines: imported.ignored_lines,
+                    register_write_count: writes.len(),
+                    unique_register_count: final_writes.len(),
+                    final_writes,
+                    writes: args.include_writes.then_some(writes),
+                    error: Some(DiagnosticErrorReport {
+                        code: "trace_register_output_encode_failed",
+                        message: error.to_string(),
+                    }),
+                };
+            }
+        }
+    }
+
+    TraceRegistersReport {
+        schema_version: 1,
+        command: "trace-registers",
+        started_at_unix_ms,
+        platform,
+        input_path: args.input,
+        output_path: args.output,
+        min_address_hex,
+        max_address_hex,
+        result: DiagnosticResult::Pass,
+        imported_events: imported.events.len(),
+        ignored_lines: imported.ignored_lines,
+        register_write_count: writes.len(),
+        unique_register_count: final_writes.len(),
+        final_writes,
+        writes: args.include_writes.then_some(writes),
+        error: None,
+    }
+}
+
+fn trace_register_write_from_event(
+    event_index: usize,
+    event: &UsbTraceEvent,
+    min_address: Option<u16>,
+    max_address: Option<u16>,
+) -> Option<TraceRegisterWriteReport> {
+    if event.kind != radio_core::UsbTraceKind::ControlWrite
+        || event.request_type != Some(0x40)
+        || event.request != Some(0x05)
+        || event.index != Some(0)
+    {
+        return None;
+    }
+    let address = event.value?;
+    if min_address.is_some_and(|min_address| address < min_address)
+        || max_address.is_some_and(|max_address| address > max_address)
+    {
+        return None;
+    }
+    let width = event.length?;
+    if !matches!(width, 1 | 2 | 4) {
+        return None;
+    }
+    let data_hex = event.data_hex.as_ref()?;
+    let data = parse_hex_bytes(data_hex).ok()?;
+    if data.len() != width {
+        return None;
+    }
+
+    let value_le = trace_value_le(&data);
+    let value_be = trace_value_be(&data);
+    Some(TraceRegisterWriteReport {
+        event_index,
+        address,
+        address_hex: format!("0x{address:04x}"),
+        width,
+        data_hex: data_hex.clone(),
+        value_le_hex: trace_value_hex(value_le, width),
+        value_be_hex: trace_value_hex(value_be, width),
+    })
+}
+
+fn trace_value_le(bytes: &[u8]) -> u32 {
+    bytes.iter().enumerate().fold(0u32, |value, (idx, byte)| {
+        value | (u32::from(*byte) << (idx * 8))
+    })
+}
+
+fn trace_value_be(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0u32, |value, byte| (value << 8) | u32::from(*byte))
+}
+
+fn trace_value_hex(value: u32, width_bytes: usize) -> String {
+    let width = width_bytes * 2;
+    format!("0x{value:0width$x}")
+}
+
 fn read_trace_events(path: &Path) -> std::result::Result<Vec<UsbTraceEvent>, String> {
     let data =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
@@ -25973,6 +26464,45 @@ fn print_trace_import_human(report: &TraceImportReport) {
     }
 }
 
+fn print_trace_registers_human(report: &TraceRegistersReport) {
+    println!("Trace registers: {}", report.result.as_str());
+    println!("Input: {}", report.input_path.display());
+    if let Some(path) = &report.output_path {
+        println!("Final register map out: {}", path.display());
+    }
+    println!(
+        "Events: imported={} ignored_lines={}",
+        report.imported_events, report.ignored_lines
+    );
+    println!(
+        "Register writes: total={} unique={}",
+        report.register_write_count, report.unique_register_count
+    );
+    if !report.final_writes.is_empty() {
+        println!("Final writes:");
+        for write in report.final_writes.iter().take(40) {
+            println!(
+                "- {} width={} data={} le={} writes={} last_event={}",
+                write.address_hex,
+                write.width,
+                write.data_hex,
+                write.value_le_hex,
+                write.write_count,
+                write.last_event_index
+            );
+        }
+        if report.final_writes.len() > 40 {
+            println!(
+                "- ... {} more registers",
+                report.final_writes.len().saturating_sub(40)
+            );
+        }
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26555,7 +27085,7 @@ mod tests {
     fn tx_status_deltas_report_only_changed_registers() {
         let before = vec![
             TxStatusRegisterReport {
-                name: "REG_A",
+                name: "REG_A".to_string(),
                 address: 0x0010,
                 address_hex: "0x0010".to_string(),
                 width: "u8",
@@ -26563,7 +27093,7 @@ mod tests {
                 value_hex: "0x12".to_string(),
             },
             TxStatusRegisterReport {
-                name: "REG_B",
+                name: "REG_B".to_string(),
                 address: 0x0020,
                 address_hex: "0x0020".to_string(),
                 width: "u16",
@@ -26573,7 +27103,7 @@ mod tests {
         ];
         let after = vec![
             TxStatusRegisterReport {
-                name: "REG_A",
+                name: "REG_A".to_string(),
                 address: 0x0010,
                 address_hex: "0x0010".to_string(),
                 width: "u8",
@@ -26581,7 +27111,7 @@ mod tests {
                 value_hex: "0x12".to_string(),
             },
             TxStatusRegisterReport {
-                name: "REG_B",
+                name: "REG_B".to_string(),
                 address: 0x0020,
                 address_hex: "0x0020".to_string(),
                 width: "u16",
@@ -26595,6 +27125,64 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].name, "REG_B");
         assert_eq!(deltas[0].xor_hex, "0x0001");
+    }
+
+    #[test]
+    fn tx_status_register_source_merges_trace_final_writes() {
+        let stamp = started_at_unix_ms();
+        let input_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-tx-status-registers-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &input_path,
+            r#"[
+  {
+    "address": 3232,
+    "address_hex": "0x0ca0",
+    "width": 4,
+    "data_hex": "407d8101",
+    "value_le_hex": "0x01817d40",
+    "value_be_hex": "0x407d8101",
+    "write_count": 1,
+    "last_event_index": 7
+  },
+  {
+    "address": 3248,
+    "address_hex": "0x0cb0",
+    "width": 4,
+    "data_hex": "17773354",
+    "value_le_hex": "0x54337717",
+    "value_be_hex": "0x17773354",
+    "write_count": 2,
+    "last_event_index": 8
+  }
+]"#,
+        )
+        .expect("write trace registers");
+
+        let (requests, error) = tx_status_register_requests(&TxStatusProbeArgs {
+            tx_status_registers_from: vec![input_path.clone()],
+            ..TxStatusProbeArgs::default()
+        });
+        let _ = fs::remove_file(input_path);
+
+        assert!(error.is_none());
+        assert!(requests.iter().any(|request| {
+            request.name == "TRACE_0x0ca0"
+                && request.address == 0x0ca0
+                && request.width == TxStatusRegisterWidth::U32
+        }));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.address == REG_RFE_PINMUX_A_JAGUAR
+                        && request.width == TxStatusRegisterWidth::U32
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -27075,6 +27663,55 @@ ffff 1 S Bi:1:004:1 -115 512 <
         assert_eq!(report.result, DiagnosticResult::Pass);
         assert!(output.contains("\"control_write\""));
         assert!(output.contains("\"bulk_in\""));
+    }
+
+    #[test]
+    fn trace_registers_reports_final_register_payloads() {
+        let stamp = started_at_unix_ms();
+        let input_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-reg-usbmon-{}-{stamp}.txt",
+            std::process::id()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-reg-usbmon-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &input_path,
+            "\
+ffff 0 S Co:1:004:0 s 40 05 0cb0 0000 0004 4 = 77775477
+ffff 1 S Co:1:004:0 s 40 05 0cb0 0000 0004 4 = 17773354
+ffff 2 S Co:1:004:0 s 40 05 0002 0000 00c4 196 = 00112233
+ffff 3 S Bo:1:004:2 -115 64 = 01020304
+",
+        )
+        .expect("write usbmon");
+
+        let report = trace_registers_report(TraceRegistersArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+            include_writes: true,
+            min_address: Some(0x0c00),
+            max_address: Some(0x0fff),
+        });
+
+        let output = fs::read_to_string(&output_path).expect("output");
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(report.register_write_count, 2);
+        assert_eq!(report.unique_register_count, 1);
+        assert_eq!(report.final_writes[0].address_hex, "0x0cb0");
+        assert_eq!(report.final_writes[0].data_hex, "17773354");
+        assert_eq!(report.final_writes[0].value_le_hex, "0x54337717");
+        assert_eq!(report.final_writes[0].value_be_hex, "0x17773354");
+        assert_eq!(report.final_writes[0].write_count, 2);
+        assert!(report
+            .writes
+            .as_ref()
+            .is_some_and(|writes| writes.len() == 2));
+        assert!(output.contains("\"address_hex\": \"0x0cb0\""));
     }
 
     #[test]
