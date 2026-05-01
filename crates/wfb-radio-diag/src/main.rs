@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use radio_core::rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE};
@@ -4449,6 +4452,7 @@ const DEFAULT_TX_STATUS_DELAY_MS: u64 = 50;
 const MAX_TX_STATUS_DELAY_MS: u64 = 60_000;
 const MAX_TX_STATUS_POLL_COUNT: u32 = 64;
 const MAX_TX_STATUS_TOTAL_POLL_MS: u64 = 60_000;
+const BRIDGE_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 const RTL8812_MAX_H2C_BOX_NUMS: u8 = 4;
 const RTL8812_MESSAGE_BOX_SIZE: u16 = 4;
 const RTL8812_EX_MESSAGE_BOX_SIZE: u16 = 4;
@@ -19838,6 +19842,14 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             );
         }
     };
+    if let Err(error) = configure_bridge_tx_socket(&socket, args.bind) {
+        return bridge_tx_listen_failure(
+            report,
+            "socket_bind",
+            "failed to configure bridge TX UDP listener receive buffer",
+            error,
+        );
+    }
     if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(args.idle_timeout_ms))) {
         return bridge_tx_listen_failure(
             report,
@@ -20509,6 +20521,44 @@ struct BridgeRunTxSocket {
     report_index: usize,
 }
 
+#[cfg(unix)]
+fn set_udp_receive_buffer(socket: &UdpSocket, bytes: usize) -> std::io::Result<()> {
+    let value: libc::c_int = bytes.try_into().unwrap_or(libc::c_int::MAX);
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn set_udp_receive_buffer(_socket: &UdpSocket, _bytes: usize) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn configure_bridge_tx_socket(
+    socket: &UdpSocket,
+    bind_addr: SocketAddr,
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    set_udp_receive_buffer(socket, BRIDGE_TX_SOCKET_RCVBUF_BYTES).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "udp_rcvbuf_config_failed",
+            message: format!(
+                "failed to configure {bind_addr} receive buffer to {BRIDGE_TX_SOCKET_RCVBUF_BYTES} bytes: {error}"
+            ),
+        }
+    })
+}
+
 fn bridge_run_bind_addrs(args: &BridgeRunArgs) -> Vec<SocketAddr> {
     let mut bind_addrs = Vec::with_capacity(args.tx_binds.len() + 1);
     bind_addrs.push(args.tx.bind);
@@ -20526,6 +20576,7 @@ fn bridge_run_bind_tx_sockets(
             code: "udp_bind_failed",
             message: format!("failed to bind {bind_addr}: {error}"),
         })?;
+        configure_bridge_tx_socket(&socket, bind_addr)?;
         socket
             .set_nonblocking(true)
             .map_err(|error| DiagnosticErrorReport {
