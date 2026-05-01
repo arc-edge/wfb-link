@@ -101,6 +101,13 @@ mod tests {
             data,
             rssi_dbm: -47,
             channel: Channel::from_number(149).expect("channel"),
+            rx_rate_raw: 0x0d,
+            rx_rate: Some(radio_core::TxRate::Mcs(1)),
+            rx_bandwidth_raw: 0,
+            rx_bandwidth: Some(radio_core::Bandwidth::Mhz20),
+            short_gi: false,
+            ldpc: false,
+            stbc: false,
             crc_error: false,
         }
     }

@@ -170,6 +170,13 @@ pub struct RxFrame {
     pub data: Vec<u8>,
     pub rssi_dbm: i8,
     pub channel: Channel,
+    pub rx_rate_raw: u8,
+    pub rx_rate: Option<TxRate>,
+    pub rx_bandwidth_raw: u8,
+    pub rx_bandwidth: Option<Bandwidth>,
+    pub short_gi: bool,
+    pub ldpc: bool,
+    pub stbc: bool,
     pub crc_error: bool,
 }
 
@@ -420,11 +427,15 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
     }
 
     let dw0 = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let dw3 = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let dw4 = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
     let packet_len = (dw0 & 0x3fff) as usize;
     let crc_error = ((dw0 >> 14) & 1) != 0;
     let drvinfo_size = ((dw0 >> 16) & 0x0f) as usize * 8;
     let shift = ((dw0 >> 24) & 0x03) as usize;
     let phy_status = ((dw0 >> 26) & 1) != 0;
+    let rx_rate_raw = (dw3 & 0x7f) as u8;
+    let rx_bandwidth_raw = ((dw4 >> 4) & 0x03) as u8;
 
     if packet_len == 0 || packet_len > 4096 {
         return ParsedRxPacket {
@@ -468,8 +479,50 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
             data: buf[data_start..data_start + frame_len].to_vec(),
             rssi_dbm,
             channel,
+            rx_rate_raw,
+            rx_rate: rx_rate_from_hw(rx_rate_raw),
+            rx_bandwidth_raw,
+            rx_bandwidth: rx_bandwidth_from_raw(rx_bandwidth_raw),
+            short_gi: (dw4 & 1) != 0,
+            ldpc: ((dw4 >> 1) & 1) != 0,
+            stbc: ((dw4 >> 2) & 1) != 0,
             crc_error,
         }),
+    }
+}
+
+fn rx_rate_from_hw(raw: u8) -> Option<TxRate> {
+    match raw {
+        0x00 => Some(TxRate::Cck1m),
+        0x01 => Some(TxRate::Cck2m),
+        0x02 => Some(TxRate::Cck5_5m),
+        0x03 => Some(TxRate::Cck11m),
+        0x04 => Some(TxRate::Ofdm6m),
+        0x05 => Some(TxRate::Ofdm9m),
+        0x06 => Some(TxRate::Ofdm12m),
+        0x07 => Some(TxRate::Ofdm18m),
+        0x08 => Some(TxRate::Ofdm24m),
+        0x09 => Some(TxRate::Ofdm36m),
+        0x0a => Some(TxRate::Ofdm48m),
+        0x0b => Some(TxRate::Ofdm54m),
+        0x0c..=0x2b => Some(TxRate::Mcs(raw - 0x0c)),
+        0x2c..=0x53 => {
+            let index = raw - 0x2c;
+            Some(TxRate::Vht {
+                mcs: index % 10,
+                nss: (index / 10) + 1,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn rx_bandwidth_from_raw(raw: u8) -> Option<Bandwidth> {
+    match raw {
+        0 => Some(Bandwidth::Mhz20),
+        1 => Some(Bandwidth::Mhz40),
+        2 => Some(Bandwidth::Mhz80),
+        _ => None,
     }
 }
 
@@ -1184,6 +1237,10 @@ mod tests {
         let mut bulk = vec![0u8; RX_DESC_SIZE + payload.len()];
         let dw0 = payload.len() as u32;
         bulk[0..4].copy_from_slice(&dw0.to_le_bytes());
+        let dw3 = 0x0d_u32;
+        let dw4 = 0x17_u32;
+        bulk[12..16].copy_from_slice(&dw3.to_le_bytes());
+        bulk[16..20].copy_from_slice(&dw4.to_le_bytes());
         bulk[RX_DESC_SIZE..RX_DESC_SIZE + payload.len()].copy_from_slice(&payload);
 
         let parsed = parse_rx_packet(&bulk, channel);
@@ -1193,6 +1250,13 @@ mod tests {
         let rx = parsed.frame.expect("frame");
         assert_eq!(rx.data, frame);
         assert_eq!(rx.rssi_dbm, -80);
+        assert_eq!(rx.rx_rate_raw, 0x0d);
+        assert_eq!(rx.rx_rate, Some(TxRate::Mcs(1)));
+        assert_eq!(rx.rx_bandwidth_raw, 1);
+        assert_eq!(rx.rx_bandwidth, Some(Bandwidth::Mhz40));
+        assert!(rx.short_gi);
+        assert!(rx.ldpc);
+        assert!(rx.stbc);
         assert!(!rx.crc_error);
     }
 

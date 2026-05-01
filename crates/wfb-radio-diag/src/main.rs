@@ -2798,6 +2798,14 @@ struct RxFrameJsonRecord {
     channel: Channel,
     frequency_mhz: u16,
     band: Band,
+    rx_rate_raw: u8,
+    rx_rate_raw_hex: String,
+    rx_rate: Option<TxRate>,
+    rx_bandwidth_raw: u8,
+    rx_bandwidth_mhz: Option<u16>,
+    short_gi: bool,
+    ldpc: bool,
+    stbc: bool,
     frame_type: String,
     frame_hex: String,
 }
@@ -17980,6 +17988,14 @@ fn write_rx_frame_record(
         channel,
         frequency_mhz: channel.frequency_mhz,
         band: channel.band,
+        rx_rate_raw: frame.rx_rate_raw,
+        rx_rate_raw_hex: format!("0x{:02x}", frame.rx_rate_raw),
+        rx_rate: frame.rx_rate,
+        rx_bandwidth_raw: frame.rx_bandwidth_raw,
+        rx_bandwidth_mhz: frame.rx_bandwidth.map(|bandwidth| bandwidth.mhz()),
+        short_gi: frame.short_gi,
+        ldpc: frame.ldpc,
+        stbc: frame.stbc,
         frame_type,
         frame_hex: encode_hex(&frame.data),
     };
@@ -31235,6 +31251,10 @@ mod tests {
         assert!(pcap_len > 24);
         assert!(frame_jsonl.contains("\"frame_type\":\"Data\""));
         assert!(frame_jsonl.contains("\"rssi_dbm\":-80"));
+        assert!(frame_jsonl.contains("\"rx_rate_raw\":13"));
+        assert!(frame_jsonl.contains("\"rx_rate\":{\"mcs\":1}"));
+        assert!(frame_jsonl.contains("\"rx_bandwidth_mhz\":40"));
+        assert!(frame_jsonl.contains("\"short_gi\":true"));
     }
 
     #[test]
@@ -31855,6 +31875,8 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         let mut bulk = vec![0u8; RX_ALIGNMENT];
         let dw0 = payload.len() as u32;
         bulk[0..4].copy_from_slice(&dw0.to_le_bytes());
+        bulk[12..16].copy_from_slice(&0x0d_u32.to_le_bytes());
+        bulk[16..20].copy_from_slice(&0x11_u32.to_le_bytes());
         bulk[RX_DESC_SIZE..RX_DESC_SIZE + payload.len()].copy_from_slice(&payload);
         bulk
     }
