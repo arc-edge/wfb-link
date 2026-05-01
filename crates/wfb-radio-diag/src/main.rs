@@ -21240,6 +21240,9 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 report.rx.read_timeouts += 1;
             }
             Err(error) => {
+                if BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst) {
+                    break "signal";
+                }
                 bridge_run_update_counters(
                     &mut report,
                     pre_counters,
