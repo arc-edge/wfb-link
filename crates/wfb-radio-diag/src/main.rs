@@ -1401,6 +1401,9 @@ struct BridgeTxListenArgs {
     #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
     rfe_type: u8,
 
+    #[command(flatten)]
+    tx_power: TxPowerControlArgs,
+
     /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
     #[arg(long)]
     clear_txdma_status_before_tx: bool,
@@ -1719,6 +1722,9 @@ struct BridgeTxBenchArgs {
     #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
     rfe_type: u8,
 
+    #[command(flatten)]
+    tx_power: TxPowerControlArgs,
+
     /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
     #[arg(long)]
     clear_txdma_status_before_tx: bool,
@@ -1812,6 +1818,31 @@ struct BridgeTxBenchArgs {
 
     #[command(flatten)]
     macos_usbhost: MacosUsbHostArgs,
+}
+
+#[derive(Debug, Parser, Clone, Copy, Default)]
+struct TxPowerControlArgs {
+    /// Explicit RTL8812AU TXAGC power index to write to all per-rate TX power registers.
+    #[arg(long, value_parser = parse_tx_power_index)]
+    tx_power_index: Option<u8>,
+
+    /// RF path set affected by --tx-power-index.
+    #[arg(long, value_enum, default_value = "both")]
+    tx_power_path: TxPowerPathArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum TxPowerPathArg {
+    A,
+    B,
+    Both,
+}
+
+impl Default for TxPowerPathArg {
+    fn default() -> Self {
+        Self::Both
+    }
 }
 
 impl BridgeTxBenchArgs {
@@ -2806,6 +2837,7 @@ struct BridgeTxListenReport {
     bulk_out_endpoint_hex: Option<String>,
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    tx_power_control: Option<TxPowerControlReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
@@ -2849,6 +2881,7 @@ struct BridgeRunReport {
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
     monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    tx_power_control: Option<TxPowerControlReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
@@ -2973,6 +3006,7 @@ struct BridgeTxBenchReport {
     monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
     fw_media_status_report: Option<BridgeTxBenchH2cReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    tx_power_control: Option<TxPowerControlReport>,
     txdma_offset_check_write: Option<BridgeTxBenchRegisterClearReport>,
     cr_write: Option<BridgeTxBenchRegisterClearReport>,
     trxdma_ctrl_write: Option<BridgeTxBenchRegisterClearReport>,
@@ -2999,6 +3033,18 @@ struct BridgeTxBenchLocalMacReport {
     written: String,
     after: String,
     counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct TxPowerControlReport {
+    semantics: &'static str,
+    index: u8,
+    index_hex: String,
+    path: TxPowerPathArg,
+    register_count: usize,
+    value: u32,
+    value_hex: String,
+    writes: Vec<BridgeTxBenchRegisterClearReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -12696,6 +12742,97 @@ where
     Ok(())
 }
 
+type TxPowerAgcRegister = (&'static str, u16);
+
+const TX_POWER_AGC_PATH_A_REGISTERS: &[TxPowerAgcRegister] = &[
+    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR),
+    ("rA_TxAGC_OFDM18_OFDM6", REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR),
+    ("rA_TxAGC_OFDM54_OFDM24", REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR),
+    ("rA_TxAGC_MCS3_MCS0", REG_TX_AGC_A_MCS3_MCS0_JAGUAR),
+    ("rA_TxAGC_MCS7_MCS4", REG_TX_AGC_A_MCS7_MCS4_JAGUAR),
+    ("rA_TxAGC_NSS1_7_NSS1_4", REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR),
+    (
+        "rA_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+    ),
+    ("rA_TxAGC_NSS1_3_NSS1_0", REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR),
+    ("rA_TxAGC_NSS2_3_NSS2_0", REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR),
+    ("rA_TxAGC_NSS2_7_NSS2_4", REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR),
+    (
+        "rA_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+    ),
+    ("rA_TxAGC_NSS3_3_NSS3_0", REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR),
+];
+
+const TX_POWER_AGC_PATH_B_REGISTERS: &[TxPowerAgcRegister] = &[
+    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR),
+    ("rB_TxAGC_OFDM18_OFDM6", REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR),
+    ("rB_TxAGC_OFDM54_OFDM24", REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR),
+    ("rB_TxAGC_MCS3_MCS0", REG_TX_AGC_B_MCS3_MCS0_JAGUAR),
+    ("rB_TxAGC_MCS7_MCS4", REG_TX_AGC_B_MCS7_MCS4_JAGUAR),
+    ("rB_TxAGC_NSS1_7_NSS1_4", REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR),
+    (
+        "rB_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+    ),
+    ("rB_TxAGC_NSS1_3_NSS1_0", REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR),
+    ("rB_TxAGC_NSS2_3_NSS2_0", REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR),
+    ("rB_TxAGC_NSS2_7_NSS2_4", REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR),
+    (
+        "rB_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+    ),
+    ("rB_TxAGC_NSS3_3_NSS3_0", REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR),
+];
+
+fn tx_power_agc_value(index: u8) -> u32 {
+    u32::from(index) * 0x0101_0101
+}
+
+fn tx_power_agc_registers(path: TxPowerPathArg) -> Vec<TxPowerAgcRegister> {
+    match path {
+        TxPowerPathArg::A => TX_POWER_AGC_PATH_A_REGISTERS.to_vec(),
+        TxPowerPathArg::B => TX_POWER_AGC_PATH_B_REGISTERS.to_vec(),
+        TxPowerPathArg::Both => TX_POWER_AGC_PATH_A_REGISTERS
+            .iter()
+            .chain(TX_POWER_AGC_PATH_B_REGISTERS.iter())
+            .copied()
+            .collect(),
+    }
+}
+
+fn apply_tx_power_control<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    args: &TxPowerControlArgs,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Option<TxPowerControlReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let Some(index) = args.tx_power_index else {
+        return Ok(None);
+    };
+    let value = tx_power_agc_value(index);
+    let mut writes = Vec::new();
+    for (name, address) in tx_power_agc_registers(args.tx_power_path) {
+        writes.push(bridge_tx_bench_write32_register(
+            registers, name, address, value, counters,
+        )?);
+    }
+
+    Ok(Some(TxPowerControlReport {
+        semantics: "explicit diagnostic TXAGC override; writes the selected index to every byte lane of each selected per-rate TX power register after init and before TX",
+        index,
+        index_hex: format_value(index, 2),
+        path: args.tx_power_path,
+        register_count: writes.len(),
+        value,
+        value_hex: format_value(value, 8),
+        writes,
+    }))
+}
+
 fn data_secondary_channel_setting(
     channel: Channel,
     bandwidth: Bandwidth,
@@ -16659,6 +16796,7 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         type_apa: args.type_apa,
         crystal_cap: args.crystal_cap,
         rfe_type: args.rfe_type,
+        tx_power: TxPowerControlArgs::default(),
         clear_txdma_status_before_tx: false,
         txdma_status_clear_value: 0,
         txdma_offset_check_value: None,
@@ -16736,6 +16874,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         type_apa: args.type_apa,
         crystal_cap: args.crystal_cap,
         rfe_type: args.rfe_type,
+        tx_power: args.tx_power,
         clear_txdma_status_before_tx: args.clear_txdma_status_before_tx,
         txdma_status_clear_value: args.txdma_status_clear_value,
         txdma_offset_check_value: None,
@@ -19601,6 +19740,25 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if args.tx_power.tx_power_index.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_power_control(&registers, &args.tx_power, &mut pre_tx_counters) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge TX listener explicit TXAGC power-index override failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
     let mut tx_status = tx_status_probe_report(&args.tx_status);
@@ -19832,7 +19990,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         frame_bytes,
     );
     report.result = DiagnosticResult::Pass;
-    report.phases = vec![
+    let mut phases = vec![
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
@@ -19848,12 +20006,35 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             status: DiagnosticPhaseStatus::Completed,
             detail: claim_detail,
         },
-        DiagnosticPhase {
-            id: "bridge_listen",
-            status: DiagnosticPhaseStatus::Completed,
-            detail: "received bounded UDP datagrams and submitted them through live radio TX",
-        },
     ];
+    if args.init_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "init_before_tx",
+            status: DiagnosticPhaseStatus::Completed,
+            detail:
+                "completed full RTL8812AU init inside the retained bridge TX listener USB session",
+        });
+    }
+    if args.clear_txdma_status_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "clear_txdma_status",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "wrote REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment",
+        });
+    }
+    if report.tx_power_control.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "tx_power_control",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit TXAGC power-index override before the TX loop",
+        });
+    }
+    phases.push(DiagnosticPhase {
+        id: "bridge_listen",
+        status: DiagnosticPhaseStatus::Completed,
+        detail: "received bounded UDP datagrams and submitted them through live radio TX",
+    });
+    report.phases = phases;
     report.notes = if args.init_before_tx {
         vec![
             "live bridge TX listener ran same-session RTL8812AU init before accepting datagrams",
@@ -19893,6 +20074,7 @@ fn bridge_tx_listen_base_report(
         bulk_out_endpoint_hex: None,
         same_session_init: None,
         txdma_status_clear: None,
+        tx_power_control: None,
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
@@ -20259,6 +20441,25 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
+    if args.tx.tx_power.tx_power_index.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match apply_tx_power_control(&registers, &args.tx.tx_power, &mut pre_counters) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge run explicit TXAGC power-index override failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
     let tx_sockets = match bridge_run_bind_tx_sockets(&args) {
         Ok(sockets) => sockets,
         Err(error) => {
@@ -20561,7 +20762,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         frame_bytes,
     );
     report.result = DiagnosticResult::Pass;
-    report.phases = vec![
+    let mut phases = vec![
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
@@ -20572,11 +20773,33 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             status: DiagnosticPhaseStatus::Completed,
             detail: claim_detail,
         },
-        DiagnosticPhase {
-            id: "monitor_opmode",
+    ];
+    phases.push(DiagnosticPhase {
+        id: "init_before_tx",
+        status: DiagnosticPhaseStatus::Completed,
+        detail: "completed full RTL8812AU init inside the retained bridge-run USB session",
+    });
+    phases.push(DiagnosticPhase {
+        id: "monitor_opmode",
+        status: DiagnosticPhaseStatus::Completed,
+        detail: "set monitor receive filtering while preserving MAC station state",
+    });
+    if args.tx.clear_txdma_status_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "clear_txdma_status",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "set monitor receive filtering while preserving MAC station state",
-        },
+            detail:
+                "wrote REG_TXDMA_STATUS before the bridge run as a guarded TXDMA-clear experiment",
+        });
+    }
+    if report.tx_power_control.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "tx_power_control",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit TXAGC power-index override before RX/TX loops",
+        });
+    }
+    phases.extend([
         DiagnosticPhase {
             id: "socket_bind",
             status: DiagnosticPhaseStatus::Completed,
@@ -20587,7 +20810,8 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             status: DiagnosticPhaseStatus::Completed,
             detail: "ran bounded interleaved RX forwarding and TX injection loop",
         },
-    ];
+    ]);
+    report.phases = phases;
     report.notes = vec![
         "bridge-run uses one retained radio session for same-session init, RX, and TX",
         "the loop is bounded and single-threaded; it interleaves UDP TX input with bulk-IN RX reads",
@@ -20644,6 +20868,7 @@ fn bridge_run_base_report(
         same_session_init: None,
         monitor_opmode: None,
         txdma_status_clear: None,
+        tx_power_control: None,
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
@@ -23357,6 +23582,25 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if args.tx_power.tx_power_index.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_power_control(&registers, &args.tx_power, &mut pre_tx_counters) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge TX benchmark explicit TXAGC power-index override failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     if args.fw_media_status {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -23508,6 +23752,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             || !args.pre_tx_write16.is_empty()
             || !args.pre_tx_write32.is_empty()
             || !args.pre_tx_rmw32.is_empty(),
+        report.tx_power_control.is_some(),
         args.fw_media_status,
         bridge_tx_bench_has_post_tx_register_mutation(&args),
         claim_detail,
@@ -23597,6 +23842,7 @@ fn bridge_tx_bench_pass_phases(
     trxdma_ctrl_write: bool,
     trace_register_apply: bool,
     generic_register_write: bool,
+    tx_power_control: bool,
     fw_media_status: bool,
     post_tx_register_write: bool,
     claim_detail: &'static str,
@@ -23681,6 +23927,13 @@ fn bridge_tx_bench_pass_phases(
             id: "pre_tx_register_write",
             status: DiagnosticPhaseStatus::Completed,
             detail: "applied generic pre-TX register writes as guarded scheduler experiments",
+        });
+    }
+    if tx_power_control {
+        phases.push(DiagnosticPhase {
+            id: "tx_power_control",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit TXAGC power-index override before the TX loop",
         });
     }
     if fw_media_status {
@@ -23825,6 +24078,7 @@ fn bridge_tx_bench_base_report(
         monitor_opmode: None,
         fw_media_status_report: None,
         txdma_status_clear: None,
+        tx_power_control: None,
         txdma_offset_check_write: None,
         cr_write: None,
         trxdma_ctrl_write: None,
@@ -26984,6 +27238,15 @@ fn parse_u8(input: &str) -> std::result::Result<u8, String> {
     u8::try_from(value).map_err(|_| format!("{input:?} is outside u8 range"))
 }
 
+fn parse_tx_power_index(input: &str) -> std::result::Result<u8, String> {
+    let value = parse_u8(input)?;
+    if value <= 0x3f {
+        Ok(value)
+    } else {
+        Err("TX power index must be in 0x00..=0x3f".to_string())
+    }
+}
+
 fn parse_bridge_run_rx_forward_arg(
     input: &str,
 ) -> std::result::Result<BridgeRunRxForwardArg, String> {
@@ -27459,6 +27722,13 @@ fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
     }
 }
 
+fn print_tx_power_control_human(tx_power: &TxPowerControlReport) {
+    println!(
+        "TX power override: index={} path={:?} registers={} value={}",
+        tx_power.index_hex, tx_power.path, tx_power.register_count, tx_power.value_hex
+    );
+}
+
 fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -27490,6 +27760,9 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
             "TXDMA status clear: before={} after={} written={}",
             clear.before_hex, clear.after_hex, clear.written_hex
         );
+    }
+    if let Some(tx_power) = &report.tx_power_control {
+        print_tx_power_control_human(tx_power);
     }
     if let Some(datagram) = &report.last_datagram {
         println!(
@@ -27652,6 +27925,9 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         report.submit_counters.short_writes,
         report.submit_counters.bytes_written
     );
+    if let Some(tx_power) = &report.tx_power_control {
+        print_tx_power_control_human(tx_power);
+    }
     if let Some(throughput) = &report.throughput {
         println!(
             "Throughput: elapsed_us={} received/s={} submitted/s={} UDP bytes/s={} frame bytes/s={} USB bytes/s={}",
@@ -27763,6 +28039,9 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
             "TXDMA status clear: {} -> {} (wrote {}, changed={})",
             clear.before_hex, clear.after_hex, clear.written_hex, clear.changed
         );
+    }
+    if let Some(tx_power) = &report.tx_power_control {
+        print_tx_power_control_human(tx_power);
     }
     if let Some(write) = &report.txdma_offset_check_write {
         println!(
@@ -29095,6 +29374,7 @@ mod tests {
             type_apa: 0,
             crystal_cap: 0x20,
             rfe_type: DEFAULT_RFE_TYPE,
+            tx_power: TxPowerControlArgs::default(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
         }
@@ -29174,6 +29454,7 @@ mod tests {
             type_apa: 0,
             crystal_cap: 0x20,
             rfe_type: DEFAULT_RFE_TYPE,
+            tx_power: TxPowerControlArgs::default(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
             txdma_offset_check_value: None,
@@ -29284,6 +29565,35 @@ mod tests {
         assert!(parse_tx_rate_arg("mcs32").is_err());
         assert!(parse_tx_rate_arg("vht2ss-mcs10").is_err());
         assert!(parse_tx_rate_arg("vht5ss-mcs0").is_err());
+    }
+
+    #[test]
+    fn parse_tx_power_index_accepts_guarded_range() {
+        assert_eq!(parse_tx_power_index("0").expect("zero"), 0);
+        assert_eq!(parse_tx_power_index("0x3f").expect("max"), 0x3f);
+        assert!(parse_tx_power_index("0x40")
+            .expect_err("above guarded max")
+            .contains("0x00..=0x3f"));
+    }
+
+    #[test]
+    fn tx_power_agc_value_repeats_index() {
+        assert_eq!(tx_power_agc_value(0x1a), 0x1a1a_1a1a);
+    }
+
+    #[test]
+    fn tx_power_agc_registers_select_path_sets() {
+        let path_a = tx_power_agc_registers(TxPowerPathArg::A);
+        let path_b = tx_power_agc_registers(TxPowerPathArg::B);
+        let both = tx_power_agc_registers(TxPowerPathArg::Both);
+
+        assert_eq!(path_a.len(), 12);
+        assert_eq!(path_b.len(), 12);
+        assert_eq!(both.len(), 24);
+        assert!(path_a.contains(&("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR)));
+        assert!(path_b.contains(&("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR)));
+        assert!(both.contains(&("rA_TxAGC_OFDM18_OFDM6", REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR)));
+        assert!(both.contains(&("rB_TxAGC_OFDM18_OFDM6", REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR)));
     }
 
     #[test]
