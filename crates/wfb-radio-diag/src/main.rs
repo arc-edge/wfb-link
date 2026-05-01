@@ -2641,10 +2641,27 @@ struct TxStatusProbeReport {
     samples: Vec<TxStatusSampleReport>,
     changed: Vec<TxStatusDeltaReport>,
     trace_comparison: Option<TxStatusTraceComparisonReport>,
+    rf_summary: Option<TxStatusRfSummaryReport>,
     counters: DiagnosticCounters,
     error: Option<DiagnosticErrorReport>,
     #[serde(skip)]
     registers: Vec<TxStatusRegisterRequest>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxStatusRfSummaryReport {
+    semantics: &'static str,
+    usb_submitted: u64,
+    usb_failed: u64,
+    usb_short_writes: u64,
+    chip_activity: bool,
+    activity_registers: Vec<String>,
+    queue_activity_registers: Vec<String>,
+    scheduler_activity_registers: Vec<String>,
+    txdma_status: Option<TxStatusRegisterReport>,
+    txdma_status_nonzero: bool,
+    rf_confirmation: &'static str,
+    interpretation: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -6678,6 +6695,7 @@ fn tx_status_probe_report(args: &TxStatusProbeArgs) -> Option<TxStatusProbeRepor
             samples: Vec::new(),
             changed: Vec::new(),
             trace_comparison: None,
+            rf_summary: None,
             counters: DiagnosticCounters::default(),
             error,
             registers,
@@ -6873,6 +6891,106 @@ fn tx_status_probe_post<T>(
             Err(error) => report.error = Some(error),
         }
     }
+}
+
+fn tx_status_attach_rf_summary(
+    report: &mut Option<TxStatusProbeReport>,
+    submit_counters: &TxSubmitCounters,
+) {
+    if let Some(report) = report.as_mut() {
+        report.rf_summary = Some(tx_status_rf_summary(report, submit_counters));
+    }
+}
+
+fn tx_status_rf_summary(
+    report: &TxStatusProbeReport,
+    submit_counters: &TxSubmitCounters,
+) -> TxStatusRfSummaryReport {
+    let activity_registers = report
+        .changed
+        .iter()
+        .filter(|delta| tx_status_rf_activity_register(delta.address))
+        .map(|delta| delta.name.clone())
+        .collect::<Vec<_>>();
+    let queue_activity_registers = report
+        .changed
+        .iter()
+        .filter(|delta| tx_status_queue_activity_register(delta.address))
+        .map(|delta| delta.name.clone())
+        .collect::<Vec<_>>();
+    let scheduler_activity_registers = report
+        .changed
+        .iter()
+        .filter(|delta| tx_status_scheduler_activity_register(delta.address))
+        .map(|delta| delta.name.clone())
+        .collect::<Vec<_>>();
+    let txdma_status = report
+        .post
+        .iter()
+        .find(|register| register.address == REG_TXDMA_STATUS && register.width == "u32")
+        .cloned();
+    let txdma_status_nonzero = txdma_status
+        .as_ref()
+        .is_some_and(|status| status.value != 0);
+    let chip_activity = !activity_registers.is_empty();
+    let interpretation = if report.error.is_some() {
+        "status_probe_error"
+    } else if submit_counters.submitted == 0 {
+        "no_usb_submission"
+    } else if chip_activity && txdma_status_nonzero {
+        "usb_submitted_chip_activity_with_txdma_status"
+    } else if chip_activity {
+        "usb_submitted_chip_activity"
+    } else {
+        "usb_submitted_no_tracked_chip_activity"
+    };
+
+    TxStatusRfSummaryReport {
+        semantics: "RF-aware summary of USB submission and tracked chip-side TX register movement; independent receiver capture is still required for RF confirmation",
+        usb_submitted: submit_counters.submitted,
+        usb_failed: submit_counters.failed,
+        usb_short_writes: submit_counters.short_writes,
+        chip_activity,
+        activity_registers,
+        queue_activity_registers,
+        scheduler_activity_registers,
+        txdma_status,
+        txdma_status_nonzero,
+        rf_confirmation: "not_measured_by_this_command",
+        interpretation,
+    }
+}
+
+fn tx_status_rf_activity_register(address: u16) -> bool {
+    tx_status_queue_activity_register(address) || tx_status_scheduler_activity_register(address)
+}
+
+fn tx_status_queue_activity_register(address: u16) -> bool {
+    matches!(
+        address,
+        REG_Q0_INFO
+            | REG_Q1_INFO
+            | REG_Q2_INFO
+            | REG_Q3_INFO
+            | REG_MGQ_INFO
+            | REG_CPU_MGQ_INFORMATION
+            | REG_HGQ_INFO
+            | REG_BCNQ_INFO
+            | REG_TXPKT_EMPTY
+    )
+}
+
+fn tx_status_scheduler_activity_register(address: u16) -> bool {
+    matches!(
+        address,
+        REG_TDECTRL
+            | REG_TXDMA_STATUS
+            | REG_TXDMA_OFFSET_CHK
+            | REG_TRXDMA_CTRL
+            | REG_FWHW_TXQ_CTRL
+            | REG_TXPAUSE
+            | REG_SCH_TX_CMD
+    )
 }
 
 fn add_tx_status_probe_counters(
@@ -18323,6 +18441,7 @@ fn tx_once_live_report(
             if tx_status.is_some() {
                 let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
+                tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
@@ -18396,6 +18515,7 @@ fn tx_once_live_report(
             if tx_status.is_some() {
                 let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
+                tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
@@ -18847,6 +18967,7 @@ fn tx_repeat_live_report(
             if tx_status.is_some() {
                 let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
+                tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
@@ -18902,6 +19023,7 @@ fn tx_repeat_live_report(
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
+        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
     }
     tx_activity_led_hold(&tx_activity_led);
     if tx_activity_led.is_some() {
@@ -19944,6 +20066,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             if tx_status.is_some() {
                 let registers = Rtl8812auRegisterAccess::new(&transport);
                 tx_status_probe_post(&registers, &mut tx_status);
+                tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
                 report.tx_status = tx_status;
             }
             bridge_tx_listen_update_counters(
@@ -19974,6 +20097,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
+        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
         report.tx_status = tx_status;
     }
     bridge_tx_listen_update_counters(
@@ -20649,6 +20773,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     if tx_status.is_some() {
                         let registers = Rtl8812auRegisterAccess::new(&transport);
                         tx_status_probe_post(&registers, &mut tx_status);
+                        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
                         report.tx_status = tx_status;
                     }
                     bridge_run_update_counters(
@@ -20751,6 +20876,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
+        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
         report.tx_status = tx_status;
     }
     bridge_run_update_counters(&mut report, pre_counters, bridge_counters, submit_counters);
@@ -23700,6 +23826,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
+        tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
     }
     let elapsed = started.elapsed();
     let elapsed_us = elapsed.as_micros().try_into().unwrap_or(u64::MAX);
@@ -27729,6 +27856,18 @@ fn print_tx_power_control_human(tx_power: &TxPowerControlReport) {
     );
 }
 
+fn print_tx_status_rf_summary_human(status: &TxStatusProbeReport) {
+    if let Some(summary) = &status.rf_summary {
+        println!(
+            "RF summary: interpretation={} chip_activity={} activity_registers={} rf_confirmation={}",
+            summary.interpretation,
+            summary.chip_activity,
+            summary.activity_registers.join(","),
+            summary.rf_confirmation
+        );
+    }
+}
+
 fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -27850,6 +27989,7 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
                 delta.name, delta.before_hex, delta.after_hex, delta.xor_hex
             );
         }
+        print_tx_status_rf_summary_human(status);
     }
     println!("Phases:");
     for phase in &report.phases {
@@ -28174,6 +28314,7 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
                 delta.name, delta.before_hex, delta.after_hex, delta.xor_hex
             );
         }
+        print_tx_status_rf_summary_human(status);
     }
     if let Some(index) = report.failure_index {
         println!("Failure index: {index}");
@@ -29991,6 +30132,117 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].name, "REG_B");
         assert_eq!(deltas[0].xor_hex, "0x0001");
+    }
+
+    fn tx_status_report_for_rf_summary(
+        changed: Vec<TxStatusDeltaReport>,
+        post: Vec<TxStatusRegisterReport>,
+    ) -> TxStatusProbeReport {
+        TxStatusProbeReport {
+            enabled: true,
+            delay_ms: 0,
+            poll_ms: 0,
+            poll_count: 0,
+            register_count: 0,
+            register_source_paths: Vec::new(),
+            semantics: "test",
+            pre: Vec::new(),
+            post,
+            samples: Vec::new(),
+            changed,
+            trace_comparison: None,
+            rf_summary: None,
+            counters: DiagnosticCounters::default(),
+            error: None,
+            registers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tx_status_rf_summary_classifies_chip_activity_without_rf_claim() {
+        let report = tx_status_report_for_rf_summary(
+            vec![
+                TxStatusDeltaReport {
+                    name: "REG_TDECTRL".to_string(),
+                    address: REG_TDECTRL,
+                    address_hex: format_address(REG_TDECTRL),
+                    width: "u32",
+                    before_hex: "0x0000f710".to_string(),
+                    after_hex: "0x0100f710".to_string(),
+                    xor_hex: "0x01000000".to_string(),
+                },
+                TxStatusDeltaReport {
+                    name: "REG_MGQ_INFO".to_string(),
+                    address: REG_MGQ_INFO,
+                    address_hex: format_address(REG_MGQ_INFO),
+                    width: "u32",
+                    before_hex: "0x007f80ff".to_string(),
+                    after_hex: "0x017f80ff".to_string(),
+                    xor_hex: "0x01000000".to_string(),
+                },
+            ],
+            vec![TxStatusRegisterReport {
+                name: "REG_TXDMA_STATUS".to_string(),
+                address: REG_TXDMA_STATUS,
+                address_hex: format_address(REG_TXDMA_STATUS),
+                width: "u32",
+                value: 0,
+                value_hex: "0x00000000".to_string(),
+            }],
+        );
+        let submit = TxSubmitCounters {
+            submitted: 3,
+            ..TxSubmitCounters::default()
+        };
+
+        let summary = tx_status_rf_summary(&report, &submit);
+
+        assert!(summary.chip_activity);
+        assert_eq!(summary.interpretation, "usb_submitted_chip_activity");
+        assert_eq!(summary.rf_confirmation, "not_measured_by_this_command");
+        assert_eq!(
+            summary.queue_activity_registers,
+            vec!["REG_MGQ_INFO".to_string()]
+        );
+        assert_eq!(
+            summary.scheduler_activity_registers,
+            vec!["REG_TDECTRL".to_string()]
+        );
+    }
+
+    #[test]
+    fn tx_status_rf_summary_flags_nonzero_txdma_status() {
+        let report = tx_status_report_for_rf_summary(
+            vec![TxStatusDeltaReport {
+                name: "REG_TXDMA_STATUS".to_string(),
+                address: REG_TXDMA_STATUS,
+                address_hex: format_address(REG_TXDMA_STATUS),
+                width: "u32",
+                before_hex: "0x00000000".to_string(),
+                after_hex: "0x00000401".to_string(),
+                xor_hex: "0x00000401".to_string(),
+            }],
+            vec![TxStatusRegisterReport {
+                name: "REG_TXDMA_STATUS".to_string(),
+                address: REG_TXDMA_STATUS,
+                address_hex: format_address(REG_TXDMA_STATUS),
+                width: "u32",
+                value: 0x0000_0401,
+                value_hex: "0x00000401".to_string(),
+            }],
+        );
+        let submit = TxSubmitCounters {
+            submitted: 1,
+            ..TxSubmitCounters::default()
+        };
+
+        let summary = tx_status_rf_summary(&report, &submit);
+
+        assert!(summary.txdma_status_nonzero);
+        assert_eq!(
+            summary.interpretation,
+            "usb_submitted_chip_activity_with_txdma_status"
+        );
     }
 
     #[test]
