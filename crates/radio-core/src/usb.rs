@@ -139,6 +139,8 @@ pub enum UsbError {
     Rusb(#[from] rusb::Error),
     #[error("USB backend operation failed: {0}")]
     Backend(String),
+    #[error("USB backend operation timed out: {0}")]
+    BackendTimeout(String),
     #[error("no supported adapter matched selector")]
     NoSupportedAdapter,
     #[error("selected device disappeared before claim")]
@@ -149,7 +151,10 @@ pub enum UsbError {
 
 impl UsbError {
     pub fn is_timeout(&self) -> bool {
-        matches!(self, UsbError::Rusb(rusb::Error::Timeout))
+        matches!(
+            self,
+            UsbError::Rusb(rusb::Error::Timeout) | UsbError::BackendTimeout(_)
+        )
     }
 }
 

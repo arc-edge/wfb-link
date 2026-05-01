@@ -57,6 +57,8 @@ enum Command {
     MacosBulkInSmoke(MacosBulkInSmokeArgs),
     /// Configure IOUSBHost interface and issue one zero-length bulk-OUT request.
     MacosBulkOutSmoke(MacosBulkOutSmokeArgs),
+    /// Open a retained IOUSBHost interface session and exercise control plus bulk pipes.
+    MacosSessionSmoke(MacosSessionSmokeArgs),
     /// Read RTL8812AU registers through macOS IOUSBHost direct control transfers.
     MacosRegSmoke(RegSmokeArgs),
     /// Dump RTL8812AU EFUSE through macOS IOUSBHost direct control transfers.
@@ -239,6 +241,56 @@ struct MacosBulkOutSmokeArgs {
     endpoint: u8,
 
     /// Bulk transfer timeout in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    timeout_ms: u64,
+
+    /// Number of interface-service polling attempts after configuration.
+    #[arg(long, default_value_t = 25)]
+    poll_attempts: u32,
+
+    /// Delay between interface-service polls in milliseconds.
+    #[arg(long, default_value_t = 100)]
+    poll_delay_ms: u64,
+
+    /// Required acknowledgement that this command may issue SET_CONFIGURATION.
+    #[arg(long)]
+    i_understand_this_may_reconfigure_usb: bool,
+
+    /// Required acknowledgement that this command submits one bulk OUT request.
+    #[arg(long)]
+    i_understand_this_submits_bulk_out: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MacosSessionSmokeArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// USB configuration value to select before interface matching.
+    #[arg(long, default_value_t = 1)]
+    configuration_value: u8,
+
+    /// Whether configureWithValue should register interfaces for matching.
+    #[arg(long, default_value_t = true)]
+    match_interfaces: bool,
+
+    /// Interface number to match and open.
+    #[arg(long, default_value_t = 0)]
+    interface_number: u8,
+
+    /// Bulk IN endpoint address to retain and read.
+    #[arg(long, default_value = "0x81", value_parser = parse_u8)]
+    bulk_in_endpoint: u8,
+
+    /// Bulk OUT endpoint address to retain and write.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    bulk_out_endpoint: u8,
+
+    /// Number of bytes to request from the retained bulk IN pipe.
+    #[arg(long, default_value_t = 512)]
+    bulk_in_length: usize,
+
+    /// Control and bulk transfer timeout in milliseconds.
     #[arg(long, default_value_t = 100)]
     timeout_ms: u64,
 
@@ -1051,6 +1103,16 @@ fn main() -> Result<()> {
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_macos_bulk_out_smoke_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::MacosSessionSmoke(args) => {
+            let report = macos_session_smoke_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_macos_session_smoke_human(&report);
             }
             if let Some(code) = report.result.exit_code() {
                 std::process::exit(code);
@@ -1893,6 +1955,34 @@ struct MacosBulkOutTransferReport {
     transferred_len: usize,
     payload_hex: String,
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacosSessionSmokeReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    configuration_value: u8,
+    match_interfaces: bool,
+    interface_number: u8,
+    bulk_in_endpoint: u8,
+    bulk_in_endpoint_hex: String,
+    bulk_out_endpoint: u8,
+    bulk_out_endpoint_hex: String,
+    bulk_in_length: usize,
+    timeout_ms: u64,
+    poll_attempts: u32,
+    poll_delay_ms: u64,
+    result: DiagnosticResult,
+    interface_probe: Option<MacosInterfaceProbeReport>,
+    reads: Vec<RegisterReadReport>,
+    bulk_in_transfer: Option<MacosBulkInTransferReport>,
+    bulk_out_transfer: Option<MacosBulkOutTransferReport>,
+    counters: DiagnosticCounters,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -15342,6 +15432,368 @@ fn macos_bulk_out_transfer_report_from_transfer(
     }
 }
 
+fn macos_session_smoke_report(args: MacosSessionSmokeArgs) -> MacosSessionSmokeReport {
+    let selector = args.adapter.selector();
+    let counters = DiagnosticCounters::default();
+
+    if !args.i_understand_this_may_reconfigure_usb {
+        return macos_session_smoke_failure(
+            &args,
+            selector,
+            MacosSessionSmokeFailureInput {
+                interface_probe: None,
+                reads: Vec::new(),
+                bulk_in_transfer: None,
+                bulk_out_transfer: None,
+                counters,
+                error: DiagnosticErrorReport {
+                code: "missing_reconfigure_authorization",
+                message: "macos-session-smoke may issue SET_CONFIGURATION and requires --i-understand-this-may-reconfigure-usb".to_string(),
+                },
+            },
+        );
+    }
+
+    if !args.i_understand_this_submits_bulk_out {
+        return macos_session_smoke_failure(
+            &args,
+            selector,
+            MacosSessionSmokeFailureInput {
+                interface_probe: None,
+                reads: Vec::new(),
+                bulk_in_transfer: None,
+                bulk_out_transfer: None,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "missing_bulk_out_authorization",
+                    message: "macos-session-smoke submits one zero-length bulk OUT request and requires --i-understand-this-submits-bulk-out".to_string(),
+                },
+            },
+        );
+    }
+
+    if args.bulk_in_length == 0 {
+        return macos_session_smoke_failure(
+            &args,
+            selector,
+            MacosSessionSmokeFailureInput {
+                interface_probe: None,
+                reads: Vec::new(),
+                bulk_in_transfer: None,
+                bulk_out_transfer: None,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "invalid_bulk_in_length",
+                    message: "--bulk-in-length must be nonzero".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return macos_session_smoke_failure(
+            &args,
+            selector,
+            MacosSessionSmokeFailureInput {
+                interface_probe: None,
+                reads: Vec::new(),
+                bulk_in_transfer: None,
+                bulk_out_transfer: None,
+                counters,
+                error: DiagnosticErrorReport {
+                    code: "unsupported_platform",
+                    message: "macos-session-smoke requires macOS IOUSBHost".to_string(),
+                },
+            },
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some(vid) = selector.vid else {
+            return macos_session_smoke_failure(
+                &args,
+                selector,
+                MacosSessionSmokeFailureInput {
+                    interface_probe: None,
+                    reads: Vec::new(),
+                    bulk_in_transfer: None,
+                    bulk_out_transfer: None,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_vid",
+                        message: "macos-session-smoke requires --vid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+        let Some(pid) = selector.pid else {
+            return macos_session_smoke_failure(
+                &args,
+                selector,
+                MacosSessionSmokeFailureInput {
+                    interface_probe: None,
+                    reads: Vec::new(),
+                    bulk_in_transfer: None,
+                    bulk_out_transfer: None,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "missing_pid",
+                        message: "macos-session-smoke requires --pid because IOUSBHost matching is VID/PID based".to_string(),
+                    },
+                },
+            );
+        };
+
+        let mut session = match macos_usbhost::MacosUsbHostSession::open(
+            macos_usbhost::MacosUsbHostSessionOpenRequest {
+                vid,
+                pid,
+                configuration_value: args.configuration_value,
+                match_interfaces: args.match_interfaces,
+                interface_number: args.interface_number,
+                bulk_in_endpoint: args.bulk_in_endpoint,
+                bulk_out_endpoint: args.bulk_out_endpoint,
+                poll_attempts: args.poll_attempts,
+                poll_delay: Duration::from_millis(args.poll_delay_ms),
+            },
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                return macos_session_smoke_failure(
+                    &args,
+                    selector,
+                    MacosSessionSmokeFailureInput {
+                        interface_probe: None,
+                        reads: Vec::new(),
+                        bulk_in_transfer: None,
+                        bulk_out_transfer: None,
+                        counters,
+                        error: DiagnosticErrorReport {
+                            code: "macos_session_open_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+
+        let interface_probe = macos_interface_probe_report_from_probe(&session.interface_probe);
+        let mut counters = DiagnosticCounters {
+            usb_control_writes: u64::from(session.interface_probe.configure_attempted),
+            ..DiagnosticCounters::default()
+        };
+        let mut reads = Vec::new();
+        {
+            let timeout = Duration::from_millis(args.timeout_ms);
+            let registers = Rtl8812auRegisterAccess::new(&session).with_timeout(timeout);
+            for spec in REGISTER_SMOKE_READS {
+                match read_smoke_register(&registers, *spec) {
+                    Ok(read) => {
+                        counters.usb_control_reads += 1;
+                        reads.push(read);
+                    }
+                    Err(error) => {
+                        return macos_session_smoke_failure(
+                            &args,
+                            selector,
+                            MacosSessionSmokeFailureInput {
+                                interface_probe: Some(interface_probe),
+                                reads,
+                                bulk_in_transfer: None,
+                                bulk_out_transfer: None,
+                                counters,
+                                error: DiagnosticErrorReport {
+                                    code: "session_register_read_failed",
+                                    message: format!(
+                                        "{} at 0x{:04x} failed through retained session: {error}",
+                                        spec.name, spec.address
+                                    ),
+                                },
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut bulk_in_buf = vec![0u8; args.bulk_in_length];
+        let bulk_in = match session.bulk_read_once(
+            args.bulk_in_endpoint,
+            &mut bulk_in_buf,
+            Duration::from_millis(args.timeout_ms),
+        ) {
+            Ok(transfer) => {
+                counters.usb_bulk_in_reads += 1;
+                transfer
+            }
+            Err(error) => {
+                return macos_session_smoke_failure(
+                    &args,
+                    selector,
+                    MacosSessionSmokeFailureInput {
+                        interface_probe: Some(interface_probe),
+                        reads,
+                        bulk_in_transfer: None,
+                        bulk_out_transfer: None,
+                        counters,
+                        error: DiagnosticErrorReport {
+                            code: "session_bulk_in_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+        let bulk_in_passed = bulk_in.transfer_ok || bulk_in.timed_out;
+        let bulk_in_report = macos_bulk_in_transfer_report_from_transfer(&bulk_in);
+        if !bulk_in_passed {
+            return macos_session_smoke_failure(
+                &args,
+                selector,
+                MacosSessionSmokeFailureInput {
+                    interface_probe: Some(interface_probe),
+                    reads,
+                    bulk_in_transfer: Some(bulk_in_report),
+                    bulk_out_transfer: None,
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "session_bulk_in_request_failed",
+                        message: bulk_in.error.clone().unwrap_or_else(|| {
+                            "retained session bulk-IN request did not complete or time out cleanly"
+                                .to_string()
+                        }),
+                    },
+                },
+            );
+        }
+
+        let bulk_out = match session.bulk_write_once(
+            args.bulk_out_endpoint,
+            &[],
+            Duration::from_millis(args.timeout_ms),
+        ) {
+            Ok(transfer) => {
+                counters.usb_bulk_out_writes += 1;
+                transfer
+            }
+            Err(error) => {
+                return macos_session_smoke_failure(
+                    &args,
+                    selector,
+                    MacosSessionSmokeFailureInput {
+                        interface_probe: Some(interface_probe),
+                        reads,
+                        bulk_in_transfer: Some(bulk_in_report),
+                        bulk_out_transfer: None,
+                        counters,
+                        error: DiagnosticErrorReport {
+                            code: "session_bulk_out_failed",
+                            message: error,
+                        },
+                    },
+                );
+            }
+        };
+        let bulk_out_report = macos_bulk_out_transfer_report_from_transfer(&bulk_out);
+        if !bulk_out.transfer_ok {
+            return macos_session_smoke_failure(
+                &args,
+                selector,
+                MacosSessionSmokeFailureInput {
+                    interface_probe: Some(interface_probe),
+                    reads,
+                    bulk_in_transfer: Some(bulk_in_report),
+                    bulk_out_transfer: Some(bulk_out_report),
+                    counters,
+                    error: DiagnosticErrorReport {
+                        code: "session_bulk_out_request_failed",
+                        message: bulk_out.error.clone().unwrap_or_else(|| {
+                            "retained session zero-length bulk-OUT request failed".to_string()
+                        }),
+                    },
+                },
+            );
+        }
+
+        MacosSessionSmokeReport {
+            schema_version: 1,
+            command: "macos-session-smoke",
+            started_at_unix_ms: started_at_unix_ms(),
+            platform: platform_info(),
+            selector,
+            configuration_value: args.configuration_value,
+            match_interfaces: args.match_interfaces,
+            interface_number: args.interface_number,
+            bulk_in_endpoint: args.bulk_in_endpoint,
+            bulk_in_endpoint_hex: format_value(args.bulk_in_endpoint, 2),
+            bulk_out_endpoint: args.bulk_out_endpoint,
+            bulk_out_endpoint_hex: format_value(args.bulk_out_endpoint, 2),
+            bulk_in_length: args.bulk_in_length,
+            timeout_ms: args.timeout_ms,
+            poll_attempts: args.poll_attempts,
+            poll_delay_ms: args.poll_delay_ms,
+            result: DiagnosticResult::Pass,
+            interface_probe: Some(interface_probe),
+            reads,
+            bulk_in_transfer: Some(bulk_in_report),
+            bulk_out_transfer: Some(bulk_out_report),
+            counters,
+            error: None,
+            notes: vec![
+                "macOS IOUSBHost retained-session smoke: configure once, hold interface 0 and selected bulk pipes open, read stable RTL8812AU registers, then submit one bounded bulk-IN request and one zero-length bulk-OUT request",
+                "bulk-IN timeout is accepted when no RF traffic is present; zero-length bulk OUT does not submit a TX descriptor or 802.11 frame",
+                "no hardware register writes, firmware download, channel tuning, RX loop, TX descriptor, nonzero bulk OUT payload, or RF TX operation was issued",
+            ],
+        }
+    }
+}
+
+struct MacosSessionSmokeFailureInput {
+    interface_probe: Option<MacosInterfaceProbeReport>,
+    reads: Vec<RegisterReadReport>,
+    bulk_in_transfer: Option<MacosBulkInTransferReport>,
+    bulk_out_transfer: Option<MacosBulkOutTransferReport>,
+    counters: DiagnosticCounters,
+    error: DiagnosticErrorReport,
+}
+
+fn macos_session_smoke_failure(
+    args: &MacosSessionSmokeArgs,
+    selector: DeviceSelector,
+    input: MacosSessionSmokeFailureInput,
+) -> MacosSessionSmokeReport {
+    MacosSessionSmokeReport {
+        schema_version: 1,
+        command: "macos-session-smoke",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        configuration_value: args.configuration_value,
+        match_interfaces: args.match_interfaces,
+        interface_number: args.interface_number,
+        bulk_in_endpoint: args.bulk_in_endpoint,
+        bulk_in_endpoint_hex: format_value(args.bulk_in_endpoint, 2),
+        bulk_out_endpoint: args.bulk_out_endpoint,
+        bulk_out_endpoint_hex: format_value(args.bulk_out_endpoint, 2),
+        bulk_in_length: args.bulk_in_length,
+        timeout_ms: args.timeout_ms,
+        poll_attempts: args.poll_attempts,
+        poll_delay_ms: args.poll_delay_ms,
+        result: DiagnosticResult::Fail,
+        interface_probe: input.interface_probe,
+        reads: input.reads,
+        bulk_in_transfer: input.bulk_in_transfer,
+        bulk_out_transfer: input.bulk_out_transfer,
+        counters: input.counters,
+        error: Some(input.error),
+        notes: vec![
+            "macOS IOUSBHost retained-session smoke stopped before firmware download, channel tuning, RX loop, TX descriptor, nonzero bulk OUT payload, or RF TX operation",
+        ],
+    }
+}
+
 fn parse_usb_device_descriptor(
     raw: &[u8],
 ) -> std::result::Result<UsbDeviceDescriptorReport, DiagnosticErrorReport> {
@@ -16163,6 +16615,17 @@ fn stages_report() -> StagesReport {
                     "bench authorization for USB reconfiguration and one zero-length bulk OUT request",
                 ],
                 pass_signal: "Bulk-OUT endpoint 0x02 accepts and completes a synchronous zero-length IOUSBHost request.",
+            },
+            VerificationStage {
+                id: "macos-session-smoke",
+                command: "wfb-radio-diag macos-session-smoke --vid 0x0bda --pid 0x8812 --i-understand-this-may-reconfigure-usb --i-understand-this-submits-bulk-out",
+                purpose: "Open one retained IOUSBHost interface session and exercise default-control register reads plus retained bulk IN/OUT pipes.",
+                prerequisites: &[
+                    "macos-bulk-in-smoke pass",
+                    "macos-bulk-out-smoke pass",
+                    "bench authorization for USB reconfiguration and one zero-length bulk OUT request",
+                ],
+                pass_signal: "One retained session reads stable RTL8812AU registers, accepts a bounded bulk-IN request, and completes a zero-length bulk-OUT request.",
             },
             VerificationStage {
                 id: "macos-reg-smoke",
@@ -17033,6 +17496,83 @@ fn print_macos_bulk_out_smoke_human(report: &MacosBulkOutSmokeReport) {
         if let Some(error) = &transfer.error {
             println!("Transfer error: {error}");
         }
+    }
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_macos_session_smoke_human(report: &MacosSessionSmokeReport) {
+    println!("macOS retained-session smoke: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Configuration: value={} match_interfaces={} interface={} bulk_in={} bulk_out={} timeout_ms={}",
+        report.configuration_value,
+        report.match_interfaces,
+        report.interface_number,
+        report.bulk_in_endpoint_hex,
+        report.bulk_out_endpoint_hex,
+        report.timeout_ms
+    );
+    if let Some(probe) = &report.interface_probe {
+        println!(
+            "Session: configure_ok={} interface_found={} interface_opened={} polls={} matched_interfaces={}",
+            probe.configure_ok,
+            probe.interface_found,
+            probe.interface_opened,
+            probe.poll_attempts_observed,
+            probe.matched_interface_count
+        );
+        for pipe in &probe.pipes {
+            println!(
+                "  retained pipe {} copied={} {} {} mps={} error={}",
+                pipe.address_hex,
+                pipe.copied,
+                pipe.direction,
+                pipe.transfer_type,
+                pipe.max_packet_size,
+                pipe.error.as_deref().unwrap_or("-")
+            );
+        }
+    }
+    println!("Register reads:");
+    for read in &report.reads {
+        println!(
+            "  {} {} {} = {}",
+            read.address_hex, read.width, read.name, read.value_hex
+        );
+    }
+    if let Some(transfer) = &report.bulk_in_transfer {
+        println!(
+            "Bulk IN: endpoint={} transfer_ok={} timed_out={} transferred={}/{} error={}",
+            transfer.endpoint_address_hex,
+            transfer.transfer_ok,
+            transfer.timed_out,
+            transfer.transferred_len,
+            transfer.requested_len,
+            transfer.error.as_deref().unwrap_or("-")
+        );
+    }
+    if let Some(transfer) = &report.bulk_out_transfer {
+        println!(
+            "Bulk OUT: endpoint={} transfer_ok={} timed_out={} transferred={}/{} error={}",
+            transfer.endpoint_address_hex,
+            transfer.transfer_ok,
+            transfer.timed_out,
+            transfer.transferred_len,
+            transfer.requested_len,
+            transfer.error.as_deref().unwrap_or("-")
+        );
     }
     println!(
         "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",

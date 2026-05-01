@@ -44,6 +44,10 @@ The system SHALL verify IOUSBHost interface matching and one-shot bulk pipe acce
 - **WHEN** interface smoke has passed and the operator authorizes a zero-length bulk OUT request
 - **THEN** the verification command submits one zero-length bulk OUT request to endpoint `0x02`, reports transfer completion, and does not submit an RTL8812AU TX descriptor or 802.11 frame
 
+#### Scenario: macOS retained session smoke succeeds
+- **WHEN** one-shot bulk IN and bulk OUT smokes have passed and the operator authorizes USB reconfiguration plus a zero-length bulk OUT request
+- **THEN** the verification command retains one IOUSBHost interface session, reads stable RTL8812AU registers, submits one bounded bulk IN request, submits one zero-length bulk OUT request, and reports that no firmware download, channel tuning, TX descriptor, or RF TX operation was issued
+
 ### Requirement: Firmware Smoke Verification
 The system SHALL verify RTL8812A firmware download independently from channel tuning, RX, and TX.
 

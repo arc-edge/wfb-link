@@ -14,6 +14,14 @@ typedef struct WfbMacosUsbHost {
     void *device;
 } WfbMacosUsbHost;
 
+typedef struct WfbMacosUsbHostSession {
+    void *interface;
+    void *bulk_in_pipe;
+    void *bulk_out_pipe;
+    uint8_t bulk_in_endpoint;
+    uint8_t bulk_out_endpoint;
+} WfbMacosUsbHostSession;
+
 typedef struct WfbMacosUsbHostPipeProbe {
     uint8_t address;
     int requested;
@@ -145,6 +153,55 @@ static io_service_t copy_first_matching_interface(uint16_t vid,
     return first;
 }
 
+static void fill_pipe_probe_from_pipe(WfbMacosUsbHostPipeProbe *probe,
+                                      IOUSBHostPipe *pipe) {
+    if (!probe || !pipe) {
+        return;
+    }
+    probe->copied = 1;
+    probe->descriptor_address = (uint8_t)pipe.endpointAddress;
+    const IOUSBHostIOSourceDescriptors *descriptors = pipe.descriptors;
+    if (descriptors) {
+        probe->descriptor_available = 1;
+        probe->descriptor_address = descriptors->descriptor.bEndpointAddress;
+        probe->attributes = descriptors->descriptor.bmAttributes;
+        probe->max_packet_size = descriptors->descriptor.wMaxPacketSize;
+        probe->interval = descriptors->descriptor.bInterval;
+    }
+}
+
+static void fill_bulk_transfer_from_pipe(WfbMacosUsbHostBulkTransfer *result,
+                                         IOUSBHostPipe *pipe,
+                                         uint8_t endpoint_address,
+                                         size_t len) {
+    if (!result) {
+        return;
+    }
+    memset(result, 0, sizeof(*result));
+    result->configure_ok = 1;
+    result->interface_found = 1;
+    result->interface_opened = 1;
+    result->pipe_copied = pipe ? 1 : 0;
+    result->endpoint_address = endpoint_address;
+    result->requested_len = len;
+    if (!pipe) {
+        return;
+    }
+    result->descriptor_address = (uint8_t)pipe.endpointAddress;
+    const IOUSBHostIOSourceDescriptors *descriptors = pipe.descriptors;
+    if (descriptors) {
+        result->descriptor_available = 1;
+        result->descriptor_address = descriptors->descriptor.bEndpointAddress;
+        result->attributes = descriptors->descriptor.bmAttributes;
+        result->max_packet_size = descriptors->descriptor.wMaxPacketSize;
+        result->interval = descriptors->descriptor.bInterval;
+    }
+}
+
+static int is_timeout_error(NSError *error) {
+    return error && error.code == kIOReturnTimeout;
+}
+
 int wfb_macos_usbhost_open(uint16_t wanted_vid,
                            uint16_t wanted_pid,
                            WfbMacosUsbHost **out_host,
@@ -222,6 +279,243 @@ void wfb_macos_usbhost_close(WfbMacosUsbHost *host) {
             host->device = NULL;
         }
         free(host);
+    }
+}
+
+int wfb_macos_usbhost_session_open(WfbMacosUsbHost *host,
+                                   uint16_t vid,
+                                   uint16_t pid,
+                                   uint8_t configuration_value,
+                                   int match_interfaces,
+                                   uint8_t interface_number,
+                                   uint8_t bulk_in_endpoint,
+                                   uint8_t bulk_out_endpoint,
+                                   uint32_t poll_attempts,
+                                   uint64_t poll_delay_ms,
+                                   WfbMacosUsbHostSession **out_session,
+                                   WfbMacosUsbHostInterfaceProbe *result,
+                                   char *error,
+                                   size_t error_len) {
+    @autoreleasepool {
+        clear_error(error, error_len);
+        if (!host || !host->device || !out_session || !result) {
+            set_error(error, error_len, @"invalid session open argument");
+            return -1;
+        }
+        *out_session = NULL;
+        memset(result, 0, sizeof(*result));
+        result->configure_attempted = 1;
+        result->match_interfaces = match_interfaces ? 1 : 0;
+        result->pipe_count = 2;
+        result->pipes[0].address = bulk_in_endpoint;
+        result->pipes[0].requested = 1;
+        result->pipes[1].address = bulk_out_endpoint;
+        result->pipes[1].requested = 1;
+        clear_error(result->pipes[0].error, sizeof(result->pipes[0].error));
+        clear_error(result->pipes[1].error, sizeof(result->pipes[1].error));
+
+        IOUSBHostDevice *device = (__bridge IOUSBHostDevice *)host->device;
+        NSError *configure_error = nil;
+        BOOL configured = [device configureWithValue:configuration_value
+                                     matchInterfaces:(match_interfaces ? YES : NO)
+                                               error:&configure_error];
+        result->configure_ok = configured ? 1 : 0;
+        if (!configured) {
+            set_error(error, error_len, [NSString stringWithFormat:@"configureWithValue:%u matchInterfaces:%@ failed: %@", configuration_value, match_interfaces ? @"YES" : @"NO", configure_error]);
+            return 0;
+        }
+
+        io_service_t interface_service = IO_OBJECT_NULL;
+        kern_return_t last_kr = KERN_SUCCESS;
+        uint32_t last_matched_count = 0;
+        uint32_t attempts = poll_attempts == 0 ? 1 : poll_attempts;
+        for (uint32_t attempt = 1; attempt <= attempts; attempt++) {
+            interface_service = copy_first_matching_interface(vid,
+                                                              pid,
+                                                              configuration_value,
+                                                              interface_number,
+                                                              &last_matched_count,
+                                                              &last_kr);
+            result->poll_attempts_observed = attempt;
+            result->matched_interface_count = last_matched_count;
+            if (interface_service != IO_OBJECT_NULL) {
+                result->interface_found = 1;
+                break;
+            }
+            if (attempt < attempts && poll_delay_ms > 0) {
+                usleep((useconds_t)(poll_delay_ms * 1000));
+            }
+        }
+
+        if (interface_service == IO_OBJECT_NULL) {
+            set_error(error, error_len, [NSString stringWithFormat:@"no IOUSBHostInterface matched vid=0x%04x pid=0x%04x configuration=%u interface=%u after %u poll(s); last IOKit status=0x%08x",
+                                         vid,
+                                         pid,
+                                         configuration_value,
+                                         interface_number,
+                                         result->poll_attempts_observed,
+                                         last_kr]);
+            return 0;
+        }
+
+        NSError *interface_error = nil;
+        IOUSBHostInterface *interface = [[IOUSBHostInterface alloc] initWithIOService:interface_service
+                                                                              options:0
+                                                                                queue:nil
+                                                                                error:&interface_error
+                                                                      interestHandler:nil];
+        IOObjectRelease(interface_service);
+        if (!interface) {
+            set_error(error, error_len, [NSString stringWithFormat:@"IOUSBHostInterface initWithIOService failed: %@", interface_error]);
+            return 0;
+        }
+        result->interface_opened = 1;
+
+        NSError *bulk_in_error = nil;
+        IOUSBHostPipe *bulk_in_pipe = [interface copyPipeWithAddress:bulk_in_endpoint
+                                                               error:&bulk_in_error];
+        if (!bulk_in_pipe) {
+            set_error(result->pipes[0].error, sizeof(result->pipes[0].error), [NSString stringWithFormat:@"copyPipeWithAddress:0x%02x failed: %@", bulk_in_endpoint, bulk_in_error]);
+            set_error(error, error_len, [NSString stringWithFormat:@"copy bulk IN pipe 0x%02x failed: %@", bulk_in_endpoint, bulk_in_error]);
+            [interface destroy];
+            return 0;
+        }
+        fill_pipe_probe_from_pipe(&result->pipes[0], bulk_in_pipe);
+
+        NSError *bulk_out_error = nil;
+        IOUSBHostPipe *bulk_out_pipe = [interface copyPipeWithAddress:bulk_out_endpoint
+                                                                error:&bulk_out_error];
+        if (!bulk_out_pipe) {
+            set_error(result->pipes[1].error, sizeof(result->pipes[1].error), [NSString stringWithFormat:@"copyPipeWithAddress:0x%02x failed: %@", bulk_out_endpoint, bulk_out_error]);
+            set_error(error, error_len, [NSString stringWithFormat:@"copy bulk OUT pipe 0x%02x failed: %@", bulk_out_endpoint, bulk_out_error]);
+            [interface destroy];
+            return 0;
+        }
+        fill_pipe_probe_from_pipe(&result->pipes[1], bulk_out_pipe);
+
+        WfbMacosUsbHostSession *session = (WfbMacosUsbHostSession *)calloc(1, sizeof(WfbMacosUsbHostSession));
+        if (!session) {
+            [interface destroy];
+            set_error(error, error_len, @"calloc session failed");
+            return -1;
+        }
+        session->interface = (__bridge_retained void *)interface;
+        session->bulk_in_pipe = (__bridge_retained void *)bulk_in_pipe;
+        session->bulk_out_pipe = (__bridge_retained void *)bulk_out_pipe;
+        session->bulk_in_endpoint = bulk_in_endpoint;
+        session->bulk_out_endpoint = bulk_out_endpoint;
+        *out_session = session;
+        return 0;
+    }
+}
+
+void wfb_macos_usbhost_session_close(WfbMacosUsbHostSession *session) {
+    @autoreleasepool {
+        if (!session) {
+            return;
+        }
+        if (session->bulk_in_pipe) {
+            IOUSBHostPipe *pipe = (__bridge_transfer IOUSBHostPipe *)session->bulk_in_pipe;
+            (void)pipe;
+            session->bulk_in_pipe = NULL;
+        }
+        if (session->bulk_out_pipe) {
+            IOUSBHostPipe *pipe = (__bridge_transfer IOUSBHostPipe *)session->bulk_out_pipe;
+            (void)pipe;
+            session->bulk_out_pipe = NULL;
+        }
+        if (session->interface) {
+            IOUSBHostInterface *interface = (__bridge_transfer IOUSBHostInterface *)session->interface;
+            [interface destroy];
+            session->interface = NULL;
+        }
+        free(session);
+    }
+}
+
+int wfb_macos_usbhost_session_bulk_read(WfbMacosUsbHostSession *session,
+                                        uint8_t endpoint_address,
+                                        uint8_t *data,
+                                        size_t len,
+                                        uint64_t timeout_ms,
+                                        WfbMacosUsbHostBulkTransfer *result,
+                                        char *error,
+                                        size_t error_len) {
+    @autoreleasepool {
+        clear_error(error, error_len);
+        if (!session || !session->bulk_in_pipe || !result || (!data && len != 0)) {
+            set_error(error, error_len, @"invalid session bulk read argument");
+            return -1;
+        }
+        if (endpoint_address != session->bulk_in_endpoint) {
+            set_error(error, error_len, [NSString stringWithFormat:@"endpoint 0x%02x is not the retained bulk IN endpoint 0x%02x", endpoint_address, session->bulk_in_endpoint]);
+            return -1;
+        }
+
+        IOUSBHostPipe *pipe = (__bridge IOUSBHostPipe *)session->bulk_in_pipe;
+        fill_bulk_transfer_from_pipe(result, pipe, endpoint_address, len);
+
+        NSMutableData *buffer = [NSMutableData dataWithLength:len];
+        NSUInteger actual = 0;
+        NSError *request_error = nil;
+        BOOL ok = [pipe sendIORequestWithData:buffer
+                             bytesTransferred:&actual
+                            completionTimeout:(NSTimeInterval)timeout_ms / 1000.0
+                                        error:&request_error];
+        result->transfer_ok = ok ? 1 : 0;
+        result->transferred_len = actual;
+        if (ok) {
+            memcpy(data, buffer.bytes, actual);
+        } else {
+            if (is_timeout_error(request_error)) {
+                result->timed_out = 1;
+            }
+            set_error(error, error_len, [NSString stringWithFormat:@"session bulk read endpoint 0x%02x failed after %llu ms: %@", endpoint_address, (unsigned long long)timeout_ms, request_error]);
+        }
+        return 0;
+    }
+}
+
+int wfb_macos_usbhost_session_bulk_write(WfbMacosUsbHostSession *session,
+                                         uint8_t endpoint_address,
+                                         const uint8_t *data,
+                                         size_t len,
+                                         uint64_t timeout_ms,
+                                         WfbMacosUsbHostBulkTransfer *result,
+                                         char *error,
+                                         size_t error_len) {
+    @autoreleasepool {
+        clear_error(error, error_len);
+        if (!session || !session->bulk_out_pipe || !result || (!data && len != 0)) {
+            set_error(error, error_len, @"invalid session bulk write argument");
+            return -1;
+        }
+        if (endpoint_address != session->bulk_out_endpoint) {
+            set_error(error, error_len, [NSString stringWithFormat:@"endpoint 0x%02x is not the retained bulk OUT endpoint 0x%02x", endpoint_address, session->bulk_out_endpoint]);
+            return -1;
+        }
+
+        IOUSBHostPipe *pipe = (__bridge IOUSBHostPipe *)session->bulk_out_pipe;
+        fill_bulk_transfer_from_pipe(result, pipe, endpoint_address, len);
+
+        NSMutableData *buffer = len == 0
+            ? nil
+            : [NSMutableData dataWithBytes:data length:len];
+        NSUInteger actual = 0;
+        NSError *request_error = nil;
+        BOOL ok = [pipe sendIORequestWithData:buffer
+                             bytesTransferred:&actual
+                            completionTimeout:(NSTimeInterval)timeout_ms / 1000.0
+                                        error:&request_error];
+        result->transfer_ok = ok ? 1 : 0;
+        result->transferred_len = actual;
+        if (!ok) {
+            if (is_timeout_error(request_error)) {
+                result->timed_out = 1;
+            }
+            set_error(error, error_len, [NSString stringWithFormat:@"session bulk write endpoint 0x%02x failed after %llu ms: %@", endpoint_address, (unsigned long long)timeout_ms, request_error]);
+        }
+        return 0;
     }
 }
 

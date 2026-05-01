@@ -31,6 +31,12 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-bulk-out-sm
   --i-understand-this-may-reconfigure-usb \
   --i-understand-this-submits-bulk-out
 
+cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-session-smoke.json macos-session-smoke \
+  --vid 0x0bda \
+  --pid 0x8812 \
+  --i-understand-this-may-reconfigure-usb \
+  --i-understand-this-submits-bulk-out
+
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-reg-smoke.json macos-reg-smoke \
   --vid 0x0bda \
   --pid 0x8812
@@ -145,6 +151,21 @@ The zero-length IOUSBHost bulk-OUT smoke test also passed against endpoint `0x02
 - Bulk IN reads: 0
 - Bulk OUT writes: 1
 
+The retained IOUSBHost session smoke test passed using one configured interface session:
+
+- Report: `/tmp/wfb-remote-macos-session-smoke.json`
+- Configuration: 1
+- Retained pipes: bulk IN `0x81`, bulk OUT `0x02`
+- Control reads through the same process/session: 6
+- `REG_SYS_FUNC_EN`: `0x1f`
+- `REG_APS_FSMCO`: `0x20020002`
+- `REG_SYS_CLKR`: `0xfc23`
+- `REG_RF_CTRL`: `0x07`
+- `REG_MCUFWDL`: `0xc6`
+- `REG_CR`: `0x06ff`
+- Retained bulk IN request: endpoint `0x81`, 512 bytes requested, timed out after 100 ms with no RF traffic
+- Retained bulk OUT request: endpoint `0x02`, zero bytes requested, completed
+
 The integrated IOUSBHost transport then passed direct default-control register reads:
 
 ```text
@@ -249,7 +270,7 @@ After BB smoke, the guarded IOUSBHost RF smoke test also passed:
 
 ## Interpretation
 
-The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, or one-shot pipe IO. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute there through BB/RF programming, interface 0 can be opened after `configureWithValue:matchInterfaces:`, and descriptor-confirmed bulk pipes can accept synchronous IO requests.
+The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, one-shot pipe IO, or retaining interface and pipe objects across several operations. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute there through BB/RF programming, interface 0 can be opened after `configureWithValue:matchInterfaces:`, descriptor-confirmed bulk pipes can accept synchronous IO requests, and a retained session can combine register reads with bulk IN/OUT requests.
 
 The next useful implementation work is to turn the one-shot IOUSBHost probes into a retained radio transport session: configure once, keep interface 0 and pipes open, run the existing RTL8812AU init through default control, then reuse the retained bulk IN/OUT pipes for `rx-scan`, `tx-once`, and bridge traffic.
 

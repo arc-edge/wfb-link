@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use radio_core::{rtl8812au::Rtl8812auUsbTransport, UsbError};
+use radio_core::{rtl8812au::Rtl8812auUsbTransport, UsbBulkTransfer, UsbError};
 
 const RTL_USB_REQ: u8 = 0x05;
 const RTL_READ_REQUEST_TYPE: u8 = 0xc0;
@@ -19,6 +19,12 @@ const PIPE_ERROR_BUF_LEN: usize = 160;
 
 #[repr(C)]
 struct WfbMacosUsbHost {
+    _private: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomData<()>)>,
+}
+
+#[repr(C)]
+struct WfbMacosUsbHostSession {
     _private: [u8; 0],
     _marker: PhantomData<(*mut u8, PhantomData<()>)>,
 }
@@ -106,6 +112,43 @@ extern "C" {
         error: *mut c_char,
         error_len: usize,
     ) -> c_int;
+    fn wfb_macos_usbhost_session_open(
+        host: *mut WfbMacosUsbHost,
+        vid: u16,
+        pid: u16,
+        configuration_value: u8,
+        match_interfaces: c_int,
+        interface_number: u8,
+        bulk_in_endpoint: u8,
+        bulk_out_endpoint: u8,
+        poll_attempts: u32,
+        poll_delay_ms: u64,
+        out_session: *mut *mut WfbMacosUsbHostSession,
+        result: *mut WfbMacosUsbHostInterfaceProbe,
+        error: *mut c_char,
+        error_len: usize,
+    ) -> c_int;
+    fn wfb_macos_usbhost_session_close(session: *mut WfbMacosUsbHostSession);
+    fn wfb_macos_usbhost_session_bulk_read(
+        session: *mut WfbMacosUsbHostSession,
+        endpoint_address: u8,
+        data: *mut u8,
+        len: usize,
+        timeout_ms: u64,
+        result: *mut WfbMacosUsbHostBulkTransfer,
+        error: *mut c_char,
+        error_len: usize,
+    ) -> c_int;
+    fn wfb_macos_usbhost_session_bulk_write(
+        session: *mut WfbMacosUsbHostSession,
+        endpoint_address: u8,
+        data: *const u8,
+        len: usize,
+        timeout_ms: u64,
+        result: *mut WfbMacosUsbHostBulkTransfer,
+        error: *mut c_char,
+        error_len: usize,
+    ) -> c_int;
     fn wfb_macos_usbhost_interface_probe(
         host: *mut WfbMacosUsbHost,
         vid: u16,
@@ -161,6 +204,14 @@ pub struct MacosUsbHostDevice {
     raw: NonNull<WfbMacosUsbHost>,
 }
 
+pub struct MacosUsbHostSession {
+    raw: NonNull<WfbMacosUsbHostSession>,
+    device: MacosUsbHostDevice,
+    pub interface_probe: MacosUsbHostInterfaceProbe,
+    pub bulk_in_endpoint: u8,
+    pub bulk_out_endpoint: u8,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MacosUsbHostInterfaceProbeRequest<'a> {
     pub vid: u16,
@@ -199,6 +250,19 @@ pub struct MacosUsbHostBulkWriteRequest<'a> {
     pub poll_attempts: u32,
     pub poll_delay: Duration,
     pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MacosUsbHostSessionOpenRequest {
+    pub vid: u16,
+    pub pid: u16,
+    pub configuration_value: u8,
+    pub match_interfaces: bool,
+    pub interface_number: u8,
+    pub bulk_in_endpoint: u8,
+    pub bulk_out_endpoint: u8,
+    pub poll_attempts: u32,
+    pub poll_delay: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -473,6 +537,121 @@ impl Drop for MacosUsbHostDevice {
     }
 }
 
+impl MacosUsbHostSession {
+    pub fn open(request: MacosUsbHostSessionOpenRequest) -> Result<Self, String> {
+        let device = MacosUsbHostDevice::open(request.vid, request.pid)?;
+        let mut raw_session = std::ptr::null_mut();
+        let mut raw_probe: WfbMacosUsbHostInterfaceProbe = unsafe { std::mem::zeroed() };
+        let mut error = [0i8; ERROR_BUF_LEN];
+        let rc = unsafe {
+            wfb_macos_usbhost_session_open(
+                device.raw.as_ptr(),
+                request.vid,
+                request.pid,
+                request.configuration_value,
+                c_int::from(request.match_interfaces),
+                request.interface_number,
+                request.bulk_in_endpoint,
+                request.bulk_out_endpoint,
+                request.poll_attempts,
+                duration_ms(request.poll_delay),
+                &mut raw_session,
+                &mut raw_probe,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(error_message(&error));
+        }
+        let raw = NonNull::new(raw_session).ok_or_else(|| {
+            let message = error_message(&error);
+            if message.is_empty() {
+                "wfb_macos_usbhost_session_open returned null".to_string()
+            } else {
+                message
+            }
+        })?;
+        Ok(Self {
+            raw,
+            device,
+            interface_probe: interface_probe_from_raw(&raw_probe, error_message(&error)),
+            bulk_in_endpoint: request.bulk_in_endpoint,
+            bulk_out_endpoint: request.bulk_out_endpoint,
+        })
+    }
+
+    pub fn bulk_read_once(
+        &mut self,
+        endpoint_address: u8,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<MacosUsbHostBulkTransfer, String> {
+        let mut raw_result: WfbMacosUsbHostBulkTransfer = unsafe { std::mem::zeroed() };
+        let mut error = [0i8; ERROR_BUF_LEN];
+        let rc = unsafe {
+            wfb_macos_usbhost_session_bulk_read(
+                self.raw.as_ptr(),
+                endpoint_address,
+                data.as_mut_ptr(),
+                data.len(),
+                duration_ms(timeout),
+                &mut raw_result,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(error_message(&error));
+        }
+        let transferred_len = raw_result.transferred_len.min(data.len());
+        Ok(bulk_transfer_from_raw(
+            &raw_result,
+            data[..transferred_len].to_vec(),
+            error_message(&error),
+        ))
+    }
+
+    pub fn bulk_write_once(
+        &mut self,
+        endpoint_address: u8,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<MacosUsbHostBulkTransfer, String> {
+        let mut raw_result: WfbMacosUsbHostBulkTransfer = unsafe { std::mem::zeroed() };
+        let mut error = [0i8; ERROR_BUF_LEN];
+        let rc = unsafe {
+            wfb_macos_usbhost_session_bulk_write(
+                self.raw.as_ptr(),
+                endpoint_address,
+                data.as_ptr(),
+                data.len(),
+                duration_ms(timeout),
+                &mut raw_result,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(error_message(&error));
+        }
+        let transferred_len = raw_result.transferred_len.min(data.len());
+        Ok(bulk_transfer_from_raw(
+            &raw_result,
+            data[..transferred_len].to_vec(),
+            error_message(&error),
+        ))
+    }
+}
+
+impl Drop for MacosUsbHostSession {
+    fn drop(&mut self) {
+        unsafe {
+            wfb_macos_usbhost_session_close(self.raw.as_ptr());
+        }
+    }
+}
+
 impl Rtl8812auUsbTransport for &MacosUsbHostDevice {
     fn read_vendor(
         &self,
@@ -508,6 +687,92 @@ impl Rtl8812auUsbTransport for &MacosUsbHostDevice {
             timeout,
         )
         .map_err(UsbError::Backend)
+    }
+}
+
+impl Rtl8812auUsbTransport for &MacosUsbHostSession {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        self.device
+            .control_read(
+                RTL_READ_REQUEST_TYPE,
+                RTL_USB_REQ,
+                value,
+                index,
+                data,
+                timeout,
+            )
+            .map_err(UsbError::Backend)
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        self.device
+            .control_write(
+                RTL_WRITE_REQUEST_TYPE,
+                RTL_USB_REQ,
+                value,
+                index,
+                data,
+                timeout,
+            )
+            .map_err(UsbError::Backend)
+    }
+}
+
+impl UsbBulkTransfer for MacosUsbHostSession {
+    fn read_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        let transfer = self
+            .bulk_read_once(endpoint, data, timeout)
+            .map_err(UsbError::Backend)?;
+        if transfer.transfer_ok {
+            Ok(transfer.transferred_len)
+        } else if transfer.timed_out {
+            Err(UsbError::BackendTimeout(transfer.error.unwrap_or_else(
+                || format!("bulk IN endpoint 0x{endpoint:02x} timed out"),
+            )))
+        } else {
+            Err(UsbError::Backend(transfer.error.unwrap_or_else(|| {
+                format!("bulk IN endpoint 0x{endpoint:02x} failed")
+            })))
+        }
+    }
+
+    fn write_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        let transfer = self
+            .bulk_write_once(endpoint, data, timeout)
+            .map_err(UsbError::Backend)?;
+        if transfer.transfer_ok {
+            Ok(transfer.transferred_len)
+        } else if transfer.timed_out {
+            Err(UsbError::BackendTimeout(transfer.error.unwrap_or_else(
+                || format!("bulk OUT endpoint 0x{endpoint:02x} timed out"),
+            )))
+        } else {
+            Err(UsbError::Backend(transfer.error.unwrap_or_else(|| {
+                format!("bulk OUT endpoint 0x{endpoint:02x} failed")
+            })))
+        }
     }
 }
 
