@@ -1496,6 +1496,10 @@ struct BridgeRunArgs {
 
 #[derive(Debug, Parser, Clone, Default)]
 struct BridgeTxOverrideArgs {
+    /// Descriptor profile applied before explicit TX overrides.
+    #[arg(long, value_enum, default_value = "linux-monitor")]
+    tx_profile: BridgeTxProfileArg,
+
     /// Override radiotap TX rate for live bridge submissions.
     #[arg(long, value_parser = parse_tx_rate_arg)]
     tx_rate: Option<TxRate>,
@@ -1946,6 +1950,21 @@ impl From<TxQueueArg> for TxQueue {
             TxQueueArg::High => TxQueue::High,
             TxQueueArg::Mgnt => TxQueue::Mgnt,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum BridgeTxProfileArg {
+    /// Receiver-proven Linux monitor-injection descriptor shape for WFB HT/VHT traffic.
+    LinuxMonitor,
+    /// Preserve radiotap-derived TX options except for explicit CLI overrides.
+    RadiotapDirect,
+}
+
+impl Default for BridgeTxProfileArg {
+    fn default() -> Self {
+        Self::LinuxMonitor
     }
 }
 
@@ -2862,6 +2881,7 @@ struct BridgeTxDatagramReport {
     frame_len: usize,
     packet_len: Option<usize>,
     tx_descriptor_hex: Option<String>,
+    tx_profile: BridgeTxProfileArg,
     tx_options: TxOptions,
 }
 
@@ -19336,6 +19356,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
         frame_len,
         packet_len: Some(packet_len),
         tx_descriptor_hex,
+        tx_profile: args.tx_overrides.tx_profile,
         tx_options,
     });
 
@@ -19441,6 +19462,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
             tx_rate: args.tx_overrides.tx_rate,
             tx_bandwidth: args.tx_overrides.tx_bandwidth,
             tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
+            tx_profile: args.tx_overrides.tx_profile,
             tx_queue: args.tx_overrides.tx_queue.into(),
             tx_mac_id: args.tx_overrides.mac_id,
             tx_rate_id: args.tx_overrides.tx_rate_id,
@@ -19521,6 +19543,7 @@ struct BridgeTxRadio<'a> {
     tx_rate: Option<TxRate>,
     tx_bandwidth: Option<Bandwidth>,
     tx_channel_bandwidth: Option<Bandwidth>,
+    tx_profile: BridgeTxProfileArg,
     tx_queue: TxQueue,
     tx_mac_id: Option<u8>,
     tx_rate_id: Option<u8>,
@@ -19545,7 +19568,7 @@ fn apply_bridge_tx_overrides(
     if let Some(bandwidth) = overrides.tx_bandwidth {
         options.bandwidth = bandwidth;
     }
-    options = apply_wfb_monitor_tx_defaults(options);
+    options = apply_bridge_tx_profile(overrides.tx_profile, options);
     if overrides.tx_queue != TxQueueArg::Auto {
         options.queue = overrides.tx_queue.into();
     }
@@ -19588,6 +19611,13 @@ fn apply_wfb_monitor_tx_defaults(mut options: TxOptions) -> TxOptions {
     options
 }
 
+fn apply_bridge_tx_profile(profile: BridgeTxProfileArg, options: TxOptions) -> TxOptions {
+    match profile {
+        BridgeTxProfileArg::LinuxMonitor => apply_wfb_monitor_tx_defaults(options),
+        BridgeTxProfileArg::RadiotapDirect => options,
+    }
+}
+
 impl RadioTx for BridgeTxRadio<'_> {
     fn submit_80211(
         &mut self,
@@ -19602,7 +19632,7 @@ impl RadioTx for BridgeTxRadio<'_> {
         if let Some(bandwidth) = self.tx_bandwidth {
             options.bandwidth = bandwidth;
         }
-        options = apply_wfb_monitor_tx_defaults(options);
+        options = apply_bridge_tx_profile(self.tx_profile, options);
         if self.tx_queue != TxQueue::Auto {
             options.queue = self.tx_queue;
         }
@@ -20238,6 +20268,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             frame_len: parsed.ieee80211_frame.len(),
             packet_len: Some(packet_len),
             tx_descriptor_hex,
+            tx_profile: args.tx_overrides.tx_profile,
             tx_options,
         });
 
@@ -20250,6 +20281,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 tx_rate: args.tx_overrides.tx_rate,
                 tx_bandwidth: args.tx_overrides.tx_bandwidth,
                 tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
+                tx_profile: args.tx_overrides.tx_profile,
                 tx_queue: args.tx_overrides.tx_queue.into(),
                 tx_mac_id: args.tx_overrides.mac_id,
                 tx_rate_id: args.tx_overrides.tx_rate_id,
@@ -20960,6 +20992,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     frame_len: parsed.ieee80211_frame.len(),
                     packet_len: Some(packet_len),
                     tx_descriptor_hex,
+                    tx_profile: args.tx.tx_overrides.tx_profile,
                     tx_options,
                 });
                 let submit_result = {
@@ -20971,6 +21004,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                         tx_rate: args.tx.tx_overrides.tx_rate,
                         tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
                         tx_channel_bandwidth: args.tx.tx_overrides.tx_channel_bandwidth,
+                        tx_profile: args.tx.tx_overrides.tx_profile,
                         tx_queue: args.tx.tx_overrides.tx_queue.into(),
                         tx_mac_id: args.tx.tx_overrides.mac_id,
                         tx_rate_id: args.tx.tx_overrides.tx_rate_id,
@@ -24114,6 +24148,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             tx_rate: args.tx_rate,
             tx_bandwidth: args.tx_bandwidth,
             tx_channel_bandwidth: args.tx_channel_bandwidth,
+            tx_profile: BridgeTxProfileArg::LinuxMonitor,
             tx_queue: args.tx_queue.into(),
             tx_mac_id: Some(args.mac_id),
             tx_rate_id: args.tx_rate_id,
@@ -28185,7 +28220,8 @@ fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
             println!("TX descriptor: {descriptor}");
         }
         println!(
-            "TX options: rate={:?} bandwidth={} short_gi={} ldpc={} stbc={} no_retry={}",
+            "TX options: profile={:?} rate={:?} bandwidth={} short_gi={} ldpc={} stbc={} no_retry={}",
+            datagram.tx_profile,
             datagram.tx_options.rate,
             datagram.tx_options.bandwidth.mhz(),
             datagram.tx_options.short_gi,
@@ -28333,6 +28369,7 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
         if let Some(descriptor) = &datagram.tx_descriptor_hex {
             println!("TX descriptor: {descriptor}");
         }
+        println!("TX profile: {:?}", datagram.tx_profile);
     }
     println!(
         "Bridge TX: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
@@ -31039,6 +31076,33 @@ mod tests {
         assert!(!options.disable_rate_fallback);
         assert_eq!(options.rate_fallback_limit, 0);
         assert!(!options.aggregate_break);
+    }
+
+    #[test]
+    fn bridge_tx_radiotap_direct_profile_preserves_radiotap_shape() {
+        let overrides = BridgeTxOverrideArgs {
+            tx_profile: BridgeTxProfileArg::RadiotapDirect,
+            ..BridgeTxOverrideArgs::default()
+        };
+        let options = apply_bridge_tx_overrides(
+            &overrides,
+            Bandwidth::Mhz40,
+            TxOptions {
+                rate: TxRate::Mcs(1),
+                bandwidth: Bandwidth::Mhz40,
+                no_retry: true,
+                ..TxOptions::default()
+            },
+        );
+
+        assert_eq!(options.rate, TxRate::Mcs(1));
+        assert_eq!(options.queue, TxQueue::Auto);
+        assert_eq!(options.mac_id, 0);
+        assert_eq!(options.rate_id, None);
+        assert_eq!(options.retries, 12);
+        assert!(options.disable_rate_fallback);
+        assert_eq!(options.rate_fallback_limit, 0x1f);
+        assert!(options.aggregate_break);
     }
 
     #[test]
