@@ -2723,11 +2723,26 @@ struct BridgeTxListenReport {
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
+    throughput: Option<BridgeTxListenThroughputReport>,
+    cpu: Option<CpuUsageReport>,
     counters: DiagnosticCounters,
     result: DiagnosticResult,
     phases: Vec<DiagnosticPhase>,
     error: Option<DiagnosticErrorReport>,
     notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxListenThroughputReport {
+    elapsed_us: u64,
+    received_per_second: Option<f64>,
+    submitted_per_second: Option<f64>,
+    datagram_bytes: u64,
+    frame_bytes: u64,
+    usb_bytes: u64,
+    datagram_bytes_per_second: Option<f64>,
+    frame_bytes_per_second: Option<f64>,
+    usb_bytes_per_second: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -19174,6 +19189,10 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
+    let cpu_started = process_cpu_usage();
+    let started = Instant::now();
+    let mut datagram_bytes = 0u64;
+    let mut frame_bytes = 0u64;
     let mut buf = vec![0u8; u16::MAX as usize];
     for _ in 0..args.max_datagrams {
         let (len, peer) = match socket.recv_from(&mut buf) {
@@ -19189,6 +19208,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                     pre_tx_counters,
                     bridge_counters,
                     submit_counters,
+                );
+                bridge_tx_listen_set_runtime_metrics(
+                    &mut report,
+                    started,
+                    cpu_started,
+                    datagram_bytes,
+                    frame_bytes,
                 );
                 let (code, message) = if report.datagrams_received == 0 {
                     (
@@ -19218,6 +19244,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                     bridge_counters,
                     submit_counters,
                 );
+                bridge_tx_listen_set_runtime_metrics(
+                    &mut report,
+                    started,
+                    cpu_started,
+                    datagram_bytes,
+                    frame_bytes,
+                );
                 return bridge_tx_listen_failure(
                     report,
                     "bridge_listen",
@@ -19233,6 +19266,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         report.datagrams_received += 1;
         report.last_peer = Some(peer.to_string());
         let datagram = &buf[..len];
+        datagram_bytes = datagram_bytes.saturating_add(len as u64);
         let parsed = match parse_tx_datagram(datagram) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -19242,6 +19276,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                     pre_tx_counters,
                     bridge_counters,
                     submit_counters,
+                );
+                bridge_tx_listen_set_runtime_metrics(
+                    &mut report,
+                    started,
+                    cpu_started,
+                    datagram_bytes,
+                    frame_bytes,
                 );
                 return bridge_tx_listen_failure(
                     report,
@@ -19254,6 +19295,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 );
             }
         };
+        frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
         let tx_options = apply_bridge_tx_overrides(&args.tx_overrides, parsed.tx_options);
         let (packet_len, tx_descriptor_hex) =
             match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
@@ -19267,6 +19309,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                         pre_tx_counters,
                         bridge_counters,
                         submit_counters,
+                    );
+                    bridge_tx_listen_set_runtime_metrics(
+                        &mut report,
+                        started,
+                        cpu_started,
+                        datagram_bytes,
+                        frame_bytes,
                     );
                     return bridge_tx_listen_failure(
                         report,
@@ -19323,6 +19372,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 bridge_counters,
                 submit_counters,
             );
+            bridge_tx_listen_set_runtime_metrics(
+                &mut report,
+                started,
+                cpu_started,
+                datagram_bytes,
+                frame_bytes,
+            );
             return bridge_tx_listen_failure(
                 report,
                 "bridge_submit",
@@ -19345,6 +19401,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         pre_tx_counters,
         bridge_counters,
         submit_counters,
+    );
+    bridge_tx_listen_set_runtime_metrics(
+        &mut report,
+        started,
+        cpu_started,
+        datagram_bytes,
+        frame_bytes,
     );
     report.result = DiagnosticResult::Pass;
     report.phases = vec![
@@ -19411,12 +19474,38 @@ fn bridge_tx_listen_base_report(
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
+        throughput: None,
+        cpu: None,
         counters: DiagnosticCounters::default(),
         result: DiagnosticResult::NotImplemented,
         phases: Vec::new(),
         error: None,
         notes: vec!["live bridge TX listener stopped before completing bounded submission"],
     }
+}
+
+fn bridge_tx_listen_set_runtime_metrics(
+    report: &mut BridgeTxListenReport,
+    started: Instant,
+    cpu_started: Option<CpuUsageSnapshot>,
+    datagram_bytes: u64,
+    frame_bytes: u64,
+) {
+    let elapsed = started.elapsed();
+    let elapsed_us = elapsed.as_micros().try_into().unwrap_or(u64::MAX);
+    let elapsed_ms = elapsed.as_millis().try_into().unwrap_or(u64::MAX);
+    report.throughput = Some(BridgeTxListenThroughputReport {
+        elapsed_us,
+        received_per_second: rate_per_second_us(report.datagrams_received, elapsed_us),
+        submitted_per_second: rate_per_second_us(report.submit_counters.submitted, elapsed_us),
+        datagram_bytes,
+        frame_bytes,
+        usb_bytes: report.submit_counters.bytes_written,
+        datagram_bytes_per_second: rate_per_second_us(datagram_bytes, elapsed_us),
+        frame_bytes_per_second: rate_per_second_us(frame_bytes, elapsed_us),
+        usb_bytes_per_second: rate_per_second_us(report.submit_counters.bytes_written, elapsed_us),
+    });
+    report.cpu = cpu_usage_delta(cpu_started, process_cpu_usage(), elapsed_ms);
 }
 
 fn bridge_tx_listen_failure(
@@ -26128,6 +26217,43 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
         report.submit_counters.short_writes,
         report.submit_counters.bytes_written
     );
+    if let Some(throughput) = &report.throughput {
+        println!(
+            "Throughput: elapsed_us={} received/s={} submitted/s={} UDP bytes/s={} frame bytes/s={} USB bytes/s={}",
+            throughput.elapsed_us,
+            throughput
+                .received_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .submitted_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .datagram_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .frame_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .usb_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    if let Some(cpu) = &report.cpu {
+        println!(
+            "CPU: user_us={} system_us={} total_us={} one_core={}",
+            cpu.user_us,
+            cpu.system_us,
+            cpu.total_us,
+            cpu.percent_one_core
+                .map(|value| format!("{value:.2}%"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
     if let Some(status) = &report.tx_status {
         println!(
             "TX status: changed={} error={}",
