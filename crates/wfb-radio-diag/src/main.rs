@@ -1410,10 +1410,21 @@ struct BridgeTxListenArgs {
     txdma_status_clear_value: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BridgeRunRxForwardArg {
+    link_id: Option<u32>,
+    radio_port: u8,
+    aggregator: SocketAddr,
+}
+
 #[derive(Debug, Parser, Clone)]
 struct BridgeRunArgs {
     #[command(flatten)]
     tx: BridgeTxListenArgs,
+
+    /// Additional UDP addresses to bind for WFB distributor/injector datagrams.
+    #[arg(long = "tx-bind", value_name = "ADDR")]
+    tx_binds: Vec<SocketAddr>,
 
     /// Bounded full-bridge runtime in milliseconds after init completes.
     #[arg(long, default_value_t = 10000)]
@@ -1422,6 +1433,10 @@ struct BridgeRunArgs {
     /// Per bulk-IN read timeout while interleaving RX and TX.
     #[arg(long, default_value_t = 20)]
     rx_timeout_ms: u64,
+
+    /// Maximum TX datagrams to drain before returning to one bulk-IN RX read.
+    #[arg(long, default_value_t = 8)]
+    tx_burst_limit: u32,
 
     /// WFB link ID to match and optionally forward during RX.
     #[arg(long, value_parser = parse_u32)]
@@ -1434,6 +1449,10 @@ struct BridgeRunArgs {
     /// UDP aggregator address for matching WFB RX forwarding.
     #[arg(long)]
     rx_aggregator: Option<SocketAddr>,
+
+    /// Additional WFB RX forwarding target as LINK_ID:RADIO_PORT=HOST:PORT or RADIO_PORT=HOST:PORT with --wfb-link-id.
+    #[arg(long = "rx-forward", value_name = "LINK_ID:RADIO_PORT=HOST:PORT", value_parser = parse_bridge_run_rx_forward_arg)]
+    rx_forwards: Vec<BridgeRunRxForwardArg>,
 
     /// WFB forwarding WLAN index metadata.
     #[arg(long, default_value_t = 0)]
@@ -2644,6 +2663,7 @@ struct RxFixtureReport {
     fixture_paths: Vec<PathBuf>,
     frame_jsonl_path: Option<PathBuf>,
     wfb_forward: Option<RxWfbForwardReport>,
+    wfb_forwards: Vec<RxWfbForwardReport>,
     buffers_read: u64,
     read_timeouts: u64,
     bulk_bytes: u64,
@@ -2665,7 +2685,7 @@ struct RxScanWfbForwardConfig {
     aggregator: Option<SocketAddr>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct RxWfbForwardReport {
     link_id: u32,
     link_id_hex: String,
@@ -2798,8 +2818,11 @@ struct BridgeRunReport {
     channel: Option<Channel>,
     bandwidth: Bandwidth,
     bind_addr: String,
+    bind_addrs: Vec<String>,
+    tx_bind_reports: Vec<BridgeRunTxBindReport>,
     duration_ms: u64,
     rx_timeout_ms: u64,
+    tx_burst_limit: u32,
     max_datagrams: u32,
     datagrams_received: u64,
     last_peer: Option<String>,
@@ -2824,6 +2847,14 @@ struct BridgeRunReport {
     phases: Vec<DiagnosticPhase>,
     error: Option<DiagnosticErrorReport>,
     notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BridgeRunTxBindReport {
+    bind_addr: String,
+    datagrams_received: u64,
+    datagram_bytes: u64,
+    last_peer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -16590,6 +16621,42 @@ fn bridge_run_wfb_forward_config(
     )
 }
 
+fn bridge_run_wfb_forward_configs(
+    args: &BridgeRunArgs,
+) -> std::result::Result<Vec<RxScanWfbForwardConfig>, DiagnosticErrorReport> {
+    let mut configs = Vec::new();
+    if let Some(config) = bridge_run_wfb_forward_config(args)? {
+        configs.push(config);
+    }
+    for forward in &args.rx_forwards {
+        let link_id = match forward.link_id.or(args.wfb_link_id) {
+            Some(link_id) => link_id,
+            None => {
+                return Err(DiagnosticErrorReport {
+                    code: "missing_wfb_rx_forward_link_id",
+                    message: "--rx-forward RADIO_PORT=HOST:PORT requires --wfb-link-id; use LINK_ID:RADIO_PORT=HOST:PORT to make it self-contained".to_string(),
+                });
+            }
+        };
+        let channel_id = WfbChannelId::new(link_id, forward.radio_port).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "invalid_wfb_rx_channel_id",
+                message: error.to_string(),
+            }
+        })?;
+        configs.push(RxScanWfbForwardConfig {
+            config: RxForwardConfig {
+                channel_id,
+                wlan_idx: args.rx_wlan_idx,
+                mcs_index: args.rx_mcs_index,
+                bandwidth_mhz: args.tx.bandwidth.mhz() as u8,
+            },
+            aggregator: Some(forward.aggregator),
+        });
+    }
+    Ok(configs)
+}
+
 fn wfb_forward_config_from_parts(
     wfb_link_id: Option<u32>,
     wfb_radio_port: Option<u8>,
@@ -17152,7 +17219,7 @@ where
     };
     let mut pcap = create_optional_pcap(pcap_path)?;
     let mut frame_jsonl = create_optional_frame_jsonl(frame_jsonl_path)?;
-    let mut wfb_forward = create_optional_wfb_forward(wfb_forward_config)?;
+    let mut wfb_forwards = create_wfb_forwards(wfb_forward_config.into_iter().collect())?;
     let timeout_ms = timeout_ms.clamp(1, duration_ms.max(1));
     let per_read_timeout = Duration::from_millis(timeout_ms);
     let deadline = Instant::now() + Duration::from_millis(duration_ms);
@@ -17175,7 +17242,7 @@ where
                     &mut report,
                     &mut pcap,
                     &mut frame_jsonl,
-                    &mut wfb_forward,
+                    &mut wfb_forwards,
                     channel,
                     &buf[..len],
                 )?;
@@ -17196,7 +17263,7 @@ where
 
     flush_optional_pcap(&mut pcap)?;
     flush_optional_frame_jsonl(&mut frame_jsonl)?;
-    report.wfb_forward = wfb_forward.map(|runtime| runtime.report);
+    set_rx_wfb_forward_reports(&mut report, wfb_forwards);
     let counters = DiagnosticCounters {
         usb_bulk_in_reads: report.buffers_read + report.read_timeouts,
         rx_frames: report.parsed_frames,
@@ -17238,12 +17305,15 @@ fn create_optional_frame_jsonl(
     }
 }
 
-fn create_optional_wfb_forward(
-    config: Option<RxScanWfbForwardConfig>,
-) -> std::result::Result<Option<RxWfbForwardRuntime>, DiagnosticErrorReport> {
-    let Some(config) = config else {
-        return Ok(None);
-    };
+fn create_wfb_forwards(
+    configs: Vec<RxScanWfbForwardConfig>,
+) -> std::result::Result<Vec<RxWfbForwardRuntime>, DiagnosticErrorReport> {
+    configs.into_iter().map(create_wfb_forward).collect()
+}
+
+fn create_wfb_forward(
+    config: RxScanWfbForwardConfig,
+) -> std::result::Result<RxWfbForwardRuntime, DiagnosticErrorReport> {
     let socket = match config.aggregator {
         Some(_) => Some(
             UdpSocket::bind("0.0.0.0:0").map_err(|error| DiagnosticErrorReport {
@@ -17254,7 +17324,7 @@ fn create_optional_wfb_forward(
         None => None,
     };
     let channel_id = config.config.channel_id;
-    Ok(Some(RxWfbForwardRuntime {
+    Ok(RxWfbForwardRuntime {
         config: config.config,
         socket,
         aggregator: config.aggregator,
@@ -17270,14 +17340,21 @@ fn create_optional_wfb_forward(
             forwarded_bytes: 0,
             counters: RxCounters::default(),
         },
-    }))
+    })
+}
+
+fn set_rx_wfb_forward_reports(report: &mut RxFixtureReport, runtimes: Vec<RxWfbForwardRuntime>) {
+    let reports: Vec<RxWfbForwardReport> =
+        runtimes.into_iter().map(|runtime| runtime.report).collect();
+    report.wfb_forward = reports.first().cloned();
+    report.wfb_forwards = reports;
 }
 
 fn process_rx_buffer(
     report: &mut RxFixtureReport,
     pcap: &mut Option<PcapWriter<File>>,
     frame_jsonl: &mut Option<File>,
-    wfb_forward: &mut Option<RxWfbForwardRuntime>,
+    wfb_forwards: &mut [RxWfbForwardRuntime],
     channel: Channel,
     buf: &[u8],
 ) -> std::result::Result<(), DiagnosticErrorReport> {
@@ -17289,7 +17366,7 @@ fn process_rx_buffer(
                 let frame = parsed.frame.expect("frame outcome includes frame");
                 report.parsed_frames += 1;
                 count_rx_frame_type(report, &frame.data);
-                process_wfb_rx_forward(wfb_forward, &frame)?;
+                process_wfb_rx_forwards(wfb_forwards, &frame)?;
                 if let Some(writer) = pcap.as_mut() {
                     writer
                         .write_frame(SystemTime::now(), &frame.data)
@@ -17318,13 +17395,20 @@ fn process_rx_buffer(
     Ok(())
 }
 
-fn process_wfb_rx_forward(
-    wfb_forward: &mut Option<RxWfbForwardRuntime>,
+fn process_wfb_rx_forwards(
+    wfb_forwards: &mut [RxWfbForwardRuntime],
     frame: &radio_core::RxFrame,
 ) -> std::result::Result<(), DiagnosticErrorReport> {
-    let Some(runtime) = wfb_forward.as_mut() else {
-        return Ok(());
-    };
+    for runtime in wfb_forwards {
+        process_wfb_rx_forward(runtime, frame)?;
+    }
+    Ok(())
+}
+
+fn process_wfb_rx_forward(
+    runtime: &mut RxWfbForwardRuntime,
+    frame: &radio_core::RxFrame,
+) -> std::result::Result<(), DiagnosticErrorReport> {
     let Some(packet) =
         build_rx_forward_datagram(frame, runtime.config, &mut runtime.report.counters)
     else {
@@ -17480,7 +17564,7 @@ fn parse_rx_fixture_files(
     };
     let mut pcap = create_optional_pcap(pcap_path)?;
     let mut frame_jsonl = create_optional_frame_jsonl(frame_jsonl_path)?;
-    let mut wfb_forward: Option<RxWfbForwardRuntime> = None;
+    let mut wfb_forwards = Vec::new();
 
     for path in paths {
         let buf = fs::read(path).map_err(|error| DiagnosticErrorReport {
@@ -17493,7 +17577,7 @@ fn parse_rx_fixture_files(
             &mut report,
             &mut pcap,
             &mut frame_jsonl,
-            &mut wfb_forward,
+            &mut wfb_forwards,
             channel,
             &buf,
         )?;
@@ -19649,6 +19733,44 @@ fn bridge_tx_listen_failure(
     report
 }
 
+struct BridgeRunTxSocket {
+    bind_addr: SocketAddr,
+    socket: UdpSocket,
+    report_index: usize,
+}
+
+fn bridge_run_bind_addrs(args: &BridgeRunArgs) -> Vec<SocketAddr> {
+    let mut bind_addrs = Vec::with_capacity(args.tx_binds.len() + 1);
+    bind_addrs.push(args.tx.bind);
+    bind_addrs.extend(args.tx_binds.iter().copied());
+    bind_addrs
+}
+
+fn bridge_run_bind_tx_sockets(
+    args: &BridgeRunArgs,
+) -> std::result::Result<Vec<BridgeRunTxSocket>, DiagnosticErrorReport> {
+    let bind_addrs = bridge_run_bind_addrs(args);
+    let mut sockets = Vec::with_capacity(bind_addrs.len());
+    for (report_index, bind_addr) in bind_addrs.into_iter().enumerate() {
+        let socket = UdpSocket::bind(bind_addr).map_err(|error| DiagnosticErrorReport {
+            code: "udp_bind_failed",
+            message: format!("failed to bind {bind_addr}: {error}"),
+        })?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|error| DiagnosticErrorReport {
+                code: "udp_nonblocking_config_failed",
+                message: format!("failed to configure {bind_addr} as nonblocking: {error}"),
+            })?;
+        sockets.push(BridgeRunTxSocket {
+            bind_addr,
+            socket,
+            report_index,
+        });
+    }
+    Ok(sockets)
+}
+
 fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let selector = args.tx.adapter.selector();
     let (channel, result, error) = resolve_report_channel(args.tx.channel, args.tx.bandwidth);
@@ -19707,9 +19829,20 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             },
         );
     }
+    if args.tx_burst_limit == 0 {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run requires a nonzero TX burst limit",
+            DiagnosticErrorReport {
+                code: "invalid_tx_burst_limit",
+                message: "--tx-burst-limit must be greater than zero".to_string(),
+            },
+        );
+    }
 
-    let wfb_forward_config = match bridge_run_wfb_forward_config(&args) {
-        Ok(config) => config,
+    let wfb_forward_configs = match bridge_run_wfb_forward_configs(&args) {
+        Ok(configs) => configs,
         Err(error) => {
             return bridge_run_failure(
                 report,
@@ -19743,32 +19876,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
-
-    let socket = match UdpSocket::bind(args.tx.bind) {
-        Ok(socket) => socket,
-        Err(error) => {
-            return bridge_run_failure(
-                report,
-                "socket_bind",
-                "failed to bind bridge TX UDP listener",
-                DiagnosticErrorReport {
-                    code: "udp_bind_failed",
-                    message: format!("failed to bind {}: {error}", args.tx.bind),
-                },
-            );
-        }
-    };
-    if let Err(error) = socket.set_nonblocking(true) {
-        return bridge_run_failure(
-            report,
-            "socket_bind",
-            "failed to configure bridge TX UDP listener as nonblocking",
-            DiagnosticErrorReport {
-                code: "udp_nonblocking_config_failed",
-                message: error.to_string(),
-            },
-        );
-    }
 
     let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
         if args.tx.macos_usbhost.enabled {
@@ -19939,6 +20046,18 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
+    let tx_sockets = match bridge_run_bind_tx_sockets(&args) {
+        Ok(sockets) => sockets,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "socket_bind",
+                "failed to bind bridge TX UDP listener",
+                error,
+            );
+        }
+    };
+
     let mut pcap = match create_optional_pcap(args.rx_pcap.as_deref()) {
         Ok(pcap) => pcap,
         Err(error) => {
@@ -19956,8 +20075,8 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
-    let mut wfb_forward = match create_optional_wfb_forward(wfb_forward_config) {
-        Ok(runtime) => runtime,
+    let mut wfb_forwards = match create_wfb_forwards(wfb_forward_configs) {
+        Ok(runtimes) => runtimes,
         Err(error) => {
             return bridge_run_failure(
                 report,
@@ -19984,11 +20103,135 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let mut rx_buf = vec![0u8; 16 * 1024];
 
     while Instant::now() < deadline {
-        while report.datagrams_received < u64::from(args.tx.max_datagrams) {
-            let (len, peer) = match socket.recv_from(&mut udp_buf) {
-                Ok(received) => received,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => {
+        let mut received_any = true;
+        let mut tx_burst_count = 0u32;
+        while report.datagrams_received < u64::from(args.tx.max_datagrams)
+            && tx_burst_count < args.tx_burst_limit
+            && received_any
+        {
+            received_any = false;
+            for tx_socket in &tx_sockets {
+                if report.datagrams_received >= u64::from(args.tx.max_datagrams) {
+                    break;
+                }
+                if tx_burst_count >= args.tx_burst_limit {
+                    break;
+                }
+                let (len, peer) = match tx_socket.socket.recv_from(&mut udp_buf) {
+                    Ok(received) => {
+                        received_any = true;
+                        received
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(error) => {
+                        bridge_run_update_counters(
+                            &mut report,
+                            pre_counters,
+                            bridge_counters,
+                            submit_counters,
+                        );
+                        bridge_run_set_runtime_metrics(
+                            &mut report,
+                            started,
+                            cpu_started,
+                            datagram_bytes,
+                            frame_bytes,
+                        );
+                        return bridge_run_failure(
+                            report,
+                            "bridge_tx_receive",
+                            "bridge run UDP receive failed",
+                            DiagnosticErrorReport {
+                                code: "udp_receive_failed",
+                                message: format!(
+                                    "UDP receive from {} failed: {error}",
+                                    tx_socket.bind_addr
+                                ),
+                            },
+                        );
+                    }
+                };
+
+                report.datagrams_received += 1;
+                tx_burst_count = tx_burst_count.saturating_add(1);
+                report.last_peer = Some(peer.to_string());
+                let datagram = &udp_buf[..len];
+                datagram_bytes = datagram_bytes.saturating_add(len as u64);
+                if let Some(bind_report) = report.tx_bind_reports.get_mut(tx_socket.report_index) {
+                    bind_report.datagrams_received =
+                        bind_report.datagrams_received.saturating_add(1);
+                    bind_report.datagram_bytes =
+                        bind_report.datagram_bytes.saturating_add(len as u64);
+                    bind_report.last_peer = Some(peer.to_string());
+                }
+                let parsed = match parse_tx_datagram(datagram) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        bridge_counters.incoming += 1;
+                        bridge_counters.dropped += 1;
+                        bridge_counters.malformed += 1;
+                        bridge_counters.unsupported_radiotap +=
+                            u64::from(bridge_tx_is_unsupported_radiotap(&error));
+                        continue;
+                    }
+                };
+                frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
+                let tx_options =
+                    apply_bridge_tx_overrides(&args.tx.tx_overrides, parsed.tx_options);
+                let (packet_len, tx_descriptor_hex) =
+                    match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+                        Ok(packet) => (
+                            packet.len(),
+                            Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+                        ),
+                        Err(_) => {
+                            bridge_counters.incoming += 1;
+                            bridge_counters.dropped += 1;
+                            bridge_counters.malformed += 1;
+                            continue;
+                        }
+                    };
+                report.last_datagram = Some(BridgeTxDatagramReport {
+                    source: "udp",
+                    datagram_len: len,
+                    fwmark: parsed.fwmark,
+                    fwmark_hex: format_value(parsed.fwmark, 8),
+                    radiotap_len: parsed.radiotap_len,
+                    frame_len: parsed.ieee80211_frame.len(),
+                    packet_len: Some(packet_len),
+                    tx_descriptor_hex,
+                    tx_options,
+                });
+                let submit_result = {
+                    let mut radio = BridgeTxRadio {
+                        transport: &mut transport,
+                        bulk_out,
+                        channel,
+                        tx_rate: args.tx.tx_overrides.tx_rate,
+                        tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
+                        tx_queue: args.tx.tx_overrides.tx_queue.into(),
+                        tx_mac_id: args.tx.tx_overrides.mac_id,
+                        tx_rate_id: args.tx.tx_overrides.tx_rate_id,
+                        tx_retries: args.tx.tx_overrides.tx_retries,
+                        tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
+                        hardware_sequence: None,
+                        first_segment: None,
+                        disable_rate_fallback: args
+                            .tx
+                            .tx_overrides
+                            .enable_rate_fallback
+                            .then_some(false),
+                        aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
+                        submit_counters: &mut submit_counters,
+                    };
+                    submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+                };
+                if let Err(error) = submit_result {
+                    if tx_status.is_some() {
+                        let registers = Rtl8812auRegisterAccess::new(&transport);
+                        tx_status_probe_post(&registers, &mut tx_status);
+                        report.tx_status = tx_status;
+                    }
                     bridge_run_update_counters(
                         &mut report,
                         pre_counters,
@@ -20004,109 +20247,14 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     );
                     return bridge_run_failure(
                         report,
-                        "bridge_tx_receive",
-                        "bridge run UDP receive failed",
+                        "bridge_tx_submit",
+                        "bridge run TX submission failed",
                         DiagnosticErrorReport {
-                            code: "udp_receive_failed",
+                            code: "bridge_tx_submit_failed",
                             message: error.to_string(),
                         },
                     );
                 }
-            };
-
-            report.datagrams_received += 1;
-            report.last_peer = Some(peer.to_string());
-            let datagram = &udp_buf[..len];
-            datagram_bytes = datagram_bytes.saturating_add(len as u64);
-            let parsed = match parse_tx_datagram(datagram) {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    bridge_counters.incoming += 1;
-                    bridge_counters.dropped += 1;
-                    bridge_counters.malformed += 1;
-                    bridge_counters.unsupported_radiotap +=
-                        u64::from(bridge_tx_is_unsupported_radiotap(&error));
-                    continue;
-                }
-            };
-            frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-            let tx_options = apply_bridge_tx_overrides(&args.tx.tx_overrides, parsed.tx_options);
-            let (packet_len, tx_descriptor_hex) =
-                match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
-                    Ok(packet) => (
-                        packet.len(),
-                        Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
-                    ),
-                    Err(_) => {
-                        bridge_counters.incoming += 1;
-                        bridge_counters.dropped += 1;
-                        bridge_counters.malformed += 1;
-                        continue;
-                    }
-                };
-            report.last_datagram = Some(BridgeTxDatagramReport {
-                source: "udp",
-                datagram_len: len,
-                fwmark: parsed.fwmark,
-                fwmark_hex: format_value(parsed.fwmark, 8),
-                radiotap_len: parsed.radiotap_len,
-                frame_len: parsed.ieee80211_frame.len(),
-                packet_len: Some(packet_len),
-                tx_descriptor_hex,
-                tx_options,
-            });
-            let submit_result = {
-                let mut radio = BridgeTxRadio {
-                    transport: &mut transport,
-                    bulk_out,
-                    channel,
-                    tx_rate: args.tx.tx_overrides.tx_rate,
-                    tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
-                    tx_queue: args.tx.tx_overrides.tx_queue.into(),
-                    tx_mac_id: args.tx.tx_overrides.mac_id,
-                    tx_rate_id: args.tx.tx_overrides.tx_rate_id,
-                    tx_retries: args.tx.tx_overrides.tx_retries,
-                    tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
-                    hardware_sequence: None,
-                    first_segment: None,
-                    disable_rate_fallback: args
-                        .tx
-                        .tx_overrides
-                        .enable_rate_fallback
-                        .then_some(false),
-                    aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
-                    submit_counters: &mut submit_counters,
-                };
-                submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
-            };
-            if let Err(error) = submit_result {
-                if tx_status.is_some() {
-                    let registers = Rtl8812auRegisterAccess::new(&transport);
-                    tx_status_probe_post(&registers, &mut tx_status);
-                    report.tx_status = tx_status;
-                }
-                bridge_run_update_counters(
-                    &mut report,
-                    pre_counters,
-                    bridge_counters,
-                    submit_counters,
-                );
-                bridge_run_set_runtime_metrics(
-                    &mut report,
-                    started,
-                    cpu_started,
-                    datagram_bytes,
-                    frame_bytes,
-                );
-                return bridge_run_failure(
-                    report,
-                    "bridge_tx_submit",
-                    "bridge run TX submission failed",
-                    DiagnosticErrorReport {
-                        code: "bridge_tx_submit_failed",
-                        message: error.to_string(),
-                    },
-                );
             }
         }
 
@@ -20126,7 +20274,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     &mut report.rx,
                     &mut pcap,
                     &mut frame_jsonl,
-                    &mut wfb_forward,
+                    &mut wfb_forwards,
                     channel,
                     &rx_buf[..len],
                 ) {
@@ -20180,7 +20328,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             error,
         );
     }
-    report.rx.wfb_forward = wfb_forward.map(|runtime| runtime.report);
+    set_rx_wfb_forward_reports(&mut report.rx, wfb_forwards);
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_post(&registers, &mut tx_status);
@@ -20202,11 +20350,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             detail: "operator supplied bounded bridge run arguments and live TX authorization",
         },
         DiagnosticPhase {
-            id: "socket_bind",
-            status: DiagnosticPhaseStatus::Completed,
-            detail: "bound nonblocking UDP socket for WFB distributor-style TX datagrams",
-        },
-        DiagnosticPhase {
             id: "usb_claim",
             status: DiagnosticPhaseStatus::Completed,
             detail: claim_detail,
@@ -20215,6 +20358,11 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             id: "monitor_opmode",
             status: DiagnosticPhaseStatus::Completed,
             detail: "set monitor receive filtering while preserving MAC station state",
+        },
+        DiagnosticPhase {
+            id: "socket_bind",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "bound nonblocking UDP socket(s) after radio init for WFB distributor-style TX datagrams",
         },
         DiagnosticPhase {
             id: "bridge_run",
@@ -20245,8 +20393,22 @@ fn bridge_run_base_report(
         channel,
         bandwidth: args.tx.bandwidth,
         bind_addr: args.tx.bind.to_string(),
+        bind_addrs: bridge_run_bind_addrs(args)
+            .iter()
+            .map(|addr| addr.to_string())
+            .collect(),
+        tx_bind_reports: bridge_run_bind_addrs(args)
+            .into_iter()
+            .map(|addr| BridgeRunTxBindReport {
+                bind_addr: addr.to_string(),
+                datagrams_received: 0,
+                datagram_bytes: 0,
+                last_peer: None,
+            })
+            .collect(),
         duration_ms: args.duration_ms,
         rx_timeout_ms: args.rx_timeout_ms,
+        tx_burst_limit: args.tx_burst_limit,
         max_datagrams: args.tx.max_datagrams,
         datagrams_received: 0,
         last_peer: None,
@@ -26595,6 +26757,42 @@ fn parse_u8(input: &str) -> std::result::Result<u8, String> {
     u8::try_from(value).map_err(|_| format!("{input:?} is outside u8 range"))
 }
 
+fn parse_bridge_run_rx_forward_arg(
+    input: &str,
+) -> std::result::Result<BridgeRunRxForwardArg, String> {
+    let (channel_part, aggregator_part) = input.split_once('=').ok_or_else(|| {
+        format!("{input:?} must use LINK_ID:RADIO_PORT=HOST:PORT or RADIO_PORT=HOST:PORT")
+    })?;
+    let aggregator = aggregator_part
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid RX aggregator address {aggregator_part:?}: {error}"))?;
+    let mut channel_parts = channel_part.split(':');
+    let first = channel_parts
+        .next()
+        .filter(|part| !part.trim().is_empty())
+        .ok_or_else(|| format!("{input:?} is missing a radio port"))?;
+    let second = channel_parts.next();
+    if channel_parts.next().is_some() {
+        return Err(format!(
+            "{input:?} has too many ':' separators before '='; expected LINK_ID:RADIO_PORT"
+        ));
+    }
+    let (link_id, radio_port) = match second {
+        Some(port) => {
+            if port.trim().is_empty() {
+                return Err(format!("{input:?} is missing a radio port"));
+            }
+            (Some(parse_u32(first)?), parse_u8(port)?)
+        }
+        None => (None, parse_u8(first)?),
+    };
+    Ok(BridgeRunRxForwardArg {
+        link_id,
+        radio_port,
+        aggregator,
+    })
+}
+
 fn parse_register_write_arg_u8(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
     let parsed = parse_register_write_arg(input)?;
     u8::try_from(parsed.value)
@@ -27181,17 +27379,28 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         );
     }
     println!(
-        "Bridge run: duration_ms={} tx_bind={} tx_datagrams={} max_datagrams={} rx_buffers={} rx_frames={}",
+        "Bridge run: duration_ms={} tx_binds={} tx_datagrams={} max_datagrams={} tx_burst_limit={} rx_buffers={} rx_frames={}",
         report.duration_ms,
-        report.bind_addr,
+        report.bind_addrs.join(","),
         report.datagrams_received,
         report.max_datagrams,
+        report.tx_burst_limit,
         report.rx.buffers_read,
         report.rx.parsed_frames
     );
-    if let Some(forward) = report.rx.wfb_forward.as_ref() {
+    for bind in &report.tx_bind_reports {
         println!(
-            "RX WFB: matched={} forwarded={} filtered={} malformed={} send_failed={} bytes={}",
+            "TX bind {}: datagrams={} bytes={} last_peer={}",
+            bind.bind_addr,
+            bind.datagrams_received,
+            bind.datagram_bytes,
+            bind.last_peer.as_deref().unwrap_or("n/a")
+        );
+    }
+    for forward in &report.rx.wfb_forwards {
+        println!(
+            "RX WFB port {}: matched={} forwarded={} filtered={} malformed={} send_failed={} bytes={}",
+            forward.radio_port_hex,
             forward.counters.matched,
             forward.counters.forwarded,
             forward.counters.filtered,
@@ -28664,6 +28873,24 @@ mod tests {
         }
     }
 
+    fn bridge_run_args() -> BridgeRunArgs {
+        BridgeRunArgs {
+            tx: bridge_tx_listen_args(true),
+            tx_binds: Vec::new(),
+            duration_ms: 10,
+            rx_timeout_ms: 1,
+            tx_burst_limit: 8,
+            wfb_link_id: None,
+            wfb_radio_port: None,
+            rx_aggregator: None,
+            rx_forwards: Vec::new(),
+            rx_wlan_idx: 0,
+            rx_mcs_index: 0,
+            rx_pcap: None,
+            rx_frame_jsonl: None,
+        }
+    }
+
     fn bridge_tx_bench_args(authorized: bool) -> BridgeTxBenchArgs {
         BridgeTxBenchArgs {
             adapter: adapter_args(),
@@ -30077,6 +30304,61 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(config.config.channel_id.radio_port, 0x23);
         assert_eq!(config.config.bandwidth_mhz, 20);
         assert_eq!(config.aggregator, args.rx_aggregator);
+    }
+
+    #[test]
+    fn bridge_run_rx_forward_parser_accepts_explicit_and_default_link_forms() {
+        let explicit =
+            parse_bridge_run_rx_forward_arg("0x000102:0x03=127.0.0.1:5700").expect("explicit");
+        assert_eq!(explicit.link_id, Some(0x000102));
+        assert_eq!(explicit.radio_port, 0x03);
+        assert_eq!(explicit.aggregator, "127.0.0.1:5700".parse().expect("addr"));
+
+        let defaulted = parse_bridge_run_rx_forward_arg("0x04=127.0.0.1:5701").expect("defaulted");
+        assert_eq!(defaulted.link_id, None);
+        assert_eq!(defaulted.radio_port, 0x04);
+
+        assert!(parse_bridge_run_rx_forward_arg("0x04").is_err());
+        assert!(parse_bridge_run_rx_forward_arg("0x01:0x02:0x03=127.0.0.1:5702").is_err());
+    }
+
+    #[test]
+    fn bridge_run_rx_forward_configs_merge_legacy_and_repeated_targets() {
+        let mut args = bridge_run_args();
+        args.wfb_link_id = Some(0x000001);
+        args.wfb_radio_port = Some(0x03);
+        args.rx_aggregator = Some("127.0.0.1:5700".parse().expect("addr"));
+        args.rx_forwards.push(
+            parse_bridge_run_rx_forward_arg("0x04=127.0.0.1:5701").expect("defaulted forward"),
+        );
+        args.rx_forwards.push(
+            parse_bridge_run_rx_forward_arg("0x000002:0x05=127.0.0.1:5702")
+                .expect("explicit forward"),
+        );
+
+        let configs = bridge_run_wfb_forward_configs(&args).expect("configs");
+
+        assert_eq!(configs.len(), 3);
+        assert_eq!(configs[0].config.channel_id.link_id, 0x000001);
+        assert_eq!(configs[0].config.channel_id.radio_port, 0x03);
+        assert_eq!(configs[1].config.channel_id.link_id, 0x000001);
+        assert_eq!(configs[1].config.channel_id.radio_port, 0x04);
+        assert_eq!(configs[2].config.channel_id.link_id, 0x000002);
+        assert_eq!(configs[2].config.channel_id.radio_port, 0x05);
+    }
+
+    #[test]
+    fn bridge_run_rx_forward_requires_link_for_defaulted_forward() {
+        let mut args = bridge_run_args();
+        args.rx_forwards
+            .push(parse_bridge_run_rx_forward_arg("0x04=127.0.0.1:5701").expect("forward"));
+
+        assert_eq!(
+            bridge_run_wfb_forward_configs(&args)
+                .expect_err("missing link")
+                .code,
+            "missing_wfb_rx_forward_link_id"
+        );
     }
 
     #[test]
