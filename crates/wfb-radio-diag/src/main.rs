@@ -117,6 +117,8 @@ enum Command {
     BridgeTxOnce(BridgeTxOnceArgs),
     /// Listen for WFB distributor-style datagrams and submit them through live radio TX.
     BridgeTxListen(BridgeTxListenArgs),
+    /// Run bounded WFB RX forwarding and TX injection in one retained radio session.
+    BridgeRun(BridgeRunArgs),
     /// Generate WFB distributor-style datagrams and submit a bounded TX throughput burst.
     BridgeTxBench(BridgeTxBenchArgs),
     /// Compare normalized USB trace event sequences.
@@ -1408,6 +1410,48 @@ struct BridgeTxListenArgs {
     txdma_status_clear_value: u32,
 }
 
+#[derive(Debug, Parser, Clone)]
+struct BridgeRunArgs {
+    #[command(flatten)]
+    tx: BridgeTxListenArgs,
+
+    /// Bounded full-bridge runtime in milliseconds after init completes.
+    #[arg(long, default_value_t = 10000)]
+    duration_ms: u64,
+
+    /// Per bulk-IN read timeout while interleaving RX and TX.
+    #[arg(long, default_value_t = 20)]
+    rx_timeout_ms: u64,
+
+    /// WFB link ID to match and optionally forward during RX.
+    #[arg(long, value_parser = parse_u32)]
+    wfb_link_id: Option<u32>,
+
+    /// WFB radio port to match and optionally forward during RX.
+    #[arg(long, value_parser = parse_u8)]
+    wfb_radio_port: Option<u8>,
+
+    /// UDP aggregator address for matching WFB RX forwarding.
+    #[arg(long)]
+    rx_aggregator: Option<SocketAddr>,
+
+    /// WFB forwarding WLAN index metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_wlan_idx: u8,
+
+    /// WFB forwarding MCS metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_mcs_index: u8,
+
+    /// Optional PCAP output path for received 802.11 frames.
+    #[arg(long)]
+    rx_pcap: Option<PathBuf>,
+
+    /// Optional JSONL output path for received raw frames plus RX metadata.
+    #[arg(long, value_name = "PATH")]
+    rx_frame_jsonl: Option<PathBuf>,
+}
+
 #[derive(Debug, Parser, Clone, Default)]
 struct BridgeTxOverrideArgs {
     /// Override radiotap TX rate for live bridge submissions.
@@ -2261,6 +2305,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::BridgeRun(args) => {
+            let report = bridge_run_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_bridge_run_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::BridgeTxBench(args) => {
             let report = bridge_tx_bench_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -2719,6 +2773,46 @@ struct BridgeTxListenReport {
     bulk_out_endpoint: Option<u8>,
     bulk_out_endpoint_hex: Option<String>,
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
+    txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    tx_status: Option<TxStatusProbeReport>,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+    throughput: Option<BridgeTxListenThroughputReport>,
+    cpu: Option<CpuUsageReport>,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeRunReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    bind_addr: String,
+    duration_ms: u64,
+    rx_timeout_ms: u64,
+    max_datagrams: u32,
+    datagrams_received: u64,
+    last_peer: Option<String>,
+    last_datagram: Option<BridgeTxDatagramReport>,
+    bulk_in_endpoint: Option<u8>,
+    bulk_in_endpoint_hex: Option<String>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_hex: Option<String>,
+    rx_pcap_path: Option<PathBuf>,
+    rx_frame_jsonl_path: Option<PathBuf>,
+    rx: RxFixtureReport,
+    same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
+    monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
@@ -16473,8 +16567,39 @@ fn add_counters(left: &mut DiagnosticCounters, right: DiagnosticCounters) {
 fn rx_scan_wfb_forward_config(
     args: &RxScanArgs,
 ) -> std::result::Result<Option<RxScanWfbForwardConfig>, DiagnosticErrorReport> {
-    match (args.wfb_link_id, args.wfb_radio_port) {
-        (None, None) if args.rx_aggregator.is_none() => Ok(None),
+    wfb_forward_config_from_parts(
+        args.wfb_link_id,
+        args.wfb_radio_port,
+        args.rx_aggregator,
+        args.rx_wlan_idx,
+        args.rx_mcs_index,
+        args.bandwidth,
+    )
+}
+
+fn bridge_run_wfb_forward_config(
+    args: &BridgeRunArgs,
+) -> std::result::Result<Option<RxScanWfbForwardConfig>, DiagnosticErrorReport> {
+    wfb_forward_config_from_parts(
+        args.wfb_link_id,
+        args.wfb_radio_port,
+        args.rx_aggregator,
+        args.rx_wlan_idx,
+        args.rx_mcs_index,
+        args.tx.bandwidth,
+    )
+}
+
+fn wfb_forward_config_from_parts(
+    wfb_link_id: Option<u32>,
+    wfb_radio_port: Option<u8>,
+    rx_aggregator: Option<SocketAddr>,
+    rx_wlan_idx: u8,
+    rx_mcs_index: u8,
+    bandwidth: Bandwidth,
+) -> std::result::Result<Option<RxScanWfbForwardConfig>, DiagnosticErrorReport> {
+    match (wfb_link_id, wfb_radio_port) {
+        (None, None) if rx_aggregator.is_none() => Ok(None),
         (None, None) => Err(DiagnosticErrorReport {
             code: "missing_wfb_rx_filter",
             message: "--rx-aggregator requires --wfb-link-id and --wfb-radio-port".to_string(),
@@ -16492,11 +16617,11 @@ fn rx_scan_wfb_forward_config(
             Ok(Some(RxScanWfbForwardConfig {
                 config: RxForwardConfig {
                     channel_id,
-                    wlan_idx: args.rx_wlan_idx,
-                    mcs_index: args.rx_mcs_index,
-                    bandwidth_mhz: args.bandwidth.mhz() as u8,
+                    wlan_idx: rx_wlan_idx,
+                    mcs_index: rx_mcs_index,
+                    bandwidth_mhz: bandwidth.mhz() as u8,
                 },
-                aggregator: args.rx_aggregator,
+                aggregator: rx_aggregator,
             }))
         }
     }
@@ -19524,6 +19649,695 @@ fn bridge_tx_listen_failure(
     report
 }
 
+fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
+    let selector = args.tx.adapter.selector();
+    let (channel, result, error) = resolve_report_channel(args.tx.channel, args.tx.bandwidth);
+    let mut report = bridge_run_base_report(&args, selector, channel);
+    if result == DiagnosticResult::Fail {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run arguments did not pass local validation",
+            error.expect("unsupported channel error"),
+        );
+    }
+    let channel = channel.expect("channel resolved before bridge run");
+
+    if !args.tx.i_understand_this_transmits {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run requires explicit TX authorization",
+            DiagnosticErrorReport {
+                code: "missing_tx_authorization",
+                message: "bridge-run requires --i-understand-this-transmits".to_string(),
+            },
+        );
+    }
+    if !args.tx.init_before_tx {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run requires same-session radio init",
+            DiagnosticErrorReport {
+                code: "missing_init_before_tx",
+                message: "bridge-run requires --init-before-tx so RX and TX share one initialized radio session".to_string(),
+            },
+        );
+    }
+    if args.duration_ms == 0 {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run requires a nonzero duration",
+            DiagnosticErrorReport {
+                code: "invalid_duration",
+                message: "--duration-ms must be greater than zero".to_string(),
+            },
+        );
+    }
+    if args.rx_timeout_ms == 0 {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "bridge run requires a nonzero RX timeout",
+            DiagnosticErrorReport {
+                code: "invalid_rx_timeout",
+                message: "--rx-timeout-ms must be greater than zero".to_string(),
+            },
+        );
+    }
+
+    let wfb_forward_config = match bridge_run_wfb_forward_config(&args) {
+        Ok(config) => config,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "argument_validation",
+                "bridge run WFB RX forwarding arguments did not pass local validation",
+                error,
+            );
+        }
+    };
+    let init_bridge_args = bridge_tx_listen_init_bridge_args(&args.tx);
+    let init_assets = match load_bridge_tx_bench_init_assets(&init_bridge_args) {
+        Ok(Some(init_assets)) => init_assets,
+        Ok(None) => {
+            return bridge_run_failure(
+                report,
+                "argument_validation",
+                "bridge run did not load same-session init assets",
+                DiagnosticErrorReport {
+                    code: "missing_init_assets",
+                    message: "bridge-run requires --firmware with an RTL8812A firmware image"
+                        .to_string(),
+                },
+            );
+        }
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "argument_validation",
+                "bridge run same-session init arguments did not pass local validation",
+                error,
+            );
+        }
+    };
+
+    let socket = match UdpSocket::bind(args.tx.bind) {
+        Ok(socket) => socket,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "socket_bind",
+                "failed to bind bridge TX UDP listener",
+                DiagnosticErrorReport {
+                    code: "udp_bind_failed",
+                    message: format!("failed to bind {}: {error}", args.tx.bind),
+                },
+            );
+        }
+    };
+    if let Err(error) = socket.set_nonblocking(true) {
+        return bridge_run_failure(
+            report,
+            "socket_bind",
+            "failed to configure bridge TX UDP listener as nonblocking",
+            DiagnosticErrorReport {
+                code: "udp_nonblocking_config_failed",
+                message: error.to_string(),
+            },
+        );
+    }
+
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.tx.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.tx.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for bounded bridge run",
+                ),
+                Err(error) => {
+                    return bridge_run_failure(
+                        report,
+                        "usb_claim",
+                        "macOS IOUSBHost retained-session open failed",
+                        error,
+                    );
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return bridge_run_failure(
+                        report,
+                        "usb_claim",
+                        "no supported adapter matched the selector",
+                        error,
+                    );
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    report.adapter = Some(selected);
+                    return bridge_run_failure(
+                        report,
+                        "usb_claim",
+                        "USB interface claim failed",
+                        DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed adapter for bounded bridge run",
+            )
+        };
+
+    let bulk_in = match endpoints.bulk_in {
+        Some(endpoint) => endpoint,
+        None => {
+            report.adapter = Some(adapter);
+            report.endpoints = Some(endpoints);
+            report.counters = claim_counters;
+            return bridge_run_failure(
+                report,
+                "bulk_in",
+                "claimed interface has no bulk IN endpoint",
+                DiagnosticErrorReport {
+                    code: "missing_bulk_in_endpoint",
+                    message: "claimed interface has no bulk IN endpoint".to_string(),
+                },
+            );
+        }
+    };
+    let bulk_out = match endpoints.bulk_out {
+        Some(endpoint) => endpoint,
+        None => {
+            report.adapter = Some(adapter);
+            report.endpoints = Some(endpoints);
+            report.counters = claim_counters;
+            return bridge_run_failure(
+                report,
+                "bulk_out",
+                "claimed interface has no bulk OUT endpoint",
+                DiagnosticErrorReport {
+                    code: "missing_bulk_out_endpoint",
+                    message: "claimed interface has no bulk OUT endpoint".to_string(),
+                },
+            );
+        }
+    };
+    report.adapter = Some(adapter);
+    report.endpoints = Some(endpoints);
+    report.bulk_in_endpoint = Some(bulk_in);
+    report.bulk_in_endpoint_hex = Some(format_value(bulk_in, 2));
+    report.bulk_out_endpoint = Some(bulk_out);
+    report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
+    let mut pre_counters = claim_counters;
+
+    let registers = Rtl8812auRegisterAccess::new(&transport)
+        .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+    match run_bridge_tx_bench_same_session_init(
+        &registers,
+        &init_bridge_args,
+        channel,
+        report
+            .endpoints
+            .as_ref()
+            .expect("bridge run endpoints are present after USB claim"),
+        &init_assets,
+        &mut pre_counters,
+    ) {
+        Ok(init_report) => {
+            report.same_session_init = Some(init_report);
+        }
+        Err((init_report, error)) => {
+            report.same_session_init = Some(init_report);
+            report.counters = pre_counters;
+            return bridge_run_failure(
+                report,
+                "init_before_tx",
+                "bridge run same-session init failed before RX/TX loops",
+                error,
+            );
+        }
+    }
+
+    {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match bridge_tx_bench_set_monitor_receive_filter(&registers, &mut pre_counters) {
+            Ok(monitor_report) => {
+                report.monitor_opmode = Some(monitor_report);
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "monitor_opmode",
+                    "bridge run monitor/no-link receive filter setup failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
+    if args.tx.clear_txdma_status_before_tx {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match bridge_tx_bench_clear_txdma_status(
+            &registers,
+            args.tx.txdma_status_clear_value,
+            &mut pre_counters,
+        ) {
+            Ok(clear_report) => {
+                report.txdma_status_clear = Some(clear_report);
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "clear_txdma_status",
+                    "bridge run TXDMA status clear failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
+    let mut pcap = match create_optional_pcap(args.rx_pcap.as_deref()) {
+        Ok(pcap) => pcap,
+        Err(error) => {
+            return bridge_run_failure(report, "rx_pcap", "failed to create RX PCAP", error)
+        }
+    };
+    let mut frame_jsonl = match create_optional_frame_jsonl(args.rx_frame_jsonl.as_deref()) {
+        Ok(frame_jsonl) => frame_jsonl,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "rx_frame_jsonl",
+                "failed to create RX frame JSONL",
+                error,
+            );
+        }
+    };
+    let mut wfb_forward = match create_optional_wfb_forward(wfb_forward_config) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "rx_forward",
+                "failed to create WFB RX forwarding socket",
+                error,
+            );
+        }
+    };
+
+    let mut bridge_counters = TxCounters::default();
+    let mut submit_counters = TxSubmitCounters::default();
+    let mut tx_status = tx_status_probe_report(&args.tx.tx_status);
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_pre(&registers, &mut tx_status);
+    }
+    let cpu_started = process_cpu_usage();
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(args.duration_ms);
+    let mut datagram_bytes = 0u64;
+    let mut frame_bytes = 0u64;
+    let mut udp_buf = vec![0u8; u16::MAX as usize];
+    let mut rx_buf = vec![0u8; 16 * 1024];
+
+    while Instant::now() < deadline {
+        while report.datagrams_received < u64::from(args.tx.max_datagrams) {
+            let (len, peer) = match socket.recv_from(&mut udp_buf) {
+                Ok(received) => received,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    bridge_run_update_counters(
+                        &mut report,
+                        pre_counters,
+                        bridge_counters,
+                        submit_counters,
+                    );
+                    bridge_run_set_runtime_metrics(
+                        &mut report,
+                        started,
+                        cpu_started,
+                        datagram_bytes,
+                        frame_bytes,
+                    );
+                    return bridge_run_failure(
+                        report,
+                        "bridge_tx_receive",
+                        "bridge run UDP receive failed",
+                        DiagnosticErrorReport {
+                            code: "udp_receive_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
+
+            report.datagrams_received += 1;
+            report.last_peer = Some(peer.to_string());
+            let datagram = &udp_buf[..len];
+            datagram_bytes = datagram_bytes.saturating_add(len as u64);
+            let parsed = match parse_tx_datagram(datagram) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    bridge_counters.incoming += 1;
+                    bridge_counters.dropped += 1;
+                    bridge_counters.malformed += 1;
+                    bridge_counters.unsupported_radiotap +=
+                        u64::from(bridge_tx_is_unsupported_radiotap(&error));
+                    continue;
+                }
+            };
+            frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
+            let tx_options = apply_bridge_tx_overrides(&args.tx.tx_overrides, parsed.tx_options);
+            let (packet_len, tx_descriptor_hex) =
+                match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+                    Ok(packet) => (
+                        packet.len(),
+                        Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+                    ),
+                    Err(_) => {
+                        bridge_counters.incoming += 1;
+                        bridge_counters.dropped += 1;
+                        bridge_counters.malformed += 1;
+                        continue;
+                    }
+                };
+            report.last_datagram = Some(BridgeTxDatagramReport {
+                source: "udp",
+                datagram_len: len,
+                fwmark: parsed.fwmark,
+                fwmark_hex: format_value(parsed.fwmark, 8),
+                radiotap_len: parsed.radiotap_len,
+                frame_len: parsed.ieee80211_frame.len(),
+                packet_len: Some(packet_len),
+                tx_descriptor_hex,
+                tx_options,
+            });
+            let submit_result = {
+                let mut radio = BridgeTxRadio {
+                    transport: &mut transport,
+                    bulk_out,
+                    channel,
+                    tx_rate: args.tx.tx_overrides.tx_rate,
+                    tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
+                    tx_queue: args.tx.tx_overrides.tx_queue.into(),
+                    tx_mac_id: args.tx.tx_overrides.mac_id,
+                    tx_rate_id: args.tx.tx_overrides.tx_rate_id,
+                    tx_retries: args.tx.tx_overrides.tx_retries,
+                    tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
+                    hardware_sequence: None,
+                    first_segment: None,
+                    disable_rate_fallback: args
+                        .tx
+                        .tx_overrides
+                        .enable_rate_fallback
+                        .then_some(false),
+                    aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
+                    submit_counters: &mut submit_counters,
+                };
+                submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+            };
+            if let Err(error) = submit_result {
+                if tx_status.is_some() {
+                    let registers = Rtl8812auRegisterAccess::new(&transport);
+                    tx_status_probe_post(&registers, &mut tx_status);
+                    report.tx_status = tx_status;
+                }
+                bridge_run_update_counters(
+                    &mut report,
+                    pre_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                bridge_run_set_runtime_metrics(
+                    &mut report,
+                    started,
+                    cpu_started,
+                    datagram_bytes,
+                    frame_bytes,
+                );
+                return bridge_run_failure(
+                    report,
+                    "bridge_tx_submit",
+                    "bridge run TX submission failed",
+                    DiagnosticErrorReport {
+                        code: "bridge_tx_submit_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout = Duration::from_millis(args.rx_timeout_ms).min(remaining);
+        match transport.read_bulk_transfer(bulk_in, &mut rx_buf, timeout) {
+            Ok(0) => {
+                report.rx.buffers_read += 1;
+            }
+            Ok(len) => {
+                report.rx.buffers_read += 1;
+                report.rx.bulk_bytes += len as u64;
+                if let Err(error) = process_rx_buffer(
+                    &mut report.rx,
+                    &mut pcap,
+                    &mut frame_jsonl,
+                    &mut wfb_forward,
+                    channel,
+                    &rx_buf[..len],
+                ) {
+                    bridge_run_update_counters(
+                        &mut report,
+                        pre_counters,
+                        bridge_counters,
+                        submit_counters,
+                    );
+                    return bridge_run_failure(
+                        report,
+                        "bridge_rx",
+                        "bridge run RX buffer processing failed",
+                        error,
+                    );
+                }
+            }
+            Err(error) if error.is_timeout() => {
+                report.rx.read_timeouts += 1;
+            }
+            Err(error) => {
+                bridge_run_update_counters(
+                    &mut report,
+                    pre_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                return bridge_run_failure(
+                    report,
+                    "bridge_rx",
+                    "bridge run bulk-IN read failed",
+                    DiagnosticErrorReport {
+                        code: "bulk_in_read_failed",
+                        message: format!(
+                            "bulk IN read from endpoint 0x{bulk_in:02x} failed: {error}"
+                        ),
+                    },
+                );
+            }
+        }
+    }
+
+    if let Err(error) = flush_optional_pcap(&mut pcap) {
+        return bridge_run_failure(report, "rx_pcap", "failed to flush RX PCAP", error);
+    }
+    if let Err(error) = flush_optional_frame_jsonl(&mut frame_jsonl) {
+        return bridge_run_failure(
+            report,
+            "rx_frame_jsonl",
+            "failed to flush RX frame JSONL",
+            error,
+        );
+    }
+    report.rx.wfb_forward = wfb_forward.map(|runtime| runtime.report);
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_post(&registers, &mut tx_status);
+        report.tx_status = tx_status;
+    }
+    bridge_run_update_counters(&mut report, pre_counters, bridge_counters, submit_counters);
+    bridge_run_set_runtime_metrics(
+        &mut report,
+        started,
+        cpu_started,
+        datagram_bytes,
+        frame_bytes,
+    );
+    report.result = DiagnosticResult::Pass;
+    report.phases = vec![
+        DiagnosticPhase {
+            id: "argument_validation",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "operator supplied bounded bridge run arguments and live TX authorization",
+        },
+        DiagnosticPhase {
+            id: "socket_bind",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "bound nonblocking UDP socket for WFB distributor-style TX datagrams",
+        },
+        DiagnosticPhase {
+            id: "usb_claim",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: claim_detail,
+        },
+        DiagnosticPhase {
+            id: "monitor_opmode",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "set monitor receive filtering while preserving MAC station state",
+        },
+        DiagnosticPhase {
+            id: "bridge_run",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "ran bounded interleaved RX forwarding and TX injection loop",
+        },
+    ];
+    report.notes = vec![
+        "bridge-run uses one retained radio session for same-session init, RX, and TX",
+        "the loop is bounded and single-threaded; it interleaves UDP TX input with bulk-IN RX reads",
+    ];
+    report
+}
+
+fn bridge_run_base_report(
+    args: &BridgeRunArgs,
+    selector: DeviceSelector,
+    channel: Option<Channel>,
+) -> BridgeRunReport {
+    BridgeRunReport {
+        schema_version: 1,
+        command: "bridge-run",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.tx.bandwidth,
+        bind_addr: args.tx.bind.to_string(),
+        duration_ms: args.duration_ms,
+        rx_timeout_ms: args.rx_timeout_ms,
+        max_datagrams: args.tx.max_datagrams,
+        datagrams_received: 0,
+        last_peer: None,
+        last_datagram: None,
+        bulk_in_endpoint: None,
+        bulk_in_endpoint_hex: None,
+        bulk_out_endpoint: None,
+        bulk_out_endpoint_hex: None,
+        rx_pcap_path: args.rx_pcap.clone(),
+        rx_frame_jsonl_path: args.rx_frame_jsonl.clone(),
+        rx: RxFixtureReport {
+            frame_jsonl_path: args.rx_frame_jsonl.clone(),
+            ..RxFixtureReport::default()
+        },
+        same_session_init: None,
+        monitor_opmode: None,
+        txdma_status_clear: None,
+        tx_status: None,
+        bridge_counters: TxCounters::default(),
+        submit_counters: TxSubmitCounters::default(),
+        throughput: None,
+        cpu: None,
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::NotImplemented,
+        phases: Vec::new(),
+        error: None,
+        notes: Vec::new(),
+    }
+}
+
+fn bridge_run_update_counters(
+    report: &mut BridgeRunReport,
+    claim_counters: DiagnosticCounters,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+) {
+    report.bridge_counters = bridge_counters;
+    report.submit_counters = submit_counters;
+    let mut counters = DiagnosticCounters {
+        usb_control_reads: claim_counters.usb_control_reads,
+        usb_control_writes: claim_counters.usb_control_writes,
+        usb_bulk_in_reads: report.rx.buffers_read + report.rx.read_timeouts,
+        usb_bulk_out_writes: report.submit_counters.submitted + report.submit_counters.failed,
+        rx_frames: report.rx.parsed_frames,
+        tx_frames: report.submit_counters.submitted,
+        dropped_frames: report.rx.dropped_packets + report.bridge_counters.dropped,
+    };
+    add_tx_status_probe_counters(&mut counters, &report.tx_status);
+    report.counters = counters;
+}
+
+fn bridge_run_set_runtime_metrics(
+    report: &mut BridgeRunReport,
+    started: Instant,
+    cpu_started: Option<CpuUsageSnapshot>,
+    datagram_bytes: u64,
+    frame_bytes: u64,
+) {
+    let elapsed = started.elapsed();
+    let elapsed_us = elapsed.as_micros().try_into().unwrap_or(u64::MAX);
+    let elapsed_ms = elapsed.as_millis().try_into().unwrap_or(u64::MAX);
+    report.throughput = Some(BridgeTxListenThroughputReport {
+        elapsed_us,
+        received_per_second: rate_per_second_us(report.datagrams_received, elapsed_us),
+        submitted_per_second: rate_per_second_us(report.submit_counters.submitted, elapsed_us),
+        datagram_bytes,
+        frame_bytes,
+        usb_bytes: report.submit_counters.bytes_written,
+        datagram_bytes_per_second: rate_per_second_us(datagram_bytes, elapsed_us),
+        frame_bytes_per_second: rate_per_second_us(frame_bytes, elapsed_us),
+        usb_bytes_per_second: rate_per_second_us(report.submit_counters.bytes_written, elapsed_us),
+    });
+    report.cpu = cpu_usage_delta(cpu_started, process_cpu_usage(), elapsed_ms);
+}
+
+fn bridge_run_failure(
+    mut report: BridgeRunReport,
+    phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> BridgeRunReport {
+    report.result = DiagnosticResult::Fail;
+    report.phases = vec![DiagnosticPhase {
+        id: phase_id,
+        status: DiagnosticPhaseStatus::Blocked,
+        detail: phase_detail,
+    }];
+    report.error = Some(error);
+    report
+}
+
 fn bridge_tx_listen_update_counters(
     report: &mut BridgeTxListenReport,
     claim_counters: DiagnosticCounters,
@@ -20490,6 +21304,74 @@ where
         msr_written_hex: format_value(msr_written, 2),
         msr_after,
         msr_after_hex: format_value(msr_after, 2),
+        rcr_written: MONITOR_RECEIVE_CONFIG,
+        rcr_written_hex: format_value(MONITOR_RECEIVE_CONFIG, 8),
+        rcr_after,
+        rcr_after_hex: format_value(rcr_after, 8),
+        rxfltmap2_written: u16::MAX,
+        rxfltmap2_written_hex: format_value(u16::MAX, 4),
+        rxfltmap2_after,
+        rxfltmap2_after_hex: format_value(rxfltmap2_after, 4),
+        counters: DiagnosticCounters {
+            usb_control_reads: counters
+                .usb_control_reads
+                .saturating_sub(before_counters.usb_control_reads),
+            usb_control_writes: counters
+                .usb_control_writes
+                .saturating_sub(before_counters.usb_control_writes),
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_set_monitor_receive_filter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchMonitorOpmodeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let msr_before = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_MSR pre-monitor-filter read failed: {error}"),
+        }
+    })?;
+    write32_with_counter(registers, counters, REG_RCR, MONITOR_RECEIVE_CONFIG).map_err(
+        |error| DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_RCR monitor receive config write failed: {error}"),
+        },
+    )?;
+    let rcr_after = read32_with_counter(registers, counters, REG_RCR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_RCR post-monitor-filter read failed: {error}"),
+        }
+    })?;
+
+    write16_with_counter(registers, counters, REG_RXFLTMAP2, u16::MAX).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_RXFLTMAP2 monitor receive map write failed: {error}"),
+        }
+    })?;
+    let rxfltmap2_after =
+        read16_with_counter(registers, counters, REG_RXFLTMAP2).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("REG_RXFLTMAP2 post-monitor-filter read failed: {error}"),
+            }
+        })?;
+
+    Ok(BridgeTxBenchMonitorOpmodeReport {
+        msr_before,
+        msr_before_hex: format_value(msr_before, 2),
+        msr_written: msr_before,
+        msr_written_hex: format_value(msr_before, 2),
+        msr_after: msr_before,
+        msr_after_hex: format_value(msr_before, 2),
         rcr_written: MONITOR_RECEIVE_CONFIG,
         rcr_written_hex: format_value(MONITOR_RECEIVE_CONFIG, 8),
         rcr_after,
@@ -26280,6 +27162,99 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
     }
     for note in &report.notes {
         println!("Note: {note}");
+    }
+}
+
+fn print_bridge_run_human(report: &BridgeRunReport) {
+    println!("Command: {}", report.command);
+    println!("Result: {}", report.result.as_str());
+    if let Some(adapter) = &report.adapter {
+        println!(
+            "Adapter: {} {} bus={} address={} speed={}",
+            adapter.vid_hex, adapter.pid_hex, adapter.bus, adapter.address, adapter.speed
+        );
+    }
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} {} MHz {:?} {:?}",
+            channel.number, channel.frequency_mhz, channel.band, report.bandwidth
+        );
+    }
+    println!(
+        "Bridge run: duration_ms={} tx_bind={} tx_datagrams={} max_datagrams={} rx_buffers={} rx_frames={}",
+        report.duration_ms,
+        report.bind_addr,
+        report.datagrams_received,
+        report.max_datagrams,
+        report.rx.buffers_read,
+        report.rx.parsed_frames
+    );
+    if let Some(forward) = report.rx.wfb_forward.as_ref() {
+        println!(
+            "RX WFB: matched={} forwarded={} filtered={} malformed={} send_failed={} bytes={}",
+            forward.counters.matched,
+            forward.counters.forwarded,
+            forward.counters.filtered,
+            forward.counters.malformed,
+            forward.counters.send_failed,
+            forward.forwarded_bytes
+        );
+    }
+    println!(
+        "TX bridge: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
+        report.bridge_counters.incoming,
+        report.bridge_counters.injected,
+        report.bridge_counters.dropped,
+        report.bridge_counters.malformed,
+        report.bridge_counters.unsupported_radiotap
+    );
+    println!(
+        "TX submit: attempted={} submitted={} failed={} short_writes={} bytes={}",
+        report.submit_counters.attempted,
+        report.submit_counters.submitted,
+        report.submit_counters.failed,
+        report.submit_counters.short_writes,
+        report.submit_counters.bytes_written
+    );
+    if let Some(throughput) = &report.throughput {
+        println!(
+            "Throughput: elapsed_us={} received/s={} submitted/s={} UDP bytes/s={} frame bytes/s={} USB bytes/s={}",
+            throughput.elapsed_us,
+            throughput
+                .received_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .submitted_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .datagram_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .frame_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .usb_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    if let Some(cpu) = &report.cpu {
+        println!(
+            "CPU: user_us={} system_us={} total_us={} one_core={}",
+            cpu.user_us,
+            cpu.system_us,
+            cpu.total_us,
+            cpu.percent_one_core
+                .map(|value| format!("{value:.2}%"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {} - {}", error.code, error.message);
     }
 }
 

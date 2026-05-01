@@ -108,9 +108,10 @@ Initial implementation has started. The current code can:
 - Submit stripped TX frames to a trait-backed radio sink with TX bridge counters.
 - Submit one WFB distributor-style datagram through the live radio backend with `bridge-tx-once`.
 - Listen for bounded UDP WFB distributor-style datagrams and submit them through live radio TX with `bridge-tx-listen`.
+- Run bounded RX forwarding and TX injection in one retained radio session with `bridge-run`.
 - Receive stock WFB-ng distributor traffic from Linux `wfb_tx -d`, inject it over the Mac-controlled AWUS036ACH, and deliver low-rate payloads to Linux `wfb_rx`.
 - List verification stages with `wfb-radio-diag stages`.
-- Emit JSON diagnostics for current commands, including live `init`, `efuse-dump`, `rx-scan`, `tx-once`, `tx-repeat`, `bridge-tx-once`, and `bridge-tx-listen` reports; `tx-once --dry-run` also builds descriptor-prefixed bytes without touching USB.
+- Emit JSON diagnostics for current commands, including live `init`, `efuse-dump`, `rx-scan`, `tx-once`, `tx-repeat`, `bridge-tx-once`, `bridge-tx-listen`, and `bridge-run` reports; `tx-once --dry-run` also builds descriptor-prefixed bytes without touching USB.
 
 The simplest diagnostic entry point is still:
 
@@ -196,6 +197,8 @@ cargo run -p wfb-radio-diag -- --json trace-compare --expected fixtures/traces/i
 `bridge-tx-once` is live and write-gated: it reads one WFB distributor/injector datagram from `--datagram-hex` or `--datagram-file`, parses the firmware mark plus radiotap-prefixed IEEE 802.11 frame, maps HT/VHT radiotap metadata into radio TX options, and submits the stripped 802.11 frame through the live radio TX backend. The first macOS 26 IOUSBHost run on April 30, 2026 parsed a 41-byte datagram and submitted one 64-byte descriptor-prefixed HT MCS0 packet to endpoint `0x02` with bridge counters `incoming=1`, `injected=1`, `dropped=0`. Report: `/tmp/wfb-remote-macos-bridge-tx-once-usbhost.json`. This still needs a stock WFB-ng distributor plus Linux receiver before the TX bridge is considered end-to-end verified.
 
 `bridge-tx-listen` is the bounded socket-facing version: it binds UDP with `--bind`, waits for up to `--max-datagrams`, and submits each received WFB distributor/injector datagram through the same bridge parser and live radio backend. The report includes bridge counters plus elapsed time, datagrams/s, byte rates, and process CPU usage. On May 1, 2026, the Linux-order same-session init path received 300 stock Linux `wfb_tx -d` distributor datagrams, injected 300/300, and a dedicated Linux `wfb_rx` recovered 99 decrypted `STOCKCTRL` payloads from the Mac RF path. The measured 20 MHz `-l 1000` path now recovers 768, 900, and exactly 1,000 byte source payloads; the sustained 1,000-byte run injected 3,000/3,000 datagrams, captured 2,906 WFB MAC frames, and recovered 1,999/2,000 decrypted payloads at 92.24 submitted datagrams/s, 100.58 KB/s USB write rate, and 1.32% CPU. Reports/captures: `/tmp/wfb-agent-stock-controlled-listen.json`, `/tmp/wfb-agent-sust1000-listen.json`, `/tmp/mac-sust1000-rf.pcap`, `/tmp/mac-sust1000-rx-lo.pcap`.
+
+`bridge-run` is the first bounded full bridge loop. It owns one retained radio session, runs Linux-order init once, preserves station/MSR state for TX, opens RX filter maps, interleaves nonblocking UDP TX input with bulk-IN RX reads, and forwards matching WFB RX frames to an aggregator socket. The first bidirectional macOS 26 run forwarded 44 Linux-to-Mac WFB frames to a Mac UDP aggregator while injecting 121/121 Mac-to-Linux distributor datagrams; Linux `wfb_rx` recovered 80/80 `MAC2LIN` payloads and the Linux monitor captured 120 WFB MAC frames. Reports/captures: `/tmp/wfb-agent-bridge-run-duplex3.json`, `/tmp/wfb-agent-bridge-run-duplex3-agg.json`, `/tmp/mac-bridgerun-duplex3-rf.pcap`, `/tmp/mac-bridgerun-duplex3-rx-lo.pcap`.
 
 `reg-smoke` is live but read-only: it claims the adapter, reads a small set of RTL8812AU registers through vendor control requests, reports the values, and then releases the interface. It does not issue control writes, bulk transfers, RF changes, or TX operations.
 
