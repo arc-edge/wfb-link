@@ -319,12 +319,13 @@ The integrated retained-session radio path then passed full init, RX, and TX dia
 - `bridge-tx-listen --macos-usbhost`: `/tmp/wfb-remote-macos-bridge-tx-listen-usbhost.json`, result `pass`, bound `127.0.0.1:5611`, received one local UDP WFB distributor-style datagram, and submitted one 64-byte descriptor-prefixed packet to endpoint `0x02` with bridge counters `incoming=1`, `injected=1`, `dropped=0`.
 - `bridge-tx-listen --macos-usbhost --max-datagrams 3`: `/tmp/wfb-remote-macos-bridge-tx-listen-3-usbhost.json`, result `pass`, received three local UDP datagrams in one retained session and submitted all three packets with bridge counters `incoming=3`, `injected=3`, `dropped=0`, 192 USB bytes written, and no failed or short writes.
 - `bridge-tx-listen --macos-usbhost --init-before-tx`: `/tmp/wfb-agent-listen-linuxorder.json`, result `pass`, used same-session init order `linux_llt_before_firmware`, received 40 UDP WFB distributor-style datagrams, submitted 40/40 MGNT-queue HT MCS1 packets with no drops or short writes, and the Linux monitor pcap `/tmp/mac-listen-linuxorder-rf.pcap` contained 39 `LISTENORD` WFB payload markers on channel 36/HT20.
+- `bridge-tx-listen --macos-usbhost --init-before-tx` with stock WFB-ng distributor input: `/tmp/wfb-agent-stock-controlled-listen.json`, result `pass`, received 300 datagrams from Linux `wfb_tx -d`, submitted 300/300 packets with no drops or short writes, and dedicated Linux `wfb_rx` recovered 99 decrypted `STOCKCTRL` payloads from the Mac RF path. RF and receiver captures: `/tmp/mac-stock-controlled-rf.pcap`, `/tmp/mac-stock-controlled-rx-lo.pcap`.
 
 ## Interpretation
 
 The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, one-shot pipe IO, retaining interface and pipe objects, full RTL8812AU init, bounded RX reads, bulk-OUT TX submission, or low-rate WFB-shaped RF TX. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute through channel setup, interface 0 can be opened after `configureWithValue:matchInterfaces:`, and descriptor-confirmed bulk pipes can serve `rx-scan`, `tx-once`, `tx-repeat`, and UDP-fed bridge TX.
 
-The remaining macOS 26 proof target is no longer basic RF visibility; it is stock WFB-ng distributor/receiver interoperability, receiver-side payload acceptance, packet loss, and sustained bidirectional workload behavior.
+The remaining macOS 26 proof target is no longer basic RF visibility or low-rate WFB interoperability; it is sustained packet loss, CPU behavior, and video/telemetry workload stability.
 
 ## SDK Notes
 
@@ -334,4 +335,4 @@ The macOS 26.4 Command Line Tools IOUSBHost headers confirm the public object sp
 - `IOUSBHostInterface` exposes `copyPipeWithAddress:error:` for endpoint pipes.
 - `IOUSBHostPipe` exposes synchronous `sendIORequestWithData:bytesTransferred:completionTimeout:error:` for bulk/interrupt transfers and async enqueue APIs.
 
-Endpoint discovery, one-shot pipe IO, retained control access, full init, bounded RX, descriptor-prefixed TX, and low-rate UDP-fed bridge RF TX are now proven. The remaining implementation target is to feed `bridge-tx-listen` from a stock WFB-ng distributor and verify Linux receiver acceptance.
+Endpoint discovery, one-shot pipe IO, retained control access, full init, bounded RX, descriptor-prefixed TX, low-rate UDP-fed bridge RF TX, and stock WFB-ng distributor-to-Linux-receiver payload delivery are now proven. The remaining implementation target is sustained bidirectional load.
