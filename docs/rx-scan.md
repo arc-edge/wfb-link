@@ -86,7 +86,19 @@ When frames are parsed, each JSONL record includes:
 - frame length and raw 802.11 frame hex
 - RSSI dBm
 - channel number, frequency, and band
+- RTL8812AU RX descriptor rate metadata: raw rate byte, decoded CCK/OFDM/HT/VHT rate, raw bandwidth field, decoded bandwidth in MHz, SGI, LDPC, and STBC flags
 - frame type
+
+A later May 1, 2026 remote macOS 26 run used the RX descriptor metadata to cross-check HT40 behavior while the Linux peer sent stock WFB traffic on channel 36/HT40+:
+
+- Linux source: `wfb_tx -B 40 -k 1 -n 3` on `drone-2f389.local:wfb0`, pinned to channel 36/HT40+.
+- Mac capture: `rx-scan --macos-usbhost --init-before-rx --monitor-opmode-before-rx --channel 36 --bandwidth 40 --frame-jsonl /tmp/wfb-agent-rxmeta40a.jsonl`.
+- Parsed frames: 893, including 130 data frames.
+- WFB bridge: 95 matched radio-port `0x03` frames, 95 forwarded datagrams, 0 send failures.
+- Descriptor metadata for the matched WFB-shaped data burst: 95 MCS1 records with `rx_bandwidth_raw=0`, decoded as 20 MHz, no SGI, no LDPC, and no STBC.
+- Report/artifacts: `/tmp/wfb-agent-rxmeta40a.json`, `/tmp/wfb-agent-rxmeta40a.jsonl`, `/tmp/wfb-agent-rxmeta40a.log`.
+
+This independently confirms that the current HT40+ WFB flow is operating on an HT40-tuned channel but the received WFB data frames are still reported by the RTL8812AU RX descriptor as 20 MHz PPDUs.
 
 ## Boundaries
 
