@@ -19538,7 +19538,6 @@ fn apply_bridge_tx_overrides(
     channel_bandwidth: Bandwidth,
     mut options: TxOptions,
 ) -> TxOptions {
-    options = apply_wfb_monitor_tx_defaults(channel_bandwidth, options);
     options.channel_bandwidth = Some(overrides.tx_channel_bandwidth.unwrap_or(channel_bandwidth));
     if let Some(rate) = overrides.tx_rate {
         options.rate = rate;
@@ -19546,6 +19545,7 @@ fn apply_bridge_tx_overrides(
     if let Some(bandwidth) = overrides.tx_bandwidth {
         options.bandwidth = bandwidth;
     }
+    options = apply_wfb_monitor_tx_defaults(options);
     if overrides.tx_queue != TxQueueArg::Auto {
         options.queue = overrides.tx_queue.into();
     }
@@ -19570,16 +19570,13 @@ fn apply_bridge_tx_overrides(
     options
 }
 
-fn apply_wfb_monitor_tx_defaults(
-    channel_bandwidth: Bandwidth,
-    mut options: TxOptions,
-) -> TxOptions {
-    options.channel_bandwidth = Some(channel_bandwidth);
-
-    if matches!(options.rate, TxRate::Mcs(_)) {
+fn apply_wfb_monitor_tx_defaults(mut options: TxOptions) -> TxOptions {
+    if matches!(options.rate, TxRate::Mcs(_) | TxRate::Vht { .. }) {
         options.queue = TxQueue::Mgnt;
         options.mac_id = 1;
-        options.rate_id = Some(7);
+        if matches!(options.rate, TxRate::Mcs(_)) {
+            options.rate_id = Some(7);
+        }
         options.disable_rate_fallback = false;
         options.rate_fallback_limit = 0;
         options.aggregate_break = false;
@@ -19597,7 +19594,6 @@ impl RadioTx for BridgeTxRadio<'_> {
         frame: &[u8],
         mut options: TxOptions,
     ) -> std::result::Result<(), String> {
-        options = apply_wfb_monitor_tx_defaults(self.channel_bandwidth, options);
         options.channel_bandwidth =
             Some(self.tx_channel_bandwidth.unwrap_or(self.channel_bandwidth));
         if let Some(rate) = self.tx_rate {
@@ -19606,6 +19602,7 @@ impl RadioTx for BridgeTxRadio<'_> {
         if let Some(bandwidth) = self.tx_bandwidth {
             options.bandwidth = bandwidth;
         }
+        options = apply_wfb_monitor_tx_defaults(options);
         if self.tx_queue != TxQueue::Auto {
             options.queue = self.tx_queue;
         }
@@ -31015,6 +31012,33 @@ mod tests {
         assert_eq!(report.bridge_counters.malformed, 1);
         assert_eq!(report.bridge_counters.unsupported_radiotap, 1);
         assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_monitor_defaults_follow_final_rate() {
+        let overrides = BridgeTxOverrideArgs {
+            tx_rate: Some(TxRate::Vht { mcs: 4, nss: 1 }),
+            ..BridgeTxOverrideArgs::default()
+        };
+        let options = apply_bridge_tx_overrides(
+            &overrides,
+            Bandwidth::Mhz80,
+            TxOptions {
+                rate: TxRate::Mcs(1),
+                bandwidth: Bandwidth::Mhz40,
+                no_retry: true,
+                ..TxOptions::default()
+            },
+        );
+
+        assert_eq!(options.rate, TxRate::Vht { mcs: 4, nss: 1 });
+        assert_eq!(options.queue, TxQueue::Mgnt);
+        assert_eq!(options.mac_id, 1);
+        assert_eq!(options.rate_id, None);
+        assert_eq!(options.retries, 0);
+        assert!(!options.disable_rate_fallback);
+        assert_eq!(options.rate_fallback_limit, 0);
+        assert!(!options.aggregate_break);
     }
 
     #[test]
