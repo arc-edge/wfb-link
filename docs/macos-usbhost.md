@@ -315,12 +315,13 @@ The integrated retained-session radio path then passed full init, RX, and TX dia
 - `tx-once --macos-usbhost --tx-led --tx-status`: `/tmp/wfb-remote-macos-tx-once-led-status-usbhost.json`, result `pass`, LED on/off register readback passed, TX status pre/post reads passed, and one 64-byte bulk-OUT packet was submitted.
 - `init --macos-usbhost --bandwidth 80`: `/tmp/wfb-remote-macos-init-80mhz-usbhost.json`, result `pass`, channel 36/80 MHz completed in 19 channel steps.
 - `tx-once --macos-usbhost --bandwidth 80 --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc`: `/tmp/wfb-remote-macos-tx-once-vht-usbhost.json`, result `pass`, one 64-byte descriptor-prefixed VHT packet was submitted.
+- `bridge-tx-once --macos-usbhost`: `/tmp/wfb-remote-macos-bridge-tx-once-usbhost.json`, result `pass`, parsed one 41-byte WFB distributor-style datagram with fwmark `0x00000000`, a 13-byte HT radiotap header, and a 24-byte IEEE 802.11 frame, then submitted one 64-byte descriptor-prefixed packet to endpoint `0x02` with bridge counters `incoming=1`, `injected=1`, `dropped=0`.
 
 ## Interpretation
 
 The macOS 26 blocker is not raw USB device visibility, descriptor access, default-control access, interface matching, one-shot pipe IO, retaining interface and pipe objects, full RTL8812AU init, bounded RX reads, or bulk-OUT TX submission. The default control endpoint is reachable through IOUSBHost even when libusb cannot enumerate the radio, standard USB descriptors can be read, guarded register-write sequences can execute through channel setup, interface 0 can be opened after `configureWithValue:matchInterfaces:`, and descriptor-confirmed bulk pipes can serve `rx-scan`, `tx-once`, and `tx-repeat`.
 
-The remaining macOS 26 proof target is not USB mechanics; it is RF and WFB behavior. A second monitor receiver or Linux WFB peer still needs to confirm over-the-air TX, real RX frames, packet loss, and bridge interoperability.
+The remaining macOS 26 proof target is not USB mechanics; it is RF and WFB behavior. A second monitor receiver or Linux WFB peer still needs to confirm over-the-air TX, real RX frames, packet loss, and stock WFB-ng distributor/receiver interoperability.
 
 ## SDK Notes
 

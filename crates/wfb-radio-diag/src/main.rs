@@ -21,6 +21,9 @@ use radio_core::{
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
+use wfb_bridge::{
+    parse_tx_datagram, submit_tx_datagram, RadioTx, RadiotapError, TxCounters, TxDatagramError,
+};
 
 #[cfg(target_os = "macos")]
 mod macos_usbhost;
@@ -107,6 +110,8 @@ enum Command {
     TxOnce(TxOnceArgs),
     /// Placeholder for repeated TX diagnostics with explicit operator gating.
     TxRepeat(TxRepeatArgs),
+    /// Submit one WFB distributor-style datagram through the live radio TX bridge path.
+    BridgeTxOnce(BridgeTxOnceArgs),
     /// Compare normalized USB trace event sequences.
     TraceCompare(TraceCompareArgs),
     /// Import Linux usbmon text into normalized USB trace JSON.
@@ -1107,6 +1112,35 @@ struct TxRepeatArgs {
     tx_status: TxStatusProbeArgs,
 }
 
+#[derive(Debug, Parser, Clone)]
+struct BridgeTxOnceArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Channel to transmit on.
+    #[arg(long)]
+    channel: u8,
+
+    /// Fallback bandwidth used for channel validation and reporting.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// WFB distributor/injector datagram bytes as hex: fwmark + radiotap + IEEE 802.11 frame.
+    #[arg(long)]
+    datagram_hex: Option<String>,
+
+    /// Read one raw WFB distributor/injector datagram from a file.
+    #[arg(long, value_name = "PATH")]
+    datagram_file: Option<PathBuf>,
+
+    /// Required acknowledgement for live bridge TX submission.
+    #[arg(long)]
+    i_understand_this_transmits: bool,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+}
+
 #[derive(Debug, Parser, Clone, Default)]
 struct TxOptionArgs {
     /// TX descriptor rate: ofdm6m, mcs7, or vht2ss-mcs9.
@@ -1510,6 +1544,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::BridgeTxOnce(args) => {
+            let report = bridge_tx_once_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_bridge_tx_once_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::TraceCompare(args) => {
             let report = trace_compare_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -1819,6 +1863,41 @@ struct RepeatTxReport {
     tx_activity_led: Option<TxActivityLedReport>,
     tx_status: Option<TxStatusProbeReport>,
     submit_counters: TxSubmitCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxOnceReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    datagram: Option<BridgeTxDatagramReport>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_hex: Option<String>,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxDatagramReport {
+    source: &'static str,
+    datagram_len: usize,
+    fwmark: u32,
+    fwmark_hex: String,
+    radiotap_len: usize,
+    frame_len: usize,
+    packet_len: Option<usize>,
+    tx_options: TxOptions,
 }
 
 #[derive(Debug, Serialize)]
@@ -14958,6 +15037,358 @@ fn repeat_tx_report_with_submit(
     }
 }
 
+fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
+    let selector = args.adapter.selector();
+    let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
+    let mut report = bridge_tx_once_base_report(selector, channel, args.bandwidth);
+    if result == DiagnosticResult::Fail {
+        return bridge_tx_once_failure(
+            report,
+            "argument_validation",
+            "bridge TX arguments did not pass local validation",
+            error.expect("unsupported channel error"),
+        );
+    }
+    let channel = channel.expect("channel resolved before bridge TX");
+
+    let (datagram, datagram_source) = match bridge_tx_datagram_from_args(&args) {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            return bridge_tx_once_failure(
+                report,
+                "argument_validation",
+                "bridge TX datagram arguments did not pass local validation",
+                error,
+            );
+        }
+    };
+
+    let parsed = match parse_tx_datagram(&datagram) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            report.bridge_counters = bridge_tx_parse_error_counters(&error);
+            return bridge_tx_once_failure(
+                report,
+                "bridge_parse",
+                "WFB distributor datagram could not be parsed",
+                DiagnosticErrorReport {
+                    code: "invalid_bridge_tx_datagram",
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+
+    let frame_len = parsed.ieee80211_frame.len();
+    report.datagram = Some(BridgeTxDatagramReport {
+        source: datagram_source,
+        datagram_len: datagram.len(),
+        fwmark: parsed.fwmark,
+        fwmark_hex: format_value(parsed.fwmark, 8),
+        radiotap_len: parsed.radiotap_len,
+        frame_len,
+        packet_len: None,
+        tx_options: parsed.tx_options,
+    });
+
+    let packet_len = match build_tx_packet(parsed.ieee80211_frame, channel, parsed.tx_options) {
+        Ok(packet) => packet.len(),
+        Err(error) => {
+            return bridge_tx_once_failure(
+                report,
+                "tx_descriptor",
+                "bridge TX descriptor construction failed before USB submission",
+                DiagnosticErrorReport {
+                    code: "tx_descriptor_failed",
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+    if let Some(datagram_report) = &mut report.datagram {
+        datagram_report.packet_len = Some(packet_len);
+    }
+
+    if !args.i_understand_this_transmits {
+        return bridge_tx_once_failure(
+            report,
+            "argument_validation",
+            "bridge TX requires explicit operator authorization",
+            DiagnosticErrorReport {
+                code: "missing_tx_authorization",
+                message: "bridge-tx-once requires --i-understand-this-transmits".to_string(),
+            },
+        );
+    }
+
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live bridge TX",
+                ),
+                Err(error) => {
+                    return bridge_tx_once_failure(
+                        report,
+                        "usb_claim",
+                        "macOS IOUSBHost retained-session open failed",
+                        error,
+                    );
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return bridge_tx_once_failure(
+                        report,
+                        "usb_claim",
+                        "no supported adapter matched the selector",
+                        error,
+                    );
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    report.adapter = Some(selected);
+                    return bridge_tx_once_failure(
+                        report,
+                        "usb_claim",
+                        "USB interface claim failed",
+                        DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live bridge TX",
+            )
+        };
+
+    let bulk_out = match endpoints.bulk_out {
+        Some(endpoint) => endpoint,
+        None => {
+            report.adapter = Some(adapter);
+            report.endpoints = Some(endpoints);
+            report.counters = claim_counters;
+            return bridge_tx_once_failure(
+                report,
+                "bulk_out",
+                "claimed interface has no bulk OUT endpoint",
+                DiagnosticErrorReport {
+                    code: "missing_bulk_out_endpoint",
+                    message: "claimed interface has no bulk OUT endpoint".to_string(),
+                },
+            );
+        }
+    };
+
+    let mut bridge_counters = TxCounters::default();
+    let mut submit_counters = TxSubmitCounters::default();
+    let submit_result = {
+        let mut radio = BridgeTxRadio {
+            transport: &mut transport,
+            bulk_out,
+            channel,
+            submit_counters: &mut submit_counters,
+        };
+        submit_tx_datagram(&datagram, &mut radio, &mut bridge_counters)
+    };
+
+    let counters = DiagnosticCounters {
+        usb_control_writes: claim_counters.usb_control_writes,
+        usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
+        tx_frames: submit_counters.submitted,
+        dropped_frames: bridge_counters.dropped,
+        ..DiagnosticCounters::default()
+    };
+    report.adapter = Some(adapter);
+    report.endpoints = Some(endpoints);
+    report.bulk_out_endpoint = Some(bulk_out);
+    report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
+    report.bridge_counters = bridge_counters;
+    report.submit_counters = submit_counters;
+    report.counters = counters;
+
+    match submit_result {
+        Ok(_) => {
+            report.result = DiagnosticResult::Pass;
+            report.phases = vec![
+                DiagnosticPhase {
+                    id: "argument_validation",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "operator supplied a datagram, channel, and live TX authorization",
+                },
+                DiagnosticPhase {
+                    id: "bridge_parse",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "parsed WFB firmware mark, radiotap metadata, and IEEE 802.11 frame",
+                },
+                DiagnosticPhase {
+                    id: "usb_claim",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: claim_detail,
+                },
+                DiagnosticPhase {
+                    id: "bridge_submit",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "submitted parsed bridge frame through the live radio TX backend",
+                },
+            ];
+            report.notes = vec![
+                "live bridge TX assumes the adapter has already completed init on the requested channel",
+                "one parsed WFB distributor-style datagram was submitted; no RX peer confirmation was attempted",
+            ];
+            report
+        }
+        Err(error) => bridge_tx_once_failure(
+            report,
+            "bridge_submit",
+            "bridge TX submission failed",
+            DiagnosticErrorReport {
+                code: "bridge_tx_submit_failed",
+                message: error.to_string(),
+            },
+        ),
+    }
+}
+
+struct BridgeTxRadio<'a> {
+    transport: &'a mut InitUsbTransport,
+    bulk_out: u8,
+    channel: Channel,
+    submit_counters: &'a mut TxSubmitCounters,
+}
+
+impl RadioTx for BridgeTxRadio<'_> {
+    fn submit_80211(
+        &mut self,
+        frame: &[u8],
+        options: TxOptions,
+    ) -> std::result::Result<(), String> {
+        submit_tx_frame(
+            self.transport,
+            self.bulk_out,
+            frame,
+            self.channel,
+            options,
+            self.submit_counters,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn bridge_tx_once_base_report(
+    selector: DeviceSelector,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+) -> BridgeTxOnceReport {
+    BridgeTxOnceReport {
+        schema_version: 1,
+        command: "bridge-tx-once",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth,
+        datagram: None,
+        bulk_out_endpoint: None,
+        bulk_out_endpoint_hex: None,
+        bridge_counters: TxCounters::default(),
+        submit_counters: TxSubmitCounters::default(),
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::NotImplemented,
+        phases: Vec::new(),
+        error: None,
+        notes: vec!["live bridge TX stopped before USB bulk OUT submission"],
+    }
+}
+
+fn bridge_tx_once_failure(
+    mut report: BridgeTxOnceReport,
+    phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> BridgeTxOnceReport {
+    report.result = DiagnosticResult::Fail;
+    report.phases = vec![DiagnosticPhase {
+        id: phase_id,
+        status: DiagnosticPhaseStatus::Blocked,
+        detail: phase_detail,
+    }];
+    report.error = Some(error);
+    if report.notes.is_empty() {
+        report
+            .notes
+            .push("live bridge TX stopped before USB bulk OUT submission");
+    }
+    report
+}
+
+fn bridge_tx_datagram_from_args(
+    args: &BridgeTxOnceArgs,
+) -> std::result::Result<(Vec<u8>, &'static str), DiagnosticErrorReport> {
+    match (&args.datagram_hex, &args.datagram_file) {
+        (Some(_), Some(_)) => Err(DiagnosticErrorReport {
+            code: "multiple_datagram_sources",
+            message: "use only one of --datagram-hex or --datagram-file".to_string(),
+        }),
+        (None, None) => Err(DiagnosticErrorReport {
+            code: "missing_datagram",
+            message: "bridge-tx-once requires --datagram-hex or --datagram-file".to_string(),
+        }),
+        (Some(hex), None) => parse_hex_bytes(hex)
+            .map(|bytes| (bytes, "operator_hex"))
+            .map_err(|message| DiagnosticErrorReport {
+                code: "invalid_datagram_hex",
+                message,
+            }),
+        (None, Some(path)) => fs::read(path)
+            .map(|bytes| (bytes, "file"))
+            .map_err(|error| DiagnosticErrorReport {
+                code: "datagram_file_read_failed",
+                message: format!("failed to read {}: {error}", path.display()),
+            }),
+    }
+}
+
+fn bridge_tx_parse_error_counters(error: &TxDatagramError) -> TxCounters {
+    TxCounters {
+        incoming: 1,
+        dropped: 1,
+        malformed: 1,
+        unsupported_radiotap: u64::from(bridge_tx_is_unsupported_radiotap(error)),
+        ..TxCounters::default()
+    }
+}
+
+fn bridge_tx_is_unsupported_radiotap(error: &TxDatagramError) -> bool {
+    matches!(
+        error,
+        TxDatagramError::Radiotap(
+            RadiotapError::UnsupportedPresentFlags { .. }
+                | RadiotapError::UnsupportedHtBandwidth { .. }
+                | RadiotapError::UnsupportedVhtBandwidth { .. }
+        )
+    )
+}
+
 fn elapsed_ms_u64(started: Instant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -17939,6 +18370,70 @@ fn print_pending_human(report: &PendingDiagnosticReport) {
     }
 }
 
+fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} ({} MHz, {:?})",
+            channel.number, channel.frequency_mhz, channel.band
+        );
+    }
+    if let Some(datagram) = &report.datagram {
+        println!(
+            "Datagram: source={} len={} fwmark={} radiotap={} frame={} packet={}",
+            datagram.source,
+            datagram.datagram_len,
+            datagram.fwmark_hex,
+            datagram.radiotap_len,
+            datagram.frame_len,
+            datagram
+                .packet_len
+                .map(|len| len.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+        println!(
+            "TX options: rate={:?} bandwidth={} short_gi={} ldpc={} stbc={} no_retry={}",
+            datagram.tx_options.rate,
+            datagram.tx_options.bandwidth.mhz(),
+            datagram.tx_options.short_gi,
+            datagram.tx_options.ldpc,
+            datagram.tx_options.stbc,
+            datagram.tx_options.no_retry
+        );
+    }
+    if let Some(endpoint) = &report.bulk_out_endpoint_hex {
+        println!("Bulk OUT endpoint: {endpoint}");
+    }
+    println!(
+        "Bridge TX: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
+        report.bridge_counters.incoming,
+        report.bridge_counters.injected,
+        report.bridge_counters.dropped,
+        report.bridge_counters.malformed,
+        report.bridge_counters.unsupported_radiotap
+    );
+    println!(
+        "Radio TX: attempted={} submitted={} rejected={} failed={} short_writes={} bytes={}",
+        report.submit_counters.attempted,
+        report.submit_counters.submitted,
+        report.submit_counters.rejected,
+        report.submit_counters.failed,
+        report.submit_counters.short_writes,
+        report.submit_counters.bytes_written
+    );
+    println!("Phases:");
+    for phase in &report.phases {
+        println!("  - {}: {:?} - {}", phase.id, phase.status, phase.detail);
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
 fn print_usb_probe_human(report: &radio_core::UsbProbeReport) {
     println!("USB probe: {}", report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -19035,6 +19530,18 @@ mod tests {
         }
     }
 
+    fn bridge_tx_once_args(datagram_hex: Option<String>, authorized: bool) -> BridgeTxOnceArgs {
+        BridgeTxOnceArgs {
+            adapter: adapter_args(),
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            datagram_hex,
+            datagram_file: None,
+            i_understand_this_transmits: authorized,
+            macos_usbhost: MacosUsbHostArgs::default(),
+        }
+    }
+
     #[test]
     fn parse_bandwidth_accepts_common_forms() {
         assert_eq!(parse_bandwidth("20").expect("20"), Bandwidth::Mhz20);
@@ -19469,6 +19976,59 @@ mod tests {
     }
 
     #[test]
+    fn bridge_tx_once_requires_authorization_before_usb_open() {
+        let report = bridge_tx_once_report(bridge_tx_once_args(
+            Some(sample_bridge_tx_datagram_hex()),
+            false,
+        ));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "missing_tx_authorization"
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.bridge_counters.incoming, 0);
+        assert_eq!(report.submit_counters.attempted, 0);
+        let datagram = report.datagram.expect("datagram report");
+        assert_eq!(datagram.radiotap_len, 13);
+        assert_eq!(datagram.frame_len, sample_data_frame().len());
+        assert!(datagram.packet_len.is_some());
+    }
+
+    #[test]
+    fn bridge_tx_once_rejects_invalid_datagram_hex_before_usb_open() {
+        let report = bridge_tx_once_report(bridge_tx_once_args(Some("abc".to_string()), true));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_datagram_hex"
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.submit_counters.attempted, 0);
+    }
+
+    #[test]
+    fn bridge_tx_once_counts_unsupported_radiotap_parse_failure() {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&0u32.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00, 0x08, 0x00, 0xef, 0xbe, 0xad, 0xde]);
+        let report = bridge_tx_once_report(bridge_tx_once_args(Some(encode_hex(&packet)), true));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_bridge_tx_datagram"
+        );
+        assert_eq!(report.bridge_counters.incoming, 1);
+        assert_eq!(report.bridge_counters.dropped, 1);
+        assert_eq!(report.bridge_counters.malformed, 1);
+        assert_eq!(report.bridge_counters.unsupported_radiotap, 1);
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
     fn tx_rate_helper_handles_elapsed_time() {
         assert_eq!(rate_per_second(50, Some(100)), Some(500.0));
         assert_eq!(rate_per_second(50, Some(0)), None);
@@ -19873,6 +20433,16 @@ ffff 1 S Bi:1:004:1 -115 512 <
             0x08, 0x01, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x57, 0x42, 0x00, 0x00,
             0x01, 0x23, 0x57, 0x42, 0x00, 0x00, 0x01, 0x23, 0x10, 0x00,
         ]
+    }
+
+    fn sample_bridge_tx_datagram_hex() -> String {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&0u32.to_be_bytes());
+        packet.extend_from_slice(&[
+            0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x00, 0x00,
+        ]);
+        packet.extend_from_slice(&sample_data_frame());
+        encode_hex(&packet)
     }
 
     fn sample_rx_bulk_in() -> Vec<u8> {
