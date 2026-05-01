@@ -2476,10 +2476,36 @@ struct TxStatusProbeReport {
     post: Vec<TxStatusRegisterReport>,
     samples: Vec<TxStatusSampleReport>,
     changed: Vec<TxStatusDeltaReport>,
+    trace_comparison: Option<TxStatusTraceComparisonReport>,
     counters: DiagnosticCounters,
     error: Option<DiagnosticErrorReport>,
     #[serde(skip)]
     registers: Vec<TxStatusRegisterRequest>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxStatusTraceComparisonReport {
+    semantics: &'static str,
+    expected_register_count: usize,
+    pre_mismatch_count: usize,
+    post_mismatch_count: usize,
+    pre_mismatches: Vec<TxStatusTraceMismatchReport>,
+    post_mismatches: Vec<TxStatusTraceMismatchReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxStatusTraceMismatchReport {
+    name: String,
+    address: u16,
+    address_hex: String,
+    width: &'static str,
+    source_path: PathBuf,
+    expected_hex: String,
+    observed_hex: String,
+    xor_hex: String,
+    trace_data_hex: String,
+    trace_write_count: usize,
+    trace_last_event_index: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -5129,18 +5155,7 @@ fn summarize_efuse(raw: &[u8], decoded: &EfuseLogicalDecode) -> EfuseSummaryRepo
         .collect();
     let usb_vid = efuse_le_u16(logical_map, 0xd0).map(|value| format_value(u64::from(value), 4));
     let usb_pid = efuse_le_u16(logical_map, 0xd2).map(|value| format_value(u64::from(value), 4));
-    let mac_address = logical_map.get(0xd7..0xdd).and_then(|mac| {
-        if mac.iter().all(|byte| *byte == 0xff) {
-            None
-        } else {
-            Some(
-                mac.iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(":"),
-            )
-        }
-    });
+    let mac_address = efuse_logical_mac_address(logical_map).map(format_mac_address);
     let tx_power = summarize_efuse_tx_power(logical_map);
 
     EfuseSummaryReport {
@@ -5232,6 +5247,33 @@ fn summarize_efuse_tx_power(logical_map: &[u8]) -> EfuseTxPowerReport {
         all_ff: non_ff_bytes == 0,
         regions,
     }
+}
+
+fn efuse_logical_mac_address(logical_map: &[u8]) -> Option<[u8; 6]> {
+    let mac = logical_map.get(0xd7..0xdd)?;
+    if mac.iter().all(|byte| *byte == 0xff) || mac.iter().all(|byte| *byte == 0x00) {
+        None
+    } else {
+        Some([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]])
+    }
+}
+
+fn read_efuse_mac_address<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Option<[u8; 6]>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let raw = read_efuse_physical(
+        registers,
+        counters,
+        RTL8812AU_EFUSE_REAL_CONTENT_LEN,
+        1000,
+        Duration::from_micros(1000),
+    )?;
+    let decoded = decode_efuse_logical_map(&raw);
+    Ok(efuse_logical_mac_address(&decoded.logical_map))
 }
 
 fn led_smoke_report(args: LedSmokeArgs) -> LedSmokeReport {
@@ -5730,6 +5772,17 @@ struct TxStatusRegisterRequest {
     name: String,
     address: u16,
     width: TxStatusRegisterWidth,
+    expected: Option<TxStatusRegisterExpected>,
+}
+
+#[derive(Debug, Clone)]
+struct TxStatusRegisterExpected {
+    source_path: PathBuf,
+    value: u32,
+    value_hex: String,
+    data_hex: String,
+    write_count: usize,
+    last_event_index: usize,
 }
 
 impl From<TxStatusRegisterSpec> for TxStatusRegisterRequest {
@@ -5738,6 +5791,7 @@ impl From<TxStatusRegisterSpec> for TxStatusRegisterRequest {
             name: spec.name.to_string(),
             address: spec.address,
             width: spec.width,
+            expected: None,
         }
     }
 }
@@ -6299,20 +6353,21 @@ fn tx_status_probe_report(args: &TxStatusProbeArgs) -> Option<TxStatusProbeRepor
     tx_status_enabled(args).then(|| {
         let (registers, error) = tx_status_register_requests(args);
         TxStatusProbeReport {
-        enabled: true,
-        delay_ms: args.tx_status_delay_ms,
-        poll_ms: args.tx_status_poll_ms,
-        poll_count: args.tx_status_poll_count,
-        register_count: registers.len(),
-        register_source_paths: args.tx_status_registers_from.clone(),
-        semantics: "read-only RTL8812AU register deltas around USB TX submission; this does not prove RF radiation",
-        pre: Vec::new(),
-        post: Vec::new(),
-        samples: Vec::new(),
-        changed: Vec::new(),
-        counters: DiagnosticCounters::default(),
-        error,
-        registers,
+            enabled: true,
+            delay_ms: args.tx_status_delay_ms,
+            poll_ms: args.tx_status_poll_ms,
+            poll_count: args.tx_status_poll_count,
+            register_count: registers.len(),
+            register_source_paths: args.tx_status_registers_from.clone(),
+            semantics: "read-only RTL8812AU register deltas around USB TX submission; this does not prove RF radiation",
+            pre: Vec::new(),
+            post: Vec::new(),
+            samples: Vec::new(),
+            changed: Vec::new(),
+            trace_comparison: None,
+            counters: DiagnosticCounters::default(),
+            error,
+            registers,
         }
     })
 }
@@ -6359,21 +6414,60 @@ fn tx_status_register_requests(
             let Some(width) = tx_status_width_from_trace_width(final_write.width) else {
                 continue;
             };
-            if requests
-                .iter()
-                .any(|request| request.address == final_write.address && request.width == width)
+            let expected = match tx_status_expected_from_trace(path, &final_write, width) {
+                Ok(expected) => expected,
+                Err(error) => {
+                    return (
+                        requests,
+                        Some(DiagnosticErrorReport {
+                            code: "tx_status_register_source_value_failed",
+                            message: format!("parse {}: {error}", path.display()),
+                        }),
+                    );
+                }
+            };
+            if let Some(request) = requests
+                .iter_mut()
+                .find(|request| request.address == final_write.address && request.width == width)
             {
+                request.expected = Some(expected);
                 continue;
             }
             requests.push(TxStatusRegisterRequest {
                 name: format!("TRACE_{}", final_write.address_hex),
                 address: final_write.address,
                 width,
+                expected: Some(expected),
             });
         }
     }
 
     (requests, None)
+}
+
+fn tx_status_expected_from_trace(
+    source_path: &Path,
+    final_write: &TraceRegisterFinalWriteReport,
+    width: TxStatusRegisterWidth,
+) -> std::result::Result<TxStatusRegisterExpected, String> {
+    let value = parse_trace_value_hex(&final_write.value_le_hex)?;
+    Ok(TxStatusRegisterExpected {
+        source_path: source_path.to_path_buf(),
+        value,
+        value_hex: format_value(value, width.hex_digits()),
+        data_hex: final_write.data_hex.clone(),
+        write_count: final_write.write_count,
+        last_event_index: final_write.last_event_index,
+    })
+}
+
+fn parse_trace_value_hex(input: &str) -> std::result::Result<u32, String> {
+    let stripped = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+        .unwrap_or(input);
+    u32::from_str_radix(stripped, 16)
+        .map_err(|error| format!("invalid trace value {input}: {error}"))
 }
 
 fn parse_trace_register_final_writes_json(
@@ -6460,6 +6554,8 @@ fn tx_status_probe_post<T>(
                         }
                     }
                 }
+                report.trace_comparison =
+                    tx_status_trace_comparison(&report.registers, &report.pre, &report.post);
             }
             Err(error) => report.error = Some(error),
         }
@@ -6551,6 +6647,59 @@ fn tx_status_deltas(
                 before.value ^ after.value,
                 tx_status_width_digits(before.width),
             ),
+        })
+        .collect()
+}
+
+fn tx_status_trace_comparison(
+    requests: &[TxStatusRegisterRequest],
+    pre: &[TxStatusRegisterReport],
+    post: &[TxStatusRegisterReport],
+) -> Option<TxStatusTraceComparisonReport> {
+    let expected_register_count = requests
+        .iter()
+        .filter(|request| request.expected.is_some())
+        .count();
+    if expected_register_count == 0 {
+        return None;
+    }
+    let pre_mismatches = tx_status_trace_mismatches(requests, pre);
+    let post_mismatches = tx_status_trace_mismatches(requests, post);
+    Some(TxStatusTraceComparisonReport {
+        semantics: "compares sampled Mac register values to Linux trace-register final writes at matching address and width; adapter-specific and volatile registers can legitimately differ",
+        expected_register_count,
+        pre_mismatch_count: pre_mismatches.len(),
+        post_mismatch_count: post_mismatches.len(),
+        pre_mismatches,
+        post_mismatches,
+    })
+}
+
+fn tx_status_trace_mismatches(
+    requests: &[TxStatusRegisterRequest],
+    observed: &[TxStatusRegisterReport],
+) -> Vec<TxStatusTraceMismatchReport> {
+    requests
+        .iter()
+        .zip(observed.iter())
+        .filter_map(|(request, observed)| {
+            let expected = request.expected.as_ref()?;
+            (expected.value != observed.value).then(|| TxStatusTraceMismatchReport {
+                name: observed.name.clone(),
+                address: observed.address,
+                address_hex: observed.address_hex.clone(),
+                width: observed.width,
+                source_path: expected.source_path.clone(),
+                expected_hex: expected.value_hex.clone(),
+                observed_hex: observed.value_hex.clone(),
+                xor_hex: format_value(
+                    expected.value ^ observed.value,
+                    tx_status_width_digits(observed.width),
+                ),
+                trace_data_hex: expected.data_hex.clone(),
+                trace_write_count: expected.write_count,
+                trace_last_event_index: expected.last_event_index,
+            })
         })
         .collect()
 }
@@ -15552,6 +15701,59 @@ fn init_live_report(
         counters,
     );
 
+    let before = counters;
+    match program_efuse_macid(&registers, &mut counters) {
+        Ok(Some(report)) => push_init_live_phase(
+            &mut phase_summaries,
+            "mac_addr",
+            DiagnosticPhaseStatus::Completed,
+            format!(
+                "programmed REG_MACID from EFUSE MAC {} (was {})",
+                report.written, report.before
+            ),
+            before,
+            counters,
+        ),
+        Ok(None) => push_init_live_phase(
+            &mut phase_summaries,
+            "mac_addr",
+            DiagnosticPhaseStatus::Completed,
+            "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged",
+            before,
+            counters,
+        ),
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "mac_addr",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                counters,
+            );
+            return init_live_pending_report(InitLivePendingReportInput {
+                args: &args,
+                selector,
+                adapter,
+                endpoints,
+                channel,
+                firmware_path,
+                firmware,
+                phase_summaries,
+                firmware_payload_len,
+                llt_stats: &llt_stats,
+                queue_layout,
+                bb_stats: &bb_stats,
+                rf_stats: &rf_stats,
+                counters,
+                result: DiagnosticResult::Fail,
+                phases: init_live_phases("mac_addr"),
+                error: Some(error),
+                notes: vec!["live init stopped while reading EFUSE MAC and programming REG_MACID"],
+            });
+        }
+    }
+
     let mut bb_steps = Vec::new();
     let before = counters;
     if let Err(error) = run_bb_sequence(
@@ -15737,7 +15939,7 @@ fn init_live_report(
         phases: init_live_phases(""),
         error: None,
         notes: vec![
-            "live init completed power, firmware, LLT, queue/DMA, MAC, BB, RF, and selected channel setup",
+            "live init completed power, firmware, LLT, queue/DMA, MAC, EFUSE MACID, BB, RF, and selected channel setup",
             "TX power tables, IQK, bulk IN loop, and TX frame submission remain separate tasks",
             "no bulk IN loop, bulk OUT frame submission, or TX operation was issued",
         ],
@@ -15869,6 +16071,10 @@ fn init_live_phases(blocked_phase: &'static str) -> Vec<DiagnosticPhase> {
         (
             "mac",
             "program MAC/WMAC raw receive and TX/RX enable registers",
+        ),
+        (
+            "mac_addr",
+            "read adapter EFUSE MAC address and program REG_MACID",
         ),
         ("bb", "program BB PHY/AGC tables and crystal-cap setting"),
         (
@@ -19428,6 +19634,55 @@ where
         *counters,
     );
 
+    let before = *counters;
+    match program_efuse_macid(registers, counters) {
+        Ok(Some(report)) => push_init_live_phase(
+            &mut phase_summaries,
+            "mac_addr",
+            DiagnosticPhaseStatus::Completed,
+            format!(
+                "programmed REG_MACID from EFUSE MAC {} (was {})",
+                report.written, report.before
+            ),
+            before,
+            *counters,
+        ),
+        Ok(None) => push_init_live_phase(
+            &mut phase_summaries,
+            "mac_addr",
+            DiagnosticPhaseStatus::Completed,
+            "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged",
+            before,
+            *counters,
+        ),
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "mac_addr",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    }
+
     let mut bb_steps = Vec::new();
     let before = *counters;
     if let Err(error) = run_bb_sequence(
@@ -19728,6 +19983,19 @@ where
             ..DiagnosticCounters::default()
         },
     })
+}
+
+fn program_efuse_macid<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Option<BridgeTxBenchLocalMacReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    match read_efuse_mac_address(registers, counters)? {
+        Some(mac) => bridge_tx_bench_program_local_mac(registers, mac, counters).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn read_mac_register<T>(
@@ -26939,6 +27207,21 @@ mod tests {
     }
 
     #[test]
+    fn efuse_logical_mac_address_filters_blank_values() {
+        let mut logical = vec![0xff; RTL8812AU_EFUSE_LOGICAL_MAP_LEN];
+        assert_eq!(efuse_logical_mac_address(&logical), None);
+
+        logical[0xd7..0xdd].copy_from_slice(&[0x00; 6]);
+        assert_eq!(efuse_logical_mac_address(&logical), None);
+
+        logical[0xd7..0xdd].copy_from_slice(&[0x00, 0xc0, 0xca, 0xba, 0xbd, 0x9f]);
+        assert_eq!(
+            efuse_logical_mac_address(&logical),
+            Some([0x00, 0xc0, 0xca, 0xba, 0xbd, 0x9f])
+        );
+    }
+
+    #[test]
     fn init_report_rejects_invalid_channel_bandwidth() {
         let report = init_report(init_args(6, Bandwidth::Mhz80, None, false, None));
 
@@ -27172,6 +27455,10 @@ mod tests {
             request.name == "TRACE_0x0ca0"
                 && request.address == 0x0ca0
                 && request.width == TxStatusRegisterWidth::U32
+                && request
+                    .expected
+                    .as_ref()
+                    .is_some_and(|expected| expected.value_hex == "0x01817d40")
         }));
         assert_eq!(
             requests
@@ -27183,6 +27470,85 @@ mod tests {
                 .count(),
             1
         );
+        assert!(requests.iter().any(|request| {
+            request.address == REG_RFE_PINMUX_A_JAGUAR
+                && request.width == TxStatusRegisterWidth::U32
+                && request
+                    .expected
+                    .as_ref()
+                    .is_some_and(|expected| expected.write_count == 2)
+        }));
+    }
+
+    #[test]
+    fn tx_status_trace_comparison_reports_pre_and_post_mismatches() {
+        let source_path = PathBuf::from("/tmp/linux-final.json");
+        let requests = vec![
+            TxStatusRegisterRequest {
+                name: "TRACE_0x0100".to_string(),
+                address: 0x0100,
+                width: TxStatusRegisterWidth::U16,
+                expected: Some(TxStatusRegisterExpected {
+                    source_path,
+                    value: 0x06ff,
+                    value_hex: "0x06ff".to_string(),
+                    data_hex: "ff06".to_string(),
+                    write_count: 3,
+                    last_event_index: 9,
+                }),
+            },
+            TxStatusRegisterRequest {
+                name: "REG_TDECTRL".to_string(),
+                address: REG_TDECTRL,
+                width: TxStatusRegisterWidth::U32,
+                expected: None,
+            },
+        ];
+        let pre = vec![
+            TxStatusRegisterReport {
+                name: "TRACE_0x0100".to_string(),
+                address: 0x0100,
+                address_hex: "0x0100".to_string(),
+                width: "u16",
+                value: 0x06ff,
+                value_hex: "0x06ff".to_string(),
+            },
+            TxStatusRegisterReport {
+                name: "REG_TDECTRL".to_string(),
+                address: REG_TDECTRL,
+                address_hex: format_address(REG_TDECTRL),
+                width: "u32",
+                value: 0x0000_f710,
+                value_hex: "0x0000f710".to_string(),
+            },
+        ];
+        let post = vec![
+            TxStatusRegisterReport {
+                name: "TRACE_0x0100".to_string(),
+                address: 0x0100,
+                address_hex: "0x0100".to_string(),
+                width: "u16",
+                value: 0x04ff,
+                value_hex: "0x04ff".to_string(),
+            },
+            TxStatusRegisterReport {
+                name: "REG_TDECTRL".to_string(),
+                address: REG_TDECTRL,
+                address_hex: format_address(REG_TDECTRL),
+                width: "u32",
+                value: 0x0100_f710,
+                value_hex: "0x0100f710".to_string(),
+            },
+        ];
+
+        let comparison = tx_status_trace_comparison(&requests, &pre, &post).expect("comparison");
+
+        assert_eq!(comparison.expected_register_count, 1);
+        assert_eq!(comparison.pre_mismatch_count, 0);
+        assert_eq!(comparison.post_mismatch_count, 1);
+        assert_eq!(comparison.post_mismatches[0].expected_hex, "0x06ff");
+        assert_eq!(comparison.post_mismatches[0].observed_hex, "0x04ff");
+        assert_eq!(comparison.post_mismatches[0].xor_hex, "0x0200");
     }
 
     #[test]
