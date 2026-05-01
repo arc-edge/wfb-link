@@ -1481,6 +1481,10 @@ struct BridgeTxOverrideArgs {
     #[arg(long, value_parser = parse_bandwidth)]
     tx_bandwidth: Option<Bandwidth>,
 
+    /// Override the bandwidth used for TX descriptor secondary-channel bits.
+    #[arg(long, value_parser = parse_bandwidth)]
+    tx_channel_bandwidth: Option<Bandwidth>,
+
     /// Override TX descriptor queue for live bridge submissions.
     #[arg(long, value_enum, default_value = "auto")]
     tx_queue: TxQueueArg,
@@ -1570,6 +1574,14 @@ struct BridgeTxBenchArgs {
     /// Override the parsed radiotap TX rate for synthetic WFB submissions.
     #[arg(long, value_parser = parse_tx_rate_arg)]
     tx_rate: Option<TxRate>,
+
+    /// Override the parsed radiotap TX bandwidth for synthetic WFB submissions.
+    #[arg(long, value_parser = parse_bandwidth)]
+    tx_bandwidth: Option<Bandwidth>,
+
+    /// Override the bandwidth used for TX descriptor secondary-channel bits.
+    #[arg(long, value_parser = parse_bandwidth)]
+    tx_channel_bandwidth: Option<Bandwidth>,
 
     /// TX descriptor queue override for synthetic WFB submissions.
     #[arg(long, value_enum, default_value = "auto")]
@@ -2896,6 +2908,8 @@ struct BridgeTxBenchReport {
     fwmark_hex: String,
     mcs: u8,
     tx_rate: Option<TxRate>,
+    tx_bandwidth: Option<Bandwidth>,
+    tx_channel_bandwidth: Option<Bandwidth>,
     tx_queue: TxQueueArg,
     mac_id: u8,
     mac_id_hex: String,
@@ -12333,17 +12347,327 @@ where
         },
     )?;
 
-    if channel.band == Band::Ghz5 && bandwidth == Bandwidth::Mhz20 {
-        apply_captured_tx_bringup_tail_8812a(registers, counters, steps)?;
+    if should_apply_captured_tx_bringup_tail(channel, bandwidth) {
+        apply_captured_tx_bringup_tail_8812a(registers, counters, steps, bandwidth)?;
     }
 
     Ok(())
+}
+
+fn should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
+    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+}
+
+type CapturedTxBringupWrite = (&'static str, u16, u32);
+
+const CAPTURED_TX_BRINGUP_TAIL_20MHZ: &[CapturedTxBringupWrite] = &[
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x2d40_0003),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x2d40_0003),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
+    ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
+    ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
+    (
+        "rB_IQK_Result_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x200,
+        0x3000_0c1c,
+    ),
+    (
+        "rA_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 4,
+        0x0000_0058,
+    ),
+    (
+        "rB_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x204,
+        0x0000_0058,
+    ),
+    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
+    (
+        "rA_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+        0x2626_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+        0x2626_2626,
+    ),
+    ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001e),
+    ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0010_161e),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0181_7d24),
+    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
+    (
+        "rB_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+        0x2828_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+        0x2828_2828,
+    ),
+    ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001e),
+    ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0012_1820),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7d24),
+];
+
+const CAPTURED_TX_BRINGUP_TAIL_40MHZ: &[CapturedTxBringupWrite] = &[
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x35e0_0003),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x35e0_0003),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
+    ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
+    ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
+    (
+        "rB_IQK_Result_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x200,
+        0x3000_0c1c,
+    ),
+    (
+        "rA_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 4,
+        0x0000_0058,
+    ),
+    (
+        "rB_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x204,
+        0x0000_0058,
+    ),
+    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
+    (
+        "rA_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+        0x2727_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+        0x2727_2727,
+    ),
+    ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001c),
+    ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0011_171f),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0423_8500),
+    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
+    (
+        "rB_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+        0x2929_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+        0x2929_2929,
+    ),
+    ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001c),
+    ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0013_1921),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7526),
+];
+
+fn captured_tx_bringup_tail_8812a(
+    bandwidth: Bandwidth,
+) -> std::result::Result<&'static [CapturedTxBringupWrite], DiagnosticErrorReport> {
+    match bandwidth {
+        Bandwidth::Mhz20 => Ok(CAPTURED_TX_BRINGUP_TAIL_20MHZ),
+        Bandwidth::Mhz40 => Ok(CAPTURED_TX_BRINGUP_TAIL_40MHZ),
+        Bandwidth::Mhz80 => Err(DiagnosticErrorReport {
+            code: "captured_tx_bringup_tail_unsupported",
+            message: "captured TX bring-up tail is only available for 20 and 40 MHz".to_string(),
+        }),
+    }
 }
 
 fn apply_captured_tx_bringup_tail_8812a<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
     steps: &mut Vec<QueueDmaStepReport>,
+    bandwidth: Bandwidth,
 ) -> std::result::Result<(), DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
@@ -12351,150 +12675,7 @@ where
     // These are the write32 arguments/readback values for this Rust USB path,
     // reconstructed from a known-good Linux usbmon trace. They are a bench
     // bring-up stand-in for the runtime RFE, TX power, and IQK functions.
-    for (register_name, address, value) in [
-        ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x2d40_0003),
-        ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x2d40_0003),
-        ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
-        ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
-        ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
-        ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
-        ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
-        ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
-        ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
-        (
-            "rB_IQK_Result_Jaguar",
-            REG_OFDM0_XBAGCCORE1 + 0x200,
-            0x3000_0c1c,
-        ),
-        (
-            "rA_IQK_Shadow_Jaguar",
-            REG_OFDM0_XBAGCCORE1 + 4,
-            0x0000_0058,
-        ),
-        (
-            "rB_IQK_Shadow_Jaguar",
-            REG_OFDM0_XBAGCCORE1 + 0x204,
-            0x0000_0058,
-        ),
-        ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
-        (
-            "rA_TxAGC_OFDM18_OFDM6",
-            REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
-            0x2727_2727,
-        ),
-        (
-            "rA_TxAGC_OFDM54_OFDM24",
-            REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
-            0x2727_2727,
-        ),
-        (
-            "rA_TxAGC_MCS3_MCS0",
-            REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rA_TxAGC_MCS7_MCS4",
-            REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rA_TxAGC_NSS1_7_NSS1_4",
-            REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
-            0x2626_2626,
-        ),
-        (
-            "rA_TxAGC_NSS1_11_NSS1_8",
-            REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
-            0x2626_2626,
-        ),
-        (
-            "rA_TxAGC_NSS1_3_NSS1_0",
-            REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rA_TxAGC_NSS2_3_NSS2_0",
-            REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rA_TxAGC_NSS2_7_NSS2_4",
-            REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
-            0x2626_2828,
-        ),
-        (
-            "rA_TxAGC_NSS2_11_NSS2_8",
-            REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
-            0x2626_2626,
-        ),
-        (
-            "rA_TxAGC_NSS3_3_NSS3_0",
-            REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
-            0x2626_2626,
-        ),
-        ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001e),
-        ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0010_161e),
-        ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0181_7d24),
-        ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
-        (
-            "rB_TxAGC_OFDM18_OFDM6",
-            REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rB_TxAGC_OFDM54_OFDM24",
-            REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rB_TxAGC_MCS3_MCS0",
-            REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
-            0x2a2a_2a2a,
-        ),
-        (
-            "rB_TxAGC_MCS7_MCS4",
-            REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
-            0x2a2a_2a2a,
-        ),
-        (
-            "rB_TxAGC_NSS1_7_NSS1_4",
-            REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rB_TxAGC_NSS1_11_NSS1_8",
-            REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rB_TxAGC_NSS1_3_NSS1_0",
-            REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
-            0x2a2a_2a2a,
-        ),
-        (
-            "rB_TxAGC_NSS2_3_NSS2_0",
-            REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
-            0x2a2a_2a2a,
-        ),
-        (
-            "rB_TxAGC_NSS2_7_NSS2_4",
-            REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
-            0x2828_2a2a,
-        ),
-        (
-            "rB_TxAGC_NSS2_11_NSS2_8",
-            REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
-            0x2828_2828,
-        ),
-        (
-            "rB_TxAGC_NSS3_3_NSS3_0",
-            REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
-            0x2828_2828,
-        ),
-        ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001e),
-        ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0012_1820),
-        ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7d24),
-    ] {
+    for &(register_name, address, value) in captured_tx_bringup_tail_8812a(bandwidth)? {
         queue_write32_step(
             registers,
             counters,
@@ -12566,10 +12747,26 @@ fn channel_programming_number(
     bandwidth: Bandwidth,
 ) -> std::result::Result<u8, DiagnosticErrorReport> {
     match bandwidth {
-        Bandwidth::Mhz20 | Bandwidth::Mhz40 => Ok(channel.number),
+        Bandwidth::Mhz20 => Ok(channel.number),
+        Bandwidth::Mhz40 => forty_mhz_center_channel(channel),
         Bandwidth::Mhz80 => {
             eighty_mhz_center_and_position(channel.number).map(|(center, _)| center)
         }
+    }
+}
+
+fn forty_mhz_center_channel(channel: Channel) -> std::result::Result<u8, DiagnosticErrorReport> {
+    let data_sc = data_secondary_channel_setting(channel, Bandwidth::Mhz40)?;
+    match data_sc {
+        VHT_DATA_SC_20_LOWER_OF_80MHZ => Ok(channel.number + 2),
+        VHT_DATA_SC_20_UPPER_OF_80MHZ => Ok(channel.number - 2),
+        _ => Err(DiagnosticErrorReport {
+            code: "channel_bandwidth_not_supported",
+            message: format!(
+                "channel {} did not map to a 40 MHz primary side",
+                channel.number
+            ),
+        }),
     }
 }
 
@@ -16429,6 +16626,8 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         fwmark: 0,
         mcs: 0,
         tx_rate: None,
+        tx_bandwidth: None,
+        tx_channel_bandwidth: None,
         tx_queue: TxQueueArg::Auto,
         mac_id: 0,
         tx_rate_id: None,
@@ -16504,6 +16703,8 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         fwmark: 0,
         mcs: 0,
         tx_rate: args.tx_overrides.tx_rate,
+        tx_bandwidth: args.tx_overrides.tx_bandwidth,
+        tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
         tx_queue: args.tx_overrides.tx_queue,
         mac_id: args.tx_overrides.mac_id.unwrap_or(0),
         tx_rate_id: args.tx_overrides.tx_rate_id,
@@ -18774,7 +18975,8 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
     };
 
     let frame_len = parsed.ieee80211_frame.len();
-    let tx_options = apply_bridge_tx_overrides(&args.tx_overrides, parsed.tx_options);
+    let tx_options =
+        apply_bridge_tx_overrides(&args.tx_overrides, args.bandwidth, parsed.tx_options);
     let (packet_len, tx_descriptor_hex) =
         match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
             Ok(packet) => (
@@ -18903,8 +19105,10 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
             transport: &mut transport,
             bulk_out,
             channel,
+            channel_bandwidth: args.bandwidth,
             tx_rate: args.tx_overrides.tx_rate,
             tx_bandwidth: args.tx_overrides.tx_bandwidth,
+            tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
             tx_queue: args.tx_overrides.tx_queue.into(),
             tx_mac_id: args.tx_overrides.mac_id,
             tx_rate_id: args.tx_overrides.tx_rate_id,
@@ -18981,8 +19185,10 @@ struct BridgeTxRadio<'a> {
     transport: &'a mut InitUsbTransport,
     bulk_out: u8,
     channel: Channel,
+    channel_bandwidth: Bandwidth,
     tx_rate: Option<TxRate>,
     tx_bandwidth: Option<Bandwidth>,
+    tx_channel_bandwidth: Option<Bandwidth>,
     tx_queue: TxQueue,
     tx_mac_id: Option<u8>,
     tx_rate_id: Option<u8>,
@@ -18997,8 +19203,10 @@ struct BridgeTxRadio<'a> {
 
 fn apply_bridge_tx_overrides(
     overrides: &BridgeTxOverrideArgs,
+    channel_bandwidth: Bandwidth,
     mut options: TxOptions,
 ) -> TxOptions {
+    options.channel_bandwidth = Some(overrides.tx_channel_bandwidth.unwrap_or(channel_bandwidth));
     if let Some(rate) = overrides.tx_rate {
         options.rate = rate;
     }
@@ -19035,6 +19243,8 @@ impl RadioTx for BridgeTxRadio<'_> {
         frame: &[u8],
         mut options: TxOptions,
     ) -> std::result::Result<(), String> {
+        options.channel_bandwidth =
+            Some(self.tx_channel_bandwidth.unwrap_or(self.channel_bandwidth));
         if let Some(rate) = self.tx_rate {
             options.rate = rate;
         }
@@ -19505,7 +19715,8 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             }
         };
         frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-        let tx_options = apply_bridge_tx_overrides(&args.tx_overrides, parsed.tx_options);
+        let tx_options =
+            apply_bridge_tx_overrides(&args.tx_overrides, args.bandwidth, parsed.tx_options);
         let (packet_len, tx_descriptor_hex) =
             match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
                 Ok(packet) => (
@@ -19554,8 +19765,10 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 transport: &mut transport,
                 bulk_out,
                 channel,
+                channel_bandwidth: args.bandwidth,
                 tx_rate: args.tx_overrides.tx_rate,
                 tx_bandwidth: args.tx_overrides.tx_bandwidth,
+                tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
                 tx_queue: args.tx_overrides.tx_queue.into(),
                 tx_mac_id: args.tx_overrides.mac_id,
                 tx_rate_id: args.tx_overrides.tx_rate_id,
@@ -20176,8 +20389,11 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     }
                 };
                 frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-                let tx_options =
-                    apply_bridge_tx_overrides(&args.tx.tx_overrides, parsed.tx_options);
+                let tx_options = apply_bridge_tx_overrides(
+                    &args.tx.tx_overrides,
+                    args.tx.bandwidth,
+                    parsed.tx_options,
+                );
                 let (packet_len, tx_descriptor_hex) =
                     match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
                         Ok(packet) => (
@@ -20207,8 +20423,10 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                         transport: &mut transport,
                         bulk_out,
                         channel,
+                        channel_bandwidth: args.tx.bandwidth,
                         tx_rate: args.tx.tx_overrides.tx_rate,
                         tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
+                        tx_channel_bandwidth: args.tx.tx_overrides.tx_channel_bandwidth,
                         tx_queue: args.tx.tx_overrides.tx_queue.into(),
                         tx_mac_id: args.tx.tx_overrides.mac_id,
                         tx_rate_id: args.tx.tx_overrides.tx_rate_id,
@@ -23194,8 +23412,10 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             transport: &mut transport,
             bulk_out,
             channel,
+            channel_bandwidth: args.bandwidth,
             tx_rate: args.tx_rate,
-            tx_bandwidth: None,
+            tx_bandwidth: args.tx_bandwidth,
+            tx_channel_bandwidth: args.tx_channel_bandwidth,
             tx_queue: args.tx_queue.into(),
             tx_mac_id: Some(args.mac_id),
             tx_rate_id: args.tx_rate_id,
@@ -23487,8 +23707,12 @@ fn bridge_tx_bench_pass_phases(
 }
 
 fn bridge_tx_bench_tx_options(args: &BridgeTxBenchArgs, mut options: TxOptions) -> TxOptions {
+    options.channel_bandwidth = Some(args.tx_channel_bandwidth.unwrap_or(args.bandwidth));
     if let Some(tx_rate) = args.tx_rate {
         options.rate = tx_rate;
+    }
+    if let Some(tx_bandwidth) = args.tx_bandwidth {
+        options.bandwidth = tx_bandwidth;
     }
     options.queue = args.tx_queue.into();
     options.mac_id = args.mac_id;
@@ -23534,6 +23758,8 @@ fn bridge_tx_bench_base_report(
         fwmark_hex: format_value(args.fwmark, 8),
         mcs: args.mcs,
         tx_rate: args.tx_rate,
+        tx_bandwidth: args.tx_bandwidth,
+        tx_channel_bandwidth: args.tx_channel_bandwidth,
         tx_queue: args.tx_queue,
         mac_id: args.mac_id,
         mac_id_hex: format_value(args.mac_id, 2),
@@ -23940,6 +24166,7 @@ fn tx_options_from_args(bandwidth: Bandwidth, args: &TxOptionArgs) -> TxOptions 
     TxOptions {
         rate: args.tx_rate,
         bandwidth,
+        channel_bandwidth: Some(bandwidth),
         short_gi: args.short_gi,
         ldpc: args.ldpc,
         stbc: args.stbc,
@@ -28908,6 +29135,8 @@ mod tests {
             fwmark: 0,
             mcs: 0,
             tx_rate: None,
+            tx_bandwidth: None,
+            tx_channel_bandwidth: None,
             tx_queue: TxQueueArg::Auto,
             mac_id: 0,
             tx_rate_id: None,
@@ -30442,6 +30671,30 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
     #[test]
     fn forty_mhz_secondary_channel_mapping_matches_primary_side() {
         assert_eq!(
+            channel_programming_number(
+                Channel::from_number(36).expect("channel 36"),
+                Bandwidth::Mhz40
+            )
+            .expect("36/40 center"),
+            38
+        );
+        assert_eq!(
+            channel_programming_number(
+                Channel::from_number(40).expect("channel 40"),
+                Bandwidth::Mhz40
+            )
+            .expect("40/40 center"),
+            38
+        );
+        assert_eq!(
+            channel_programming_number(
+                Channel::from_number(6).expect("channel 6"),
+                Bandwidth::Mhz40
+            )
+            .expect("6/40 center"),
+            8
+        );
+        assert_eq!(
             data_secondary_channel_setting(
                 Channel::from_number(36).expect("channel 36"),
                 Bandwidth::Mhz40
@@ -30465,6 +30718,64 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             .expect("6/40"),
             VHT_DATA_SC_20_LOWER_OF_80MHZ
         );
+    }
+
+    #[test]
+    fn captured_tx_bringup_tail_covers_5ghz_twenty_and_forty_mhz() {
+        let channel_36 = Channel::from_number(36).expect("channel 36");
+        let channel_6 = Channel::from_number(6).expect("channel 6");
+
+        assert!(should_apply_captured_tx_bringup_tail(
+            channel_36,
+            Bandwidth::Mhz20
+        ));
+        assert!(should_apply_captured_tx_bringup_tail(
+            channel_36,
+            Bandwidth::Mhz40
+        ));
+        assert!(!should_apply_captured_tx_bringup_tail(
+            channel_36,
+            Bandwidth::Mhz80
+        ));
+        assert!(!should_apply_captured_tx_bringup_tail(
+            channel_6,
+            Bandwidth::Mhz40
+        ));
+    }
+
+    #[test]
+    fn captured_tx_bringup_tail_selects_bandwidth_specific_runtime_values() {
+        fn value_for(
+            writes: &[CapturedTxBringupWrite],
+            address: u16,
+        ) -> std::result::Result<u32, &'static str> {
+            writes
+                .iter()
+                .find(|(_, candidate, _)| *candidate == address)
+                .map(|(_, _, value)| *value)
+                .ok_or("missing register")
+        }
+
+        let tail20 = captured_tx_bringup_tail_8812a(Bandwidth::Mhz20).expect("20 MHz tail");
+        let tail40 = captured_tx_bringup_tail_8812a(Bandwidth::Mhz40).expect("40 MHz tail");
+
+        assert_eq!(
+            value_for(tail20, REG_TX_SCALE_A_JAGUAR).expect("20 tx scale A"),
+            0x2d40_0003
+        );
+        assert_eq!(
+            value_for(tail40, REG_TX_SCALE_A_JAGUAR).expect("40 tx scale A"),
+            0x35e0_0003
+        );
+        assert_eq!(
+            value_for(tail40, REG_TX_BB_CTRL_A_JAGUAR).expect("40 tx bb A"),
+            0x0423_8500
+        );
+        assert_eq!(
+            value_for(tail40, REG_TX_AGC_B_MCS3_MCS0_JAGUAR).expect("40 txagc B mcs0-3"),
+            0x2b2b_2b2b
+        );
+        assert!(captured_tx_bringup_tail_8812a(Bandwidth::Mhz80).is_err());
     }
 
     #[test]

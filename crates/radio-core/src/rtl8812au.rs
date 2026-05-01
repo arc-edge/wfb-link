@@ -23,6 +23,13 @@ const QSLT_VI: u8 = 0x05;
 const QSLT_VO: u8 = 0x07;
 const QSLT_HIGH: u8 = 0x11;
 const QSLT_MGNT: u8 = 0x12;
+const VHT_DATA_SC_DONOT_CARE: u8 = 0;
+const VHT_DATA_SC_20_UPPER_OF_80MHZ: u8 = 1;
+const VHT_DATA_SC_20_LOWER_OF_80MHZ: u8 = 2;
+const VHT_DATA_SC_20_UPPERST_OF_80MHZ: u8 = 3;
+const VHT_DATA_SC_20_LOWEST_OF_80MHZ: u8 = 4;
+const VHT_DATA_SC_40_UPPER_OF_80MHZ: u8 = 9;
+const VHT_DATA_SC_40_LOWER_OF_80MHZ: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterWidth {
@@ -107,6 +114,7 @@ pub enum TxQueue {
 pub struct TxOptions {
     pub rate: TxRate,
     pub bandwidth: Bandwidth,
+    pub channel_bandwidth: Option<Bandwidth>,
     pub queue: TxQueue,
     pub mac_id: u8,
     pub rate_id: Option<u8>,
@@ -138,6 +146,7 @@ impl Default for TxOptions {
         Self {
             rate: TxRate::Ofdm6m,
             bandwidth: Bandwidth::Mhz20,
+            channel_bandwidth: None,
             queue: TxQueue::Auto,
             mac_id: 0,
             rate_id: None,
@@ -278,6 +287,8 @@ pub fn build_tx_packet(
     packet[0x11] = opts.rate_fallback_limit & 0x1f;
     packet[0x12] = (1 << 1) | ((retries & 0x3f) << 2);
 
+    let channel_bandwidth = opts.channel_bandwidth.unwrap_or(opts.bandwidth);
+    packet[0x14] |= tx_data_secondary_channel(channel, channel_bandwidth, opts.bandwidth)?;
     match opts.bandwidth {
         Bandwidth::Mhz20 => {}
         Bandwidth::Mhz40 => packet[0x14] |= 1 << 5,
@@ -305,6 +316,58 @@ pub fn build_tx_packet(
     packet[TX_DESC_SIZE..TX_DESC_SIZE + frame.len()].copy_from_slice(frame);
 
     Ok(packet)
+}
+
+fn tx_data_secondary_channel(
+    channel: Channel,
+    channel_bandwidth: Bandwidth,
+    frame_bandwidth: Bandwidth,
+) -> Result<u8, Rtl8812auTxError> {
+    match (channel_bandwidth, frame_bandwidth) {
+        (Bandwidth::Mhz20, Bandwidth::Mhz20)
+        | (Bandwidth::Mhz40, Bandwidth::Mhz40)
+        | (Bandwidth::Mhz80, Bandwidth::Mhz80) => Ok(VHT_DATA_SC_DONOT_CARE),
+        (Bandwidth::Mhz40, Bandwidth::Mhz20) => tx_primary_20_of_40(channel),
+        (Bandwidth::Mhz80, Bandwidth::Mhz40) => match channel.number {
+            36 | 40 | 52 | 56 | 100 | 104 | 116 | 120 | 132 | 136 | 149 | 153 => {
+                Ok(VHT_DATA_SC_40_LOWER_OF_80MHZ)
+            }
+            44 | 48 | 60 | 64 | 108 | 112 | 124 | 128 | 140 | 144 | 157 | 161 => {
+                Ok(VHT_DATA_SC_40_UPPER_OF_80MHZ)
+            }
+            _ => Err(Rtl8812auTxError::UnsupportedBandwidth {
+                channel: channel.number,
+                bandwidth_mhz: channel_bandwidth.mhz(),
+            }),
+        },
+        (Bandwidth::Mhz80, Bandwidth::Mhz20) => match channel.number {
+            36 | 52 | 100 | 116 | 132 | 149 => Ok(VHT_DATA_SC_20_LOWEST_OF_80MHZ),
+            40 | 56 | 104 | 120 | 136 | 153 => Ok(VHT_DATA_SC_20_LOWER_OF_80MHZ),
+            44 | 60 | 108 | 124 | 140 | 157 => Ok(VHT_DATA_SC_20_UPPER_OF_80MHZ),
+            48 | 64 | 112 | 128 | 144 | 161 => Ok(VHT_DATA_SC_20_UPPERST_OF_80MHZ),
+            _ => Err(Rtl8812auTxError::UnsupportedBandwidth {
+                channel: channel.number,
+                bandwidth_mhz: channel_bandwidth.mhz(),
+            }),
+        },
+        _ => Err(Rtl8812auTxError::UnsupportedBandwidth {
+            channel: channel.number,
+            bandwidth_mhz: frame_bandwidth.mhz(),
+        }),
+    }
+}
+
+fn tx_primary_20_of_40(channel: Channel) -> Result<u8, Rtl8812auTxError> {
+    match channel.band {
+        Band::Ghz5 if channel.number % 8 == 4 => Ok(VHT_DATA_SC_20_LOWER_OF_80MHZ),
+        Band::Ghz5 if channel.number % 8 == 0 => Ok(VHT_DATA_SC_20_UPPER_OF_80MHZ),
+        Band::Ghz2 if (1..=7).contains(&channel.number) => Ok(VHT_DATA_SC_20_LOWER_OF_80MHZ),
+        Band::Ghz2 if (8..=13).contains(&channel.number) => Ok(VHT_DATA_SC_20_UPPER_OF_80MHZ),
+        _ => Err(Rtl8812auTxError::UnsupportedBandwidth {
+            channel: channel.number,
+            bandwidth_mhz: Bandwidth::Mhz40.mhz(),
+        }),
+    }
 }
 
 pub fn submit_tx_frame<T: UsbBulkTransfer>(
@@ -848,7 +911,107 @@ mod tests {
         assert_eq!(packet[0x14] & 0x10, 0x10);
         assert_eq!(packet[0x14] & 0x60, 0x20);
         assert_eq!(packet[0x14] & 0x80, 0x80);
+        assert_eq!(packet[0x14] & 0x0f, VHT_DATA_SC_DONOT_CARE);
         assert_eq!(packet[0x15] & 0x03, 0x01);
+    }
+
+    #[test]
+    fn tx_packet_uses_dont_care_data_secondary_channel_for_full_width_frames() {
+        let frame = sample_data_frame();
+        let packet_36 = build_tx_packet(
+            &frame,
+            Channel::from_number(36).expect("channel 36"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz40,
+                ..TxOptions::default()
+            },
+        )
+        .expect("36/40 tx packet");
+        let packet_40 = build_tx_packet(
+            &frame,
+            Channel::from_number(40).expect("channel 40"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz40,
+                ..TxOptions::default()
+            },
+        )
+        .expect("40/40 tx packet");
+        let packet_44_vht = build_tx_packet(
+            &frame,
+            Channel::from_number(44).expect("channel 44"),
+            TxOptions {
+                rate: TxRate::Vht { mcs: 1, nss: 1 },
+                bandwidth: Bandwidth::Mhz80,
+                ..TxOptions::default()
+            },
+        )
+        .expect("44/80 tx packet");
+
+        assert_eq!(packet_36[0x14] & 0x0f, VHT_DATA_SC_DONOT_CARE);
+        assert_eq!(packet_40[0x14] & 0x0f, VHT_DATA_SC_DONOT_CARE);
+        assert_eq!(packet_44_vht[0x14] & 0x0f, VHT_DATA_SC_DONOT_CARE);
+    }
+
+    #[test]
+    fn tx_packet_encodes_data_secondary_channel_for_narrow_frames_on_wide_channels() {
+        let frame = sample_data_frame();
+        let packet_20_on_40_lower = build_tx_packet(
+            &frame,
+            Channel::from_number(36).expect("channel 36"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz20,
+                channel_bandwidth: Some(Bandwidth::Mhz40),
+                ..TxOptions::default()
+            },
+        )
+        .expect("20 on 36/40 tx packet");
+        let packet_20_on_40_upper = build_tx_packet(
+            &frame,
+            Channel::from_number(40).expect("channel 40"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz20,
+                channel_bandwidth: Some(Bandwidth::Mhz40),
+                ..TxOptions::default()
+            },
+        )
+        .expect("20 on 40/40 tx packet");
+        let packet_40_on_80_lower = build_tx_packet(
+            &frame,
+            Channel::from_number(36).expect("channel 36"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz40,
+                channel_bandwidth: Some(Bandwidth::Mhz80),
+                ..TxOptions::default()
+            },
+        )
+        .expect("40 on 36/80 tx packet");
+        let packet_20_on_80_upper = build_tx_packet(
+            &frame,
+            Channel::from_number(44).expect("channel 44"),
+            TxOptions {
+                bandwidth: Bandwidth::Mhz20,
+                channel_bandwidth: Some(Bandwidth::Mhz80),
+                ..TxOptions::default()
+            },
+        )
+        .expect("20 on 44/80 tx packet");
+
+        assert_eq!(
+            packet_20_on_40_lower[0x14] & 0x0f,
+            VHT_DATA_SC_20_LOWER_OF_80MHZ
+        );
+        assert_eq!(
+            packet_20_on_40_upper[0x14] & 0x0f,
+            VHT_DATA_SC_20_UPPER_OF_80MHZ
+        );
+        assert_eq!(
+            packet_40_on_80_lower[0x14] & 0x0f,
+            VHT_DATA_SC_40_LOWER_OF_80MHZ
+        );
+        assert_eq!(
+            packet_20_on_80_upper[0x14] & 0x0f,
+            VHT_DATA_SC_20_UPPER_OF_80MHZ
+        );
     }
 
     #[test]

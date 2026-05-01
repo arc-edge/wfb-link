@@ -116,6 +116,7 @@ fn parse_ht(packet: &[u8]) -> Result<ParsedRadiotapTx, RadiotapError> {
                 TxRate::Ofdm6m
             },
             bandwidth: bw,
+            channel_bandwidth: None,
             queue: Default::default(),
             mac_id: 0,
             rate_id: None,
@@ -156,6 +157,7 @@ fn parse_vht(packet: &[u8]) -> Result<ParsedRadiotapTx, RadiotapError> {
         options: TxOptions {
             rate: TxRate::Vht { mcs, nss },
             bandwidth: bw,
+            channel_bandwidth: None,
             queue: Default::default(),
             mac_id: 0,
             rate_id: None,
