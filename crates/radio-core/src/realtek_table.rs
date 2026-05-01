@@ -25,6 +25,7 @@ pub enum RealtekTableError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtekTableKind {
+    Mac,
     BbPhy,
     BbAgc,
     RfRadioA,
@@ -436,13 +437,14 @@ fn check_positive(
 
 fn table_bitmask(kind: RealtekTableKind) -> u32 {
     match kind {
-        RealtekTableKind::BbPhy | RealtekTableKind::BbAgc => MASKDWORD,
+        RealtekTableKind::Mac | RealtekTableKind::BbPhy | RealtekTableKind::BbAgc => MASKDWORD,
         RealtekTableKind::RfRadioA | RealtekTableKind::RfRadioB => 0x000f_ffff,
     }
 }
 
 fn table_delay_us(kind: RealtekTableKind, address: u32) -> Option<u64> {
     match kind {
+        RealtekTableKind::Mac => None,
         RealtekTableKind::BbPhy => match address {
             0xfe => Some(50_000),
             0xfd => Some(5_000),

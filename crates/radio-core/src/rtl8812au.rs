@@ -18,7 +18,10 @@ const USB2_BULK_PACKET_SIZE: usize = 512;
 const RX_AGGREGATION_ALIGNMENT: usize = 128;
 
 const QSLT_BE: u8 = 0x00;
-const QSLT_VO: u8 = 0x06;
+const QSLT_BK: u8 = 0x02;
+const QSLT_VI: u8 = 0x05;
+const QSLT_VO: u8 = 0x07;
+const QSLT_HIGH: u8 = 0x11;
 const QSLT_MGNT: u8 = 0x12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +90,31 @@ pub enum TxRate {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TxQueue {
+    #[default]
+    Auto,
+    Be,
+    Bk,
+    Vi,
+    Vo,
+    High,
+    Mgnt,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TxOptions {
     pub rate: TxRate,
     pub bandwidth: Bandwidth,
+    pub queue: TxQueue,
+    pub mac_id: u8,
+    pub rate_id: Option<u8>,
     pub retries: u8,
+    pub hardware_sequence: bool,
+    pub first_segment: bool,
+    pub disable_rate_fallback: bool,
+    pub aggregate_break: bool,
     pub short_gi: bool,
     pub ldpc: bool,
     pub stbc: bool,
@@ -114,7 +137,14 @@ impl Default for TxOptions {
         Self {
             rate: TxRate::Ofdm6m,
             bandwidth: Bandwidth::Mhz20,
+            queue: TxQueue::Auto,
+            mac_id: 0,
+            rate_id: None,
             retries: 12,
+            hardware_sequence: true,
+            first_segment: true,
+            disable_rate_fallback: true,
+            aggregate_break: true,
             short_gi: false,
             ldpc: false,
             stbc: false,
@@ -185,16 +215,26 @@ pub fn build_tx_packet(
 
     let rate = tx_rate_to_hw(opts.rate, channel)?;
     let retries = if opts.no_retry {
-        1
+        0
     } else {
-        opts.retries.clamp(1, 63)
+        opts.retries.min(63)
     };
     let bmc = frame[4] & 0x01 != 0;
-    let qsel = match frame_type(frame)? {
+    let frame_type = frame_type(frame)?;
+    let auto_qsel = match frame_type {
         FrameType::Management => QSLT_MGNT,
         FrameType::Control => QSLT_VO,
         FrameType::Data => QSLT_BE,
         FrameType::Extension => QSLT_MGNT,
+    };
+    let qsel = match opts.queue {
+        TxQueue::Auto => auto_qsel,
+        TxQueue::Be => QSLT_BE,
+        TxQueue::Bk => QSLT_BK,
+        TxQueue::Vi => QSLT_VI,
+        TxQueue::Vo => QSLT_VO,
+        TxQueue::High => QSLT_HIGH,
+        TxQueue::Mgnt => QSLT_MGNT,
     };
 
     let frame_len_for_usb = if (frame.len() + TX_DESC_SIZE) % USB2_BULK_PACKET_SIZE == 0 {
@@ -208,15 +248,25 @@ pub fn build_tx_packet(
     packet[0x01] = ((frame_len_for_usb >> 8) & 0xff) as u8;
     packet[0x02] = TX_DESC_SIZE as u8;
     packet[0x03] = (1 << 2) | (1 << 7);
+    if opts.first_segment {
+        packet[0x03] |= 1 << 3;
+    }
     if bmc {
         packet[0x03] |= 1;
     }
 
     packet[0x04] = 0x00;
+    packet[0x04] = opts.mac_id & 0x7f;
     packet[0x05] = qsel & 0x1f;
-    packet[0x06] = if rate <= 0x03 { 8 } else { 7 };
+    packet[0x06] = opts.rate_id.unwrap_or_else(|| default_rate_id(opts.rate)) & 0x1f;
+    if matches!(frame_type, FrameType::Data) && opts.aggregate_break {
+        packet[0x0a] |= 1;
+    }
 
-    packet[0x0d] = (1 << 0) | (1 << 2);
+    packet[0x0d] = 1 << 0;
+    if opts.disable_rate_fallback {
+        packet[0x0d] |= 1 << 2;
+    }
     if opts.protect {
         packet[0x0d] |= (1 << 4) | (1 << 5);
         packet[0x13] = 0x04;
@@ -232,16 +282,22 @@ pub fn build_tx_packet(
         Bandwidth::Mhz80 => packet[0x14] |= 2 << 5,
     }
     if opts.short_gi {
-        packet[0x14] |= 1 << 7;
+        packet[0x14] |= 1 << 4;
     }
     if opts.ldpc {
-        packet[0x17] |= 1;
+        packet[0x14] |= 1 << 7;
     }
     if opts.stbc {
-        packet[0x17] |= 1 << 4;
+        packet[0x15] |= 1;
     }
 
-    packet[0x21] = 1 << 7;
+    if opts.hardware_sequence {
+        packet[0x21] = 1 << 7;
+    } else if frame.len() >= 24 {
+        let sequence = (u16::from_le_bytes([frame[22], frame[23]]) >> 4) & 0x0fff;
+        packet[0x25] |= ((sequence & 0x000f) << 4) as u8;
+        packet[0x26] = (sequence >> 4) as u8;
+    }
     let checksum = tx_descriptor_checksum(&packet[..32]);
     packet[0x1c..0x1e].copy_from_slice(&checksum.to_le_bytes());
     packet[TX_DESC_SIZE..TX_DESC_SIZE + frame.len()].copy_from_slice(frame);
@@ -385,6 +441,20 @@ fn tx_rate_to_hw(rate: TxRate, channel: Channel) -> Result<u8, Rtl8812auTxError>
         Ok(0x04)
     } else {
         Ok(hw)
+    }
+}
+
+fn default_rate_id(rate: TxRate) -> u8 {
+    match rate {
+        TxRate::Cck1m | TxRate::Cck2m | TxRate::Cck5_5m | TxRate::Cck11m => 8,
+        TxRate::Mcs(mcs) if mcs <= 7 => 3,
+        TxRate::Mcs(mcs) if mcs <= 15 => 2,
+        TxRate::Mcs(_) => 14,
+        TxRate::Vht { nss: 1, .. } => 10,
+        TxRate::Vht { nss: 2, .. } => 9,
+        TxRate::Vht { nss: 3, .. } => 13,
+        TxRate::Vht { .. } => 13,
+        _ => 7,
     }
 }
 
@@ -683,7 +753,9 @@ mod tests {
         assert_eq!(packet.len(), TX_DESC_SIZE + frame.len());
         assert_eq!(&packet[TX_DESC_SIZE..], frame.as_slice());
         assert_eq!(packet[0x02], TX_DESC_SIZE as u8);
+        assert_eq!(packet[0x03] & ((1 << 2) | (1 << 3) | (1 << 7)), 0x8c);
         assert_eq!(packet[0x05], QSLT_BE);
+        assert_eq!(packet[0x0a] & 0x01, 0x01);
         assert_eq!(packet[0x10], 0x04);
         assert_eq!(packet[0x21], 0x80);
 
@@ -751,6 +823,88 @@ mod tests {
         assert_eq!(ht[0x10], 0x13);
         assert_eq!(vht[0x10], 0x3f);
         assert_eq!(vht[0x14] & 0x60, 0x40);
+    }
+
+    #[test]
+    fn tx_packet_encodes_sgi_ldpc_and_stbc_in_data_bw_word() {
+        let frame = sample_data_frame();
+        let channel = Channel::from_number(36).expect("channel 36");
+        let packet = build_tx_packet(
+            &frame,
+            channel,
+            TxOptions {
+                rate: TxRate::Mcs(0),
+                bandwidth: Bandwidth::Mhz40,
+                short_gi: true,
+                ldpc: true,
+                stbc: true,
+                ..TxOptions::default()
+            },
+        )
+        .expect("tx packet");
+
+        assert_eq!(packet[0x14] & 0x10, 0x10);
+        assert_eq!(packet[0x14] & 0x60, 0x20);
+        assert_eq!(packet[0x14] & 0x80, 0x80);
+        assert_eq!(packet[0x15] & 0x03, 0x01);
+    }
+
+    #[test]
+    fn tx_packet_allows_queue_override() {
+        let frame = sample_data_frame();
+        let channel = Channel::from_number(36).expect("channel 36");
+        let packet = build_tx_packet(
+            &frame,
+            channel,
+            TxOptions {
+                queue: TxQueue::Mgnt,
+                ..TxOptions::default()
+            },
+        )
+        .expect("tx packet");
+
+        assert_eq!(packet[0x05], QSLT_MGNT);
+    }
+
+    #[test]
+    fn tx_packet_allows_mac_id_override() {
+        let frame = sample_data_frame();
+        let channel = Channel::from_number(36).expect("channel 36");
+        let packet = build_tx_packet(
+            &frame,
+            channel,
+            TxOptions {
+                mac_id: 1,
+                ..TxOptions::default()
+            },
+        )
+        .expect("tx packet");
+
+        assert_eq!(packet[0x04] & 0x7f, 1);
+    }
+
+    #[test]
+    fn tx_packet_can_preserve_injected_sequence_and_rate_fallback() {
+        let mut frame = sample_data_frame();
+        frame[22..24].copy_from_slice(&0x1230u16.to_le_bytes());
+        let channel = Channel::from_number(36).expect("channel 36");
+        let packet = build_tx_packet(
+            &frame,
+            channel,
+            TxOptions {
+                retries: 0,
+                hardware_sequence: false,
+                disable_rate_fallback: false,
+                ..TxOptions::default()
+            },
+        )
+        .expect("tx packet");
+
+        assert_eq!(packet[0x0d] & (1 << 2), 0);
+        assert_eq!(packet[0x12] & 0xfe, 0x02);
+        assert_eq!(packet[0x21] & 0x80, 0);
+        assert_eq!(packet[0x25] >> 4, 0x03);
+        assert_eq!(packet[0x26], 0x12);
     }
 
     #[test]

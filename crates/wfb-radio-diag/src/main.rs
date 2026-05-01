@@ -9,21 +9,22 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use radio_core::rtl8812au::Rtl8812auUsbTransport;
+use radio_core::rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE};
 use radio_core::{
     build_tx_packet, compare_usb_traces, frame_type, import_usbmon_text, parse_realtek_u32_array,
     parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, submit_tx_frame,
     validate_ieee80211_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector,
-    EndpointInfo, FirmwareImage, FrameType, InitDryRunPlan, InitPhaseCount, InterfaceInfo,
-    PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind, RealtekTableKind,
-    RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
-    UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison, UsbTraceEvent,
-    UsbTraceImport,
+    EndpointInfo, FirmwareImage, FirmwarePayload, FrameType, InitDryRunPlan, InitPhaseCount,
+    InterfaceInfo, PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind,
+    RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate,
+    TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison,
+    UsbTraceEvent, UsbTraceImport,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 use wfb_bridge::{
-    parse_tx_datagram, submit_tx_datagram, RadioTx, RadiotapError, TxCounters, TxDatagramError,
+    build_wfb_data_header, parse_tx_datagram, submit_tx_datagram, RadioTx, RadiotapError,
+    TxCounters, TxDatagramError, WfbChannelId,
 };
 
 #[cfg(target_os = "macos")]
@@ -115,6 +116,8 @@ enum Command {
     BridgeTxOnce(BridgeTxOnceArgs),
     /// Listen for WFB distributor-style datagrams and submit them through live radio TX.
     BridgeTxListen(BridgeTxListenArgs),
+    /// Generate WFB distributor-style datagrams and submit a bounded TX throughput burst.
+    BridgeTxBench(BridgeTxBenchArgs),
     /// Compare normalized USB trace event sequences.
     TraceCompare(TraceCompareArgs),
     /// Import Linux usbmon text into normalized USB trace JSON.
@@ -867,6 +870,10 @@ struct InitArgs {
     #[arg(long, default_value = "0x20", value_parser = parse_u8)]
     crystal_cap: u8,
 
+    /// RTL8812A RFE option used for band-switch pinmux programming.
+    #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
+    rfe_type: u8,
+
     /// Required acknowledgement that live init writes hardware registers.
     #[arg(long)]
     i_understand_this_writes_registers: bool,
@@ -1018,6 +1025,90 @@ struct RxScanArgs {
     #[command(flatten)]
     macos_usbhost: MacosUsbHostArgs,
 
+    /// Run full RTL8812AU init in this same USB session before the RX capture.
+    #[arg(long)]
+    init_before_rx: bool,
+
+    /// RTL8812A firmware image path for --init-before-rx.
+    #[arg(long)]
+    firmware: Option<PathBuf>,
+
+    /// Per-register read/write timeout in milliseconds for --init-before-rx.
+    #[arg(long, default_value_t = 500)]
+    init_timeout_ms: u64,
+
+    /// Realtek halhwimg8812a_mac.c source file for --init-before-rx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c"
+    )]
+    mac_source: PathBuf,
+
+    /// Realtek halhwimg8812a_bb.c source file for --init-before-rx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c"
+    )]
+    bb_source: PathBuf,
+
+    /// Realtek halhwimg8812a_rf.c source file for --init-before-rx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c"
+    )]
+    rf_source: PathBuf,
+
+    /// Realtek condition cut version for --init-before-rx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    cut_version: u8,
+
+    /// Realtek condition package type for --init-before-rx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    package_type: u8,
+
+    /// Realtek condition support interface; RTL8812AU USB is 0x02.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    support_interface: u8,
+
+    /// Realtek condition support platform.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    support_platform: u8,
+
+    /// Realtek board type for --init-before-rx.
+    #[arg(long, default_value = "0xd8", value_parser = parse_u8)]
+    board_type: u8,
+
+    /// Realtek 2.4 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_glna: u16,
+
+    /// Realtek 2.4 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_gpa: u16,
+
+    /// Realtek 5 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_alna: u16,
+
+    /// Realtek 5 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_apa: u16,
+
+    /// Crystal-cap value used by the --init-before-rx BB config tail step.
+    #[arg(long, default_value = "0x20", value_parser = parse_u8)]
+    crystal_cap: u8,
+
+    /// RTL8812A RFE option used for --init-before-rx band-switch pinmux programming.
+    #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
+    rfe_type: u8,
+
+    /// Required acknowledgement for --init-before-rx hardware register writes.
+    #[arg(long)]
+    i_understand_this_writes_registers: bool,
+
     /// Optional PCAP output path, once RX capture is wired in.
     #[arg(long)]
     pcap: Option<PathBuf>,
@@ -1029,6 +1120,22 @@ struct RxScanArgs {
     /// Parse raw RTL8812AU bulk-IN buffers from fixture files instead of touching USB.
     #[arg(long, value_name = "PATH")]
     fixture_bulk_in: Vec<PathBuf>,
+}
+
+impl RxScanArgs {
+    fn condition_env(&self) -> RealtekConditionEnv {
+        RealtekConditionEnv {
+            cut_version: self.cut_version,
+            package_type: self.package_type,
+            support_interface: self.support_interface,
+            support_platform: self.support_platform,
+            board_type: self.board_type,
+            type_glna: self.type_glna,
+            type_gpa: self.type_gpa,
+            type_alna: self.type_alna,
+            type_apa: self.type_apa,
+        }
+    }
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1142,6 +1249,9 @@ struct BridgeTxOnceArgs {
 
     #[command(flatten)]
     macos_usbhost: MacosUsbHostArgs,
+
+    #[command(flatten)]
+    tx_overrides: BridgeTxOverrideArgs,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1175,6 +1285,407 @@ struct BridgeTxListenArgs {
 
     #[command(flatten)]
     macos_usbhost: MacosUsbHostArgs,
+
+    #[command(flatten)]
+    tx_overrides: BridgeTxOverrideArgs,
+
+    #[command(flatten)]
+    tx_status: TxStatusProbeArgs,
+
+    /// Run full RTL8812AU init in this same USB session before listening for TX datagrams.
+    #[arg(long)]
+    init_before_tx: bool,
+
+    /// RTL8812A firmware image path for --init-before-tx.
+    #[arg(long)]
+    firmware: Option<PathBuf>,
+
+    /// Per-register read/write timeout in milliseconds for --init-before-tx.
+    #[arg(long, default_value_t = 500)]
+    init_timeout_ms: u64,
+
+    /// Realtek halhwimg8812a_mac.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c"
+    )]
+    mac_source: PathBuf,
+
+    /// Realtek halhwimg8812a_bb.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c"
+    )]
+    bb_source: PathBuf,
+
+    /// Realtek halhwimg8812a_rf.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c"
+    )]
+    rf_source: PathBuf,
+
+    /// Realtek condition cut version for --init-before-tx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    cut_version: u8,
+
+    /// Realtek condition package type for --init-before-tx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    package_type: u8,
+
+    /// Realtek condition support interface; RTL8812AU USB is 0x02.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    support_interface: u8,
+
+    /// Realtek condition support platform.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    support_platform: u8,
+
+    /// Realtek board type for --init-before-tx.
+    #[arg(long, default_value = "0xd8", value_parser = parse_u8)]
+    board_type: u8,
+
+    /// Realtek 2.4 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_glna: u16,
+
+    /// Realtek 2.4 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_gpa: u16,
+
+    /// Realtek 5 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_alna: u16,
+
+    /// Realtek 5 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_apa: u16,
+
+    /// Crystal-cap value used by the --init-before-tx BB config tail step.
+    #[arg(long, default_value = "0x20", value_parser = parse_u8)]
+    crystal_cap: u8,
+
+    /// RTL8812A RFE option used for --init-before-tx band-switch pinmux programming.
+    #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
+    rfe_type: u8,
+
+    /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
+    #[arg(long)]
+    clear_txdma_status_before_tx: bool,
+
+    /// Value to write when --clear-txdma-status-before-tx is enabled.
+    #[arg(long, default_value = "0x00000000", value_parser = parse_u32)]
+    txdma_status_clear_value: u32,
+}
+
+#[derive(Debug, Parser, Clone, Default)]
+struct BridgeTxOverrideArgs {
+    /// Override radiotap TX rate for live bridge submissions.
+    #[arg(long, value_parser = parse_tx_rate_arg)]
+    tx_rate: Option<TxRate>,
+
+    /// Override radiotap TX bandwidth for live bridge submissions.
+    #[arg(long, value_parser = parse_bandwidth)]
+    tx_bandwidth: Option<Bandwidth>,
+
+    /// Override TX descriptor queue for live bridge submissions.
+    #[arg(long, value_enum, default_value = "auto")]
+    tx_queue: TxQueueArg,
+
+    /// Override TX descriptor MACID for live bridge submissions.
+    #[arg(long, value_parser = parse_u8)]
+    mac_id: Option<u8>,
+
+    /// Override TX descriptor rate-ID for live bridge submissions.
+    #[arg(long, value_parser = parse_u8)]
+    tx_rate_id: Option<u8>,
+
+    /// Override TX descriptor retry-limit for live bridge submissions.
+    #[arg(long, value_parser = parse_u8)]
+    tx_retries: Option<u8>,
+
+    /// Leave rate fallback enabled instead of setting the descriptor disable-fallback bit.
+    #[arg(long)]
+    enable_rate_fallback: bool,
+
+    /// Omit the TX descriptor AGG_BREAK bit for live bridge data-frame submissions.
+    #[arg(long)]
+    no_agg_break: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct BridgeTxBenchArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Channel to transmit on.
+    #[arg(long)]
+    channel: u8,
+
+    /// Synthetic HT radiotap bandwidth: 20 or 40 MHz.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// Explicit number of synthetic WFB datagrams to submit.
+    #[arg(long)]
+    count: u32,
+
+    /// WFB payload bytes after the 24-byte 802.11 data header.
+    #[arg(long, default_value_t = 1024)]
+    payload_len: usize,
+
+    /// Override the generated synthetic WFB data frame with explicit IEEE 802.11 frame bytes.
+    #[arg(long)]
+    frame_hex: Option<String>,
+
+    /// Override the generated descriptor-prefixed USB TX packet with exact bytes.
+    #[arg(long)]
+    packet_hex: Option<String>,
+
+    /// Delay between successful radio submissions. Zero means unpaced.
+    #[arg(long, default_value_t = 0)]
+    interval_us: u64,
+
+    /// 24-bit WFB link ID encoded into the synthetic frame MAC fields.
+    #[arg(long, default_value = "0x000001", value_parser = parse_u32)]
+    link_id: u32,
+
+    /// WFB radio port encoded into the synthetic frame MAC fields.
+    #[arg(long, default_value = "0x23", value_parser = parse_u8)]
+    radio_port: u8,
+
+    /// Firmware mark prefix for the generated distributor datagrams.
+    #[arg(long, default_value = "0x00000000", value_parser = parse_u32)]
+    fwmark: u32,
+
+    /// HT MCS index to encode in the synthetic radiotap header.
+    #[arg(long, default_value_t = 0)]
+    mcs: u8,
+
+    /// Override the parsed radiotap TX rate for synthetic WFB submissions.
+    #[arg(long, value_parser = parse_tx_rate_arg)]
+    tx_rate: Option<TxRate>,
+
+    /// TX descriptor queue override for synthetic WFB submissions.
+    #[arg(long, value_enum, default_value = "auto")]
+    tx_queue: TxQueueArg,
+
+    /// TX descriptor MACID override for synthetic WFB submissions.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    mac_id: u8,
+
+    /// Optional TX descriptor rate-ID override for synthetic WFB submissions.
+    #[arg(long, value_parser = parse_u8)]
+    tx_rate_id: Option<u8>,
+
+    /// TX descriptor retry-limit value for synthetic WFB submissions.
+    #[arg(long, default_value_t = 12)]
+    tx_retries: u8,
+
+    /// Preserve the injected 802.11 sequence number instead of enabling hardware sequence.
+    #[arg(long)]
+    no_hw_seq: bool,
+
+    /// Omit the TX descriptor first-segment bit for Linux-usbmon descriptor experiments.
+    #[arg(long)]
+    no_first_seg: bool,
+
+    /// Leave rate fallback enabled instead of setting the descriptor disable-fallback bit.
+    #[arg(long)]
+    enable_rate_fallback: bool,
+
+    /// Omit the TX descriptor AGG_BREAK bit for synthetic data-frame submissions.
+    #[arg(long)]
+    no_agg_break: bool,
+
+    /// Program REG_MACID with this local adapter MAC before the TX loop.
+    #[arg(long, value_parser = parse_mac_address_arg)]
+    local_mac: Option<[u8; 6]>,
+
+    /// Set Linux-style monitor/no-link MAC opmode before the TX loop.
+    #[arg(long)]
+    monitor_opmode_before_tx: bool,
+
+    /// Send RTL8812A H2C media-status connected report before the TX loop.
+    #[arg(long)]
+    fw_media_status: bool,
+
+    /// H2C media-status role value; Linux uses 1 for STA.
+    #[arg(long, default_value = "0x01", value_parser = parse_u8)]
+    fw_media_status_role: u8,
+
+    /// Run full RTL8812AU init in this same USB session before the TX benchmark.
+    #[arg(long)]
+    init_before_tx: bool,
+
+    /// Run same-session init with LLT before firmware, matching Linux rtl8812au_hal_init order.
+    #[arg(long)]
+    linux_init_order: bool,
+
+    /// RTL8812A firmware image path for --init-before-tx.
+    #[arg(long)]
+    firmware: Option<PathBuf>,
+
+    /// Per-register read/write timeout in milliseconds for --init-before-tx.
+    #[arg(long, default_value_t = 500)]
+    init_timeout_ms: u64,
+
+    /// Realtek halhwimg8812a_mac.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c"
+    )]
+    mac_source: PathBuf,
+
+    /// Realtek halhwimg8812a_bb.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c"
+    )]
+    bb_source: PathBuf,
+
+    /// Realtek halhwimg8812a_rf.c source file for --init-before-tx.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c"
+    )]
+    rf_source: PathBuf,
+
+    /// Realtek condition cut version for --init-before-tx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    cut_version: u8,
+
+    /// Realtek condition package type for --init-before-tx.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    package_type: u8,
+
+    /// Realtek condition support interface; RTL8812AU USB is 0x02.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    support_interface: u8,
+
+    /// Realtek condition support platform.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    support_platform: u8,
+
+    /// Realtek board type for --init-before-tx.
+    #[arg(long, default_value = "0xd8", value_parser = parse_u8)]
+    board_type: u8,
+
+    /// Realtek 2.4 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_glna: u16,
+
+    /// Realtek 2.4 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_gpa: u16,
+
+    /// Realtek 5 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_alna: u16,
+
+    /// Realtek 5 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_apa: u16,
+
+    /// Crystal-cap value used by the --init-before-tx BB config tail step.
+    #[arg(long, default_value = "0x20", value_parser = parse_u8)]
+    crystal_cap: u8,
+
+    /// RTL8812A RFE option used for --init-before-tx band-switch pinmux programming.
+    #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
+    rfe_type: u8,
+
+    /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
+    #[arg(long)]
+    clear_txdma_status_before_tx: bool,
+
+    /// Value to write when --clear-txdma-status-before-tx is enabled.
+    #[arg(long, default_value = "0x00000000", value_parser = parse_u32)]
+    txdma_status_clear_value: u32,
+
+    /// Optional REG_TXDMA_OFFSET_CHK value to write before the TX loop.
+    #[arg(long, value_parser = parse_u32)]
+    txdma_offset_check_value: Option<u32>,
+
+    /// Optional REG_CR value to write before the TX loop.
+    #[arg(long, value_parser = parse_u16)]
+    cr_value: Option<u16>,
+
+    /// Optional REG_TRXDMA_CTRL value to write before the TX loop.
+    #[arg(long, value_parser = parse_u16)]
+    trxdma_ctrl_value: Option<u16>,
+
+    /// Generic pre-TX u8 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "pre-tx-write8", value_parser = parse_register_write_arg_u8)]
+    pre_tx_write8: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX u16 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "pre-tx-write16", value_parser = parse_register_write_arg_u16)]
+    pre_tx_write16: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX u32 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "pre-tx-write32", value_parser = parse_register_write_arg_u32)]
+    pre_tx_write32: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic pre-TX masked u32 register update in ADDR:MASK=VALUE form.
+    #[arg(long = "pre-tx-rmw32", value_parser = parse_register_masked_write_arg_u32)]
+    pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
+
+    /// Generic post-TX u8 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "post-tx-write8", value_parser = parse_register_write_arg_u8)]
+    post_tx_write8: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic post-TX u16 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "post-tx-write16", value_parser = parse_register_write_arg_u16)]
+    post_tx_write16: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic post-TX u32 register write in ADDR=VALUE form for guarded scheduler experiments.
+    #[arg(long = "post-tx-write32", value_parser = parse_register_write_arg_u32)]
+    post_tx_write32: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic post-TX u8 register OR-mask in ADDR=MASK form for guarded scheduler experiments.
+    #[arg(long = "post-tx-set8", value_parser = parse_register_write_arg_u8)]
+    post_tx_set8: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic post-TX u16 register OR-mask in ADDR=MASK form for guarded scheduler experiments.
+    #[arg(long = "post-tx-set16", value_parser = parse_register_write_arg_u16)]
+    post_tx_set16: Vec<PreTxRegisterWriteArg>,
+
+    /// Generic post-TX u32 register OR-mask in ADDR=MASK form for guarded scheduler experiments.
+    #[arg(long = "post-tx-set32", value_parser = parse_register_write_arg_u32)]
+    post_tx_set32: Vec<PreTxRegisterWriteArg>,
+
+    /// Required acknowledgement for live bridge TX throughput submission.
+    #[arg(long)]
+    i_understand_this_transmits: bool,
+
+    #[command(flatten)]
+    tx_status: TxStatusProbeArgs,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+}
+
+impl BridgeTxBenchArgs {
+    fn condition_env(&self) -> RealtekConditionEnv {
+        RealtekConditionEnv {
+            cut_version: self.cut_version,
+            package_type: self.package_type,
+            support_interface: self.support_interface,
+            support_platform: self.support_platform,
+            board_type: self.board_type,
+            type_glna: self.type_glna,
+            type_gpa: self.type_gpa,
+            type_alna: self.type_alna,
+            type_apa: self.type_apa,
+        }
+    }
 }
 
 #[derive(Debug, Parser, Clone, Default)]
@@ -1194,6 +1705,38 @@ struct TxOptionArgs {
     /// Set the TX descriptor STBC bit.
     #[arg(long)]
     stbc: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum TxQueueArg {
+    Auto,
+    Be,
+    Bk,
+    Vi,
+    Vo,
+    High,
+    Mgnt,
+}
+
+impl Default for TxQueueArg {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl From<TxQueueArg> for TxQueue {
+    fn from(value: TxQueueArg) -> Self {
+        match value {
+            TxQueueArg::Auto => TxQueue::Auto,
+            TxQueueArg::Be => TxQueue::Be,
+            TxQueueArg::Bk => TxQueue::Bk,
+            TxQueueArg::Vi => TxQueue::Vi,
+            TxQueueArg::Vo => TxQueue::Vo,
+            TxQueueArg::High => TxQueue::High,
+            TxQueueArg::Mgnt => TxQueue::Mgnt,
+        }
+    }
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1235,6 +1778,14 @@ struct TxStatusProbeArgs {
     /// Delay after TX submission before reading post-TX status registers.
     #[arg(long, default_value_t = DEFAULT_TX_STATUS_DELAY_MS)]
     tx_status_delay_ms: u64,
+
+    /// Optional delay between extra post-TX status polls after the normal post-TX snapshot.
+    #[arg(long, default_value_t = 0)]
+    tx_status_poll_ms: u64,
+
+    /// Optional number of extra post-TX status polls after the normal post-TX snapshot.
+    #[arg(long, default_value_t = 0)]
+    tx_status_poll_count: u32,
 }
 
 impl Default for TxStatusProbeArgs {
@@ -1242,6 +1793,8 @@ impl Default for TxStatusProbeArgs {
         Self {
             tx_status: false,
             tx_status_delay_ms: DEFAULT_TX_STATUS_DELAY_MS,
+            tx_status_poll_ms: 0,
+            tx_status_poll_count: 0,
         }
     }
 }
@@ -1600,6 +2153,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::BridgeTxBench(args) => {
+            let report = bridge_tx_bench_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_bridge_tx_bench_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::TraceCompare(args) => {
             let report = trace_compare_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -1742,7 +2305,7 @@ struct DiagnosticErrorReport {
     message: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct FirmwareReport {
     source: PathBuf,
     len: usize,
@@ -1769,6 +2332,8 @@ struct InitLiveReport {
     rf_source: PathBuf,
     condition_env: RealtekConditionEnv,
     crystal_cap_hex: String,
+    rfe_type: u8,
+    rfe_type_hex: String,
     phase_summaries: Vec<InitLivePhaseSummary>,
     firmware_payload_len: Option<usize>,
     llt_entries_written: u32,
@@ -1832,12 +2397,23 @@ struct TxActivityLedReport {
 struct TxStatusProbeReport {
     enabled: bool,
     delay_ms: u64,
+    poll_ms: u64,
+    poll_count: u32,
     semantics: &'static str,
     pre: Vec<TxStatusRegisterReport>,
     post: Vec<TxStatusRegisterReport>,
+    samples: Vec<TxStatusSampleReport>,
     changed: Vec<TxStatusDeltaReport>,
     counters: DiagnosticCounters,
     error: Option<DiagnosticErrorReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxStatusSampleReport {
+    label: String,
+    sleep_before_ms: u64,
+    registers: Vec<TxStatusRegisterReport>,
+    changed_from_previous: Vec<TxStatusDeltaReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1850,7 +2426,7 @@ struct TxStatusRegisterReport {
     value_hex: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct TxStatusDeltaReport {
     name: &'static str,
     address: u16,
@@ -1943,6 +2519,7 @@ struct BridgeTxDatagramReport {
     radiotap_len: usize,
     frame_len: usize,
     packet_len: Option<usize>,
+    tx_descriptor_hex: Option<String>,
     tx_options: TxOptions,
 }
 
@@ -1965,6 +2542,9 @@ struct BridgeTxListenReport {
     last_datagram: Option<BridgeTxDatagramReport>,
     bulk_out_endpoint: Option<u8>,
     bulk_out_endpoint_hex: Option<String>,
+    same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
+    txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
     counters: DiagnosticCounters,
@@ -1972,6 +2552,228 @@ struct BridgeTxListenReport {
     phases: Vec<DiagnosticPhase>,
     error: Option<DiagnosticErrorReport>,
     notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    count: u32,
+    payload_len: usize,
+    frame_hex: Option<String>,
+    packet_hex: Option<String>,
+    interval_us: u64,
+    link_id: u32,
+    link_id_hex: String,
+    radio_port: u8,
+    radio_port_hex: String,
+    fwmark: u32,
+    fwmark_hex: String,
+    mcs: u8,
+    tx_rate: Option<TxRate>,
+    tx_queue: TxQueueArg,
+    mac_id: u8,
+    mac_id_hex: String,
+    tx_rate_id: Option<u8>,
+    tx_rate_id_hex: Option<String>,
+    tx_retries: u8,
+    hardware_sequence: bool,
+    first_segment: bool,
+    disable_rate_fallback: bool,
+    aggregate_break: bool,
+    local_mac: Option<String>,
+    monitor_opmode_before_tx: bool,
+    fw_media_status: bool,
+    fw_media_status_role: u8,
+    fw_media_status_role_hex: String,
+    init_before_tx: bool,
+    linux_init_order: bool,
+    init_timeout_ms: u64,
+    rfe_type: u8,
+    rfe_type_hex: String,
+    clear_txdma_status_before_tx: bool,
+    txdma_status_clear_value: u32,
+    txdma_status_clear_value_hex: String,
+    txdma_offset_check_value: Option<u32>,
+    txdma_offset_check_value_hex: Option<String>,
+    cr_value: Option<u16>,
+    cr_value_hex: Option<String>,
+    trxdma_ctrl_value: Option<u16>,
+    trxdma_ctrl_value_hex: Option<String>,
+    pre_tx_write8: Vec<PreTxRegisterWriteArg>,
+    pre_tx_write16: Vec<PreTxRegisterWriteArg>,
+    pre_tx_write32: Vec<PreTxRegisterWriteArg>,
+    pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
+    post_tx_write8: Vec<PreTxRegisterWriteArg>,
+    post_tx_write16: Vec<PreTxRegisterWriteArg>,
+    post_tx_write32: Vec<PreTxRegisterWriteArg>,
+    post_tx_set8: Vec<PreTxRegisterWriteArg>,
+    post_tx_set16: Vec<PreTxRegisterWriteArg>,
+    post_tx_set32: Vec<PreTxRegisterWriteArg>,
+    datagram_len: Option<usize>,
+    frame_len: Option<usize>,
+    packet_len: Option<usize>,
+    tx_descriptor_hex: Option<String>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_hex: Option<String>,
+    failure_index: Option<u32>,
+    throughput: Option<BridgeTxBenchThroughputReport>,
+    cpu: Option<CpuUsageReport>,
+    same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
+    local_mac_report: Option<BridgeTxBenchLocalMacReport>,
+    monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
+    fw_media_status_report: Option<BridgeTxBenchH2cReport>,
+    txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
+    txdma_offset_check_write: Option<BridgeTxBenchRegisterClearReport>,
+    cr_write: Option<BridgeTxBenchRegisterClearReport>,
+    trxdma_ctrl_write: Option<BridgeTxBenchRegisterClearReport>,
+    pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
+    pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
+    post_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
+    tx_status: Option<TxStatusProbeReport>,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchLocalMacReport {
+    register_name: &'static str,
+    address: u16,
+    address_hex: String,
+    before: String,
+    written: String,
+    after: String,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchMonitorOpmodeReport {
+    msr_before: u8,
+    msr_before_hex: String,
+    msr_written: u8,
+    msr_written_hex: String,
+    msr_after: u8,
+    msr_after_hex: String,
+    rcr_written: u32,
+    rcr_written_hex: String,
+    rcr_after: u32,
+    rcr_after_hex: String,
+    rxfltmap2_written: u16,
+    rxfltmap2_written_hex: String,
+    rxfltmap2_after: u16,
+    rxfltmap2_after_hex: String,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchH2cReport {
+    command_name: &'static str,
+    command_id: u8,
+    command_id_hex: String,
+    box_index: u8,
+    hmetfr_before: u8,
+    hmetfr_before_hex: String,
+    hmetfr_after: u8,
+    hmetfr_after_hex: String,
+    command_bytes_hex: Vec<String>,
+    ext_bytes_hex: Vec<String>,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchRegisterClearReport {
+    register_name: &'static str,
+    address: u16,
+    address_hex: String,
+    width: &'static str,
+    before: u32,
+    before_hex: String,
+    written: u32,
+    written_hex: String,
+    after: u32,
+    after_hex: String,
+    changed: bool,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PreTxRegisterWriteArg {
+    address: u16,
+    value: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PreTxRegisterMaskedWriteArg {
+    address: u16,
+    mask: u32,
+    value: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchRegisterMaskedWriteReport {
+    register_name: &'static str,
+    address: u16,
+    address_hex: String,
+    width: &'static str,
+    mask: u32,
+    mask_hex: String,
+    before: u32,
+    before_hex: String,
+    written: u32,
+    written_hex: String,
+    after: u32,
+    after_hex: String,
+    changed: bool,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchSameSessionInitReport {
+    result: DiagnosticResult,
+    init_order: &'static str,
+    firmware: FirmwareReport,
+    mac_source: PathBuf,
+    bb_source: PathBuf,
+    rf_source: PathBuf,
+    condition_env: RealtekConditionEnv,
+    crystal_cap_hex: String,
+    rfe_type: u8,
+    rfe_type_hex: String,
+    phase_summaries: Vec<InitLivePhaseSummary>,
+    firmware_payload_len: usize,
+    llt_entries_written: u32,
+    queue_pages: Option<QueuePageReport>,
+    mac_table_writes_applied: u64,
+    bb_phy_writes_applied: u64,
+    bb_agc_writes_applied: u64,
+    bb_delays_applied: u64,
+    rf_radioa_writes_applied: u64,
+    rf_radiob_writes_applied: u64,
+    rf_delays_applied: u64,
+    effective_channel: Option<Channel>,
+    effective_bandwidth: Option<Bandwidth>,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchThroughputReport {
+    elapsed_us: u64,
+    submitted_per_second: Option<f64>,
+    usb_bytes_per_second: Option<f64>,
+    payload_bytes_per_second: Option<f64>,
+    datagram_bytes_per_second: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2879,8 +3681,10 @@ const RF_SOURCE_PHYCFG: &str = "aircrack-ng/rtl8812au@7344855:hal/rtl8812a/rtl88
 const RF_SOURCE_RF6052: &str = "aircrack-ng/rtl8812au@7344855:hal/rtl8812a/rtl8812a_rf6052.c";
 const BB_PHY_ARRAY: &str = "array_mp_8812a_phy_reg";
 const BB_AGC_ARRAY: &str = "array_mp_8812a_agc_tab";
+const MAC_REG_ARRAY: &str = "array_mp_8812a_mac_reg";
 const RF_RADIOA_ARRAY: &str = "array_mp_8812a_radioa";
 const RF_RADIOB_ARRAY: &str = "array_mp_8812a_radiob";
+const DEFAULT_RFE_TYPE: u8 = 0x03;
 
 const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
 const RTL8812AU_EFUSE_LOGICAL_MAP_LEN: usize = 512;
@@ -2904,7 +3708,9 @@ const REG_RSV_CTRL: u16 = 0x001c;
 const REG_AFE_XTAL_CTRL: u16 = 0x0024;
 const REG_AFE_PLL_CTRL: u16 = 0x0028;
 const REG_EFUSE_CTRL: u16 = 0x0030;
+const REG_ACLK_MON: u16 = 0x003e;
 const REG_RF_CTRL: u16 = 0x001f;
+const REG_SDIO_CTRL_8812: u16 = 0x0070;
 const REG_RF_B_CTRL_8812: u16 = 0x0076;
 const REG_MAC_PHY_CTRL: u16 = 0x002c;
 const REG_LEDCFG0: u16 = 0x004c;
@@ -2918,6 +3724,7 @@ const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
 const REG_MCUFWDL: u16 = 0x0080;
 const REG_MCUFWDL_PLUS_2: u16 = REG_MCUFWDL + 2;
 const REG_CR: u16 = 0x0100;
+const REG_MSR: u16 = REG_CR + 2;
 const REG_PBP: u16 = 0x0104;
 const REG_TRXDMA_CTRL: u16 = 0x010c;
 const REG_TRXFF_BNDY: u16 = 0x0114;
@@ -2927,12 +3734,26 @@ const REG_C2HEVT_MSG_NORMAL: u16 = 0x01a0;
 const REG_C2HEVT_CMD_SEQ_88XX: u16 = 0x01a1;
 const REG_C2HEVT_CMD_LEN_88XX: u16 = 0x01ae;
 const REG_C2HEVT_CLEAR: u16 = 0x01af;
+const REG_HMETFR: u16 = 0x01cc;
+const REG_HMEBOX_0: u16 = 0x01d0;
 const REG_LLT_INIT: u16 = 0x01e0;
+const REG_HMEBOX_EXT0_8812: u16 = 0x01f0;
 const REG_RQPN: u16 = 0x0200;
 const REG_TXDMA_OFFSET_CHK: u16 = 0x020c;
 const REG_TXDMA_STATUS: u16 = 0x0210;
 const REG_TDECTRL: u16 = 0x0208;
 const REG_RQPN_NPQ: u16 = 0x0214;
+const REG_RXDMA_STATUS: u16 = 0x0288;
+const REG_RXDMA_PRO_8812: u16 = 0x0290;
+const REG_EARLY_MODE_CONTROL_8812: u16 = 0x02bc;
+const REG_Q0_INFO: u16 = 0x0400;
+const REG_Q1_INFO: u16 = 0x0404;
+const REG_Q2_INFO: u16 = 0x0408;
+const REG_Q3_INFO: u16 = 0x040c;
+const REG_MGQ_INFO: u16 = 0x0410;
+const REG_HGQ_INFO: u16 = 0x0414;
+const REG_BCNQ_INFO: u16 = 0x0418;
+const REG_CPU_MGQ_INFORMATION: u16 = 0x041c;
 const REG_BCNQ_BDNY: u16 = 0x0424;
 const REG_MGQ_BDNY: u16 = 0x0425;
 const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
@@ -2940,53 +3761,123 @@ const REG_HWSEQ_CTRL: u16 = 0x0423;
 const REG_SPEC_SIFS: u16 = 0x0428;
 const REG_RETRY_LIMIT: u16 = 0x042a;
 const REG_RRSR: u16 = 0x0440;
+const REG_ARFR0_8812: u16 = 0x0444;
+const REG_ARFR1_8812: u16 = 0x044c;
 const REG_TXPKT_EMPTY: u16 = 0x041a;
+const REG_AMPDU_MAX_TIME_8812: u16 = 0x0456;
+const REG_AMPDU_MAX_LENGTH_8812: u16 = 0x0458;
 const REG_DATA_SC_8812: u16 = 0x0483;
+const REG_MACID_SLEEP_3: u16 = 0x0484;
+const REG_MACID_SLEEP_1: u16 = 0x0488;
+const REG_ARFR2_8812: u16 = 0x048c;
+const REG_ARFR3_8812: u16 = 0x0494;
+const REG_QUEUE_CTRL: u16 = 0x04c6;
+const REG_HT_SINGLE_AMPDU_8812: u16 = 0x04c7;
+const REG_MAX_AGGR_NUM: u16 = 0x04ca;
+const REG_MACID_SLEEP_2: u16 = 0x04d0;
+const REG_MACID_SLEEP: u16 = 0x04d4;
 const REG_TX_RPT_CTRL: u16 = 0x04ec;
+const REG_TX_RPT_TIME: u16 = 0x04f0;
 const REG_CCK_CHECK_8812: u16 = 0x0454;
 const REG_WMAC_LBK_BF_HD: u16 = 0x045d;
+const REG_BCNTCFG: u16 = 0x0510;
 const REG_EDCA_VO_PARAM: u16 = 0x0500;
 const REG_EDCA_VI_PARAM: u16 = 0x0504;
 const REG_EDCA_BE_PARAM: u16 = 0x0508;
 const REG_EDCA_BK_PARAM: u16 = 0x050c;
+const REG_PIFS: u16 = 0x0512;
 const REG_SIFS_CTX: u16 = 0x0514;
 const REG_SIFS_TRX: u16 = 0x0516;
 const REG_TXPAUSE: u16 = 0x0522;
+const REG_TBTT_PROHIBIT: u16 = 0x0540;
+const REG_BCN_CTRL: u16 = 0x0550;
+const REG_DRVERLYINT: u16 = 0x0558;
+const REG_BCNDMATIM: u16 = 0x0559;
 const REG_USTIME_TSF: u16 = 0x055c;
+const REG_HIQ_NO_LMT_EN: u16 = 0x05a7;
 const REG_SCH_TX_CMD: u16 = 0x05f8;
+const REG_MACID: u16 = 0x0610;
+const REG_RX_PKT_LIMIT: u16 = 0x060c;
 const REG_RCR: u16 = 0x0608;
 const REG_RX_DRVINFO_SZ: u16 = 0x060f;
 const REG_MAR: u16 = 0x0620;
 const REG_USTIME_EDCA: u16 = 0x0638;
 const REG_MAC_SPEC_SIFS: u16 = 0x063a;
 const REG_ACKTO: u16 = 0x0640;
+const REG_NAV_UPPER: u16 = 0x0652;
 const REG_WMAC_TRXPTCL_CTL: u16 = 0x0668;
 const REG_RXFLTMAP1: u16 = 0x06a2;
+const REG_RXFLTMAP2: u16 = 0x06a4;
+const REG_MACID1: u16 = 0x0700;
 const REG_BAR_MODE_CTRL: u16 = 0x04cc;
+const REG_FPGA0_RFMOD: u16 = 0x0800;
 const REG_OFDMCCKEN_JAGUAR: u16 = 0x0808;
 const REG_TX_PATH_JAGUAR: u16 = 0x080c;
 const REG_AGC_TABLE_JAGUAR: u16 = 0x082c;
 const REG_PWED_TH_JAGUAR: u16 = 0x0830;
+const REG_TX_AGC_B_RATE18_06_LEGACY: u16 = 0x0830;
 const REG_BW_INDICATION_JAGUAR: u16 = 0x0834;
 const REG_CCA_ON_SEC_JAGUAR: u16 = 0x0838;
 const REG_L1_PEAK_TH_JAGUAR: u16 = 0x0848;
 const REG_FC_AREA_JAGUAR: u16 = 0x0860;
+const REG_EDCCA_JAGUAR: u16 = 0x08a4;
 const REG_RF_MOD_JAGUAR: u16 = 0x08ac;
 const REG_ADC_BUF_CLK_JAGUAR: u16 = 0x08c4;
 const REG_CCK_SYSTEM_JAGUAR: u16 = 0x0a00;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
+const REG_CCK_CCA_JAGUAR: u16 = 0x0a08;
+const REG_ANTSEL_SW_JAGUAR: u16 = 0x0900;
+const REG_TX_AGC_A_CCK_JAGUAR: u16 = 0x0c20;
+const REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0c34;
+const REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0c38;
+const REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0c40;
+const REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0c44;
+const REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0c48;
+const REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0c4c;
+const REG_TX_PWR_OFFSET_A_JAGUAR: u16 = 0x0c50;
+const REG_TX_PWR_TRAIN_A_JAGUAR: u16 = 0x0c54;
+const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
+const REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR: u16 = 0x0c24;
+const REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR: u16 = 0x0c28;
+const REG_TX_AGC_A_MCS3_MCS0_JAGUAR: u16 = 0x0c2c;
+const REG_TX_AGC_A_MCS7_MCS4_JAGUAR: u16 = 0x0c30;
+const REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR: u16 = 0x0c3c;
+const REG_TX_BB_CTRL_A_JAGUAR: u16 = 0x0c90;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
 const REG_RFE_INV_A_JAGUAR: u16 = 0x0cb4;
+const REG_RFE_TIMING_A_JAGUAR: u16 = 0x0cb8;
 const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
+const REG_TX_AGC_B_CCK_JAGUAR: u16 = 0x0e20;
+const REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR: u16 = 0x0e24;
+const REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR: u16 = 0x0e28;
+const REG_TX_AGC_B_MCS3_MCS0_JAGUAR: u16 = 0x0e2c;
+const REG_TX_AGC_B_MCS7_MCS4_JAGUAR: u16 = 0x0e30;
+const REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0e34;
+const REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0e38;
+const REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR: u16 = 0x0e3c;
+const REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0e40;
+const REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0e44;
+const REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0e48;
+const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
+const REG_TX_PWR_OFFSET_B_JAGUAR: u16 = 0x0e50;
+const REG_RX_WAIT_CCA_JAGUAR: u16 = 0x0e70;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RFE_INV_B_JAGUAR: u16 = 0x0eb4;
+const REG_RFE_TIMING_B_JAGUAR: u16 = 0x0eb8;
 const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
+const REG_TX_AGC_A_RATE18_06_LEGACY: u16 = 0x0e00;
+const REG_TX_PWR_TRAIN_B_JAGUAR: u16 = 0x0e54;
+const REG_TX_BB_CTRL_B_JAGUAR: u16 = 0x0e90;
+const REG_OFDM_FALSE_ALARM1_JAGUAR: u16 = 0x0f48;
+const REG_OFDM_FALSE_ALARM2_JAGUAR: u16 = 0x0f4c;
+const REG_USB_HRPWM: u16 = 0xfe58;
 const FW_START_ADDRESS: u16 = 0x1000;
 
 const BIT0: u8 = 1 << 0;
 const BIT1: u8 = 1 << 1;
 const BIT2: u8 = 1 << 2;
 const BIT3: u8 = 1 << 3;
+const BIT4: u8 = 1 << 4;
 const BIT5: u8 = 1 << 5;
 const BIT6: u8 = 1 << 6;
 const BIT7: u8 = 1 << 7;
@@ -2998,12 +3889,20 @@ const DEFAULT_TX_LED_HOLD_MS: u64 = 150;
 const MAX_TX_LED_HOLD_MS: u64 = 60_000;
 const DEFAULT_TX_STATUS_DELAY_MS: u64 = 50;
 const MAX_TX_STATUS_DELAY_MS: u64 = 60_000;
+const MAX_TX_STATUS_POLL_COUNT: u32 = 64;
+const MAX_TX_STATUS_TOTAL_POLL_MS: u64 = 60_000;
+const RTL8812_MAX_H2C_BOX_NUMS: u8 = 4;
+const RTL8812_MESSAGE_BOX_SIZE: u16 = 4;
+const RTL8812_EX_MESSAGE_BOX_SIZE: u16 = 4;
+const H2C_MEDIA_STATUS_RPT: u8 = 0x01;
 
 const MAX_DLFW_PAGE_SIZE: usize = 4096;
 const MAX_REG_BLOCK_SIZE: usize = 196;
 const FIRMWARE_REMAINDER_BLOCK_SIZE: usize = 8;
 const MAX_FIRMWARE_DOWNLOAD_PAGES: usize = 8;
-const TX_PAGE_BOUNDARY_8812: u8 = 0xf9;
+// Mirrors aircrack-ng's CONFIG_BEAMFORMER_FW_NDPA build: 0xff - 7 beacon
+// pages - 2 firmware NDPA pages, then boundary is total + 1.
+const TX_PAGE_BOUNDARY_8812: u8 = 0xf7;
 const LAST_ENTRY_OF_TX_PKT_BUFFER_8812: u8 = 0xff;
 const TX_TOTAL_PAGE_NUMBER_8812: u8 = TX_PAGE_BOUNDARY_8812 - 1;
 const RX_DMA_BOUNDARY_8812: u16 = 0x3e7f;
@@ -3030,18 +3929,24 @@ const FEN_BBRSTB: u8 = BIT0;
 const FEN_BB_GLB_RSTN: u8 = BIT1;
 const FEN_USBA: u8 = BIT2;
 const MASK_NETTYPE: u32 = 0x0003_0000;
-const NT_LINK_AP: u32 = 0x2;
+const NT_LINK_AP: u32 = 0x3;
 const NETTYPE_LINK_AP: u32 = NT_LINK_AP << 16;
+const MSR_PORT0_NETTYPE_MASK: u8 = 0x03;
 const RCR_APM: u32 = 1 << 1;
 const RCR_AM: u32 = 1 << 2;
 const RCR_AB: u32 = 1 << 3;
+const RCR_AAP: u32 = 1 << 0;
+const RCR_APWRMGT: u32 = 1 << 5;
 const RCR_CBSSID_DATA: u32 = 1 << 6;
 const RCR_CBSSID_BCN: u32 = 1 << 7;
+const RCR_ADF: u32 = 1 << 11;
+const RCR_ACF: u32 = 1 << 12;
 const RCR_AMF: u32 = 1 << 13;
 const RCR_HTC_LOC_CTRL: u32 = 1 << 14;
 const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
 const RCR_APP_ICV: u32 = 1 << 29;
 const RCR_APP_MIC: u32 = 1 << 30;
+const RCR_APPFCS: u32 = 1 << 31;
 const RCR_FORCEACK: u32 = 1 << 26;
 const MAC_RECEIVE_CONFIG: u32 = RCR_APM
     | RCR_AM
@@ -3054,6 +3959,16 @@ const MAC_RECEIVE_CONFIG: u32 = RCR_APM
     | RCR_APP_ICV
     | RCR_APP_MIC
     | RCR_FORCEACK;
+const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
+    | RCR_APM
+    | RCR_AM
+    | RCR_AB
+    | RCR_APWRMGT
+    | RCR_ADF
+    | RCR_ACF
+    | RCR_AMF
+    | RCR_APP_PHYST_RXFF
+    | RCR_APPFCS;
 const RATE_BITMAP_ALL: u32 = 0x000f_ffff;
 const RATE_RRSR_CCK_ONLY_1M: u32 = 0x000f_fff1;
 const RL_VAL_STA: u16 = 0x30;
@@ -3063,6 +3978,11 @@ const BASIC_RATE_5G: u16 = 0x0150;
 const BAR_MODE_CTRL_VALUE: u32 = 0x0201_ffff;
 const BAR_MODE_CTRL_READBACK_MASK: u32 = 0xffff_ff7f;
 const EN_AMPDU_RTY_NEW: u8 = 1 << 7;
+const DIS_TSF_UDT: u8 = BIT4;
+const TBTT_PROHIBIT_SETUP_TIME: u8 = 0x04;
+const TBTT_PROHIBIT_HOLD_TIME_STOP_BCN: u16 = 0x0064;
+const DRIVER_EARLY_INT_TIME_8812: u8 = 0x05;
+const BCN_DMA_ATIME_INT_TIME_8812: u8 = 0x02;
 const MACTXEN: u8 = 1 << 6;
 const MACRXEN: u8 = 1 << 7;
 const MAC_TX_RX_ENABLE_MASK: u8 = MACTXEN | MACRXEN;
@@ -4686,6 +5606,21 @@ struct TxStatusRegisterSpec {
 
 const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
     TxStatusRegisterSpec {
+        name: "REG_CR",
+        address: REG_CR,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CR_U32",
+        address: REG_CR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MSR",
+        address: REG_MSR,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
         name: "REG_HISR0_8812",
         address: REG_HISR0_8812,
         width: TxStatusRegisterWidth::U32,
@@ -4716,6 +5651,86 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
+        name: "REG_TRXDMA_CTRL",
+        address: REG_TRXDMA_CTRL,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TRXFF_BNDY",
+        address: REG_TRXFF_BNDY,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TDECTRL",
+        address: REG_TDECTRL,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RQPN",
+        address: REG_RQPN,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RQPN_NPQ",
+        address: REG_RQPN_NPQ,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_Q0_INFO",
+        address: REG_Q0_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_Q1_INFO",
+        address: REG_Q1_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_Q2_INFO",
+        address: REG_Q2_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_Q3_INFO",
+        address: REG_Q3_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MGQ_INFO",
+        address: REG_MGQ_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CPU_MGQ_INFORMATION",
+        address: REG_CPU_MGQ_INFORMATION,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_HGQ_INFO",
+        address: REG_HGQ_INFO,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_BCNQ_INFO",
+        address: REG_BCNQ_INFO,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_BCNQ_BDNY",
+        address: REG_BCNQ_BDNY,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MGQ_BDNY",
+        address: REG_MGQ_BDNY,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_WMAC_LBK_BF_HD",
+        address: REG_WMAC_LBK_BF_HD,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
         name: "REG_TXPKT_EMPTY",
         address: REG_TXPKT_EMPTY,
         width: TxStatusRegisterWidth::U16,
@@ -4726,9 +5741,64 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
+        name: "REG_EDCA_VO_PARAM",
+        address: REG_EDCA_VO_PARAM,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_EDCA_VI_PARAM",
+        address: REG_EDCA_VI_PARAM,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_EDCA_BE_PARAM",
+        address: REG_EDCA_BE_PARAM,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_EDCA_BK_PARAM",
+        address: REG_EDCA_BK_PARAM,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_QUEUE_CTRL",
+        address: REG_QUEUE_CTRL,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_EARLY_MODE_CONTROL_8812",
+        address: REG_EARLY_MODE_CONTROL_8812,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
         name: "REG_TX_RPT_CTRL",
         address: REG_TX_RPT_CTRL,
         width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_RPT_TIME",
+        address: REG_TX_RPT_TIME,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID_SLEEP_3",
+        address: REG_MACID_SLEEP_3,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID_SLEEP_1",
+        address: REG_MACID_SLEEP_1,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID_SLEEP_2",
+        address: REG_MACID_SLEEP_2,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID_SLEEP",
+        address: REG_MACID_SLEEP,
+        width: TxStatusRegisterWidth::U32,
     },
     TxStatusRegisterSpec {
         name: "REG_TXPAUSE",
@@ -4736,8 +5806,268 @@ const TX_STATUS_REGISTERS: &[TxStatusRegisterSpec] = &[
         width: TxStatusRegisterWidth::U8,
     },
     TxStatusRegisterSpec {
+        name: "REG_BCN_CTRL",
+        address: REG_BCN_CTRL,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TBTT_PROHIBIT",
+        address: REG_TBTT_PROHIBIT,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
         name: "REG_SCH_TX_CMD",
         address: REG_SCH_TX_CMD,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID",
+        address: REG_MACID,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_MACID1",
+        address: REG_MACID1,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_NAV_UPPER",
+        address: REG_NAV_UPPER,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RCR",
+        address: REG_RCR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RXFLTMAP2",
+        address: REG_RXFLTMAP2,
+        width: TxStatusRegisterWidth::U16,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDMCCKEN_JAGUAR",
+        address: REG_OFDMCCKEN_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_FPGA0_RFMOD",
+        address: REG_FPGA0_RFMOD,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_PATH_JAGUAR",
+        address: REG_TX_PATH_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CCA_ON_SEC_JAGUAR",
+        address: REG_CCA_ON_SEC_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_EDCCA_JAGUAR",
+        address: REG_EDCCA_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RF_MOD_JAGUAR",
+        address: REG_RF_MOD_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_CCK_CCA_JAGUAR",
+        address: REG_CCK_CCA_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_SCALE_A_JAGUAR",
+        address: REG_TX_SCALE_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_CCK_JAGUAR",
+        address: REG_TX_AGC_A_CCK_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR",
+        address: REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_RATE18_06_LEGACY",
+        address: REG_TX_AGC_A_RATE18_06_LEGACY,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR",
+        address: REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_MCS3_MCS0_JAGUAR",
+        address: REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_MCS7_MCS4_JAGUAR",
+        address: REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR",
+        address: REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_PWR_TRAIN_A_JAGUAR",
+        address: REG_TX_PWR_TRAIN_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_PWR_OFFSET_A_JAGUAR",
+        address: REG_TX_PWR_OFFSET_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_BB_CTRL_A_JAGUAR",
+        address: REG_TX_BB_CTRL_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_SCALE_B_JAGUAR",
+        address: REG_TX_SCALE_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_CCK_JAGUAR",
+        address: REG_TX_AGC_B_CCK_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_RATE18_06_LEGACY",
+        address: REG_TX_AGC_B_RATE18_06_LEGACY,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR",
+        address: REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR",
+        address: REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_MCS3_MCS0_JAGUAR",
+        address: REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_MCS7_MCS4_JAGUAR",
+        address: REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR",
+        address: REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_PWR_TRAIN_B_JAGUAR",
+        address: REG_TX_PWR_TRAIN_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_PWR_OFFSET_B_JAGUAR",
+        address: REG_TX_PWR_OFFSET_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_TX_BB_CTRL_B_JAGUAR",
+        address: REG_TX_BB_CTRL_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RX_WAIT_CCA_JAGUAR",
+        address: REG_RX_WAIT_CCA_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM0_XBAGCCORE1",
+        address: REG_OFDM0_XBAGCCORE1,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM0_XBAGCCORE1_A_SHADOW",
+        address: REG_OFDM0_XBAGCCORE1 + 4,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM0_XBAGCCORE1_B",
+        address: REG_OFDM0_XBAGCCORE1 + 0x200,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM0_XBAGCCORE1_B_SHADOW",
+        address: REG_OFDM0_XBAGCCORE1 + 0x204,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_PINMUX_A_JAGUAR",
+        address: REG_RFE_PINMUX_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_INV_A_JAGUAR",
+        address: REG_RFE_INV_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_TIMING_A_JAGUAR",
+        address: REG_RFE_TIMING_A_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_PINMUX_B_JAGUAR",
+        address: REG_RFE_PINMUX_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_INV_B_JAGUAR",
+        address: REG_RFE_INV_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_RFE_TIMING_B_JAGUAR",
+        address: REG_RFE_TIMING_B_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM_FALSE_ALARM1_JAGUAR",
+        address: REG_OFDM_FALSE_ALARM1_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_OFDM_FALSE_ALARM2_JAGUAR",
+        address: REG_OFDM_FALSE_ALARM2_JAGUAR,
+        width: TxStatusRegisterWidth::U32,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_USB_HRPWM",
+        address: REG_USB_HRPWM,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_HIQ_NO_LMT_EN",
+        address: REG_HIQ_NO_LMT_EN,
+        width: TxStatusRegisterWidth::U8,
+    },
+    TxStatusRegisterSpec {
+        name: "REG_HMETFR",
+        address: REG_HMETFR,
         width: TxStatusRegisterWidth::U8,
     },
     TxStatusRegisterSpec {
@@ -4766,13 +6096,21 @@ fn tx_status_probe_report(args: &TxStatusProbeArgs) -> Option<TxStatusProbeRepor
     args.tx_status.then(|| TxStatusProbeReport {
         enabled: true,
         delay_ms: args.tx_status_delay_ms,
+        poll_ms: args.tx_status_poll_ms,
+        poll_count: args.tx_status_poll_count,
         semantics: "read-only RTL8812AU register deltas around USB TX submission; this does not prove RF radiation",
         pre: Vec::new(),
         post: Vec::new(),
+        samples: Vec::new(),
         changed: Vec::new(),
         counters: DiagnosticCounters::default(),
         error: None,
     })
+}
+
+fn tx_status_total_poll_ms(args: &TxStatusProbeArgs) -> u64 {
+    args.tx_status_poll_ms
+        .saturating_mul(u64::from(args.tx_status_poll_count))
 }
 
 fn tx_status_probe_pre<T>(
@@ -4808,7 +6146,29 @@ fn tx_status_probe_post<T>(
         match tx_status_snapshot(registers, &mut report.counters) {
             Ok(snapshot) => {
                 report.changed = tx_status_deltas(&report.pre, &snapshot);
-                report.post = snapshot;
+                report.post = snapshot.clone();
+                let mut previous = snapshot;
+                for index in 0..report.poll_count {
+                    if report.poll_ms > 0 {
+                        std::thread::sleep(Duration::from_millis(report.poll_ms));
+                    }
+                    match tx_status_snapshot(registers, &mut report.counters) {
+                        Ok(sample) => {
+                            let changed_from_previous = tx_status_deltas(&previous, &sample);
+                            previous = sample.clone();
+                            report.samples.push(TxStatusSampleReport {
+                                label: format!("poll_{}", index + 1),
+                                sleep_before_ms: report.poll_ms,
+                                registers: sample,
+                                changed_from_previous,
+                            });
+                        }
+                        Err(error) => {
+                            report.error = Some(error);
+                            break;
+                        }
+                    }
+                }
             }
             Err(error) => report.error = Some(error),
         }
@@ -7799,6 +9159,21 @@ where
             },
         )?;
     }
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "tx_scheduler",
+            register_name: "REG_TXPAUSE",
+            address: REG_TXPAUSE,
+            value: 0x00,
+            verify_mask: u8::MAX,
+            verify_value: 0x00,
+            description: "release all MAC TX queues after reset",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
     for (register_name, address) in [
         ("REG_USTIME_TSF", REG_USTIME_TSF),
         ("REG_USTIME_EDCA", REG_USTIME_EDCA),
@@ -7849,6 +9224,8 @@ where
             source: POWER_SOURCE_USB_HALINIT,
         },
     )?;
+    run_beacon_parameters_sequence(registers, counters, steps)?;
+    run_usb_burst_packet_sequence(registers, counters, steps)?;
     queue_write8_step(
         registers,
         counters,
@@ -7891,6 +9268,396 @@ where
             value_mask: MAC_TX_RX_ENABLE_MASK,
             value: MAC_TX_RX_ENABLE_MASK,
             description: "enable MAC TX and RX blocks after queue and boundary setup",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )
+}
+
+fn run_usb_burst_packet_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    steps: &mut Vec<QueueDmaStepReport>,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "usb_burst",
+            register_name: "0xf050",
+            address: 0xf050,
+            value: 0x01,
+            verify_mask: 0x00,
+            verify_value: 0x00,
+            description: "set USB3 RX interval register used by upstream burst setup",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write16_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite16Spec {
+            phase: "usb_burst",
+            register_name: "REG_RXDMA_STATUS",
+            address: REG_RXDMA_STATUS,
+            value: 0x7400,
+            verify_mask: 0x0000,
+            verify_value: 0x0000,
+            description: "set RXDMA burst length baseline",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "usb_burst",
+            register_name: "REG_RXDMA_STATUS + 1",
+            address: REG_RXDMA_STATUS + 1,
+            value: 0xf5,
+            verify_mask: 0x00,
+            verify_value: 0x00,
+            description: "set RXDMA control byte as in upstream burst setup",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "ampdu_limits",
+            register_name: "REG_AMPDU_MAX_TIME_8812",
+            address: REG_AMPDU_MAX_TIME_8812,
+            value: 0x70,
+            verify_mask: u8::MAX,
+            verify_value: 0x70,
+            description: "set AMPDU maximum time for RTL8812AU",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write32_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite32Spec {
+            phase: "ampdu_limits",
+            register_name: "REG_AMPDU_MAX_LENGTH_8812",
+            address: REG_AMPDU_MAX_LENGTH_8812,
+            value: u32::MAX,
+            verify_mask: u32::MAX,
+            verify_value: u32::MAX,
+            description: "allow maximum AMPDU length table entries",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+
+    let speed_value =
+        read8_with_counter(registers, counters, 0x00ff).map_err(|error| DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("USB speed probe register 0x00ff read failed: {error}"),
+        })?;
+    let rxdma_pro =
+        read8_with_counter(registers, counters, REG_RXDMA_PRO_8812).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("REG_RXDMA_PRO_8812 read failed: {error}"),
+            }
+        })?;
+    let rxdma_pro_value = if speed_value & BIT7 != 0 {
+        let phy_speed = read8_with_counter(registers, counters, 0xfe17).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("USB PHY speed register 0xfe17 read failed: {error}"),
+            }
+        })?;
+        if ((phy_speed >> 4) & 0x03) == 0 {
+            (rxdma_pro | BIT4 | BIT3 | BIT2 | BIT1) & !BIT5
+        } else {
+            (rxdma_pro | BIT5 | BIT3 | BIT2 | BIT1) & !BIT4
+        }
+    } else {
+        (rxdma_pro | BIT3 | BIT2 | BIT1) & !(BIT5 | BIT4)
+    };
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "usb_burst",
+            register_name: "REG_RXDMA_PRO_8812",
+            address: REG_RXDMA_PRO_8812,
+            value: rxdma_pro_value,
+            verify_mask: u8::MAX,
+            verify_value: rxdma_pro_value,
+            description: "set USB burst packet length according to probed link speed",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "usb_burst",
+            register_name: "REG_TDECTRL",
+            address: REG_TDECTRL,
+            value: 0x10,
+            verify_mask: u8::MAX,
+            verify_value: 0x10,
+            description: "disable USB TX aggregation descriptor mode",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    mac_rmw8_step(
+        registers,
+        counters,
+        steps,
+        MacRmw8Spec {
+            phase: "ampdu_limits",
+            register_name: "REG_HT_SINGLE_AMPDU_8812",
+            address: REG_HT_SINGLE_AMPDU_8812,
+            preserve_mask: !BIT7,
+            value_mask: BIT7,
+            value: BIT7,
+            description: "enable single-packet AMPDU handling",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "ampdu_limits",
+            register_name: "REG_RX_PKT_LIMIT",
+            address: REG_RX_PKT_LIMIT,
+            value: 0x18,
+            verify_mask: u8::MAX,
+            verify_value: 0x18,
+            description: "set VHT RX packet length limit",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "edca",
+            register_name: "REG_PIFS",
+            address: REG_PIFS,
+            value: 0x00,
+            verify_mask: u8::MAX,
+            verify_value: 0x00,
+            description: "clear PIFS timing register",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write16_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite16Spec {
+            phase: "ampdu_limits",
+            register_name: "REG_MAX_AGGR_NUM",
+            address: REG_MAX_AGGR_NUM,
+            value: 0x1f1f,
+            verify_mask: u16::MAX,
+            verify_value: 0x1f1f,
+            description: "set maximum aggregation count table entries",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    mac_rmw8_step(
+        registers,
+        counters,
+        steps,
+        MacRmw8Spec {
+            phase: "retry_function",
+            register_name: "REG_FWHW_TXQ_CTRL",
+            address: REG_FWHW_TXQ_CTRL,
+            preserve_mask: !EN_AMPDU_RTY_NEW,
+            value_mask: EN_AMPDU_RTY_NEW,
+            value: 0x00,
+            description: "clear new AMPDU retry behavior after burst setup for RTL8812AU",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    mac_rmw8_step_with_verify_mask(
+        registers,
+        counters,
+        steps,
+        MacRmw8Spec {
+            phase: "usb_burst",
+            register_name: "REG_RSV_CTRL",
+            address: REG_RSV_CTRL,
+            preserve_mask: !(BIT5 | BIT6),
+            value_mask: BIT5 | BIT6,
+            value: BIT5 | BIT6,
+            description: "preserve MAC state across bus reset as in upstream burst setup",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+        BIT5,
+    )?;
+
+    for (register_name, address, low, high) in [
+        ("REG_ARFR0_8812", REG_ARFR0_8812, 0x0000_0010, 0xffff_f000),
+        ("REG_ARFR1_8812", REG_ARFR1_8812, 0x0000_0010, 0x003f_f000),
+        ("REG_ARFR2_8812", REG_ARFR2_8812, 0x0000_0015, 0x003f_f000),
+        ("REG_ARFR3_8812", REG_ARFR3_8812, 0x0000_0015, 0xffcf_f000),
+    ] {
+        queue_write32_step(
+            registers,
+            counters,
+            steps,
+            QueueWrite32Spec {
+                phase: "arfr_table",
+                register_name,
+                address,
+                value: low,
+                verify_mask: u32::MAX,
+                verify_value: low,
+                description: "program adaptive rate fallback table low word",
+                source: POWER_SOURCE_USB_HALINIT,
+            },
+        )?;
+        queue_write32_step(
+            registers,
+            counters,
+            steps,
+            QueueWrite32Spec {
+                phase: "arfr_table",
+                register_name,
+                address: address + 4,
+                value: high,
+                verify_mask: u32::MAX,
+                verify_value: high,
+                description: "program adaptive rate fallback table high word",
+                source: POWER_SOURCE_USB_HALINIT,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn run_beacon_parameters_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    steps: &mut Vec<QueueDmaStepReport>,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let bcn_ctrl = u16::from(DIS_TSF_UDT) | (u16::from(DIS_TSF_UDT) << 8);
+    queue_write16_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite16Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_BCN_CTRL",
+            address: REG_BCN_CTRL,
+            value: bcn_ctrl,
+            verify_mask: u16::MAX,
+            verify_value: bcn_ctrl,
+            description: "disable TSF update on both ports before beacon timing setup",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_TBTT_PROHIBIT",
+            address: REG_TBTT_PROHIBIT,
+            value: TBTT_PROHIBIT_SETUP_TIME,
+            verify_mask: u8::MAX,
+            verify_value: TBTT_PROHIBIT_SETUP_TIME,
+            description: "set TBTT prohibit setup time",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_TBTT_PROHIBIT + 1",
+            address: REG_TBTT_PROHIBIT + 1,
+            value: (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN & 0x00ff) as u8,
+            verify_mask: u8::MAX,
+            verify_value: (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN & 0x00ff) as u8,
+            description: "set low byte of TBTT prohibit hold time",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    mac_rmw8_step(
+        registers,
+        counters,
+        steps,
+        MacRmw8Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_TBTT_PROHIBIT + 2",
+            address: REG_TBTT_PROHIBIT + 2,
+            preserve_mask: 0xf0,
+            value_mask: 0x0f,
+            value: (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN >> 8) as u8,
+            description: "set high nibble of TBTT prohibit hold time",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_DRVERLYINT",
+            address: REG_DRVERLYINT,
+            value: DRIVER_EARLY_INT_TIME_8812,
+            verify_mask: u8::MAX,
+            verify_value: DRIVER_EARLY_INT_TIME_8812,
+            description: "set driver early interrupt time",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write8_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite8Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_BCNDMATIM",
+            address: REG_BCNDMATIM,
+            value: BCN_DMA_ATIME_INT_TIME_8812,
+            verify_mask: u8::MAX,
+            verify_value: BCN_DMA_ATIME_INT_TIME_8812,
+            description: "set beacon DMA timing",
+            source: POWER_SOURCE_USB_HALINIT,
+        },
+    )?;
+    queue_write16_step(
+        registers,
+        counters,
+        steps,
+        QueueWrite16Spec {
+            phase: "beacon_parameters",
+            register_name: "REG_BCNTCFG",
+            address: REG_BCNTCFG,
+            value: 0x4413,
+            verify_mask: u16::MAX,
+            verify_value: 0x4413,
+            description: "set beacon contention parameters",
             source: POWER_SOURCE_USB_HALINIT,
         },
     )
@@ -7997,6 +9764,19 @@ fn mac_rmw8_step<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
+    mac_rmw8_step_with_verify_mask(registers, counters, steps, spec, spec.value_mask)
+}
+
+fn mac_rmw8_step_with_verify_mask<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    steps: &mut Vec<QueueDmaStepReport>,
+    spec: MacRmw8Spec,
+    verify_mask: u8,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
     let before = read8_with_counter(registers, counters, spec.address).map_err(|error| {
         DiagnosticErrorReport {
             code: "register_read_failed",
@@ -8016,8 +9796,8 @@ where
             message: format!("{} read after write failed: {error}", spec.register_name),
         }
     })?;
-    let expected = spec.value & spec.value_mask;
-    let passed = (after & spec.value_mask) == expected;
+    let expected = spec.value & verify_mask;
+    let passed = (after & verify_mask) == expected;
     steps.push(QueueDmaStepReport {
         phase: spec.phase,
         operation: "rmw8",
@@ -8027,7 +9807,7 @@ where
         address: spec.address,
         address_hex: format_address(spec.address),
         width: "u8",
-        mask_hex: Some(format_value(spec.value_mask, 2)),
+        mask_hex: Some(format_value(verify_mask, 2)),
         value_hex: Some(format_value(spec.value, 2)),
         before_hex: Some(format_value(before, 2)),
         written_hex: Some(format_value(written, 2)),
@@ -8040,9 +9820,9 @@ where
     } else {
         Err(queue_readback_error(
             spec.register_name,
-            format_value(spec.value_mask, 2),
+            format_value(verify_mask, 2),
             format_value(expected, 2),
-            format_value(after & spec.value_mask, 2),
+            format_value(after & verify_mask, 2),
         ))
     }
 }
@@ -8528,6 +10308,80 @@ fn load_bb_table_plans(
     Ok((phy_plan, agc_plan))
 }
 
+fn load_mac_table_plan(
+    source_path: &Path,
+    condition_env: RealtekConditionEnv,
+) -> std::result::Result<RealtekTablePlan, DiagnosticErrorReport> {
+    let source = fs::read_to_string(source_path).map_err(|error| DiagnosticErrorReport {
+        code: "mac_source_read_failed",
+        message: format!("failed to read {}: {error}", source_path.display()),
+    })?;
+
+    let values =
+        parse_realtek_u32_array(&source, MAC_REG_ARRAY).map_err(|error| DiagnosticErrorReport {
+            code: "mac_table_parse_failed",
+            message: error.to_string(),
+        })?;
+    plan_realtek_table(MAC_REG_ARRAY, RealtekTableKind::Mac, &values, condition_env).map_err(
+        |error| DiagnosticErrorReport {
+            code: "mac_table_plan_failed",
+            message: error.to_string(),
+        },
+    )
+}
+
+fn run_mac_table_plan<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    plan: &RealtekTablePlan,
+) -> std::result::Result<usize, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut writes = 0usize;
+    for action in &plan.actions {
+        match action.kind {
+            RealtekTableActionKind::Delay => {
+                let delay_us = action.delay_us.unwrap_or_default();
+                if delay_us > 0 {
+                    std::thread::sleep(Duration::from_micros(delay_us));
+                }
+            }
+            RealtekTableActionKind::Write => {
+                let address = u16::try_from(action.address).map_err(|_| DiagnosticErrorReport {
+                    code: "mac_table_address_out_of_range",
+                    message: format!(
+                        "{} pair {} address {} does not fit a USB register address",
+                        plan.array_name, action.pair_index, action.address_hex
+                    ),
+                })?;
+                let data = action.data.ok_or_else(|| DiagnosticErrorReport {
+                    code: "mac_table_write_missing_data",
+                    message: format!(
+                        "{} pair {} is a write action with no data",
+                        plan.array_name, action.pair_index
+                    ),
+                })?;
+                write8_with_counter(registers, counters, address, data as u8).map_err(|error| {
+                    DiagnosticErrorReport {
+                        code: "mac_table_write_failed",
+                        message: format!(
+                            "{} pair {} write addr={} data={} failed: {error}",
+                            plan.array_name,
+                            action.pair_index,
+                            action.address_hex,
+                            action.data_hex.as_deref().unwrap_or("<missing>")
+                        ),
+                    }
+                })?;
+                writes += 1;
+                std::thread::sleep(Duration::from_micros(1));
+            }
+        }
+    }
+    Ok(writes)
+}
+
 fn run_bb_sequence<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     args: &BbSmokeArgs,
@@ -8735,6 +10589,7 @@ where
                     }
                 })?;
                 match plan.kind {
+                    RealtekTableKind::Mac => {}
                     RealtekTableKind::BbPhy => stats.phy_writes_applied += 1,
                     RealtekTableKind::BbAgc => stats.agc_writes_applied += 1,
                     RealtekTableKind::RfRadioA | RealtekTableKind::RfRadioB => {}
@@ -9378,7 +11233,7 @@ where
                 match plan.kind {
                     RealtekTableKind::RfRadioA => stats.radioa_writes_applied += 1,
                     RealtekTableKind::RfRadioB => stats.radiob_writes_applied += 1,
-                    RealtekTableKind::BbPhy | RealtekTableKind::BbAgc => {}
+                    RealtekTableKind::Mac | RealtekTableKind::BbPhy | RealtekTableKind::BbAgc => {}
                 }
                 std::thread::sleep(Duration::from_micros(1));
             }
@@ -9396,6 +11251,7 @@ fn run_channel_sequence<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     channel: Channel,
     bandwidth: Bandwidth,
+    rfe_type: u8,
     radioa_plan: &RealtekTablePlan,
     radiob_plan: &RealtekTablePlan,
     counters: &mut DiagnosticCounters,
@@ -9412,7 +11268,8 @@ where
     let mut rf_path_a = last_rf_register_data(radioa_plan, RF_CHNLBW_JAGUAR)?;
     let mut rf_path_b = last_rf_register_data(radiob_plan, RF_CHNLBW_JAGUAR)?;
 
-    switch_wireless_band_8812(registers, counters, steps, channel.band)?;
+    switch_wireless_band_8812(registers, counters, steps, channel.band, rfe_type)?;
+    ensure_ofdmccken_tx_8812(registers, counters, steps)?;
 
     bb_masked_write32_step(
         registers,
@@ -9780,7 +11637,188 @@ where
             },
             source: RF_SOURCE_RF6052,
         },
-    )
+    )?;
+
+    if channel.band == Band::Ghz5 && bandwidth == Bandwidth::Mhz20 {
+        apply_captured_tx_bringup_tail_8812a(registers, counters, steps)?;
+    }
+
+    Ok(())
+}
+
+fn apply_captured_tx_bringup_tail_8812a<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    steps: &mut Vec<QueueDmaStepReport>,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    // These are the write32 arguments/readback values for this Rust USB path,
+    // reconstructed from a known-good Linux usbmon trace. They are a bench
+    // bring-up stand-in for the runtime RFE, TX power, and IQK functions.
+    for (register_name, address, value) in [
+        ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x2d40_0003),
+        ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x2d40_0003),
+        ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
+        ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
+        ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
+        ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
+        ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
+        ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
+        ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
+        (
+            "rB_IQK_Result_Jaguar",
+            REG_OFDM0_XBAGCCORE1 + 0x200,
+            0x3000_0c1c,
+        ),
+        (
+            "rA_IQK_Shadow_Jaguar",
+            REG_OFDM0_XBAGCCORE1 + 4,
+            0x0000_0058,
+        ),
+        (
+            "rB_IQK_Shadow_Jaguar",
+            REG_OFDM0_XBAGCCORE1 + 0x204,
+            0x0000_0058,
+        ),
+        ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
+        (
+            "rA_TxAGC_OFDM18_OFDM6",
+            REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+            0x2727_2727,
+        ),
+        (
+            "rA_TxAGC_OFDM54_OFDM24",
+            REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+            0x2727_2727,
+        ),
+        (
+            "rA_TxAGC_MCS3_MCS0",
+            REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rA_TxAGC_MCS7_MCS4",
+            REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rA_TxAGC_NSS1_7_NSS1_4",
+            REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+            0x2626_2626,
+        ),
+        (
+            "rA_TxAGC_NSS1_11_NSS1_8",
+            REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+            0x2626_2626,
+        ),
+        (
+            "rA_TxAGC_NSS1_3_NSS1_0",
+            REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rA_TxAGC_NSS2_3_NSS2_0",
+            REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rA_TxAGC_NSS2_7_NSS2_4",
+            REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+            0x2626_2828,
+        ),
+        (
+            "rA_TxAGC_NSS2_11_NSS2_8",
+            REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+            0x2626_2626,
+        ),
+        (
+            "rA_TxAGC_NSS3_3_NSS3_0",
+            REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+            0x2626_2626,
+        ),
+        ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001e),
+        ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0010_161e),
+        ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0181_7d24),
+        ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
+        (
+            "rB_TxAGC_OFDM18_OFDM6",
+            REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rB_TxAGC_OFDM54_OFDM24",
+            REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rB_TxAGC_MCS3_MCS0",
+            REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+            0x2a2a_2a2a,
+        ),
+        (
+            "rB_TxAGC_MCS7_MCS4",
+            REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+            0x2a2a_2a2a,
+        ),
+        (
+            "rB_TxAGC_NSS1_7_NSS1_4",
+            REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rB_TxAGC_NSS1_11_NSS1_8",
+            REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rB_TxAGC_NSS1_3_NSS1_0",
+            REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+            0x2a2a_2a2a,
+        ),
+        (
+            "rB_TxAGC_NSS2_3_NSS2_0",
+            REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+            0x2a2a_2a2a,
+        ),
+        (
+            "rB_TxAGC_NSS2_7_NSS2_4",
+            REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+            0x2828_2a2a,
+        ),
+        (
+            "rB_TxAGC_NSS2_11_NSS2_8",
+            REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+            0x2828_2828,
+        ),
+        (
+            "rB_TxAGC_NSS3_3_NSS3_0",
+            REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+            0x2828_2828,
+        ),
+        ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001e),
+        ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0012_1820),
+        ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7d24),
+    ] {
+        queue_write32_step(
+            registers,
+            counters,
+            steps,
+            QueueWrite32Spec {
+                phase: "tx_bringup",
+                register_name,
+                address,
+                value,
+                verify_mask: u32::MAX,
+                verify_value: value,
+                description: "apply captured Linux runtime TX path and power register",
+                source: RF_SOURCE_PHYCFG,
+            },
+        )?;
+    }
+
+    Ok(())
 }
 
 fn data_secondary_channel_setting(
@@ -9883,6 +11921,7 @@ fn switch_wireless_band_8812<T>(
     counters: &mut DiagnosticCounters,
     steps: &mut Vec<QueueDmaStepReport>,
     target_band: Band,
+    rfe_type: u8,
 ) -> std::result::Result<(), DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
@@ -9918,19 +11957,44 @@ where
     });
 
     if current_band == target_band {
-        return Ok(());
+        return set_rfe_reg_8812(registers, counters, steps, target_band, rfe_type);
     }
 
     match target_band {
-        Band::Ghz2 => switch_to_2g_band(registers, counters, steps),
-        Band::Ghz5 => switch_to_5g_band(registers, counters, steps),
+        Band::Ghz2 => switch_to_2g_band(registers, counters, steps, rfe_type),
+        Band::Ghz5 => switch_to_5g_band(registers, counters, steps, rfe_type),
     }
+}
+
+fn ensure_ofdmccken_tx_8812<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    steps: &mut Vec<QueueDmaStepReport>,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    bb_masked_write32_step(
+        registers,
+        counters,
+        steps,
+        BbMaskedWrite32Spec {
+            phase: "band_switch",
+            register_name: "rOFDMCCKEN_Jaguar",
+            address: REG_OFDMCCKEN_JAGUAR,
+            bitmask: 0x3000_0000,
+            data: 0x03,
+            description: "ensure OFDM/CCK BB clocks remain enabled after band selection",
+            source: RF_SOURCE_PHYCFG,
+        },
+    )
 }
 
 fn switch_to_2g_band<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
     steps: &mut Vec<QueueDmaStepReport>,
+    rfe_type: u8,
 ) -> std::result::Result<(), DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
@@ -9978,7 +12042,7 @@ where
             source: RF_SOURCE_PHYCFG,
         },
     )?;
-    set_rfe_reg_8812_rfe0(registers, counters, steps, Band::Ghz2)?;
+    set_rfe_reg_8812(registers, counters, steps, Band::Ghz2, rfe_type)?;
     bb_masked_write32_step(
         registers,
         counters,
@@ -10030,6 +12094,7 @@ fn switch_to_5g_band<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
     steps: &mut Vec<QueueDmaStepReport>,
+    rfe_type: u8,
 ) -> std::result::Result<(), DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
@@ -10093,7 +12158,7 @@ where
             source: RF_SOURCE_PHYCFG,
         },
     )?;
-    set_rfe_reg_8812_rfe0(registers, counters, steps, Band::Ghz5)?;
+    set_rfe_reg_8812(registers, counters, steps, Band::Ghz5, rfe_type)?;
     bb_masked_write32_step(
         registers,
         counters,
@@ -10165,19 +12230,114 @@ where
     )
 }
 
-fn set_rfe_reg_8812_rfe0<T>(
+#[derive(Debug, Clone, Copy)]
+struct RfeRegConfig {
+    pinmux: u32,
+    inv_mask: u32,
+    inv: u32,
+    antsel: Option<u32>,
+    description: &'static str,
+}
+
+fn rfe_reg_config_8812(
+    band: Band,
+    rfe_type: u8,
+) -> std::result::Result<RfeRegConfig, DiagnosticErrorReport> {
+    let config = match (band, rfe_type) {
+        (Band::Ghz2, 0 | 1 | 2) => RfeRegConfig {
+            pinmux: 0x7777_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x000,
+            antsel: None,
+            description: "program RTL8812A 2.4 GHz RFE pinmux for RFE type 0/1/2",
+        },
+        (Band::Ghz2, 3) => RfeRegConfig {
+            pinmux: 0x5433_7770,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: Some(0x1),
+            description: "program RTL8812A 2.4 GHz RFE pinmux for RFE type 3",
+        },
+        (Band::Ghz2, 4) => RfeRegConfig {
+            pinmux: 0x7777_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x001,
+            antsel: None,
+            description: "program RTL8812A 2.4 GHz RFE pinmux for RFE type 4",
+        },
+        (Band::Ghz2, 6) => RfeRegConfig {
+            pinmux: 0x0777_2770,
+            inv_mask: u32::MAX,
+            inv: 0x0000_0077,
+            antsel: None,
+            description: "program RTL8812A 2.4 GHz RFE pinmux for RFE type 6",
+        },
+        (Band::Ghz5, 0) => RfeRegConfig {
+            pinmux: 0x7733_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: None,
+            description: "program RTL8812A 5 GHz RFE pinmux for RFE type 0",
+        },
+        (Band::Ghz5, 1) => RfeRegConfig {
+            pinmux: 0x7733_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x000,
+            antsel: None,
+            description: "program RTL8812A 5 GHz RFE pinmux for RFE type 1",
+        },
+        (Band::Ghz5, 2 | 4) => RfeRegConfig {
+            pinmux: 0x7733_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: None,
+            description: "program RTL8812A 5 GHz RFE pinmux for RFE type 2/4",
+        },
+        (Band::Ghz5, 3) => RfeRegConfig {
+            pinmux: 0x5433_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: Some(0x1),
+            description: "program RTL8812A 5 GHz RFE pinmux for RFE type 3",
+        },
+        (Band::Ghz5, 6) => RfeRegConfig {
+            pinmux: 0x0773_7717,
+            inv_mask: u32::MAX,
+            inv: 0x0000_0077,
+            antsel: None,
+            description: "program RTL8812A 5 GHz RFE pinmux for RFE type 6",
+        },
+        (_, 5) => {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_rfe_type",
+                message:
+                    "RFE type 5 needs byte-level partial pinmux writes that are not ported yet"
+                        .to_string(),
+            });
+        }
+        _ => {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_rfe_type",
+                message: format!(
+                    "RFE type {rfe_type} is not supported by the RTL8812A channel path"
+                ),
+            });
+        }
+    };
+    Ok(config)
+}
+
+fn set_rfe_reg_8812<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
     steps: &mut Vec<QueueDmaStepReport>,
     band: Band,
+    rfe_type: u8,
 ) -> std::result::Result<(), DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let (pinmux, inv) = match band {
-        Band::Ghz2 => (0x7777_7777, 0x000),
-        Band::Ghz5 => (0x7733_7717, 0x010),
-    };
+    let config = rfe_reg_config_8812(band, rfe_type)?;
     for (register_name, address) in [
         ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR),
         ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR),
@@ -10191,8 +12351,8 @@ where
                 register_name,
                 address,
                 bitmask: u32::MAX,
-                data: pinmux,
-                description: "program RTL8812A RFE pinmux for default RFE type 0",
+                data: config.pinmux,
+                description: config.description,
                 source: RF_SOURCE_PHYCFG,
             },
         )?;
@@ -10209,9 +12369,25 @@ where
                 phase: "band_switch",
                 register_name,
                 address,
-                bitmask: 0x3ff0_0000,
-                data: inv,
-                description: "program RTL8812A RFE inversion bits for default RFE type 0",
+                bitmask: config.inv_mask,
+                data: config.inv,
+                description: config.description,
+                source: RF_SOURCE_PHYCFG,
+            },
+        )?;
+    }
+    if let Some(antsel) = config.antsel {
+        bb_masked_write32_step(
+            registers,
+            counters,
+            steps,
+            BbMaskedWrite32Spec {
+                phase: "band_switch",
+                register_name: "r_ANTSEL_SW_Jaguar",
+                address: REG_ANTSEL_SW_JAGUAR,
+                bitmask: 0x0000_0303,
+                data: antsel,
+                description: "program RTL8812A ANTSEL software control for RFE type 3",
                 source: RF_SOURCE_PHYCFG,
             },
         )?;
@@ -13195,6 +15371,7 @@ fn init_live_report(
         &registers,
         requested_channel,
         args.bandwidth,
+        args.rfe_type,
         &radioa_plan,
         &radiob_plan,
         &mut counters,
@@ -13238,10 +15415,11 @@ fn init_live_report(
         "channel",
         DiagnosticPhaseStatus::Completed,
         format!(
-            "programmed channel {} ({} MHz, {} MHz bandwidth) in {} steps",
+            "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {} steps",
             requested_channel.number,
             requested_channel.frequency_mhz,
             args.bandwidth.mhz(),
+            format_value(args.rfe_type, 2),
             channel_steps.len()
         ),
         before,
@@ -13301,6 +15479,8 @@ fn init_live_pending_report(input: InitLivePendingReportInput<'_>) -> PendingDia
         rf_source: input.args.rf_source.clone(),
         condition_env: input.args.condition_env(),
         crystal_cap_hex: format_value(input.args.crystal_cap, 2),
+        rfe_type: input.args.rfe_type,
+        rfe_type_hex: format_value(input.args.rfe_type, 2),
         phase_summaries: input.phase_summaries,
         firmware_payload_len: input.firmware_payload_len,
         llt_entries_written: input.llt_stats.entries_written,
@@ -13423,6 +15603,223 @@ fn init_live_phases(blocked_phase: &'static str) -> Vec<DiagnosticPhase> {
     phases
 }
 
+fn load_rx_scan_init_assets(
+    args: &RxScanArgs,
+) -> std::result::Result<Option<BridgeTxBenchInitAssets>, DiagnosticErrorReport> {
+    if !args.init_before_rx {
+        return Ok(None);
+    }
+    if !args.i_understand_this_writes_registers {
+        return Err(DiagnosticErrorReport {
+            code: "missing_write_authorization",
+            message: "rx-scan --init-before-rx writes hardware registers and requires --i-understand-this-writes-registers".to_string(),
+        });
+    }
+
+    let firmware_path = args.firmware.clone().ok_or_else(|| DiagnosticErrorReport {
+        code: "missing_firmware",
+        message: "rx-scan --init-before-rx requires --firmware with an RTL8812A firmware image"
+            .to_string(),
+    })?;
+    let (firmware_image, firmware) =
+        load_firmware_with_report(&firmware_path).map_err(|message| DiagnosticErrorReport {
+            code: "firmware_load_failed",
+            message,
+        })?;
+    let firmware_payload = firmware_image.realtek_download_payload();
+    if firmware_page_count(firmware_payload.bytes.len()) > MAX_FIRMWARE_DOWNLOAD_PAGES {
+        return Err(DiagnosticErrorReport {
+            code: "firmware_too_many_pages",
+            message: format!(
+                "firmware requires {} 4 KiB pages, but RTL8812A page selector exposes {} pages",
+                firmware_page_count(firmware_payload.bytes.len()),
+                MAX_FIRMWARE_DOWNLOAD_PAGES
+            ),
+        });
+    }
+
+    let condition_env = args.condition_env();
+    let mac_plan = load_mac_table_plan(&args.mac_source, condition_env)?;
+    let (phy_plan, agc_plan) = load_bb_table_plans(&args.bb_source, condition_env)?;
+    let (radioa_plan, radiob_plan) = load_rf_table_plans(&args.rf_source, condition_env)?;
+
+    Ok(Some(BridgeTxBenchInitAssets {
+        firmware_path,
+        firmware_image,
+        firmware,
+        mac_plan,
+        phy_plan,
+        agc_plan,
+        radioa_plan,
+        radiob_plan,
+    }))
+}
+
+fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
+    BridgeTxBenchArgs {
+        adapter: args.adapter.clone(),
+        channel: args.channel,
+        bandwidth: args.bandwidth,
+        count: 1,
+        payload_len: 0,
+        frame_hex: None,
+        packet_hex: None,
+        interval_us: 0,
+        link_id: 0x000001,
+        radio_port: 0x23,
+        fwmark: 0,
+        mcs: 0,
+        tx_rate: None,
+        tx_queue: TxQueueArg::Auto,
+        mac_id: 0,
+        tx_rate_id: None,
+        tx_retries: 12,
+        no_hw_seq: false,
+        no_first_seg: false,
+        enable_rate_fallback: false,
+        no_agg_break: false,
+        local_mac: None,
+        monitor_opmode_before_tx: false,
+        fw_media_status: false,
+        fw_media_status_role: 0x01,
+        init_before_tx: args.init_before_rx,
+        linux_init_order: false,
+        firmware: args.firmware.clone(),
+        init_timeout_ms: args.init_timeout_ms,
+        mac_source: args.mac_source.clone(),
+        bb_source: args.bb_source.clone(),
+        rf_source: args.rf_source.clone(),
+        cut_version: args.cut_version,
+        package_type: args.package_type,
+        support_interface: args.support_interface,
+        support_platform: args.support_platform,
+        board_type: args.board_type,
+        type_glna: args.type_glna,
+        type_gpa: args.type_gpa,
+        type_alna: args.type_alna,
+        type_apa: args.type_apa,
+        crystal_cap: args.crystal_cap,
+        rfe_type: args.rfe_type,
+        clear_txdma_status_before_tx: false,
+        txdma_status_clear_value: 0,
+        txdma_offset_check_value: None,
+        cr_value: None,
+        trxdma_ctrl_value: None,
+        pre_tx_write8: Vec::new(),
+        pre_tx_write16: Vec::new(),
+        pre_tx_write32: Vec::new(),
+        pre_tx_rmw32: Vec::new(),
+        post_tx_write8: Vec::new(),
+        post_tx_write16: Vec::new(),
+        post_tx_write32: Vec::new(),
+        post_tx_set8: Vec::new(),
+        post_tx_set16: Vec::new(),
+        post_tx_set32: Vec::new(),
+        i_understand_this_transmits: true,
+        tx_status: TxStatusProbeArgs::default(),
+        macos_usbhost: args.macos_usbhost.clone(),
+    }
+}
+
+fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBenchArgs {
+    BridgeTxBenchArgs {
+        adapter: args.adapter.clone(),
+        channel: args.channel,
+        bandwidth: args.bandwidth,
+        count: 1,
+        payload_len: 0,
+        frame_hex: None,
+        packet_hex: None,
+        interval_us: 0,
+        link_id: 0x000001,
+        radio_port: 0x23,
+        fwmark: 0,
+        mcs: 0,
+        tx_rate: args.tx_overrides.tx_rate,
+        tx_queue: args.tx_overrides.tx_queue,
+        mac_id: args.tx_overrides.mac_id.unwrap_or(0),
+        tx_rate_id: args.tx_overrides.tx_rate_id,
+        tx_retries: args.tx_overrides.tx_retries.unwrap_or(12),
+        no_hw_seq: false,
+        no_first_seg: false,
+        enable_rate_fallback: args.tx_overrides.enable_rate_fallback,
+        no_agg_break: args.tx_overrides.no_agg_break,
+        local_mac: None,
+        monitor_opmode_before_tx: false,
+        fw_media_status: false,
+        fw_media_status_role: 0x01,
+        init_before_tx: args.init_before_tx,
+        linux_init_order: false,
+        firmware: args.firmware.clone(),
+        init_timeout_ms: args.init_timeout_ms,
+        mac_source: args.mac_source.clone(),
+        bb_source: args.bb_source.clone(),
+        rf_source: args.rf_source.clone(),
+        cut_version: args.cut_version,
+        package_type: args.package_type,
+        support_interface: args.support_interface,
+        support_platform: args.support_platform,
+        board_type: args.board_type,
+        type_glna: args.type_glna,
+        type_gpa: args.type_gpa,
+        type_alna: args.type_alna,
+        type_apa: args.type_apa,
+        crystal_cap: args.crystal_cap,
+        rfe_type: args.rfe_type,
+        clear_txdma_status_before_tx: args.clear_txdma_status_before_tx,
+        txdma_status_clear_value: args.txdma_status_clear_value,
+        txdma_offset_check_value: None,
+        cr_value: None,
+        trxdma_ctrl_value: None,
+        pre_tx_write8: Vec::new(),
+        pre_tx_write16: Vec::new(),
+        pre_tx_write32: Vec::new(),
+        pre_tx_rmw32: Vec::new(),
+        post_tx_write8: Vec::new(),
+        post_tx_write16: Vec::new(),
+        post_tx_write32: Vec::new(),
+        post_tx_set8: Vec::new(),
+        post_tx_set16: Vec::new(),
+        post_tx_set32: Vec::new(),
+        i_understand_this_transmits: true,
+        tx_status: TxStatusProbeArgs::default(),
+        macos_usbhost: args.macos_usbhost.clone(),
+    }
+}
+
+fn same_session_init_into_init_live(report: BridgeTxBenchSameSessionInitReport) -> InitLiveReport {
+    InitLiveReport {
+        bb_source: report.bb_source,
+        rf_source: report.rf_source,
+        condition_env: report.condition_env,
+        crystal_cap_hex: report.crystal_cap_hex,
+        rfe_type: report.rfe_type,
+        rfe_type_hex: report.rfe_type_hex,
+        phase_summaries: report.phase_summaries,
+        firmware_payload_len: Some(report.firmware_payload_len),
+        llt_entries_written: report.llt_entries_written,
+        queue_pages: report.queue_pages,
+        bb_phy_writes_applied: report.bb_phy_writes_applied,
+        bb_agc_writes_applied: report.bb_agc_writes_applied,
+        bb_delays_applied: report.bb_delays_applied,
+        rf_radioa_writes_applied: report.rf_radioa_writes_applied,
+        rf_radiob_writes_applied: report.rf_radiob_writes_applied,
+        rf_delays_applied: report.rf_delays_applied,
+        effective_channel: report.effective_channel,
+        effective_bandwidth: report.effective_bandwidth,
+    }
+}
+
+fn add_counters(left: &mut DiagnosticCounters, right: DiagnosticCounters) {
+    left.usb_control_reads += right.usb_control_reads;
+    left.usb_control_writes += right.usb_control_writes;
+    left.usb_bulk_in_reads += right.usb_bulk_in_reads;
+    left.usb_bulk_out_writes += right.usb_bulk_out_writes;
+    left.rx_frames += right.rx_frames;
+    left.tx_frames += right.tx_frames;
+    left.dropped_frames += right.dropped_frames;
+}
+
 fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
     if !args.fixture_bulk_in.is_empty() && result != DiagnosticResult::Fail {
@@ -13461,6 +15858,45 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         });
     }
 
+    let init_assets = match load_rx_scan_init_assets(&args) {
+        Ok(init_assets) => init_assets,
+        Err(error) => {
+            return pending_report(PendingReportInput {
+                command: "rx-scan",
+                selector: args.adapter.selector(),
+                adapter: None,
+                endpoints: None,
+                channel,
+                bandwidth: Some(args.bandwidth),
+                firmware_path: args.firmware.clone(),
+                firmware: None,
+                init_dry_run: None,
+                init_live: None,
+                duration_ms: Some(args.duration_ms),
+                pcap_path: args.pcap,
+                tx_frame_len: None,
+                tx_frame_source: None,
+                tx_dry_run: None,
+                tx_live: None,
+                rx_fixture: None,
+                repeat_tx: None,
+                counters: DiagnosticCounters::default(),
+                result: DiagnosticResult::Fail,
+                phases: vec![DiagnosticPhase {
+                    id: "argument_validation",
+                    status: DiagnosticPhaseStatus::Blocked,
+                    detail: "rx-scan same-session init arguments did not pass local validation",
+                }],
+                error: Some(error),
+                notes: vec!["live RX aborted before claiming USB or writing hardware registers"],
+            });
+        }
+    };
+    let init_bridge_args = args.init_before_rx.then(|| rx_scan_init_bridge_args(&args));
+    let init_firmware_path = init_assets
+        .as_ref()
+        .map(|assets| assets.firmware_path.clone());
+    let init_firmware = init_assets.as_ref().map(|assets| assets.firmware.clone());
     let selector = args.adapter.selector();
     let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
         if args.macos_usbhost.enabled {
@@ -13625,9 +16061,71 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         }
     };
 
+    let channel = channel.expect("channel resolved before live RX");
+    let mut pre_rx_counters = claim_counters;
+    let mut init_live = None;
+    if let (Some(init_assets), Some(init_bridge_args)) =
+        (init_assets.as_ref(), init_bridge_args.as_ref())
+    {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match run_bridge_tx_bench_same_session_init(
+            &registers,
+            init_bridge_args,
+            channel,
+            &endpoints,
+            init_assets,
+            &mut pre_rx_counters,
+        ) {
+            Ok(init_report) => {
+                init_live = Some(same_session_init_into_init_live(init_report));
+            }
+            Err((init_report, error)) => {
+                init_live = Some(same_session_init_into_init_live(init_report));
+                return pending_report(PendingReportInput {
+                    command: "rx-scan",
+                    selector,
+                    adapter: Some(adapter),
+                    endpoints: Some(endpoints),
+                    channel: Some(channel),
+                    bandwidth: Some(args.bandwidth),
+                    firmware_path: init_firmware_path,
+                    firmware: init_firmware,
+                    init_dry_run: None,
+                    init_live,
+                    duration_ms: Some(args.duration_ms),
+                    pcap_path: args.pcap,
+                    tx_frame_len: None,
+                    tx_frame_source: None,
+                    tx_dry_run: None,
+                    tx_live: None,
+                    rx_fixture: None,
+                    repeat_tx: None,
+                    counters: pre_rx_counters,
+                    result: DiagnosticResult::Fail,
+                    phases: vec![
+                        DiagnosticPhase {
+                            id: "usb_claim",
+                            status: DiagnosticPhaseStatus::Completed,
+                            detail: claim_detail,
+                        },
+                        DiagnosticPhase {
+                            id: "init_before_rx",
+                            status: DiagnosticPhaseStatus::Blocked,
+                            detail: "rx-scan same-session init failed before the bulk IN loop",
+                        },
+                    ],
+                    error: Some(error),
+                    notes: vec![
+                        "live RX stopped before bulk IN capture because same-session init failed",
+                    ],
+                });
+            }
+        }
+    }
+
     let pcap_path = args.pcap.clone();
     let frame_jsonl_path = args.frame_jsonl.clone();
-    let channel = channel.expect("channel resolved before live RX");
     match run_rx_bulk_in_capture(
         &mut transport,
         bulk_in,
@@ -13638,29 +16136,32 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         frame_jsonl_path.as_deref(),
     ) {
         Ok((rx_fixture, mut counters)) => {
-            counters.usb_control_writes += claim_counters.usb_control_writes;
-            pending_report(PendingReportInput {
-                command: "rx-scan",
-                selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
-                channel: Some(channel),
-                bandwidth: Some(args.bandwidth),
-                firmware_path: None,
-                firmware: None,
-                init_dry_run: None,
-                init_live: None,
-                duration_ms: Some(args.duration_ms),
-                pcap_path,
-                tx_frame_len: None,
-                tx_frame_source: None,
-                tx_dry_run: None,
-                tx_live: None,
-                rx_fixture: Some(rx_fixture),
-                repeat_tx: None,
-                counters,
-                result: DiagnosticResult::Pass,
-                phases: vec![
+            add_counters(&mut counters, pre_rx_counters);
+            let phases = if args.init_before_rx {
+                vec![
+                    DiagnosticPhase {
+                        id: "usb_claim",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: claim_detail,
+                    },
+                    DiagnosticPhase {
+                        id: "init_before_rx",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "completed full RTL8812AU init inside the retained RX USB session",
+                    },
+                    DiagnosticPhase {
+                        id: "bulk_in_loop",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "read bounded buffers from the RTL8812AU bulk IN endpoint",
+                    },
+                    DiagnosticPhase {
+                        id: "pcap",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "optional PCAP output completed",
+                    },
+                ]
+            } else {
+                vec![
                     DiagnosticPhase {
                         id: "usb_claim",
                         status: DiagnosticPhaseStatus::Completed,
@@ -13676,12 +16177,43 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                         status: DiagnosticPhaseStatus::Completed,
                         detail: "optional PCAP output completed",
                     },
-                ],
+                ]
+            };
+            let notes = if args.init_before_rx {
+                vec![
+                    "live RX initialized the adapter and captured bulk-IN traffic over one retained USB session",
+                    "no bulk OUT frame submissions or TX operations were issued",
+                ]
+            } else {
+                vec![
+                    "live RX assumes the adapter has already completed init on the requested channel",
+                    "no control writes, bulk OUT frame submissions, or TX operations were issued",
+                ]
+            };
+            pending_report(PendingReportInput {
+                command: "rx-scan",
+                selector,
+                adapter: Some(adapter),
+                endpoints: Some(endpoints),
+                channel: Some(channel),
+                bandwidth: Some(args.bandwidth),
+                firmware_path: init_firmware_path,
+                firmware: init_firmware,
+                init_dry_run: None,
+                init_live,
+                duration_ms: Some(args.duration_ms),
+                pcap_path,
+                tx_frame_len: None,
+                tx_frame_source: None,
+                tx_dry_run: None,
+                tx_live: None,
+                rx_fixture: Some(rx_fixture),
+                repeat_tx: None,
+                counters,
+                result: DiagnosticResult::Pass,
+                phases,
                 error: None,
-                notes: vec![
-                "live RX assumes the adapter has already completed init on the requested channel",
-                "no control writes, bulk OUT frame submissions, or TX operations were issued",
-            ],
+                notes,
             })
         }
         Err(error) => pending_report(PendingReportInput {
@@ -13691,10 +16223,10 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             endpoints: Some(endpoints),
             channel: Some(channel),
             bandwidth: Some(args.bandwidth),
-            firmware_path: None,
-            firmware: None,
+            firmware_path: init_firmware_path,
+            firmware: init_firmware,
             init_dry_run: None,
-            init_live: None,
+            init_live,
             duration_ms: Some(args.duration_ms),
             pcap_path,
             tx_frame_len: None,
@@ -13703,7 +16235,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             tx_live: None,
             rx_fixture: None,
             repeat_tx: None,
-            counters: claim_counters,
+            counters: pre_rx_counters,
             result: DiagnosticResult::Fail,
             phases: vec![DiagnosticPhase {
                 id: "bulk_in_loop",
@@ -14090,6 +16622,28 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
         error = Some(DiagnosticErrorReport {
             code: "invalid_tx_status_delay",
             message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
+        });
+    }
+    if args.tx_status.tx_status
+        && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
+        && result != DiagnosticResult::Fail
+    {
+        result = DiagnosticResult::Fail;
+        error = Some(DiagnosticErrorReport {
+            code: "invalid_tx_status_poll_count",
+            message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
+        });
+    }
+    if args.tx_status.tx_status
+        && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
+        && result != DiagnosticResult::Fail
+    {
+        result = DiagnosticResult::Fail;
+        error = Some(DiagnosticErrorReport {
+            code: "invalid_tx_status_poll_total",
+            message: format!(
+                "--tx-status-poll-ms multiplied by --tx-status-poll-count must be <= {MAX_TX_STATUS_TOTAL_POLL_MS}"
+            ),
         });
     }
 
@@ -14589,6 +17143,28 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
         error = Some(DiagnosticErrorReport {
             code: "invalid_tx_status_delay",
             message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
+        });
+    }
+    if args.tx_status.tx_status
+        && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT
+        && result != DiagnosticResult::Fail
+    {
+        result = DiagnosticResult::Fail;
+        error = Some(DiagnosticErrorReport {
+            code: "invalid_tx_status_poll_count",
+            message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
+        });
+    }
+    if args.tx_status.tx_status
+        && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
+        && result != DiagnosticResult::Fail
+    {
+        result = DiagnosticResult::Fail;
+        error = Some(DiagnosticErrorReport {
+            code: "invalid_tx_status_poll_total",
+            message: format!(
+                "--tx-status-poll-ms multiplied by --tx-status-poll-count must be <= {MAX_TX_STATUS_TOTAL_POLL_MS}"
+            ),
         });
     }
 
@@ -15154,6 +17730,25 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
     };
 
     let frame_len = parsed.ieee80211_frame.len();
+    let tx_options = apply_bridge_tx_overrides(&args.tx_overrides, parsed.tx_options);
+    let (packet_len, tx_descriptor_hex) =
+        match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+            Ok(packet) => (
+                packet.len(),
+                Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+            ),
+            Err(error) => {
+                return bridge_tx_once_failure(
+                    report,
+                    "tx_descriptor",
+                    "bridge TX descriptor construction failed before USB submission",
+                    DiagnosticErrorReport {
+                        code: "tx_descriptor_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        };
     report.datagram = Some(BridgeTxDatagramReport {
         source: datagram_source,
         datagram_len: datagram.len(),
@@ -15161,24 +17756,11 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
         fwmark_hex: format_value(parsed.fwmark, 8),
         radiotap_len: parsed.radiotap_len,
         frame_len,
-        packet_len: None,
-        tx_options: parsed.tx_options,
+        packet_len: Some(packet_len),
+        tx_descriptor_hex,
+        tx_options,
     });
 
-    let packet_len = match build_tx_packet(parsed.ieee80211_frame, channel, parsed.tx_options) {
-        Ok(packet) => packet.len(),
-        Err(error) => {
-            return bridge_tx_once_failure(
-                report,
-                "tx_descriptor",
-                "bridge TX descriptor construction failed before USB submission",
-                DiagnosticErrorReport {
-                    code: "tx_descriptor_failed",
-                    message: error.to_string(),
-                },
-            );
-        }
-    };
     if let Some(datagram_report) = &mut report.datagram {
         datagram_report.packet_len = Some(packet_len);
     }
@@ -15277,6 +17859,16 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
             transport: &mut transport,
             bulk_out,
             channel,
+            tx_rate: args.tx_overrides.tx_rate,
+            tx_bandwidth: args.tx_overrides.tx_bandwidth,
+            tx_queue: args.tx_overrides.tx_queue.into(),
+            tx_mac_id: args.tx_overrides.mac_id,
+            tx_rate_id: args.tx_overrides.tx_rate_id,
+            tx_retries: args.tx_overrides.tx_retries,
+            hardware_sequence: None,
+            first_segment: None,
+            disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
+            aggregate_break: args.tx_overrides.no_agg_break.then_some(false),
             submit_counters: &mut submit_counters,
         };
         submit_tx_datagram(&datagram, &mut radio, &mut bridge_counters)
@@ -15344,15 +17936,86 @@ struct BridgeTxRadio<'a> {
     transport: &'a mut InitUsbTransport,
     bulk_out: u8,
     channel: Channel,
+    tx_rate: Option<TxRate>,
+    tx_bandwidth: Option<Bandwidth>,
+    tx_queue: TxQueue,
+    tx_mac_id: Option<u8>,
+    tx_rate_id: Option<u8>,
+    tx_retries: Option<u8>,
+    hardware_sequence: Option<bool>,
+    first_segment: Option<bool>,
+    disable_rate_fallback: Option<bool>,
+    aggregate_break: Option<bool>,
     submit_counters: &'a mut TxSubmitCounters,
+}
+
+fn apply_bridge_tx_overrides(
+    overrides: &BridgeTxOverrideArgs,
+    mut options: TxOptions,
+) -> TxOptions {
+    if let Some(rate) = overrides.tx_rate {
+        options.rate = rate;
+    }
+    if let Some(bandwidth) = overrides.tx_bandwidth {
+        options.bandwidth = bandwidth;
+    }
+    if overrides.tx_queue != TxQueueArg::Auto {
+        options.queue = overrides.tx_queue.into();
+    }
+    if let Some(mac_id) = overrides.mac_id {
+        options.mac_id = mac_id;
+    }
+    if let Some(rate_id) = overrides.tx_rate_id {
+        options.rate_id = Some(rate_id);
+    }
+    if let Some(retries) = overrides.tx_retries {
+        options.retries = retries;
+    }
+    if overrides.enable_rate_fallback {
+        options.disable_rate_fallback = false;
+    }
+    if overrides.no_agg_break {
+        options.aggregate_break = false;
+    }
+    options
 }
 
 impl RadioTx for BridgeTxRadio<'_> {
     fn submit_80211(
         &mut self,
         frame: &[u8],
-        options: TxOptions,
+        mut options: TxOptions,
     ) -> std::result::Result<(), String> {
+        if let Some(rate) = self.tx_rate {
+            options.rate = rate;
+        }
+        if let Some(bandwidth) = self.tx_bandwidth {
+            options.bandwidth = bandwidth;
+        }
+        if self.tx_queue != TxQueue::Auto {
+            options.queue = self.tx_queue;
+        }
+        if let Some(mac_id) = self.tx_mac_id {
+            options.mac_id = mac_id;
+        }
+        if let Some(rate_id) = self.tx_rate_id {
+            options.rate_id = Some(rate_id);
+        }
+        if let Some(retries) = self.tx_retries {
+            options.retries = retries;
+        }
+        if let Some(hardware_sequence) = self.hardware_sequence {
+            options.hardware_sequence = hardware_sequence;
+        }
+        if let Some(first_segment) = self.first_segment {
+            options.first_segment = first_segment;
+        }
+        if let Some(disable_rate_fallback) = self.disable_rate_fallback {
+            options.disable_rate_fallback = disable_rate_fallback;
+        }
+        if let Some(aggregate_break) = self.aggregate_break {
+            options.aggregate_break = aggregate_break;
+        }
         submit_tx_frame(
             self.transport,
             self.bulk_out,
@@ -15462,6 +18125,56 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             },
         );
     }
+    if args.tx_status.tx_status && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listener TX status delay is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_delay",
+                message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
+            },
+        );
+    }
+    if args.tx_status.tx_status && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listener TX status poll count is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_poll_count",
+                message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
+            },
+        );
+    }
+    if args.tx_status.tx_status
+        && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
+    {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listener TX status poll total is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_poll_total",
+                message: format!(
+                    "--tx-status-poll-ms multiplied by --tx-status-poll-count must be <= {MAX_TX_STATUS_TOTAL_POLL_MS}"
+                ),
+            },
+        );
+    }
+
+    let init_bridge_args = bridge_tx_listen_init_bridge_args(&args);
+    let init_assets = match load_bridge_tx_bench_init_assets(&init_bridge_args) {
+        Ok(init_assets) => init_assets,
+        Err(error) => {
+            return bridge_tx_listen_failure(
+                report,
+                "argument_validation",
+                "bridge TX listener same-session init arguments did not pass local validation",
+                error,
+            );
+        }
+    };
 
     let socket = match UdpSocket::bind(args.bind) {
         Ok(socket) => socket,
@@ -15567,9 +18280,68 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     report.endpoints = Some(endpoints);
     report.bulk_out_endpoint = Some(bulk_out);
     report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
+    let mut pre_tx_counters = claim_counters;
+
+    if let Some(init_assets) = init_assets.as_ref() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match run_bridge_tx_bench_same_session_init(
+            &registers,
+            &init_bridge_args,
+            channel,
+            report
+                .endpoints
+                .as_ref()
+                .expect("bridge TX listener endpoints are present after USB claim"),
+            init_assets,
+            &mut pre_tx_counters,
+        ) {
+            Ok(init_report) => {
+                report.same_session_init = Some(init_report);
+            }
+            Err((init_report, error)) => {
+                report.same_session_init = Some(init_report);
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "init_before_tx",
+                    "bridge TX listener same-session init failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if args.clear_txdma_status_before_tx {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_clear_txdma_status(
+            &registers,
+            args.txdma_status_clear_value,
+            &mut pre_tx_counters,
+        ) {
+            Ok(clear_report) => {
+                report.txdma_status_clear = Some(clear_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "clear_txdma_status",
+                    "bridge TX listener TXDMA status clear failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
 
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
+    let mut tx_status = tx_status_probe_report(&args.tx_status);
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_pre(&registers, &mut tx_status);
+    }
     let mut buf = vec![0u8; u16::MAX as usize];
     for _ in 0..args.max_datagrams {
         let (len, peer) = match socket.recv_from(&mut buf) {
@@ -15582,7 +18354,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             {
                 bridge_tx_listen_update_counters(
                     &mut report,
-                    claim_counters,
+                    pre_tx_counters,
                     bridge_counters,
                     submit_counters,
                 );
@@ -15610,7 +18382,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             Err(error) => {
                 bridge_tx_listen_update_counters(
                     &mut report,
-                    claim_counters,
+                    pre_tx_counters,
                     bridge_counters,
                     submit_counters,
                 );
@@ -15635,7 +18407,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 bridge_counters = bridge_tx_parse_error_counters(&error);
                 bridge_tx_listen_update_counters(
                     &mut report,
-                    claim_counters,
+                    pre_tx_counters,
                     bridge_counters,
                     submit_counters,
                 );
@@ -15650,26 +18422,31 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 );
             }
         };
-        let packet_len = match build_tx_packet(parsed.ieee80211_frame, channel, parsed.tx_options) {
-            Ok(packet) => packet.len(),
-            Err(error) => {
-                bridge_tx_listen_update_counters(
-                    &mut report,
-                    claim_counters,
-                    bridge_counters,
-                    submit_counters,
-                );
-                return bridge_tx_listen_failure(
-                    report,
-                    "tx_descriptor",
-                    "received bridge TX datagram could not build a TX descriptor",
-                    DiagnosticErrorReport {
-                        code: "tx_descriptor_failed",
-                        message: error.to_string(),
-                    },
-                );
-            }
-        };
+        let tx_options = apply_bridge_tx_overrides(&args.tx_overrides, parsed.tx_options);
+        let (packet_len, tx_descriptor_hex) =
+            match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+                Ok(packet) => (
+                    packet.len(),
+                    Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+                ),
+                Err(error) => {
+                    bridge_tx_listen_update_counters(
+                        &mut report,
+                        pre_tx_counters,
+                        bridge_counters,
+                        submit_counters,
+                    );
+                    return bridge_tx_listen_failure(
+                        report,
+                        "tx_descriptor",
+                        "received bridge TX datagram could not build a TX descriptor",
+                        DiagnosticErrorReport {
+                            code: "tx_descriptor_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
         report.last_datagram = Some(BridgeTxDatagramReport {
             source: "udp",
             datagram_len: len,
@@ -15678,7 +18455,8 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             radiotap_len: parsed.radiotap_len,
             frame_len: parsed.ieee80211_frame.len(),
             packet_len: Some(packet_len),
-            tx_options: parsed.tx_options,
+            tx_descriptor_hex,
+            tx_options,
         });
 
         let submit_result = {
@@ -15686,14 +18464,29 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 transport: &mut transport,
                 bulk_out,
                 channel,
+                tx_rate: args.tx_overrides.tx_rate,
+                tx_bandwidth: args.tx_overrides.tx_bandwidth,
+                tx_queue: args.tx_overrides.tx_queue.into(),
+                tx_mac_id: args.tx_overrides.mac_id,
+                tx_rate_id: args.tx_overrides.tx_rate_id,
+                tx_retries: args.tx_overrides.tx_retries,
+                hardware_sequence: None,
+                first_segment: None,
+                disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
+                aggregate_break: args.tx_overrides.no_agg_break.then_some(false),
                 submit_counters: &mut submit_counters,
             };
             submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
         };
         if let Err(error) = submit_result {
+            if tx_status.is_some() {
+                let registers = Rtl8812auRegisterAccess::new(&transport);
+                tx_status_probe_post(&registers, &mut tx_status);
+                report.tx_status = tx_status;
+            }
             bridge_tx_listen_update_counters(
                 &mut report,
-                claim_counters,
+                pre_tx_counters,
                 bridge_counters,
                 submit_counters,
             );
@@ -15709,9 +18502,14 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_post(&registers, &mut tx_status);
+        report.tx_status = tx_status;
+    }
     bridge_tx_listen_update_counters(
         &mut report,
-        claim_counters,
+        pre_tx_counters,
         bridge_counters,
         submit_counters,
     );
@@ -15738,10 +18536,17 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             detail: "received bounded UDP datagrams and submitted them through live radio TX",
         },
     ];
-    report.notes = vec![
-        "live bridge TX listener assumes the adapter has already completed init on the requested channel",
-        "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
-    ];
+    report.notes = if args.init_before_tx {
+        vec![
+            "live bridge TX listener ran same-session RTL8812AU init before accepting datagrams",
+            "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+        ]
+    } else {
+        vec![
+            "live bridge TX listener assumes the adapter has already completed init on the requested channel",
+            "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+        ]
+    };
     report
 }
 
@@ -15768,6 +18573,9 @@ fn bridge_tx_listen_base_report(
         last_datagram: None,
         bulk_out_endpoint: None,
         bulk_out_endpoint_hex: None,
+        same_session_init: None,
+        txdma_status_clear: None,
+        tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
         counters: DiagnosticCounters::default(),
@@ -15802,13 +18610,2704 @@ fn bridge_tx_listen_update_counters(
 ) {
     report.bridge_counters = bridge_counters;
     report.submit_counters = submit_counters;
-    report.counters = DiagnosticCounters {
+    let mut counters = DiagnosticCounters {
+        usb_control_reads: claim_counters.usb_control_reads,
         usb_control_writes: claim_counters.usb_control_writes,
         usb_bulk_out_writes: report.submit_counters.submitted + report.submit_counters.failed,
         tx_frames: report.submit_counters.submitted,
         dropped_frames: report.bridge_counters.dropped,
         ..DiagnosticCounters::default()
     };
+    add_tx_status_probe_counters(&mut counters, &report.tx_status);
+    report.counters = counters;
+}
+
+const MAX_BRIDGE_TX_BENCH_PAYLOAD_LEN: usize = 2304;
+const BRIDGE_TX_BENCH_RADIOTAP_LEN: usize = 13;
+const BRIDGE_TX_BENCH_SEQUENCE_OFFSET: usize = 4 + BRIDGE_TX_BENCH_RADIOTAP_LEN + 22;
+
+struct BridgeTxBenchInitAssets {
+    firmware_path: PathBuf,
+    firmware_image: FirmwareImage,
+    firmware: FirmwareReport,
+    mac_plan: RealtekTablePlan,
+    phy_plan: RealtekTablePlan,
+    agc_plan: RealtekTablePlan,
+    radioa_plan: RealtekTablePlan,
+    radiob_plan: RealtekTablePlan,
+}
+
+fn load_bridge_tx_bench_init_assets(
+    args: &BridgeTxBenchArgs,
+) -> std::result::Result<Option<BridgeTxBenchInitAssets>, DiagnosticErrorReport> {
+    if !args.init_before_tx {
+        return Ok(None);
+    }
+
+    let firmware_path = args.firmware.clone().ok_or_else(|| DiagnosticErrorReport {
+        code: "missing_firmware",
+        message:
+            "bridge-tx-bench --init-before-tx requires --firmware with an RTL8812A firmware image"
+                .to_string(),
+    })?;
+    let (firmware_image, firmware) =
+        load_firmware_with_report(&firmware_path).map_err(|message| DiagnosticErrorReport {
+            code: "firmware_load_failed",
+            message,
+        })?;
+    let firmware_payload = firmware_image.realtek_download_payload();
+    if firmware_page_count(firmware_payload.bytes.len()) > MAX_FIRMWARE_DOWNLOAD_PAGES {
+        return Err(DiagnosticErrorReport {
+            code: "firmware_too_many_pages",
+            message: format!(
+                "firmware requires {} 4 KiB pages, but RTL8812A page selector exposes {} pages",
+                firmware_page_count(firmware_payload.bytes.len()),
+                MAX_FIRMWARE_DOWNLOAD_PAGES
+            ),
+        });
+    }
+
+    let condition_env = args.condition_env();
+    let mac_plan = load_mac_table_plan(&args.mac_source, condition_env)?;
+    let (phy_plan, agc_plan) = load_bb_table_plans(&args.bb_source, condition_env)?;
+    let (radioa_plan, radiob_plan) = load_rf_table_plans(&args.rf_source, condition_env)?;
+
+    Ok(Some(BridgeTxBenchInitAssets {
+        firmware_path,
+        firmware_image,
+        firmware,
+        mac_plan,
+        phy_plan,
+        agc_plan,
+        radioa_plan,
+        radiob_plan,
+    }))
+}
+
+fn run_bridge_tx_bench_firmware_phase<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    firmware_args: &FirmwareSmokeArgs,
+    firmware_payload: FirmwarePayload<'_>,
+    counters: &mut DiagnosticCounters,
+    phase_summaries: &mut Vec<InitLivePhaseSummary>,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut firmware_steps = Vec::new();
+    let mut firmware_stats = FirmwareRunStats {
+        firmware_payload_offset: Some(firmware_payload.offset),
+        firmware_payload_len: Some(firmware_payload.bytes.len()),
+        firmware_signature: firmware_payload.signature,
+        ..FirmwareRunStats::default()
+    };
+    let before = *counters;
+    if let Err(error) = run_firmware_sequence(
+        registers,
+        firmware_args,
+        firmware_payload.bytes,
+        counters,
+        &mut firmware_steps,
+        &mut firmware_stats,
+    ) {
+        push_init_live_phase(
+            phase_summaries,
+            "firmware",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} steps", error.message, firmware_steps.len()),
+            before,
+            *counters,
+        );
+        return Err(error);
+    }
+    push_init_live_phase(
+        phase_summaries,
+        "firmware",
+        DiagnosticPhaseStatus::Completed,
+        format!(
+            "downloaded {} payload bytes in {} control writes",
+            firmware_payload.bytes.len(),
+            firmware_stats.firmware_control_writes
+        ),
+        before,
+        *counters,
+    );
+    Ok(())
+}
+
+fn run_bridge_tx_bench_llt_phase<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    llt_args: &LltSmokeArgs,
+    counters: &mut DiagnosticCounters,
+    phase_summaries: &mut Vec<InitLivePhaseSummary>,
+    llt_stats: &mut LltRunStats,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut llt_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_llt_sequence(registers, llt_args, counters, &mut llt_steps, llt_stats) {
+        push_init_live_phase(
+            phase_summaries,
+            "llt",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} steps", error.message, llt_steps.len()),
+            before,
+            *counters,
+        );
+        return Err(error);
+    }
+    push_init_live_phase(
+        phase_summaries,
+        "llt",
+        DiagnosticPhaseStatus::Completed,
+        format!("wrote {} LLT entries", llt_stats.entries_written),
+        before,
+        *counters,
+    );
+    Ok(())
+}
+
+fn run_bridge_tx_bench_same_session_init<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    args: &BridgeTxBenchArgs,
+    channel: Channel,
+    endpoints: &UsbEndpoints,
+    assets: &BridgeTxBenchInitAssets,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<
+    BridgeTxBenchSameSessionInitReport,
+    (BridgeTxBenchSameSessionInitReport, DiagnosticErrorReport),
+>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let firmware_payload = assets.firmware_image.realtek_download_payload();
+    let firmware_payload_len = firmware_payload.bytes.len();
+    let mut phase_summaries = Vec::new();
+    let mut llt_stats = LltRunStats::default();
+    let mut queue_layout = None;
+    let mut bb_stats = BbSmokeStats::default();
+    let mut rf_stats = RfSmokeStats::default();
+
+    let power_args = PowerOnSmokeArgs {
+        adapter: args.adapter.clone(),
+        timeout_ms: args.init_timeout_ms,
+        poll_attempts: 200,
+        poll_delay_us: 10,
+        i_understand_this_writes_registers: true,
+    };
+    let firmware_args = FirmwareSmokeArgs {
+        adapter: args.adapter.clone(),
+        firmware: assets.firmware_path.clone(),
+        timeout_ms: args.init_timeout_ms,
+        download_attempts: 3,
+        checksum_min_attempts: 5,
+        checksum_timeout_ms: 50,
+        ready_min_attempts: 10,
+        ready_timeout_ms: 200,
+        poll_delay_us: 1000,
+        i_understand_this_writes_registers: true,
+    };
+    let llt_args = LltSmokeArgs {
+        adapter: args.adapter.clone(),
+        timeout_ms: args.init_timeout_ms,
+        poll_attempts: 25,
+        poll_delay_us: 10,
+        i_understand_this_writes_registers: true,
+    };
+    let bb_args = BbSmokeArgs {
+        adapter: args.adapter.clone(),
+        bb_source: args.bb_source.clone(),
+        timeout_ms: args.init_timeout_ms,
+        cut_version: args.cut_version,
+        package_type: args.package_type,
+        support_interface: args.support_interface,
+        support_platform: args.support_platform,
+        board_type: args.board_type,
+        type_glna: args.type_glna,
+        type_gpa: args.type_gpa,
+        type_alna: args.type_alna,
+        type_apa: args.type_apa,
+        crystal_cap: args.crystal_cap,
+        i_understand_this_writes_registers: true,
+    };
+
+    let mut power_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_power_on_sequence(registers, &power_args, counters, &mut power_steps) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "power_on",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} steps", error.message, power_steps.len()),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "power_on",
+        DiagnosticPhaseStatus::Completed,
+        format!("completed {} power-on/RF-reset steps", power_steps.len()),
+        before,
+        *counters,
+    );
+
+    if args.linux_init_order {
+        if let Err(error) = run_bridge_tx_bench_llt_phase(
+            registers,
+            &llt_args,
+            counters,
+            &mut phase_summaries,
+            &mut llt_stats,
+        ) {
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+        if let Err(error) = run_bridge_tx_bench_firmware_phase(
+            registers,
+            &firmware_args,
+            firmware_payload,
+            counters,
+            &mut phase_summaries,
+        ) {
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    } else {
+        if let Err(error) = run_bridge_tx_bench_firmware_phase(
+            registers,
+            &firmware_args,
+            firmware_payload,
+            counters,
+            &mut phase_summaries,
+        ) {
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+        if let Err(error) = run_bridge_tx_bench_llt_phase(
+            registers,
+            &llt_args,
+            counters,
+            &mut phase_summaries,
+            &mut llt_stats,
+        ) {
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    }
+
+    let before = *counters;
+    let mac_table_writes = match run_mac_table_plan(registers, counters, &assets.mac_plan) {
+        Ok(writes) => writes,
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "mac_table",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    };
+    push_init_live_phase(
+        &mut phase_summaries,
+        "mac_table",
+        DiagnosticPhaseStatus::Completed,
+        format!("applied {mac_table_writes} generated MAC register writes"),
+        before,
+        *counters,
+    );
+
+    let layout = match queue_layout_from_endpoints(endpoints) {
+        Ok(layout) => layout,
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "queue_dma",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                *counters,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    };
+    queue_layout = Some(layout);
+    let mut queue_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_queue_dma_sequence(registers, &layout, counters, &mut queue_steps) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "queue_dma",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} steps", error.message, queue_steps.len()),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "queue_dma",
+        DiagnosticPhaseStatus::Completed,
+        format!(
+            "programmed queue/DMA layout for {} bulk OUT endpoints",
+            layout.bulk_out_endpoint_count
+        ),
+        before,
+        *counters,
+    );
+
+    let mut mac_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_mac_sequence(registers, counters, &mut mac_steps) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "mac",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} steps", error.message, mac_steps.len()),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "mac",
+        DiagnosticPhaseStatus::Completed,
+        format!("completed {} MAC/WMAC setup steps", mac_steps.len()),
+        before,
+        *counters,
+    );
+
+    let mut bb_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_bb_sequence(
+        registers,
+        &bb_args,
+        &assets.phy_plan,
+        &assets.agc_plan,
+        counters,
+        &mut bb_steps,
+        &mut bb_stats,
+    ) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "bb",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} setup steps", error.message, bb_steps.len()),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "bb",
+        DiagnosticPhaseStatus::Completed,
+        format!(
+            "applied {} PHY writes, {} AGC writes, and {} delays",
+            bb_stats.phy_writes_applied, bb_stats.agc_writes_applied, bb_stats.delays_applied
+        ),
+        before,
+        *counters,
+    );
+
+    let mut rf_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_rf_sequence(
+        registers,
+        &assets.radioa_plan,
+        &assets.radiob_plan,
+        counters,
+        &mut rf_steps,
+        &mut rf_stats,
+    ) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "rf",
+            DiagnosticPhaseStatus::Blocked,
+            format!("{} after {} setup steps", error.message, rf_steps.len()),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "rf",
+        DiagnosticPhaseStatus::Completed,
+        format!(
+            "applied {} radioA writes, {} radioB writes, and {} delays",
+            rf_stats.radioa_writes_applied, rf_stats.radiob_writes_applied, rf_stats.delays_applied
+        ),
+        before,
+        *counters,
+    );
+
+    let mut channel_steps = Vec::new();
+    let before = *counters;
+    if let Err(error) = run_channel_sequence(
+        registers,
+        channel,
+        args.bandwidth,
+        args.rfe_type,
+        &assets.radioa_plan,
+        &assets.radiob_plan,
+        counters,
+        &mut channel_steps,
+    ) {
+        push_init_live_phase(
+            &mut phase_summaries,
+            "channel",
+            DiagnosticPhaseStatus::Blocked,
+            format!(
+                "{} after {} channel steps",
+                error.message,
+                channel_steps.len()
+            ),
+            before,
+            *counters,
+        );
+        return Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                phase_summaries,
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                *counters,
+                DiagnosticResult::Fail,
+            ),
+            error,
+        ));
+    }
+    push_init_live_phase(
+        &mut phase_summaries,
+        "channel",
+        DiagnosticPhaseStatus::Completed,
+        format!(
+            "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {} steps",
+            channel.number,
+            channel.frequency_mhz,
+            args.bandwidth.mhz(),
+            format_value(args.rfe_type, 2),
+            channel_steps.len()
+        ),
+        before,
+        *counters,
+    );
+
+    let before = *counters;
+    let tx_tail_steps = match run_tx_scheduler_tail_sequence(registers, counters) {
+        Ok(steps) => steps,
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "tx_scheduler_tail",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    };
+    push_init_live_phase(
+        &mut phase_summaries,
+        "tx_scheduler_tail",
+        DiagnosticPhaseStatus::Completed,
+        format!("applied {tx_tail_steps} late Linux USB TX scheduler writes"),
+        before,
+        *counters,
+    );
+
+    Ok(bridge_tx_bench_same_session_init_report(
+        args,
+        channel,
+        assets,
+        phase_summaries,
+        firmware_payload_len,
+        &llt_stats,
+        queue_layout,
+        &bb_stats,
+        &rf_stats,
+        *counters,
+        DiagnosticResult::Pass,
+    ))
+}
+
+fn run_tx_scheduler_tail_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<usize, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut writes = 0usize;
+    let queue_ctrl = read8_with_counter(registers, counters, REG_QUEUE_CTRL).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_QUEUE_CTRL pre-tail read failed: {error}"),
+        }
+    })?;
+    write8_with_counter(registers, counters, REG_QUEUE_CTRL, queue_ctrl & !BIT3).map_err(
+        |error| DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_QUEUE_CTRL late TX scheduler write failed: {error}"),
+        },
+    )?;
+    writes += 1;
+
+    for (address, value, name) in [
+        (REG_FWHW_TXQ_CTRL + 1, 0x0f, "REG_FWHW_TXQ_CTRL+1"),
+        (
+            REG_EARLY_MODE_CONTROL_8812 + 3,
+            0x01,
+            "REG_EARLY_MODE_CONTROL_8812+3",
+        ),
+        (REG_SDIO_CTRL_8812, 0x00, "REG_SDIO_CTRL_8812"),
+        (REG_ACLK_MON, 0x00, "REG_ACLK_MON"),
+        (REG_USB_HRPWM, 0x00, "REG_USB_HRPWM"),
+        (REG_NAV_UPPER, 0x00, "REG_NAV_UPPER"),
+    ] {
+        write8_with_counter(registers, counters, address, value).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_write_failed",
+                message: format!("{name} late TX scheduler write failed: {error}"),
+            }
+        })?;
+        writes += 1;
+    }
+
+    write16_with_counter(registers, counters, REG_TX_RPT_TIME, 0x3df0).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_TX_RPT_TIME late TX scheduler write failed: {error}"),
+        }
+    })?;
+    writes += 1;
+
+    Ok(writes)
+}
+
+fn bridge_tx_bench_program_local_mac<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    local_mac: [u8; 6],
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchLocalMacReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let before = read_mac_register(registers, counters, REG_MACID, "pre-local-MAC")?;
+    for (offset, value) in local_mac.iter().copied().enumerate() {
+        write8_with_counter(registers, counters, REG_MACID + offset as u16, value).map_err(
+            |error| DiagnosticErrorReport {
+                code: "register_write_failed",
+                message: format!(
+                    "REG_MACID local MAC byte write failed at {}: {error}",
+                    format_address(REG_MACID + offset as u16)
+                ),
+            },
+        )?;
+    }
+    let after = read_mac_register(registers, counters, REG_MACID, "post-local-MAC")?;
+
+    Ok(BridgeTxBenchLocalMacReport {
+        register_name: "REG_MACID",
+        address: REG_MACID,
+        address_hex: format_address(REG_MACID),
+        before: format_mac_address(before),
+        written: format_mac_address(local_mac),
+        after: format_mac_address(after),
+        counters: DiagnosticCounters {
+            usb_control_reads: counters
+                .usb_control_reads
+                .saturating_sub(before_counters.usb_control_reads),
+            usb_control_writes: counters
+                .usb_control_writes
+                .saturating_sub(before_counters.usb_control_writes),
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn read_mac_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    address: u16,
+    phase: &'static str,
+) -> std::result::Result<[u8; 6], DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut mac = [0u8; 6];
+    for (offset, value) in mac.iter_mut().enumerate() {
+        *value =
+            read8_with_counter(registers, counters, address + offset as u16).map_err(|error| {
+                DiagnosticErrorReport {
+                    code: "register_read_failed",
+                    message: format!(
+                        "REG_MACID {phase} byte read failed at {}: {error}",
+                        format_address(address + offset as u16)
+                    ),
+                }
+            })?;
+    }
+    Ok(mac)
+}
+
+fn bridge_tx_bench_set_monitor_opmode<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchMonitorOpmodeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let msr_before = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_MSR pre-monitor-opmode read failed: {error}"),
+        }
+    })?;
+    let msr_written = msr_before & !MSR_PORT0_NETTYPE_MASK;
+    write8_with_counter(registers, counters, REG_MSR, msr_written).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_MSR monitor/no-link write failed: {error}"),
+        }
+    })?;
+    let msr_after = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_MSR post-monitor-opmode read failed: {error}"),
+        }
+    })?;
+
+    write32_with_counter(registers, counters, REG_RCR, MONITOR_RECEIVE_CONFIG).map_err(
+        |error| DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_RCR monitor receive config write failed: {error}"),
+        },
+    )?;
+    let rcr_after = read32_with_counter(registers, counters, REG_RCR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_RCR post-monitor-opmode read failed: {error}"),
+        }
+    })?;
+
+    write16_with_counter(registers, counters, REG_RXFLTMAP2, u16::MAX).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_RXFLTMAP2 monitor receive map write failed: {error}"),
+        }
+    })?;
+    let rxfltmap2_after =
+        read16_with_counter(registers, counters, REG_RXFLTMAP2).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("REG_RXFLTMAP2 post-monitor-opmode read failed: {error}"),
+            }
+        })?;
+
+    Ok(BridgeTxBenchMonitorOpmodeReport {
+        msr_before,
+        msr_before_hex: format_value(msr_before, 2),
+        msr_written,
+        msr_written_hex: format_value(msr_written, 2),
+        msr_after,
+        msr_after_hex: format_value(msr_after, 2),
+        rcr_written: MONITOR_RECEIVE_CONFIG,
+        rcr_written_hex: format_value(MONITOR_RECEIVE_CONFIG, 8),
+        rcr_after,
+        rcr_after_hex: format_value(rcr_after, 8),
+        rxfltmap2_written: u16::MAX,
+        rxfltmap2_written_hex: format_value(u16::MAX, 4),
+        rxfltmap2_after,
+        rxfltmap2_after_hex: format_value(rxfltmap2_after, 4),
+        counters: DiagnosticCounters {
+            usb_control_reads: counters
+                .usb_control_reads
+                .saturating_sub(before_counters.usb_control_reads),
+            usb_control_writes: counters
+                .usb_control_writes
+                .saturating_sub(before_counters.usb_control_writes),
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_send_media_status_h2c<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    mac_id: u8,
+    role: u8,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchH2cReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let hmetfr_before = read8_with_counter(registers, counters, REG_HMETFR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_HMETFR pre-H2C read failed: {error}"),
+        }
+    })?;
+    let Some(box_index) =
+        (0..RTL8812_MAX_H2C_BOX_NUMS).find(|box_index| hmetfr_before & (1u8 << box_index) == 0)
+    else {
+        return Err(DiagnosticErrorReport {
+            code: "h2c_mailbox_busy",
+            message: format!(
+                "no RTL8812A H2C mailbox was free, REG_HMETFR={}",
+                format_value(hmetfr_before, 2)
+            ),
+        });
+    };
+
+    let mut command_bytes = [0u8; 4];
+    let ext_bytes = [0u8; 4];
+    command_bytes[0] = H2C_MEDIA_STATUS_RPT;
+    command_bytes[1] = BIT0 | ((role & 0x0f) << 4);
+    command_bytes[2] = mac_id;
+    command_bytes[3] = 0;
+
+    let ext_addr = REG_HMEBOX_EXT0_8812 + u16::from(box_index) * RTL8812_EX_MESSAGE_BOX_SIZE;
+    for (offset, value) in ext_bytes.iter().copied().enumerate() {
+        write8_with_counter(registers, counters, ext_addr + offset as u16, value).map_err(
+            |error| DiagnosticErrorReport {
+                code: "register_write_failed",
+                message: format!(
+                    "H2C media-status ext byte write failed at {}: {error}",
+                    format_address(ext_addr + offset as u16)
+                ),
+            },
+        )?;
+    }
+
+    let box_addr = REG_HMEBOX_0 + u16::from(box_index) * RTL8812_MESSAGE_BOX_SIZE;
+    for (offset, value) in command_bytes.iter().copied().enumerate() {
+        write8_with_counter(registers, counters, box_addr + offset as u16, value).map_err(
+            |error| DiagnosticErrorReport {
+                code: "register_write_failed",
+                message: format!(
+                    "H2C media-status command byte write failed at {}: {error}",
+                    format_address(box_addr + offset as u16)
+                ),
+            },
+        )?;
+    }
+
+    let hmetfr_after = read8_with_counter(registers, counters, REG_HMETFR).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_HMETFR post-H2C read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchH2cReport {
+        command_name: "H2C_MEDIA_STATUS_RPT",
+        command_id: H2C_MEDIA_STATUS_RPT,
+        command_id_hex: format_value(H2C_MEDIA_STATUS_RPT, 2),
+        box_index,
+        hmetfr_before,
+        hmetfr_before_hex: format_value(hmetfr_before, 2),
+        hmetfr_after,
+        hmetfr_after_hex: format_value(hmetfr_after, 2),
+        command_bytes_hex: command_bytes
+            .into_iter()
+            .map(|value| format_value(value, 2))
+            .collect(),
+        ext_bytes_hex: ext_bytes
+            .into_iter()
+            .map(|value| format_value(value, 2))
+            .collect(),
+        counters: DiagnosticCounters {
+            usb_control_reads: counters
+                .usb_control_reads
+                .saturating_sub(before_counters.usb_control_reads),
+            usb_control_writes: counters
+                .usb_control_writes
+                .saturating_sub(before_counters.usb_control_writes),
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_same_session_init_report(
+    args: &BridgeTxBenchArgs,
+    channel: Channel,
+    assets: &BridgeTxBenchInitAssets,
+    phase_summaries: Vec<InitLivePhaseSummary>,
+    firmware_payload_len: usize,
+    llt_stats: &LltRunStats,
+    queue_layout: Option<QueueLayout>,
+    bb_stats: &BbSmokeStats,
+    rf_stats: &RfSmokeStats,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+) -> BridgeTxBenchSameSessionInitReport {
+    let mac_table_writes_applied = phase_summaries
+        .iter()
+        .any(|phase| {
+            phase.id == "mac_table" && matches!(phase.status, DiagnosticPhaseStatus::Completed)
+        })
+        .then(|| assets.mac_plan.write_count() as u64)
+        .unwrap_or(0);
+    BridgeTxBenchSameSessionInitReport {
+        result,
+        init_order: if args.linux_init_order {
+            "linux_llt_before_firmware"
+        } else {
+            "current_firmware_before_llt"
+        },
+        firmware: assets.firmware.clone(),
+        mac_source: args.mac_source.clone(),
+        bb_source: args.bb_source.clone(),
+        rf_source: args.rf_source.clone(),
+        condition_env: args.condition_env(),
+        crystal_cap_hex: format_value(args.crystal_cap, 2),
+        rfe_type: args.rfe_type,
+        rfe_type_hex: format_value(args.rfe_type, 2),
+        phase_summaries,
+        firmware_payload_len,
+        llt_entries_written: llt_stats.entries_written,
+        queue_pages: queue_layout.map(queue_page_report),
+        mac_table_writes_applied,
+        bb_phy_writes_applied: bb_stats.phy_writes_applied,
+        bb_agc_writes_applied: bb_stats.agc_writes_applied,
+        bb_delays_applied: bb_stats.delays_applied,
+        rf_radioa_writes_applied: rf_stats.radioa_writes_applied,
+        rf_radiob_writes_applied: rf_stats.radiob_writes_applied,
+        rf_delays_applied: rf_stats.delays_applied,
+        effective_channel: if result == DiagnosticResult::Pass {
+            Some(channel)
+        } else {
+            None
+        },
+        effective_bandwidth: if result == DiagnosticResult::Pass {
+            Some(args.bandwidth)
+        } else {
+            None
+        },
+        counters,
+    }
+}
+
+fn bridge_tx_bench_clear_txdma_status<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    clear_value: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read32_with_counter(registers, counters, REG_TXDMA_STATUS).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_TXDMA_STATUS pre-clear read failed: {error}"),
+        }
+    })?;
+    write32_with_counter(registers, counters, REG_TXDMA_STATUS, clear_value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_TXDMA_STATUS clear write failed: {error}"),
+        }
+    })?;
+    let after = read32_with_counter(registers, counters, REG_TXDMA_STATUS).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("REG_TXDMA_STATUS post-clear read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name: "REG_TXDMA_STATUS",
+        address: REG_TXDMA_STATUS,
+        address_hex: format_value(REG_TXDMA_STATUS, 4),
+        width: "u32",
+        before,
+        before_hex: format_value(before, 8),
+        written: clear_value,
+        written_hex: format_value(clear_value, 8),
+        after,
+        after_hex: format_value(after, 8),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_write_txdma_offset_check<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    value: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before =
+        read32_with_counter(registers, counters, REG_TXDMA_OFFSET_CHK).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("REG_TXDMA_OFFSET_CHK pre-write read failed: {error}"),
+            }
+        })?;
+    write32_with_counter(registers, counters, REG_TXDMA_OFFSET_CHK, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("REG_TXDMA_OFFSET_CHK write failed: {error}"),
+        }
+    })?;
+    let after =
+        read32_with_counter(registers, counters, REG_TXDMA_OFFSET_CHK).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "register_read_failed",
+                message: format!("REG_TXDMA_OFFSET_CHK post-write read failed: {error}"),
+            }
+        })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name: "REG_TXDMA_OFFSET_CHK",
+        address: REG_TXDMA_OFFSET_CHK,
+        address_hex: format_value(REG_TXDMA_OFFSET_CHK, 4),
+        width: "u32",
+        before,
+        before_hex: format_value(before, 8),
+        written: value,
+        written_hex: format_value(value, 8),
+        after,
+        after_hex: format_value(after, 8),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_write16_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    value: u16,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read16_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-write read failed: {error}"),
+        }
+    })?;
+    write16_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} write failed: {error}"),
+        }
+    })?;
+    let after = read16_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-write read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u16",
+        before: u32::from(before),
+        before_hex: format_value(before, 4),
+        written: u32::from(value),
+        written_hex: format_value(value, 4),
+        after: u32::from(after),
+        after_hex: format_value(after, 4),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_write8_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    value: u8,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read8_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-write read failed: {error}"),
+        }
+    })?;
+    write8_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} write failed: {error}"),
+        }
+    })?;
+    let after = read8_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-write read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u8",
+        before: u32::from(before),
+        before_hex: format_value(before, 2),
+        written: u32::from(value),
+        written_hex: format_value(value, 2),
+        after: u32::from(after),
+        after_hex: format_value(after, 2),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_write32_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    value: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-write read failed: {error}"),
+        }
+    })?;
+    write32_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} write failed: {error}"),
+        }
+    })?;
+    let after = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-write read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u32",
+        before,
+        before_hex: format_value(before, 8),
+        written: value,
+        written_hex: format_value(value, 8),
+        after,
+        after_hex: format_value(after, 8),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_rmw32_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    value: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterMaskedWriteReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-rmw read failed: {error}"),
+        }
+    })?;
+    let written = (before & !mask) | (value & mask);
+    write32_with_counter(registers, counters, address, written).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} masked write failed: {error}"),
+        }
+    })?;
+    let after = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-rmw read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterMaskedWriteReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u32",
+        mask,
+        mask_hex: format_value(mask, 8),
+        before,
+        before_hex: format_value(before, 8),
+        written,
+        written_hex: format_value(written, 8),
+        after,
+        after_hex: format_value(after, 8),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_set8_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    mask: u8,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read8_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-set read failed: {error}"),
+        }
+    })?;
+    let value = before | mask;
+    write8_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} set write failed: {error}"),
+        }
+    })?;
+    let after = read8_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-set read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u8",
+        before: u32::from(before),
+        before_hex: format_value(before, 2),
+        written: u32::from(value),
+        written_hex: format_value(value, 2),
+        after: u32::from(after),
+        after_hex: format_value(after, 2),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_set16_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    mask: u16,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read16_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-set read failed: {error}"),
+        }
+    })?;
+    let value = before | mask;
+    write16_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} set write failed: {error}"),
+        }
+    })?;
+    let after = read16_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-set read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u16",
+        before: u32::from(before),
+        before_hex: format_value(before, 4),
+        written: u32::from(value),
+        written_hex: format_value(value, 4),
+        after: u32::from(after),
+        after_hex: format_value(after, 4),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_set32_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRegisterClearReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} pre-set read failed: {error}"),
+        }
+    })?;
+    let value = before | mask;
+    write32_with_counter(registers, counters, address, value).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_write_failed",
+            message: format!("{register_name} set write failed: {error}"),
+        }
+    })?;
+    let after = read32_with_counter(registers, counters, address).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "register_read_failed",
+            message: format!("{register_name} post-set read failed: {error}"),
+        }
+    })?;
+
+    Ok(BridgeTxBenchRegisterClearReport {
+        register_name,
+        address,
+        address_hex: format_value(address, 4),
+        width: "u32",
+        before,
+        before_hex: format_value(before, 8),
+        written: value,
+        written_hex: format_value(value, 8),
+        after,
+        after_hex: format_value(after, 8),
+        changed: before != after,
+        counters: DiagnosticCounters {
+            usb_control_reads: 2,
+            usb_control_writes: 1,
+            ..DiagnosticCounters::default()
+        },
+    })
+}
+
+fn bridge_tx_bench_has_post_tx_register_mutation(args: &BridgeTxBenchArgs) -> bool {
+    !args.post_tx_write8.is_empty()
+        || !args.post_tx_write16.is_empty()
+        || !args.post_tx_write32.is_empty()
+        || !args.post_tx_set8.is_empty()
+        || !args.post_tx_set16.is_empty()
+        || !args.post_tx_set32.is_empty()
+}
+
+fn bridge_tx_bench_apply_post_tx_register_mutations<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    args: &BridgeTxBenchArgs,
+    report: &mut BridgeTxBenchReport,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    for write in &args.post_tx_write8 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_write8_register(
+                registers,
+                "post_tx_write8",
+                write.address,
+                write.value as u8,
+                counters,
+            )?);
+    }
+    for write in &args.post_tx_write16 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_write16_register(
+                registers,
+                "post_tx_write16",
+                write.address,
+                write.value as u16,
+                counters,
+            )?);
+    }
+    for write in &args.post_tx_write32 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_write32_register(
+                registers,
+                "post_tx_write32",
+                write.address,
+                write.value,
+                counters,
+            )?);
+    }
+    for write in &args.post_tx_set8 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_set8_register(
+                registers,
+                "post_tx_set8",
+                write.address,
+                write.value as u8,
+                counters,
+            )?);
+    }
+    for write in &args.post_tx_set16 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_set16_register(
+                registers,
+                "post_tx_set16",
+                write.address,
+                write.value as u16,
+                counters,
+            )?);
+    }
+    for write in &args.post_tx_set32 {
+        report
+            .post_tx_register_writes
+            .push(bridge_tx_bench_set32_register(
+                registers,
+                "post_tx_set32",
+                write.address,
+                write.value,
+                counters,
+            )?);
+    }
+    Ok(())
+}
+
+fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
+    let selector = args.adapter.selector();
+    let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
+    let mut report = bridge_tx_bench_base_report(&args, selector, channel);
+    if result == DiagnosticResult::Fail {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark arguments did not pass local validation",
+            error.expect("unsupported channel error"),
+        );
+    }
+    let channel = channel.expect("channel resolved before bridge TX benchmark");
+
+    if !args.i_understand_this_transmits {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark requires explicit operator authorization",
+            DiagnosticErrorReport {
+                code: "missing_tx_authorization",
+                message: "bridge-tx-bench requires --i-understand-this-transmits".to_string(),
+            },
+        );
+    }
+    if args.count == 0 {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark requires at least one datagram",
+            DiagnosticErrorReport {
+                code: "invalid_bench_count",
+                message: "--count must be greater than zero".to_string(),
+            },
+        );
+    }
+    if args.payload_len > MAX_BRIDGE_TX_BENCH_PAYLOAD_LEN {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark payload is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_bench_payload_len",
+                message: format!("--payload-len must be <= {MAX_BRIDGE_TX_BENCH_PAYLOAD_LEN}"),
+            },
+        );
+    }
+    if args.mcs > 31 {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark MCS is outside the HT range",
+            DiagnosticErrorReport {
+                code: "invalid_bench_mcs",
+                message: "--mcs must be <= 31 for synthetic HT radiotap".to_string(),
+            },
+        );
+    }
+    if args.tx_status.tx_status && args.tx_status.tx_status_delay_ms > MAX_TX_STATUS_DELAY_MS {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark TX status delay is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_delay",
+                message: format!("--tx-status-delay-ms must be <= {MAX_TX_STATUS_DELAY_MS}"),
+            },
+        );
+    }
+    if args.tx_status.tx_status && args.tx_status.tx_status_poll_count > MAX_TX_STATUS_POLL_COUNT {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark TX status poll count is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_poll_count",
+                message: format!("--tx-status-poll-count must be <= {MAX_TX_STATUS_POLL_COUNT}"),
+            },
+        );
+    }
+    if args.tx_status.tx_status
+        && tx_status_total_poll_ms(&args.tx_status) > MAX_TX_STATUS_TOTAL_POLL_MS
+    {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark TX status poll total is outside the guarded range",
+            DiagnosticErrorReport {
+                code: "invalid_tx_status_poll_total",
+                message: format!(
+                    "--tx-status-poll-ms multiplied by --tx-status-poll-count must be <= {MAX_TX_STATUS_TOTAL_POLL_MS}"
+                ),
+            },
+        );
+    }
+    let init_assets = match load_bridge_tx_bench_init_assets(&args) {
+        Ok(init_assets) => init_assets,
+        Err(error) => {
+            return bridge_tx_bench_failure(
+                report,
+                "argument_validation",
+                "bridge TX benchmark same-session init arguments did not pass local validation",
+                error,
+            );
+        }
+    };
+    let channel_id = match WfbChannelId::new(args.link_id, args.radio_port) {
+        Ok(channel_id) => channel_id,
+        Err(error) => {
+            return bridge_tx_bench_failure(
+                report,
+                "argument_validation",
+                "bridge TX benchmark WFB channel ID is invalid",
+                DiagnosticErrorReport {
+                    code: "invalid_wfb_channel_id",
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+
+    let mut datagram = match build_bridge_tx_bench_datagram(&args, channel_id, 0) {
+        Ok(datagram) => datagram,
+        Err(error) => {
+            return bridge_tx_bench_failure(
+                report,
+                "argument_validation",
+                "bridge TX benchmark datagram could not be built",
+                error,
+            );
+        }
+    };
+    let packet_override = match parse_bridge_tx_bench_packet_override(&args) {
+        Ok(packet_override) => packet_override,
+        Err(error) => {
+            return bridge_tx_bench_failure(
+                report,
+                "argument_validation",
+                "bridge TX benchmark packet override did not pass local validation",
+                error,
+            );
+        }
+    };
+    let parsed = match parse_tx_datagram(&datagram) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return bridge_tx_bench_failure(
+                report,
+                "bridge_parse",
+                "generated WFB distributor datagram could not be parsed",
+                DiagnosticErrorReport {
+                    code: "invalid_generated_bridge_datagram",
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+    let packet = if let Some(packet_override) = packet_override {
+        packet_override
+    } else {
+        match build_tx_packet(
+            parsed.ieee80211_frame,
+            channel,
+            bridge_tx_bench_tx_options(&args, parsed.tx_options),
+        ) {
+            Ok(packet) => packet,
+            Err(error) => {
+                return bridge_tx_bench_failure(
+                    report,
+                    "tx_descriptor",
+                    "generated bridge TX datagram could not build a TX descriptor",
+                    DiagnosticErrorReport {
+                        code: "tx_descriptor_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        }
+    };
+    report.datagram_len = Some(datagram.len());
+    report.frame_len = if args.packet_hex.is_some() {
+        packet.len().checked_sub(TX_DESC_SIZE)
+    } else {
+        Some(parsed.ieee80211_frame.len())
+    };
+    report.packet_len = Some(packet.len());
+    report.tx_descriptor_hex = Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())]));
+
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live bridge TX benchmark",
+                ),
+                Err(error) => {
+                    return bridge_tx_bench_failure(
+                        report,
+                        "usb_claim",
+                        "macOS IOUSBHost retained-session open failed",
+                        error,
+                    );
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return bridge_tx_bench_failure(
+                        report,
+                        "usb_claim",
+                        "no supported adapter matched the selector",
+                        error,
+                    );
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    report.adapter = Some(selected);
+                    return bridge_tx_bench_failure(
+                        report,
+                        "usb_claim",
+                        "USB interface claim failed",
+                        DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live bridge TX benchmark",
+            )
+        };
+
+    let bulk_out = match endpoints.bulk_out {
+        Some(endpoint) => endpoint,
+        None => {
+            report.adapter = Some(adapter);
+            report.endpoints = Some(endpoints);
+            report.counters = claim_counters;
+            return bridge_tx_bench_failure(
+                report,
+                "bulk_out",
+                "claimed interface has no bulk OUT endpoint",
+                DiagnosticErrorReport {
+                    code: "missing_bulk_out_endpoint",
+                    message: "claimed interface has no bulk OUT endpoint".to_string(),
+                },
+            );
+        }
+    };
+    report.adapter = Some(adapter);
+    report.endpoints = Some(endpoints);
+    report.bulk_out_endpoint = Some(bulk_out);
+    report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
+    let mut pre_tx_counters = claim_counters;
+
+    if let Some(init_assets) = init_assets.as_ref() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match run_bridge_tx_bench_same_session_init(
+            &registers,
+            &args,
+            channel,
+            report
+                .endpoints
+                .as_ref()
+                .expect("bridge TX benchmark endpoints are present after USB claim"),
+            init_assets,
+            &mut pre_tx_counters,
+        ) {
+            Ok(init_report) => {
+                report.same_session_init = Some(init_report);
+            }
+            Err((init_report, error)) => {
+                report.same_session_init = Some(init_report);
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "init_before_tx",
+                    "bridge TX benchmark same-session init failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if let Some(local_mac) = args.local_mac {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_program_local_mac(&registers, local_mac, &mut pre_tx_counters) {
+            Ok(local_mac_report) => {
+                report.local_mac_report = Some(local_mac_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "local_mac",
+                    "bridge TX benchmark local MAC register programming failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if args.monitor_opmode_before_tx {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_set_monitor_opmode(&registers, &mut pre_tx_counters) {
+            Ok(monitor_report) => {
+                report.monitor_opmode = Some(monitor_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "monitor_opmode",
+                    "bridge TX benchmark monitor/no-link opmode setup failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if args.clear_txdma_status_before_tx {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_clear_txdma_status(
+            &registers,
+            args.txdma_status_clear_value,
+            &mut pre_tx_counters,
+        ) {
+            Ok(clear_report) => {
+                report.txdma_status_clear = Some(clear_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "clear_txdma_status",
+                    "bridge TX benchmark TXDMA status clear failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if let Some(offset_check_value) = args.txdma_offset_check_value {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_write_txdma_offset_check(
+            &registers,
+            offset_check_value,
+            &mut pre_tx_counters,
+        ) {
+            Ok(write_report) => {
+                report.txdma_offset_check_write = Some(write_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "txdma_offset_check",
+                    "bridge TX benchmark TXDMA offset-check write failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if let Some(cr_value) = args.cr_value {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_write16_register(
+            &registers,
+            "REG_CR",
+            REG_CR,
+            cr_value,
+            &mut pre_tx_counters,
+        ) {
+            Ok(write_report) => {
+                report.cr_write = Some(write_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "cr_write",
+                    "bridge TX benchmark REG_CR write failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if let Some(trxdma_ctrl_value) = args.trxdma_ctrl_value {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_write16_register(
+            &registers,
+            "REG_TRXDMA_CTRL",
+            REG_TRXDMA_CTRL,
+            trxdma_ctrl_value,
+            &mut pre_tx_counters,
+        ) {
+            Ok(write_report) => {
+                report.trxdma_ctrl_write = Some(write_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "trxdma_ctrl_write",
+                    "bridge TX benchmark REG_TRXDMA_CTRL write failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    if !args.pre_tx_write8.is_empty()
+        || !args.pre_tx_write16.is_empty()
+        || !args.pre_tx_write32.is_empty()
+        || !args.pre_tx_rmw32.is_empty()
+    {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_write8 {
+            match bridge_tx_bench_write8_register(
+                &registers,
+                "pre_tx_write8",
+                write.address,
+                write.value as u8,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX benchmark generic u8 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_write16 {
+            match bridge_tx_bench_write16_register(
+                &registers,
+                "pre_tx_write16",
+                write.address,
+                write.value as u16,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX benchmark generic u16 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_write32 {
+            match bridge_tx_bench_write32_register(
+                &registers,
+                "pre_tx_write32",
+                write.address,
+                write.value,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX benchmark generic u32 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+        for write in &args.pre_tx_rmw32 {
+            match bridge_tx_bench_rmw32_register(
+                &registers,
+                "pre_tx_rmw32",
+                write.address,
+                write.mask,
+                write.value,
+                &mut pre_tx_counters,
+            ) {
+                Ok(write_report) => report.pre_tx_register_masked_writes.push(write_report),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_register_write",
+                        "bridge TX benchmark generic masked u32 register write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
+    if args.fw_media_status {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match bridge_tx_bench_send_media_status_h2c(
+            &registers,
+            args.mac_id,
+            args.fw_media_status_role,
+            &mut pre_tx_counters,
+        ) {
+            Ok(h2c_report) => {
+                report.fw_media_status_report = Some(h2c_report);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "fw_media_status",
+                    "bridge TX benchmark H2C media-status command failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
+    let mut bridge_counters = TxCounters::default();
+    let mut submit_counters = TxSubmitCounters::default();
+    let mut tx_status = tx_status_probe_report(&args.tx_status);
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_pre(&registers, &mut tx_status);
+    }
+    let cpu_started = process_cpu_usage();
+    let started = Instant::now();
+    let submit_result = if args.packet_hex.is_some() {
+        let mut result = Ok(());
+        for index in 0..args.count {
+            if let Err(error) = bridge_tx_bench_submit_raw_packet(
+                &mut transport,
+                bulk_out,
+                &packet,
+                &mut submit_counters,
+            ) {
+                result = Err((index + 1, error));
+                break;
+            }
+            if args.interval_us > 0 && index + 1 < args.count {
+                std::thread::sleep(Duration::from_micros(args.interval_us));
+            }
+        }
+        result
+    } else {
+        let mut radio = BridgeTxRadio {
+            transport: &mut transport,
+            bulk_out,
+            channel,
+            tx_rate: args.tx_rate,
+            tx_bandwidth: None,
+            tx_queue: args.tx_queue.into(),
+            tx_mac_id: Some(args.mac_id),
+            tx_rate_id: args.tx_rate_id,
+            tx_retries: Some(args.tx_retries),
+            hardware_sequence: Some(!args.no_hw_seq),
+            first_segment: Some(!args.no_first_seg),
+            disable_rate_fallback: Some(!args.enable_rate_fallback),
+            aggregate_break: Some(!args.no_agg_break),
+            submit_counters: &mut submit_counters,
+        };
+        let mut result = Ok(());
+        for index in 0..args.count {
+            bridge_tx_bench_set_sequence(&mut datagram, index as u16);
+            if let Err(error) = submit_tx_datagram(&datagram, &mut radio, &mut bridge_counters) {
+                result = Err((index + 1, error.to_string()));
+                break;
+            }
+            if args.interval_us > 0 && index + 1 < args.count {
+                std::thread::sleep(Duration::from_micros(args.interval_us));
+            }
+        }
+        result
+    };
+    let post_tx_register_error = if bridge_tx_bench_has_post_tx_register_mutation(&args) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        bridge_tx_bench_apply_post_tx_register_mutations(
+            &registers,
+            &args,
+            &mut report,
+            &mut pre_tx_counters,
+        )
+        .err()
+    } else {
+        None
+    };
+    if tx_status.is_some() {
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        tx_status_probe_post(&registers, &mut tx_status);
+    }
+    let elapsed = started.elapsed();
+    let elapsed_us = elapsed.as_micros().try_into().unwrap_or(u64::MAX);
+    let elapsed_ms = elapsed.as_millis().try_into().unwrap_or(u64::MAX);
+    bridge_tx_bench_update_metrics(
+        &mut report,
+        pre_tx_counters,
+        bridge_counters,
+        submit_counters,
+        elapsed_us,
+        cpu_usage_delta(cpu_started, process_cpu_usage(), elapsed_ms),
+    );
+    report.tx_status = tx_status;
+    add_tx_status_probe_counters(&mut report.counters, &report.tx_status);
+
+    if let Some(error) = post_tx_register_error {
+        return bridge_tx_bench_failure(
+            report,
+            "post_tx_register_write",
+            "bridge TX benchmark post-submit register mutation failed",
+            error,
+        );
+    }
+
+    if let Err((failure_index, message)) = submit_result {
+        report.failure_index = Some(failure_index);
+        return bridge_tx_bench_failure(
+            report,
+            "bridge_submit",
+            "bridge TX benchmark submission failed before reaching the requested count",
+            DiagnosticErrorReport {
+                code: "bridge_tx_submit_failed",
+                message,
+            },
+        );
+    }
+
+    report.result = DiagnosticResult::Pass;
+    report.phases = bridge_tx_bench_pass_phases(
+        args.init_before_tx,
+        args.local_mac.is_some(),
+        args.monitor_opmode_before_tx,
+        args.clear_txdma_status_before_tx,
+        args.txdma_offset_check_value.is_some(),
+        args.cr_value.is_some(),
+        args.trxdma_ctrl_value.is_some(),
+        !args.pre_tx_write8.is_empty()
+            || !args.pre_tx_write16.is_empty()
+            || !args.pre_tx_write32.is_empty()
+            || !args.pre_tx_rmw32.is_empty(),
+        args.fw_media_status,
+        bridge_tx_bench_has_post_tx_register_mutation(&args),
+        claim_detail,
+    );
+    report.notes = if args.init_before_tx && args.packet_hex.is_some() {
+        vec![
+            "live bridge TX benchmark initialized the adapter and submitted exact descriptor-prefixed USB TX packets over one retained USB session",
+            "packet override bypassed bridge descriptor construction; no receiver confirmation was attempted",
+        ]
+    } else if args.init_before_tx {
+        vec![
+            "live bridge TX benchmark initialized the adapter and submitted synthetic WFB datagrams over one retained USB session",
+            "no receiver confirmation was attempted; RF packet loss still requires an independent Linux peer",
+        ]
+    } else if args.packet_hex.is_some() {
+        vec![
+            "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
+            "exact descriptor-prefixed USB TX packets were submitted; bridge parse and descriptor construction were bypassed",
+        ]
+    } else {
+        vec![
+            "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
+            "synthetic WFB datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+        ]
+    };
+    report
+}
+
+fn parse_bridge_tx_bench_packet_override(
+    args: &BridgeTxBenchArgs,
+) -> std::result::Result<Option<Vec<u8>>, DiagnosticErrorReport> {
+    let Some(packet_hex) = args.packet_hex.as_deref() else {
+        return Ok(None);
+    };
+    let packet = parse_hex_bytes(packet_hex).map_err(|message| DiagnosticErrorReport {
+        code: "invalid_bench_packet_hex",
+        message,
+    })?;
+    if packet.len() < TX_DESC_SIZE {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_bench_packet_hex",
+            message: format!(
+                "--packet-hex must contain at least {TX_DESC_SIZE} descriptor bytes, got {}",
+                packet.len()
+            ),
+        });
+    }
+    Ok(Some(packet))
+}
+
+fn bridge_tx_bench_submit_raw_packet(
+    transport: &mut InitUsbTransport,
+    bulk_out: u8,
+    packet: &[u8],
+    counters: &mut TxSubmitCounters,
+) -> std::result::Result<(), String> {
+    counters.attempted += 1;
+    match transport.write_bulk_transfer(bulk_out, packet, Duration::from_millis(500)) {
+        Ok(written) if written == packet.len() => {
+            counters.submitted += 1;
+            counters.bytes_written += written as u64;
+            Ok(())
+        }
+        Ok(written) => {
+            counters.failed += 1;
+            counters.short_writes += 1;
+            counters.bytes_written += written as u64;
+            Err(format!(
+                "short bulk OUT write to endpoint 0x{bulk_out:02x}: expected {} bytes, wrote {written}",
+                packet.len()
+            ))
+        }
+        Err(error) => {
+            counters.failed += 1;
+            Err(error.to_string())
+        }
+    }
+}
+
+fn bridge_tx_bench_pass_phases(
+    init_before_tx: bool,
+    local_mac: bool,
+    monitor_opmode_before_tx: bool,
+    clear_txdma_status_before_tx: bool,
+    txdma_offset_check: bool,
+    cr_write: bool,
+    trxdma_ctrl_write: bool,
+    generic_register_write: bool,
+    fw_media_status: bool,
+    post_tx_register_write: bool,
+    claim_detail: &'static str,
+) -> Vec<DiagnosticPhase> {
+    let mut phases = vec![
+        DiagnosticPhase {
+            id: "argument_validation",
+            status: DiagnosticPhaseStatus::Completed,
+            detail:
+                "operator supplied channel, count, synthetic WFB shape, and live TX authorization",
+        },
+        DiagnosticPhase {
+            id: "bridge_parse",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "generated WFB firmware mark, radiotap metadata, and IEEE 802.11 frame",
+        },
+        DiagnosticPhase {
+            id: "usb_claim",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: claim_detail,
+        },
+    ];
+    if init_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "init_before_tx",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "completed full RTL8812AU init inside the retained benchmark USB session",
+        });
+    }
+    if local_mac {
+        phases.push(DiagnosticPhase {
+            id: "local_mac",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "programmed REG_MACID with the selected local adapter MAC before the TX loop",
+        });
+    }
+    if monitor_opmode_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "monitor_opmode",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "set Linux-style monitor/no-link MAC opmode before the TX loop",
+        });
+    }
+    if clear_txdma_status_before_tx {
+        phases.push(DiagnosticPhase {
+            id: "clear_txdma_status",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "wrote REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment",
+        });
+    }
+    if txdma_offset_check {
+        phases.push(DiagnosticPhase {
+            id: "txdma_offset_check",
+            status: DiagnosticPhaseStatus::Completed,
+            detail:
+                "wrote REG_TXDMA_OFFSET_CHK before the TX loop as a guarded scheduler experiment",
+        });
+    }
+    if cr_write {
+        phases.push(DiagnosticPhase {
+            id: "cr_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "wrote REG_CR before the TX loop as a guarded scheduler experiment",
+        });
+    }
+    if trxdma_ctrl_write {
+        phases.push(DiagnosticPhase {
+            id: "trxdma_ctrl_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "wrote REG_TRXDMA_CTRL before the TX loop as a guarded TXDMA experiment",
+        });
+    }
+    if generic_register_write {
+        phases.push(DiagnosticPhase {
+            id: "pre_tx_register_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied generic pre-TX register writes as guarded scheduler experiments",
+        });
+    }
+    if fw_media_status {
+        phases.push(DiagnosticPhase {
+            id: "fw_media_status",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "sent RTL8812A H2C media-status connected report before the TX loop",
+        });
+    }
+    phases.push(DiagnosticPhase {
+        id: "bridge_submit_loop",
+        status: DiagnosticPhaseStatus::Completed,
+        detail: "submitted bounded synthetic WFB datagrams through the live radio TX backend",
+    });
+    if post_tx_register_write {
+        phases.push(DiagnosticPhase {
+            id: "post_tx_register_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail:
+                "applied generic post-submit register mutations as guarded scheduler experiments",
+        });
+    }
+    phases
+}
+
+fn bridge_tx_bench_tx_options(args: &BridgeTxBenchArgs, mut options: TxOptions) -> TxOptions {
+    if let Some(tx_rate) = args.tx_rate {
+        options.rate = tx_rate;
+    }
+    options.queue = args.tx_queue.into();
+    options.mac_id = args.mac_id;
+    if let Some(rate_id) = args.tx_rate_id {
+        options.rate_id = Some(rate_id);
+    }
+    options.retries = args.tx_retries;
+    options.hardware_sequence = !args.no_hw_seq;
+    options.first_segment = !args.no_first_seg;
+    options.disable_rate_fallback = !args.enable_rate_fallback;
+    options.aggregate_break = !args.no_agg_break;
+    options
+}
+
+fn bridge_tx_bench_base_report(
+    args: &BridgeTxBenchArgs,
+    selector: DeviceSelector,
+    channel: Option<Channel>,
+) -> BridgeTxBenchReport {
+    BridgeTxBenchReport {
+        schema_version: 1,
+        command: "bridge-tx-bench",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.bandwidth,
+        count: args.count,
+        payload_len: args.payload_len,
+        frame_hex: args.frame_hex.clone(),
+        packet_hex: args.packet_hex.clone(),
+        interval_us: args.interval_us,
+        link_id: args.link_id,
+        link_id_hex: format_value(args.link_id, 6),
+        radio_port: args.radio_port,
+        radio_port_hex: format_value(args.radio_port, 2),
+        fwmark: args.fwmark,
+        fwmark_hex: format_value(args.fwmark, 8),
+        mcs: args.mcs,
+        tx_rate: args.tx_rate,
+        tx_queue: args.tx_queue,
+        mac_id: args.mac_id,
+        mac_id_hex: format_value(args.mac_id, 2),
+        tx_rate_id: args.tx_rate_id,
+        tx_rate_id_hex: args.tx_rate_id.map(|rate_id| format_value(rate_id, 2)),
+        tx_retries: args.tx_retries,
+        hardware_sequence: !args.no_hw_seq,
+        first_segment: !args.no_first_seg,
+        disable_rate_fallback: !args.enable_rate_fallback,
+        aggregate_break: !args.no_agg_break,
+        local_mac: args.local_mac.map(format_mac_address),
+        monitor_opmode_before_tx: args.monitor_opmode_before_tx,
+        fw_media_status: args.fw_media_status,
+        fw_media_status_role: args.fw_media_status_role,
+        fw_media_status_role_hex: format_value(args.fw_media_status_role, 2),
+        init_before_tx: args.init_before_tx,
+        linux_init_order: args.linux_init_order,
+        init_timeout_ms: args.init_timeout_ms,
+        rfe_type: args.rfe_type,
+        rfe_type_hex: format_value(args.rfe_type, 2),
+        clear_txdma_status_before_tx: args.clear_txdma_status_before_tx,
+        txdma_status_clear_value: args.txdma_status_clear_value,
+        txdma_status_clear_value_hex: format_value(args.txdma_status_clear_value, 8),
+        txdma_offset_check_value: args.txdma_offset_check_value,
+        txdma_offset_check_value_hex: args
+            .txdma_offset_check_value
+            .map(|value| format_value(value, 8)),
+        cr_value: args.cr_value,
+        cr_value_hex: args.cr_value.map(|value| format_value(value, 4)),
+        trxdma_ctrl_value: args.trxdma_ctrl_value,
+        trxdma_ctrl_value_hex: args.trxdma_ctrl_value.map(|value| format_value(value, 4)),
+        pre_tx_write8: args.pre_tx_write8.clone(),
+        pre_tx_write16: args.pre_tx_write16.clone(),
+        pre_tx_write32: args.pre_tx_write32.clone(),
+        pre_tx_rmw32: args.pre_tx_rmw32.clone(),
+        post_tx_write8: args.post_tx_write8.clone(),
+        post_tx_write16: args.post_tx_write16.clone(),
+        post_tx_write32: args.post_tx_write32.clone(),
+        post_tx_set8: args.post_tx_set8.clone(),
+        post_tx_set16: args.post_tx_set16.clone(),
+        post_tx_set32: args.post_tx_set32.clone(),
+        datagram_len: None,
+        frame_len: None,
+        packet_len: None,
+        tx_descriptor_hex: None,
+        bulk_out_endpoint: None,
+        bulk_out_endpoint_hex: None,
+        failure_index: None,
+        throughput: None,
+        cpu: None,
+        same_session_init: None,
+        local_mac_report: None,
+        monitor_opmode: None,
+        fw_media_status_report: None,
+        txdma_status_clear: None,
+        txdma_offset_check_write: None,
+        cr_write: None,
+        trxdma_ctrl_write: None,
+        pre_tx_register_writes: Vec::new(),
+        pre_tx_register_masked_writes: Vec::new(),
+        post_tx_register_writes: Vec::new(),
+        tx_status: None,
+        bridge_counters: TxCounters::default(),
+        submit_counters: TxSubmitCounters::default(),
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::NotImplemented,
+        phases: Vec::new(),
+        error: None,
+        notes: vec!["live bridge TX benchmark stopped before completing bounded submission"],
+    }
+}
+
+fn bridge_tx_bench_failure(
+    mut report: BridgeTxBenchReport,
+    phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> BridgeTxBenchReport {
+    report.result = DiagnosticResult::Fail;
+    report.phases = vec![DiagnosticPhase {
+        id: phase_id,
+        status: DiagnosticPhaseStatus::Blocked,
+        detail: phase_detail,
+    }];
+    report.error = Some(error);
+    report
+}
+
+fn bridge_tx_bench_update_metrics(
+    report: &mut BridgeTxBenchReport,
+    pre_tx_counters: DiagnosticCounters,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+    elapsed_us: u64,
+    cpu: Option<CpuUsageReport>,
+) {
+    report.bridge_counters = bridge_counters;
+    report.submit_counters = submit_counters;
+    report.counters = DiagnosticCounters {
+        usb_control_reads: pre_tx_counters.usb_control_reads,
+        usb_control_writes: pre_tx_counters.usb_control_writes,
+        usb_bulk_in_reads: pre_tx_counters.usb_bulk_in_reads,
+        usb_bulk_out_writes: report.submit_counters.submitted + report.submit_counters.failed,
+        tx_frames: report.submit_counters.submitted,
+        dropped_frames: report.bridge_counters.dropped,
+        ..DiagnosticCounters::default()
+    };
+    report.throughput = Some(BridgeTxBenchThroughputReport {
+        elapsed_us,
+        submitted_per_second: rate_per_second_us(report.submit_counters.submitted, elapsed_us),
+        usb_bytes_per_second: rate_per_second_us(report.submit_counters.bytes_written, elapsed_us),
+        payload_bytes_per_second: rate_per_second_us(
+            report
+                .submit_counters
+                .submitted
+                .saturating_mul(report.payload_len as u64),
+            elapsed_us,
+        ),
+        datagram_bytes_per_second: rate_per_second_us(
+            report
+                .submit_counters
+                .submitted
+                .saturating_mul(report.datagram_len.unwrap_or_default() as u64),
+            elapsed_us,
+        ),
+    });
+    report.cpu = cpu;
+}
+
+fn build_bridge_tx_bench_datagram(
+    args: &BridgeTxBenchArgs,
+    channel_id: WfbChannelId,
+    sequence: u16,
+) -> std::result::Result<Vec<u8>, DiagnosticErrorReport> {
+    let radiotap = bridge_tx_bench_ht_radiotap(args.bandwidth, args.mcs)?;
+    let frame = if let Some(frame_hex) = args.frame_hex.as_deref() {
+        parse_hex_bytes(frame_hex).map_err(|message| DiagnosticErrorReport {
+            code: "invalid_bench_frame_hex",
+            message,
+        })?
+    } else {
+        let mut frame = Vec::with_capacity(24usize.saturating_add(args.payload_len));
+        frame.extend_from_slice(&build_wfb_data_header(channel_id, sequence));
+        for index in 0..args.payload_len {
+            frame.push((index % 251) as u8);
+        }
+        frame
+    };
+    let mut datagram = Vec::with_capacity(4 + radiotap.len() + frame.len());
+    datagram.extend_from_slice(&args.fwmark.to_be_bytes());
+    datagram.extend_from_slice(&radiotap);
+    datagram.extend_from_slice(&frame);
+    Ok(datagram)
+}
+
+fn bridge_tx_bench_ht_radiotap(
+    bandwidth: Bandwidth,
+    mcs: u8,
+) -> std::result::Result<[u8; BRIDGE_TX_BENCH_RADIOTAP_LEN], DiagnosticErrorReport> {
+    let bandwidth_flags = match bandwidth {
+        Bandwidth::Mhz20 => 0x00,
+        Bandwidth::Mhz40 => 0x01,
+        Bandwidth::Mhz80 => {
+            return Err(DiagnosticErrorReport {
+                code: "unsupported_bench_bandwidth",
+                message: "bridge-tx-bench synthetic HT datagrams support 20 or 40 MHz; use bridge-tx-listen for externally generated VHT/80 MHz datagrams".to_string(),
+            });
+        }
+    };
+    Ok([
+        0x00,
+        0x00,
+        BRIDGE_TX_BENCH_RADIOTAP_LEN as u8,
+        0x00,
+        0x00,
+        0x80,
+        0x08,
+        0x00,
+        0x08,
+        0x00,
+        0x37,
+        bandwidth_flags,
+        mcs,
+    ])
+}
+
+fn bridge_tx_bench_set_sequence(datagram: &mut [u8], sequence: u16) {
+    datagram[BRIDGE_TX_BENCH_SEQUENCE_OFFSET..BRIDGE_TX_BENCH_SEQUENCE_OFFSET + 2]
+        .copy_from_slice(&sequence.to_le_bytes());
 }
 
 fn bridge_tx_datagram_from_args(
@@ -15869,6 +21368,13 @@ fn rate_per_second(count: u64, elapsed_ms: Option<u64>) -> Option<f64> {
         return None;
     }
     Some(count as f64 * 1000.0 / elapsed_ms as f64)
+}
+
+fn rate_per_second_us(count: u64, elapsed_us: u64) -> Option<f64> {
+    if elapsed_us == 0 {
+        return None;
+    }
+    Some(count as f64 * 1_000_000.0 / elapsed_us as f64)
 }
 
 #[cfg(unix)]
@@ -18535,9 +24041,93 @@ fn parse_u16(input: &str) -> std::result::Result<u16, String> {
     }
 }
 
+fn parse_u32(input: &str) -> std::result::Result<u32, String> {
+    let trimmed = input.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else {
+        trimmed.parse::<u32>().map_err(|e| e.to_string())
+    }
+}
+
 fn parse_u8(input: &str) -> std::result::Result<u8, String> {
     let value = parse_u16(input)?;
     u8::try_from(value).map_err(|_| format!("{input:?} is outside u8 range"))
+}
+
+fn parse_register_write_arg_u8(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
+    let parsed = parse_register_write_arg(input)?;
+    u8::try_from(parsed.value)
+        .map(|_| parsed)
+        .map_err(|_| format!("{input:?} has a value outside u8 range"))
+}
+
+fn parse_register_write_arg_u16(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
+    let parsed = parse_register_write_arg(input)?;
+    u16::try_from(parsed.value)
+        .map(|_| parsed)
+        .map_err(|_| format!("{input:?} has a value outside u16 range"))
+}
+
+fn parse_register_write_arg_u32(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
+    parse_register_write_arg(input)
+}
+
+fn parse_register_masked_write_arg_u32(
+    input: &str,
+) -> std::result::Result<PreTxRegisterMaskedWriteArg, String> {
+    let (left, value) = input.split_once('=').ok_or_else(|| {
+        format!("invalid masked register write {input:?}; expected ADDR:MASK=VALUE")
+    })?;
+    let (address, mask) = left.split_once(':').ok_or_else(|| {
+        format!("invalid masked register write {input:?}; expected ADDR:MASK=VALUE")
+    })?;
+    Ok(PreTxRegisterMaskedWriteArg {
+        address: parse_u16(address)?,
+        mask: parse_u32(mask)?,
+        value: parse_u32(value)?,
+    })
+}
+
+fn parse_register_write_arg(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
+    let (address, value) = input
+        .split_once('=')
+        .ok_or_else(|| format!("invalid register write {input:?}; expected ADDR=VALUE"))?;
+    Ok(PreTxRegisterWriteArg {
+        address: parse_u16(address)?,
+        value: parse_u32(value)?,
+    })
+}
+
+fn parse_mac_address_arg(input: &str) -> std::result::Result<[u8; 6], String> {
+    let parts: Vec<_> = input.trim().split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!(
+            "invalid MAC address {input:?}; expected six colon-separated hex bytes"
+        ));
+    }
+    let mut mac = [0u8; 6];
+    for (index, part) in parts.iter().enumerate() {
+        if part.len() != 2 {
+            return Err(format!(
+                "invalid MAC address {input:?}; byte {} is not two hex digits",
+                index + 1
+            ));
+        }
+        mac[index] = u8::from_str_radix(part, 16)
+            .map_err(|error| format!("invalid MAC address {input:?}: {error}"))?;
+    }
+    Ok(mac)
+}
+
+fn format_mac_address(mac: [u8; 6]) -> String {
+    mac.iter()
+        .map(|value| format!("{value:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn parse_bandwidth(input: &str) -> std::result::Result<Bandwidth, String> {
@@ -18862,6 +24452,9 @@ fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
                 .map(|len| len.to_string())
                 .unwrap_or_else(|| "n/a".to_string())
         );
+        if let Some(descriptor) = &datagram.tx_descriptor_hex {
+            println!("TX descriptor: {descriptor}");
+        }
         println!(
             "TX options: rate={:?} bandwidth={} short_gi={} ldpc={} stbc={} no_retry={}",
             datagram.tx_options.rate,
@@ -18917,6 +24510,25 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
     if let Some(endpoint) = &report.bulk_out_endpoint_hex {
         println!("Bulk OUT endpoint: {endpoint}");
     }
+    if let Some(init) = &report.same_session_init {
+        println!(
+            "Same-session init: {:?} channel={} bandwidth={} writes={}",
+            init.result,
+            init.effective_channel
+                .map(|channel| channel.number.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            init.effective_bandwidth
+                .map(|bandwidth| format!("{} MHz", bandwidth.mhz()))
+                .unwrap_or_else(|| "n/a".to_string()),
+            init.counters.usb_control_writes
+        );
+    }
+    if let Some(clear) = &report.txdma_status_clear {
+        println!(
+            "TXDMA status clear: before={} after={} written={}",
+            clear.before_hex, clear.after_hex, clear.written_hex
+        );
+    }
     if let Some(datagram) = &report.last_datagram {
         println!(
             "Last datagram: len={} fwmark={} radiotap={} frame={} packet={}",
@@ -18929,6 +24541,9 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
                 .map(|len| len.to_string())
                 .unwrap_or_else(|| "n/a".to_string())
         );
+        if let Some(descriptor) = &datagram.tx_descriptor_hex {
+            println!("TX descriptor: {descriptor}");
+        }
     }
     println!(
         "Bridge TX: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
@@ -18947,6 +24562,237 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
         report.submit_counters.short_writes,
         report.submit_counters.bytes_written
     );
+    if let Some(status) = &report.tx_status {
+        println!(
+            "TX status: changed={} error={}",
+            status.changed.len(),
+            status
+                .error
+                .as_ref()
+                .map(|error| error.code)
+                .unwrap_or("none")
+        );
+        for delta in &status.changed {
+            println!(
+                "  {} {} -> {} xor={}",
+                delta.name, delta.before_hex, delta.after_hex, delta.xor_hex
+            );
+        }
+    }
+    println!("Phases:");
+    for phase in &report.phases {
+        println!("  - {}: {:?} - {}", phase.id, phase.status, phase.detail);
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
+fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Bench: count={} payload_len={} interval_us={} link_id={} radio_port={} mcs={} tx_rate={:?} tx_queue={:?} mac_id={} first_segment={} aggregate_break={}",
+        report.count,
+        report.payload_len,
+        report.interval_us,
+        report.link_id_hex,
+        report.radio_port_hex,
+        report.mcs,
+        report.tx_rate,
+        report.tx_queue,
+        report.mac_id_hex,
+        report.first_segment,
+        report.aggregate_break
+    );
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} ({} MHz, {:?}) bandwidth={}",
+            channel.number,
+            channel.frequency_mhz,
+            channel.band,
+            report.bandwidth.mhz()
+        );
+    }
+    if let Some(endpoint) = &report.bulk_out_endpoint_hex {
+        println!("Bulk OUT endpoint: {endpoint}");
+    }
+    println!(
+        "Same-session init: {}",
+        if report.init_before_tx {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if let Some(init) = &report.same_session_init {
+        println!(
+            "Init before TX: {:?} phases={} control_reads={} control_writes={}",
+            init.result,
+            init.phase_summaries.len(),
+            init.counters.usb_control_reads,
+            init.counters.usb_control_writes
+        );
+    }
+    if let Some(local_mac) = &report.local_mac_report {
+        println!(
+            "Local MAC: {} -> {} (requested {})",
+            local_mac.before, local_mac.after, local_mac.written
+        );
+    }
+    if let Some(monitor) = &report.monitor_opmode {
+        println!(
+            "Monitor opmode: MSR {} -> {} RCR={} RXFLTMAP2={}",
+            monitor.msr_before_hex,
+            monitor.msr_after_hex,
+            monitor.rcr_after_hex,
+            monitor.rxfltmap2_after_hex
+        );
+    }
+    if let Some(clear) = &report.txdma_status_clear {
+        println!(
+            "TXDMA status clear: {} -> {} (wrote {}, changed={})",
+            clear.before_hex, clear.after_hex, clear.written_hex, clear.changed
+        );
+    }
+    if let Some(write) = &report.txdma_offset_check_write {
+        println!(
+            "TXDMA offset check: {} -> {} (wrote {}, changed={})",
+            write.before_hex, write.after_hex, write.written_hex, write.changed
+        );
+    }
+    if let Some(write) = &report.cr_write {
+        println!(
+            "REG_CR: {} -> {} (wrote {}, changed={})",
+            write.before_hex, write.after_hex, write.written_hex, write.changed
+        );
+    }
+    if let Some(write) = &report.trxdma_ctrl_write {
+        println!(
+            "REG_TRXDMA_CTRL: {} -> {} (wrote {}, changed={})",
+            write.before_hex, write.after_hex, write.written_hex, write.changed
+        );
+    }
+    for write in &report.pre_tx_register_writes {
+        println!(
+            "{} {}: {} -> {} (wrote {}, changed={})",
+            write.register_name,
+            write.address_hex,
+            write.before_hex,
+            write.after_hex,
+            write.written_hex,
+            write.changed
+        );
+    }
+    for write in &report.pre_tx_register_masked_writes {
+        println!(
+            "{} {} mask {}: {} -> {} (wrote {}, changed={})",
+            write.register_name,
+            write.address_hex,
+            write.mask_hex,
+            write.before_hex,
+            write.after_hex,
+            write.written_hex,
+            write.changed
+        );
+    }
+    if let Some(h2c) = &report.fw_media_status_report {
+        println!(
+            "FW media status: cmd={} box={} HMETFR {} -> {} bytes={}",
+            h2c.command_id_hex,
+            h2c.box_index,
+            h2c.hmetfr_before_hex,
+            h2c.hmetfr_after_hex,
+            h2c.command_bytes_hex.join(" ")
+        );
+    }
+    println!(
+        "Generated: datagram={} frame={} packet={}",
+        report
+            .datagram_len
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .frame_len
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .packet_len
+            .map(|len| len.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    if let Some(descriptor) = &report.tx_descriptor_hex {
+        println!("TX descriptor: {descriptor}");
+    }
+    println!(
+        "Bridge TX: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
+        report.bridge_counters.incoming,
+        report.bridge_counters.injected,
+        report.bridge_counters.dropped,
+        report.bridge_counters.malformed,
+        report.bridge_counters.unsupported_radiotap
+    );
+    println!(
+        "Radio TX: attempted={} submitted={} rejected={} failed={} short_writes={} bytes={}",
+        report.submit_counters.attempted,
+        report.submit_counters.submitted,
+        report.submit_counters.rejected,
+        report.submit_counters.failed,
+        report.submit_counters.short_writes,
+        report.submit_counters.bytes_written
+    );
+    if let Some(throughput) = &report.throughput {
+        println!(
+            "Throughput: elapsed_us={} frames/s={} USB bytes/s={} payload bytes/s={}",
+            throughput.elapsed_us,
+            throughput
+                .submitted_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .usb_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            throughput
+                .payload_bytes_per_second
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    if let Some(cpu) = &report.cpu {
+        println!(
+            "CPU: user_us={} system_us={} total_us={} one_core={}",
+            cpu.user_us,
+            cpu.system_us,
+            cpu.total_us,
+            cpu.percent_one_core
+                .map(|value| format!("{value:.2}%"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    if let Some(status) = &report.tx_status {
+        println!(
+            "TX status: changed={} error={}",
+            status.changed.len(),
+            status
+                .error
+                .as_ref()
+                .map(|error| error.code)
+                .unwrap_or("none")
+        );
+        for delta in &status.changed {
+            println!(
+                "  {} {} -> {} xor={}",
+                delta.name, delta.before_hex, delta.after_hex, delta.xor_hex
+            );
+        }
+    }
+    if let Some(index) = report.failure_index {
+        println!("Failure index: {index}");
+    }
     println!("Phases:");
     for phase in &report.phases {
         println!("  - {}: {:?} - {}", phase.id, phase.status, phase.detail);
@@ -20049,6 +25895,7 @@ mod tests {
             type_alna: 0x0000,
             type_apa: 0x0000,
             crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
             i_understand_this_writes_registers: false,
             dry_run,
             trace_out,
@@ -20064,6 +25911,7 @@ mod tests {
             datagram_file: None,
             i_understand_this_transmits: authorized,
             macos_usbhost: MacosUsbHostArgs::default(),
+            tx_overrides: BridgeTxOverrideArgs::default(),
         }
     }
 
@@ -20077,6 +25925,143 @@ mod tests {
             idle_timeout_ms: 1,
             i_understand_this_transmits: authorized,
             macos_usbhost: MacosUsbHostArgs::default(),
+            tx_overrides: BridgeTxOverrideArgs::default(),
+            tx_status: TxStatusProbeArgs::default(),
+            init_before_tx: false,
+            firmware: None,
+            init_timeout_ms: 500,
+            mac_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c",
+            ),
+            bb_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c",
+            ),
+            rf_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c",
+            ),
+            cut_version: 0,
+            package_type: 0,
+            support_interface: 0x02,
+            support_platform: 0,
+            board_type: 0xd8,
+            type_glna: 0,
+            type_gpa: 0,
+            type_alna: 0,
+            type_apa: 0,
+            crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
+            clear_txdma_status_before_tx: false,
+            txdma_status_clear_value: 0,
+        }
+    }
+
+    fn bridge_tx_bench_args(authorized: bool) -> BridgeTxBenchArgs {
+        BridgeTxBenchArgs {
+            adapter: adapter_args(),
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            count: 10,
+            payload_len: 128,
+            frame_hex: None,
+            packet_hex: None,
+            interval_us: 0,
+            link_id: 0x000001,
+            radio_port: 0x23,
+            fwmark: 0,
+            mcs: 0,
+            tx_rate: None,
+            tx_queue: TxQueueArg::Auto,
+            mac_id: 0,
+            tx_rate_id: None,
+            tx_retries: 12,
+            no_hw_seq: false,
+            no_first_seg: false,
+            enable_rate_fallback: false,
+            no_agg_break: false,
+            local_mac: None,
+            monitor_opmode_before_tx: false,
+            fw_media_status: false,
+            fw_media_status_role: 0x01,
+            init_before_tx: false,
+            linux_init_order: false,
+            firmware: None,
+            init_timeout_ms: 500,
+            mac_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c",
+            ),
+            bb_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c",
+            ),
+            rf_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c",
+            ),
+            cut_version: 0,
+            package_type: 0,
+            support_interface: 0x02,
+            support_platform: 0,
+            board_type: 0xd8,
+            type_glna: 0,
+            type_gpa: 0,
+            type_alna: 0,
+            type_apa: 0,
+            crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
+            clear_txdma_status_before_tx: false,
+            txdma_status_clear_value: 0,
+            txdma_offset_check_value: None,
+            cr_value: None,
+            trxdma_ctrl_value: None,
+            pre_tx_write8: Vec::new(),
+            pre_tx_write16: Vec::new(),
+            pre_tx_write32: Vec::new(),
+            pre_tx_rmw32: Vec::new(),
+            post_tx_write8: Vec::new(),
+            post_tx_write16: Vec::new(),
+            post_tx_write32: Vec::new(),
+            post_tx_set8: Vec::new(),
+            post_tx_set16: Vec::new(),
+            post_tx_set32: Vec::new(),
+            i_understand_this_transmits: authorized,
+            tx_status: TxStatusProbeArgs::default(),
+            macos_usbhost: MacosUsbHostArgs::default(),
+        }
+    }
+
+    fn rx_scan_args() -> RxScanArgs {
+        RxScanArgs {
+            adapter: adapter_args(),
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            duration_ms: 1,
+            timeout_ms: 100,
+            macos_usbhost: MacosUsbHostArgs::default(),
+            init_before_rx: false,
+            firmware: None,
+            init_timeout_ms: 500,
+            mac_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c",
+            ),
+            bb_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c",
+            ),
+            rf_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c",
+            ),
+            cut_version: 0,
+            package_type: 0,
+            support_interface: 0x02,
+            support_platform: 0,
+            board_type: 0xd8,
+            type_glna: 0,
+            type_gpa: 0,
+            type_alna: 0,
+            type_apa: 0,
+            crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
+            i_understand_this_writes_registers: false,
+            pcap: None,
+            frame_jsonl: None,
+            fixture_bulk_in: Vec::new(),
         }
     }
 
@@ -20104,6 +26089,27 @@ mod tests {
         assert!(parse_tx_rate_arg("mcs32").is_err());
         assert!(parse_tx_rate_arg("vht2ss-mcs10").is_err());
         assert!(parse_tx_rate_arg("vht5ss-mcs0").is_err());
+    }
+
+    #[test]
+    fn rfe_type3_pinmux_matches_linux_phy_switch_values() {
+        let ghz2 = rfe_reg_config_8812(Band::Ghz2, 3).expect("2g rfe3");
+        assert_eq!(ghz2.pinmux, 0x5433_7770);
+        assert_eq!(ghz2.inv_mask, 0x3ff0_0000);
+        assert_eq!(ghz2.inv, 0x010);
+        assert_eq!(ghz2.antsel, Some(0x1));
+
+        let ghz5 = rfe_reg_config_8812(Band::Ghz5, 3).expect("5g rfe3");
+        assert_eq!(ghz5.pinmux, 0x5433_7717);
+        assert_eq!(ghz5.inv_mask, 0x3ff0_0000);
+        assert_eq!(ghz5.inv, 0x010);
+        assert_eq!(ghz5.antsel, Some(0x1));
+    }
+
+    #[test]
+    fn rfe_type5_is_rejected_until_byte_writes_are_ported() {
+        let error = rfe_reg_config_8812(Band::Ghz5, 5).expect_err("rfe5 should be unsupported");
+        assert_eq!(error.code, "unsupported_rfe_type");
     }
 
     #[test]
@@ -20595,10 +26601,96 @@ mod tests {
     }
 
     #[test]
+    fn bridge_tx_bench_requires_authorization_before_usb_open() {
+        let report = bridge_tx_bench_report(bridge_tx_bench_args(false));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "missing_tx_authorization"
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.submit_counters.attempted, 0);
+    }
+
+    #[test]
+    fn bridge_tx_bench_rejects_zero_count_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.count = 0;
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_bench_count"
+        );
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_rejects_oversized_payload_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.payload_len = MAX_BRIDGE_TX_BENCH_PAYLOAD_LEN + 1;
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_bench_payload_len"
+        );
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_rejects_80mhz_synthetic_ht_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.bandwidth = Bandwidth::Mhz80;
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "unsupported_bench_bandwidth"
+        );
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_rejects_short_packet_override_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.packet_hex = Some("00112233".to_string());
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_bench_packet_hex"
+        );
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_init_before_tx_requires_firmware_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.init_before_tx = true;
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "missing_firmware"
+        );
+        assert!(report.adapter.is_none());
+        assert!(report.same_session_init.is_none());
+    }
+
+    #[test]
     fn tx_rate_helper_handles_elapsed_time() {
         assert_eq!(rate_per_second(50, Some(100)), Some(500.0));
         assert_eq!(rate_per_second(50, Some(0)), None);
         assert_eq!(rate_per_second(50, None), None);
+        assert_eq!(rate_per_second_us(50, 100_000), Some(500.0));
+        assert_eq!(rate_per_second_us(50, 0), None);
     }
 
     #[test]
@@ -20678,17 +26770,11 @@ mod tests {
         ));
         fs::write(&fixture_path, sample_rx_bulk_in()).expect("write fixture");
 
-        let report = rx_scan_report(RxScanArgs {
-            adapter: adapter_args(),
-            channel: 36,
-            bandwidth: Bandwidth::Mhz20,
-            duration_ms: 1,
-            timeout_ms: 100,
-            macos_usbhost: MacosUsbHostArgs::default(),
-            pcap: Some(pcap_path.clone()),
-            frame_jsonl: Some(frame_jsonl_path.clone()),
-            fixture_bulk_in: vec![fixture_path.clone()],
-        });
+        let mut args = rx_scan_args();
+        args.pcap = Some(pcap_path.clone());
+        args.frame_jsonl = Some(frame_jsonl_path.clone());
+        args.fixture_bulk_in = vec![fixture_path.clone()];
+        let report = rx_scan_report(args);
 
         let _ = fs::remove_file(fixture_path);
         let pcap_len = fs::metadata(&pcap_path).expect("pcap metadata").len();
@@ -20858,16 +26944,16 @@ ffff 1 S Bi:1:004:1 -115 512 <
         assert_eq!(layout.hpq, 0x10);
         assert_eq!(layout.lpq, 0x10);
         assert_eq!(layout.npq, 0x00);
-        assert_eq!(layout.pubq, 0xd8);
+        assert_eq!(layout.pubq, 0xd6);
         assert_eq!(layout.rqpn_npq, 0x00);
-        assert_eq!(layout.rqpn, 0x80d8_1010);
+        assert_eq!(layout.rqpn, 0x80d6_1010);
         assert_eq!(layout.queue_map, 0xf5b0);
     }
 
     #[test]
     fn mac_receive_config_matches_upstream_wmac_bits() {
         assert_eq!(MAC_RECEIVE_CONFIG, 0x7400_60ce);
-        assert_eq!(NETTYPE_LINK_AP, 0x0002_0000);
+        assert_eq!(NETTYPE_LINK_AP, 0x0003_0000);
         assert_eq!(MAC_TX_RX_ENABLE_MASK, 0xc0);
     }
 

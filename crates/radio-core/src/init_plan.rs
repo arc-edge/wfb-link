@@ -49,12 +49,15 @@ const REG_USTIME_TSF: u16 = 0x055c;
 const REG_USTIME_EDCA: u16 = 0x0638;
 const REG_RX_PKT_LIMIT: u16 = 0x060c;
 const REG_PIFS: u16 = 0x0512;
+const REG_OFDMCCKEN_JAGUAR: u16 = 0x0808;
 
 const FW_START_ADDRESS: u16 = 0x1000;
 const MAX_DLFW_PAGE_SIZE: usize = 4096;
 const MAX_REG_BLOCK_SIZE: usize = 196;
 const FIRMWARE_REMAINDER_BLOCK_SIZE: usize = 8;
-const TX_PAGE_BOUNDARY_8812: u8 = 0xf9;
+// Mirrors aircrack-ng's CONFIG_BEAMFORMER_FW_NDPA build: 0xff - 7 beacon
+// pages - 2 firmware NDPA pages, then boundary is total + 1.
+const TX_PAGE_BOUNDARY_8812: u8 = 0xf7;
 const LAST_ENTRY_OF_TX_PKT_BUFFER_8812: u8 = 0xff;
 const DRVINFO_SZ: usize = 4;
 const RX_DMA_BOUNDARY_8812: u16 = 0x3e7f;
@@ -856,9 +859,23 @@ fn add_channel_transfers(transfers: &mut Vec<PlannedInitTransfer>) {
     write_reg(
         transfers,
         InitPhase::Channel,
+        reg("rOFDMCCKEN_Jaguar", REG_OFDMCCKEN_JAGUAR, 4),
+        "ensure OFDM/CCK BB clocks remain enabled after band selection",
+        SRC_PHYCFG,
+    );
+    write_reg(
+        transfers,
+        InitPhase::Channel,
         reg("PHY channel/bandwidth", 0x0000, 0),
         "set initial 20 MHz channel and bandwidth",
         SRC_USB_HALINIT,
+    );
+    write_reg(
+        transfers,
+        InitPhase::Channel,
+        reg("captured Linux TX bring-up tail", 0x0c20, 0),
+        "apply captured runtime RFE, IQK, and TX power register values for bench TX",
+        SRC_PHYCFG,
     );
 }
 
