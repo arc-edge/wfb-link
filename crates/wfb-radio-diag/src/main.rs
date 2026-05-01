@@ -1427,6 +1427,10 @@ struct BridgeTxListenArgs {
     /// Generic pre-TX masked u32 register update in ADDR:MASK=VALUE form.
     #[arg(long = "pre-tx-rmw32", value_parser = parse_register_masked_write_arg_u32)]
     pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
+
+    /// RF 3-wire pre-TX write in PATH:OFFSET=VALUE form for guarded experiments.
+    #[arg(long = "pre-tx-rf-write", value_parser = parse_pre_tx_rf_write_arg)]
+    pre_tx_rf_write: Vec<PreTxRfWriteArg>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1776,6 +1780,10 @@ struct BridgeTxBenchArgs {
     /// Generic pre-TX masked u32 register update in ADDR:MASK=VALUE form.
     #[arg(long = "pre-tx-rmw32", value_parser = parse_register_masked_write_arg_u32)]
     pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
+
+    /// RF 3-wire pre-TX write in PATH:OFFSET=VALUE form for guarded experiments.
+    #[arg(long = "pre-tx-rf-write", value_parser = parse_pre_tx_rf_write_arg)]
+    pre_tx_rf_write: Vec<PreTxRfWriteArg>,
 
     /// Apply trace-registers final writes from JSON before TX, filtered by the configured address range.
     #[arg(long = "pre-tx-apply-registers-from", value_name = "PATH")]
@@ -2873,6 +2881,7 @@ struct BridgeTxListenReport {
     tx_power_control: Option<TxPowerControlReport>,
     pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
     pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
+    pre_tx_rf_writes: Vec<BridgeTxBenchRfSerialWriteReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
@@ -3013,6 +3022,7 @@ struct BridgeTxBenchReport {
     pre_tx_write16: Vec<PreTxRegisterWriteArg>,
     pre_tx_write32: Vec<PreTxRegisterWriteArg>,
     pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
+    pre_tx_rf_write: Vec<PreTxRfWriteArg>,
     pre_tx_apply_registers_from: Vec<PathBuf>,
     pre_tx_apply_register_sequence_from: Vec<PathBuf>,
     pre_tx_apply_min_address: u16,
@@ -3048,6 +3058,7 @@ struct BridgeTxBenchReport {
     pre_tx_register_apply: Vec<BridgeTxBenchTraceApplyReport>,
     pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
     pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
+    pre_tx_rf_writes: Vec<BridgeTxBenchRfSerialWriteReport>,
     post_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
@@ -3145,6 +3156,13 @@ struct PreTxRegisterMaskedWriteArg {
     value: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct PreTxRfWriteArg {
+    path: TxPowerPathArg,
+    rf_offset: u32,
+    value: u32,
+}
+
 #[derive(Debug, Serialize)]
 struct BridgeTxBenchRegisterMaskedWriteReport {
     register_name: &'static str,
@@ -3160,6 +3178,23 @@ struct BridgeTxBenchRegisterMaskedWriteReport {
     after: u32,
     after_hex: String,
     changed: bool,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxBenchRfSerialWriteReport {
+    register_name: &'static str,
+    path: TxPowerPathArg,
+    path_name: &'static str,
+    bb_register_name: &'static str,
+    bb_register: u16,
+    bb_register_hex: String,
+    rf_offset: u32,
+    rf_offset_hex: String,
+    value: u32,
+    value_hex: String,
+    encoded: u32,
+    encoded_hex: String,
     counters: DiagnosticCounters,
 }
 
@@ -16942,6 +16977,7 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         pre_tx_write16: Vec::new(),
         pre_tx_write32: Vec::new(),
         pre_tx_rmw32: Vec::new(),
+        pre_tx_rf_write: Vec::new(),
         pre_tx_apply_registers_from: Vec::new(),
         pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
@@ -17020,6 +17056,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         pre_tx_write16: args.pre_tx_write16.clone(),
         pre_tx_write32: args.pre_tx_write32.clone(),
         pre_tx_rmw32: args.pre_tx_rmw32.clone(),
+        pre_tx_rf_write: args.pre_tx_rf_write.clone(),
         pre_tx_apply_registers_from: Vec::new(),
         pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
@@ -19970,6 +20007,26 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if !args.pre_tx_rf_write.is_empty() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_rf_write {
+            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
+            {
+                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_listen_failure(
+                        report,
+                        "pre_tx_rf_write",
+                        "bridge TX listener RF 3-wire write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
     if args.tx_power.tx_power_index.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -20262,6 +20319,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             detail: "applied generic pre-TX register writes as guarded experiments",
         });
     }
+    if !report.pre_tx_rf_writes.is_empty() {
+        phases.push(DiagnosticPhase {
+            id: "pre_tx_rf_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied RF 3-wire pre-TX writes as guarded experiments",
+        });
+    }
     if report.tx_power_control.is_some() {
         phases.push(DiagnosticPhase {
             id: "tx_power_control",
@@ -20317,6 +20381,7 @@ fn bridge_tx_listen_base_report(
         tx_power_control: None,
         pre_tx_register_writes: Vec::new(),
         pre_tx_register_masked_writes: Vec::new(),
+        pre_tx_rf_writes: Vec::new(),
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
@@ -22641,6 +22706,95 @@ where
     })
 }
 
+type RfSerialWriteTarget = (TxPowerPathArg, &'static str, &'static str, u16);
+
+const RF_SERIAL_TARGET_A: [RfSerialWriteTarget; 1] = [(
+    TxPowerPathArg::A,
+    "A",
+    "rA_LSSIWrite_Jaguar",
+    REG_RF_PATH_A_3WIRE,
+)];
+const RF_SERIAL_TARGET_B: [RfSerialWriteTarget; 1] = [(
+    TxPowerPathArg::B,
+    "B",
+    "rB_LSSIWrite_Jaguar",
+    REG_RF_PATH_B_3WIRE,
+)];
+const RF_SERIAL_TARGET_BOTH: [RfSerialWriteTarget; 2] = [
+    (
+        TxPowerPathArg::A,
+        "A",
+        "rA_LSSIWrite_Jaguar",
+        REG_RF_PATH_A_3WIRE,
+    ),
+    (
+        TxPowerPathArg::B,
+        "B",
+        "rB_LSSIWrite_Jaguar",
+        REG_RF_PATH_B_3WIRE,
+    ),
+];
+
+fn rf_serial_write_targets(path: TxPowerPathArg) -> &'static [RfSerialWriteTarget] {
+    match path {
+        TxPowerPathArg::A => &RF_SERIAL_TARGET_A,
+        TxPowerPathArg::B => &RF_SERIAL_TARGET_B,
+        TxPowerPathArg::Both => &RF_SERIAL_TARGET_BOTH,
+    }
+}
+
+fn rf_register_display_name(rf_offset: u32) -> &'static str {
+    match rf_offset {
+        RF_CHNLBW_JAGUAR => "RF_CHNLBW_Jaguar",
+        _ => "RF register",
+    }
+}
+
+fn bridge_tx_bench_write_rf_serial_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    write: &PreTxRfWriteArg,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Vec<BridgeTxBenchRfSerialWriteReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut reports = Vec::new();
+    for &(path, path_name, bb_register_name, bb_register) in rf_serial_write_targets(write.path) {
+        let encoded = encode_rf_serial_write(write.rf_offset, write.value);
+        write32_with_counter(registers, counters, bb_register, encoded).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "rf_serial_write_failed",
+                message: format!(
+                    "pre-TX RF path {path_name} offset 0x{:02x} value {} via {} failed: {error}",
+                    write.rf_offset,
+                    format_value(write.value, 5),
+                    format_address(bb_register)
+                ),
+            }
+        })?;
+        reports.push(BridgeTxBenchRfSerialWriteReport {
+            register_name: rf_register_display_name(write.rf_offset),
+            path,
+            path_name,
+            bb_register_name,
+            bb_register,
+            bb_register_hex: format_value(bb_register, 4),
+            rf_offset: write.rf_offset,
+            rf_offset_hex: format_value(write.rf_offset, 2),
+            value: write.value,
+            value_hex: format_value(write.value, 5),
+            encoded,
+            encoded_hex: format_value(encoded, 8),
+            counters: DiagnosticCounters {
+                usb_control_writes: 1,
+                ..DiagnosticCounters::default()
+            },
+        });
+        std::thread::sleep(Duration::from_micros(1));
+    }
+    Ok(reports)
+}
+
 fn bridge_tx_bench_trace_apply_plan(
     source_path: &Path,
     input: &str,
@@ -23826,6 +23980,26 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if !args.pre_tx_rf_write.is_empty() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        for write in &args.pre_tx_rf_write {
+            match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
+            {
+                Ok(mut write_reports) => report.pre_tx_rf_writes.append(&mut write_reports),
+                Err(error) => {
+                    report.counters = pre_tx_counters;
+                    return bridge_tx_bench_failure(
+                        report,
+                        "pre_tx_rf_write",
+                        "bridge TX benchmark RF 3-wire write failed before the TX loop",
+                        error,
+                    );
+                }
+            }
+        }
+    }
+
     if args.tx_power.tx_power_index.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -23997,6 +24171,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             || !args.pre_tx_write16.is_empty()
             || !args.pre_tx_write32.is_empty()
             || !args.pre_tx_rmw32.is_empty(),
+        !args.pre_tx_rf_write.is_empty(),
         report.tx_power_control.is_some(),
         args.fw_media_status,
         bridge_tx_bench_has_post_tx_register_mutation(&args),
@@ -24087,6 +24262,7 @@ fn bridge_tx_bench_pass_phases(
     trxdma_ctrl_write: bool,
     trace_register_apply: bool,
     generic_register_write: bool,
+    rf_serial_write: bool,
     tx_power_control: bool,
     fw_media_status: bool,
     post_tx_register_write: bool,
@@ -24172,6 +24348,13 @@ fn bridge_tx_bench_pass_phases(
             id: "pre_tx_register_write",
             status: DiagnosticPhaseStatus::Completed,
             detail: "applied generic pre-TX register writes as guarded scheduler experiments",
+        });
+    }
+    if rf_serial_write {
+        phases.push(DiagnosticPhase {
+            id: "pre_tx_rf_write",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied RF 3-wire pre-TX writes as guarded experiments",
         });
     }
     if tx_power_control {
@@ -24295,6 +24478,7 @@ fn bridge_tx_bench_base_report(
         pre_tx_write16: args.pre_tx_write16.clone(),
         pre_tx_write32: args.pre_tx_write32.clone(),
         pre_tx_rmw32: args.pre_tx_rmw32.clone(),
+        pre_tx_rf_write: args.pre_tx_rf_write.clone(),
         pre_tx_apply_registers_from: args.pre_tx_apply_registers_from.clone(),
         pre_tx_apply_register_sequence_from: args.pre_tx_apply_register_sequence_from.clone(),
         pre_tx_apply_min_address: args.pre_tx_apply_min_address,
@@ -24330,6 +24514,7 @@ fn bridge_tx_bench_base_report(
         pre_tx_register_apply: Vec::new(),
         pre_tx_register_writes: Vec::new(),
         pre_tx_register_masked_writes: Vec::new(),
+        pre_tx_rf_writes: Vec::new(),
         post_tx_register_writes: Vec::new(),
         tx_status: None,
         bridge_counters: TxCounters::default(),
@@ -27562,6 +27747,44 @@ fn parse_register_masked_write_arg_u32(
     })
 }
 
+fn parse_pre_tx_rf_write_arg(input: &str) -> std::result::Result<PreTxRfWriteArg, String> {
+    let (left, value) = input
+        .split_once('=')
+        .ok_or_else(|| format!("invalid RF write {input:?}; expected PATH:OFFSET=VALUE"))?;
+    let (path, rf_offset) = left
+        .split_once(':')
+        .ok_or_else(|| format!("invalid RF write {input:?}; expected PATH:OFFSET=VALUE"))?;
+    let path = parse_rf_path_arg(path)?;
+    let rf_offset = parse_u32(rf_offset)?;
+    if rf_offset > 0xff {
+        return Err(format!(
+            "invalid RF write {input:?}; RF offset must fit in 8 bits"
+        ));
+    }
+    let value = parse_u32(value)?;
+    if value > 0x000f_ffff {
+        return Err(format!(
+            "invalid RF write {input:?}; RF value must fit in 20 bits"
+        ));
+    }
+    Ok(PreTxRfWriteArg {
+        path,
+        rf_offset,
+        value,
+    })
+}
+
+fn parse_rf_path_arg(input: &str) -> std::result::Result<TxPowerPathArg, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "a" | "patha" | "rfa" => Ok(TxPowerPathArg::A),
+        "b" | "pathb" | "rfb" => Ok(TxPowerPathArg::B),
+        "both" | "ab" | "all" => Ok(TxPowerPathArg::Both),
+        other => Err(format!(
+            "unsupported RF path {other:?}; expected a, b, or both"
+        )),
+    }
+}
+
 fn parse_register_write_arg(input: &str) -> std::result::Result<PreTxRegisterWriteArg, String> {
     let (address, value) = input
         .split_once('=')
@@ -27974,6 +28197,20 @@ fn print_tx_power_control_human(tx_power: &TxPowerControlReport) {
     );
 }
 
+fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
+    for write in writes {
+        println!(
+            "RF write {} path={} offset={} value={} encoded={} via {}",
+            write.register_name,
+            write.path_name,
+            write.rf_offset_hex,
+            write.value_hex,
+            write.encoded_hex,
+            write.bb_register_hex
+        );
+    }
+}
+
 fn print_tx_status_rf_summary_human(status: &TxStatusProbeReport) {
     if let Some(summary) = &status.rf_summary {
         println!(
@@ -28041,6 +28278,7 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
             write.changed
         );
     }
+    print_pre_tx_rf_writes_human(&report.pre_tx_rf_writes);
     if let Some(tx_power) = &report.tx_power_control {
         print_tx_power_control_human(tx_power);
     }
@@ -28365,6 +28603,7 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
             write.changed
         );
     }
+    print_pre_tx_rf_writes_human(&report.pre_tx_rf_writes);
     if let Some(h2c) = &report.fw_media_status_report {
         println!(
             "FW media status: cmd={} box={} HMETFR {} -> {} bytes={}",
@@ -29663,6 +29902,7 @@ mod tests {
             pre_tx_write16: Vec::new(),
             pre_tx_write32: Vec::new(),
             pre_tx_rmw32: Vec::new(),
+            pre_tx_rf_write: Vec::new(),
         }
     }
 
@@ -29750,6 +29990,7 @@ mod tests {
             pre_tx_write16: Vec::new(),
             pre_tx_write32: Vec::new(),
             pre_tx_rmw32: Vec::new(),
+            pre_tx_rf_write: Vec::new(),
             pre_tx_apply_registers_from: Vec::new(),
             pre_tx_apply_register_sequence_from: Vec::new(),
             pre_tx_apply_min_address: 0x0100,
@@ -29839,6 +30080,11 @@ mod tests {
             mask: 0x003003c3,
             value: 0x00300201,
         });
+        tx_args.pre_tx_rf_write.push(PreTxRfWriteArg {
+            path: TxPowerPathArg::Both,
+            rf_offset: RF_CHNLBW_JAGUAR,
+            value: 0x10138,
+        });
         let tx_init = bridge_tx_listen_init_bridge_args(&tx_args);
         assert!(tx_init.init_before_tx);
         assert!(tx_init.linux_init_order);
@@ -29846,6 +30092,7 @@ mod tests {
         assert_eq!(tx_init.pre_tx_write16, tx_args.pre_tx_write16);
         assert_eq!(tx_init.pre_tx_write32, tx_args.pre_tx_write32);
         assert_eq!(tx_init.pre_tx_rmw32, tx_args.pre_tx_rmw32);
+        assert_eq!(tx_init.pre_tx_rf_write, tx_args.pre_tx_rf_write);
     }
 
     #[test]
@@ -29853,6 +30100,16 @@ mod tests {
         assert_eq!(parse_bandwidth("20").expect("20"), Bandwidth::Mhz20);
         assert_eq!(parse_bandwidth("40MHz").expect("40"), Bandwidth::Mhz40);
         assert_eq!(parse_bandwidth("mhz80").expect("80"), Bandwidth::Mhz80);
+    }
+
+    #[test]
+    fn parse_pre_tx_rf_write_accepts_paths_and_bounds() {
+        let write = parse_pre_tx_rf_write_arg("both:0x18=0x10138").expect("rf write");
+        assert_eq!(write.path, TxPowerPathArg::Both);
+        assert_eq!(write.rf_offset, RF_CHNLBW_JAGUAR);
+        assert_eq!(write.value, 0x10138);
+        assert!(parse_pre_tx_rf_write_arg("a:0x100=0x1").is_err());
+        assert!(parse_pre_tx_rf_write_arg("b:0x18=0x100000").is_err());
     }
 
     #[test]
