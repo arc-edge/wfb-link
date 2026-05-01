@@ -20647,6 +20647,18 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     };
 
+    let tx_sockets = match bridge_run_bind_tx_sockets(&args) {
+        Ok(sockets) => sockets,
+        Err(error) => {
+            return bridge_run_failure(
+                report,
+                "socket_bind",
+                "failed to bind bridge TX UDP listener",
+                error,
+            );
+        }
+    };
+
     let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
         if args.tx.macos_usbhost.enabled {
             match open_macos_usbhost_transport(&args.tx.macos_usbhost, selector) {
@@ -20834,18 +20846,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             }
         }
     }
-
-    let tx_sockets = match bridge_run_bind_tx_sockets(&args) {
-        Ok(sockets) => sockets,
-        Err(error) => {
-            return bridge_run_failure(
-                report,
-                "socket_bind",
-                "failed to bind bridge TX UDP listener",
-                error,
-            );
-        }
-    };
 
     let mut pcap = match create_optional_pcap(args.rx_pcap.as_deref()) {
         Ok(pcap) => pcap,
@@ -21182,7 +21182,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         DiagnosticPhase {
             id: "socket_bind",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "bound nonblocking UDP socket(s) after radio init for WFB distributor-style TX datagrams",
+            detail: "bound nonblocking UDP socket(s) before radio init for WFB distributor-style TX datagrams",
         },
         DiagnosticPhase {
             id: "bridge_run",
