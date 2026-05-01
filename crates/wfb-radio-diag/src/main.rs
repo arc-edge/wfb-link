@@ -1660,6 +1660,10 @@ struct BridgeTxBenchArgs {
     #[arg(long = "pre-tx-apply-registers-from", value_name = "PATH")]
     pre_tx_apply_registers_from: Vec<PathBuf>,
 
+    /// Replay ordered trace-registers writes from JSON before TX, filtered by address and event ranges.
+    #[arg(long = "pre-tx-apply-register-sequence-from", value_name = "PATH")]
+    pre_tx_apply_register_sequence_from: Vec<PathBuf>,
+
     /// Minimum register address applied by --pre-tx-apply-registers-from.
     #[arg(long, default_value = "0x0100", value_parser = parse_u16)]
     pre_tx_apply_min_address: u16,
@@ -1667,6 +1671,14 @@ struct BridgeTxBenchArgs {
     /// Maximum register address applied by --pre-tx-apply-registers-from.
     #[arg(long, default_value = "0x0fff", value_parser = parse_u16)]
     pre_tx_apply_max_address: u16,
+
+    /// Minimum trace event index applied by --pre-tx-apply-register-sequence-from.
+    #[arg(long)]
+    pre_tx_apply_min_event: Option<usize>,
+
+    /// Maximum trace event index applied by --pre-tx-apply-register-sequence-from.
+    #[arg(long)]
+    pre_tx_apply_max_event: Option<usize>,
 
     /// Generic post-TX u8 register write in ADDR=VALUE form for guarded scheduler experiments.
     #[arg(long = "post-tx-write8", value_parser = parse_register_write_arg_u8)]
@@ -2728,10 +2740,13 @@ struct BridgeTxBenchReport {
     pre_tx_write32: Vec<PreTxRegisterWriteArg>,
     pre_tx_rmw32: Vec<PreTxRegisterMaskedWriteArg>,
     pre_tx_apply_registers_from: Vec<PathBuf>,
+    pre_tx_apply_register_sequence_from: Vec<PathBuf>,
     pre_tx_apply_min_address: u16,
     pre_tx_apply_min_address_hex: String,
     pre_tx_apply_max_address: u16,
     pre_tx_apply_max_address_hex: String,
+    pre_tx_apply_min_event: Option<usize>,
+    pre_tx_apply_max_event: Option<usize>,
     post_tx_write8: Vec<PreTxRegisterWriteArg>,
     post_tx_write16: Vec<PreTxRegisterWriteArg>,
     post_tx_write32: Vec<PreTxRegisterWriteArg>,
@@ -2864,19 +2879,26 @@ struct BridgeTxBenchRegisterMaskedWriteReport {
 #[derive(Debug, Serialize)]
 struct BridgeTxBenchTraceApplyReport {
     source_path: PathBuf,
+    mode: &'static str,
     min_address: u16,
     min_address_hex: String,
     max_address: u16,
     max_address_hex: String,
+    min_event_index: Option<usize>,
+    max_event_index: Option<usize>,
+    first_applied_event_index: Option<usize>,
+    last_applied_event_index: Option<usize>,
     writes_loaded: usize,
     writes_selected: usize,
     writes_applied: usize,
     skipped_out_of_range: usize,
+    skipped_out_of_event_range: usize,
     skipped_unsupported_width: usize,
 }
 
 #[derive(Debug, Clone)]
 struct BridgeTxBenchTraceApplyWrite {
+    event_index: Option<usize>,
     address: u16,
     width: TxStatusRegisterWidth,
     value: u32,
@@ -16250,8 +16272,11 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         pre_tx_write32: Vec::new(),
         pre_tx_rmw32: Vec::new(),
         pre_tx_apply_registers_from: Vec::new(),
+        pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
         pre_tx_apply_max_address: 0x0fff,
+        pre_tx_apply_min_event: None,
+        pre_tx_apply_max_event: None,
         post_tx_write8: Vec::new(),
         post_tx_write16: Vec::new(),
         post_tx_write32: Vec::new(),
@@ -16322,8 +16347,11 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         pre_tx_write32: Vec::new(),
         pre_tx_rmw32: Vec::new(),
         pre_tx_apply_registers_from: Vec::new(),
+        pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
         pre_tx_apply_max_address: 0x0fff,
+        pre_tx_apply_min_event: None,
+        pre_tx_apply_max_event: None,
         post_tx_write8: Vec::new(),
         post_tx_write16: Vec::new(),
         post_tx_write32: Vec::new(),
@@ -20569,14 +20597,20 @@ fn bridge_tx_bench_trace_apply_plan(
         })?;
     let mut report = BridgeTxBenchTraceApplyReport {
         source_path: source_path.to_path_buf(),
+        mode: "final-map",
         min_address,
         min_address_hex: format_address(min_address),
         max_address,
         max_address_hex: format_address(max_address),
+        min_event_index: None,
+        max_event_index: None,
+        first_applied_event_index: None,
+        last_applied_event_index: None,
         writes_loaded: final_writes.len(),
         writes_selected: 0,
         writes_applied: 0,
         skipped_out_of_range: 0,
+        skipped_out_of_event_range: 0,
         skipped_unsupported_width: 0,
     };
     let mut writes = Vec::new();
@@ -20597,6 +20631,7 @@ fn bridge_tx_bench_trace_apply_plan(
         })?;
         report.writes_selected += 1;
         writes.push(BridgeTxBenchTraceApplyWrite {
+            event_index: Some(final_write.last_event_index),
             address: final_write.address,
             width,
             value,
@@ -20604,6 +20639,138 @@ fn bridge_tx_bench_trace_apply_plan(
     }
 
     Ok((report, writes))
+}
+
+fn parse_trace_register_writes_json(
+    input: &str,
+) -> std::result::Result<Vec<TraceRegisterWriteReport>, String> {
+    #[derive(Deserialize)]
+    struct TraceRegisterWritesEnvelope {
+        writes: Option<Vec<TraceRegisterWriteReport>>,
+    }
+
+    if let Ok(writes) = serde_json::from_str::<Vec<TraceRegisterWriteReport>>(input) {
+        return Ok(writes);
+    }
+
+    let envelope = serde_json::from_str::<TraceRegisterWritesEnvelope>(input)
+        .map_err(|error| error.to_string())?;
+    envelope.writes.ok_or_else(|| {
+        "JSON does not contain a trace-registers writes array; run trace-registers with --include-writes and save the full report with global --report".to_string()
+    })
+}
+
+fn bridge_tx_bench_trace_sequence_apply_plan(
+    source_path: &Path,
+    input: &str,
+    min_address: u16,
+    max_address: u16,
+    min_event_index: Option<usize>,
+    max_event_index: Option<usize>,
+) -> std::result::Result<
+    (
+        BridgeTxBenchTraceApplyReport,
+        Vec<BridgeTxBenchTraceApplyWrite>,
+    ),
+    DiagnosticErrorReport,
+> {
+    let trace_writes =
+        parse_trace_register_writes_json(input).map_err(|error| DiagnosticErrorReport {
+            code: "pre_tx_trace_register_sequence_parse_failed",
+            message: format!("parse {}: {error}", source_path.display()),
+        })?;
+    let mut report = BridgeTxBenchTraceApplyReport {
+        source_path: source_path.to_path_buf(),
+        mode: "ordered-sequence",
+        min_address,
+        min_address_hex: format_address(min_address),
+        max_address,
+        max_address_hex: format_address(max_address),
+        min_event_index,
+        max_event_index,
+        first_applied_event_index: None,
+        last_applied_event_index: None,
+        writes_loaded: trace_writes.len(),
+        writes_selected: 0,
+        writes_applied: 0,
+        skipped_out_of_range: 0,
+        skipped_out_of_event_range: 0,
+        skipped_unsupported_width: 0,
+    };
+    let mut writes = Vec::new();
+    for trace_write in trace_writes {
+        let Some(width) = tx_status_width_from_trace_width(trace_write.width) else {
+            report.skipped_unsupported_width += 1;
+            continue;
+        };
+        if trace_write.address < min_address || trace_write.address > max_address {
+            report.skipped_out_of_range += 1;
+            continue;
+        }
+        if min_event_index.is_some_and(|min_event_index| trace_write.event_index < min_event_index)
+            || max_event_index
+                .is_some_and(|max_event_index| trace_write.event_index > max_event_index)
+        {
+            report.skipped_out_of_event_range += 1;
+            continue;
+        }
+        let value = parse_trace_value_hex(&trace_write.value_le_hex).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "pre_tx_trace_register_sequence_value_failed",
+                message: format!("parse {}: {error}", source_path.display()),
+            }
+        })?;
+        report.writes_selected += 1;
+        report.first_applied_event_index = report
+            .first_applied_event_index
+            .or(Some(trace_write.event_index));
+        report.last_applied_event_index = Some(trace_write.event_index);
+        writes.push(BridgeTxBenchTraceApplyWrite {
+            event_index: Some(trace_write.event_index),
+            address: trace_write.address,
+            width,
+            value,
+        });
+    }
+
+    Ok((report, writes))
+}
+
+fn bridge_tx_bench_write_trace_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    write: &BridgeTxBenchTraceApplyWrite,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    match write.width {
+        TxStatusRegisterWidth::U8 => {
+            write8_with_counter(registers, counters, write.address, write.value as u8)
+        }
+        TxStatusRegisterWidth::U16 => {
+            write16_with_counter(registers, counters, write.address, write.value as u16)
+        }
+        TxStatusRegisterWidth::U32 => {
+            write32_with_counter(registers, counters, write.address, write.value)
+        }
+    }
+    .map_err(|error| DiagnosticErrorReport {
+        code: "pre_tx_trace_register_sequence_write_failed",
+        message: format!(
+            "event={} address={} width={} write failed: {error}",
+            write
+                .event_index
+                .map(|event_index| event_index.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            format_address(write.address),
+            match write.width {
+                TxStatusRegisterWidth::U8 => 1,
+                TxStatusRegisterWidth::U16 => 2,
+                TxStatusRegisterWidth::U32 => 4,
+            }
+        ),
+    })
 }
 
 fn bridge_tx_bench_apply_trace_registers<T>(
@@ -20663,6 +20830,63 @@ where
             }?;
             apply_report.writes_applied += 1;
             report.pre_tx_register_writes.push(write_report);
+        }
+        report.pre_tx_register_apply.push(apply_report);
+    }
+
+    Ok(())
+}
+
+fn bridge_tx_bench_apply_trace_register_sequences<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    args: &BridgeTxBenchArgs,
+    report: &mut BridgeTxBenchReport,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<(), DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    if args.pre_tx_apply_min_address > args.pre_tx_apply_max_address {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_pre_tx_trace_register_range",
+            message: format!(
+                "--pre-tx-apply-min-address {} is greater than --pre-tx-apply-max-address {}",
+                format_address(args.pre_tx_apply_min_address),
+                format_address(args.pre_tx_apply_max_address)
+            ),
+        });
+    }
+    if args
+        .pre_tx_apply_min_event
+        .zip(args.pre_tx_apply_max_event)
+        .is_some_and(|(min_event, max_event)| min_event > max_event)
+    {
+        return Err(DiagnosticErrorReport {
+            code: "invalid_pre_tx_trace_register_event_range",
+            message: format!(
+                "--pre-tx-apply-min-event {} is greater than --pre-tx-apply-max-event {}",
+                args.pre_tx_apply_min_event.unwrap_or_default(),
+                args.pre_tx_apply_max_event.unwrap_or_default()
+            ),
+        });
+    }
+
+    for source_path in &args.pre_tx_apply_register_sequence_from {
+        let input = fs::read_to_string(source_path).map_err(|error| DiagnosticErrorReport {
+            code: "pre_tx_trace_register_sequence_read_failed",
+            message: format!("read {}: {error}", source_path.display()),
+        })?;
+        let (mut apply_report, writes) = bridge_tx_bench_trace_sequence_apply_plan(
+            source_path,
+            &input,
+            args.pre_tx_apply_min_address,
+            args.pre_tx_apply_max_address,
+            args.pre_tx_apply_min_event,
+            args.pre_tx_apply_max_event,
+        )?;
+        for write in writes {
+            bridge_tx_bench_write_trace_register(registers, &write, counters)?;
+            apply_report.writes_applied += 1;
         }
         report.pre_tx_register_apply.push(apply_report);
     }
@@ -21430,6 +21654,25 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if !args.pre_tx_apply_register_sequence_from.is_empty() {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        if let Err(error) = bridge_tx_bench_apply_trace_register_sequences(
+            &registers,
+            &args,
+            &mut report,
+            &mut pre_tx_counters,
+        ) {
+            report.counters = pre_tx_counters;
+            return bridge_tx_bench_failure(
+                report,
+                "pre_tx_trace_register_sequence_apply",
+                "bridge TX benchmark trace-register sequence replay failed before the TX loop",
+                error,
+            );
+        }
+    }
+
     if !args.pre_tx_write8.is_empty()
         || !args.pre_tx_write16.is_empty()
         || !args.pre_tx_write32.is_empty()
@@ -21663,7 +21906,8 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         args.txdma_offset_check_value.is_some(),
         args.cr_value.is_some(),
         args.trxdma_ctrl_value.is_some(),
-        !args.pre_tx_apply_registers_from.is_empty(),
+        !args.pre_tx_apply_registers_from.is_empty()
+            || !args.pre_tx_apply_register_sequence_from.is_empty(),
         !args.pre_tx_write8.is_empty()
             || !args.pre_tx_write16.is_empty()
             || !args.pre_tx_write32.is_empty()
@@ -21833,7 +22077,7 @@ fn bridge_tx_bench_pass_phases(
         phases.push(DiagnosticPhase {
             id: "pre_tx_trace_register_apply",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied trace-register final writes over the selected address range before the TX loop",
+            detail: "applied trace-register final writes or ordered writes over the selected range before the TX loop",
         });
     }
     if generic_register_write {
@@ -21952,10 +22196,13 @@ fn bridge_tx_bench_base_report(
         pre_tx_write32: args.pre_tx_write32.clone(),
         pre_tx_rmw32: args.pre_tx_rmw32.clone(),
         pre_tx_apply_registers_from: args.pre_tx_apply_registers_from.clone(),
+        pre_tx_apply_register_sequence_from: args.pre_tx_apply_register_sequence_from.clone(),
         pre_tx_apply_min_address: args.pre_tx_apply_min_address,
         pre_tx_apply_min_address_hex: format_address(args.pre_tx_apply_min_address),
         pre_tx_apply_max_address: args.pre_tx_apply_max_address,
         pre_tx_apply_max_address_hex: format_address(args.pre_tx_apply_max_address),
+        pre_tx_apply_min_event: args.pre_tx_apply_min_event,
+        pre_tx_apply_max_event: args.pre_tx_apply_max_event,
         post_tx_write8: args.post_tx_write8.clone(),
         post_tx_write16: args.post_tx_write16.clone(),
         post_tx_write32: args.post_tx_write32.clone(),
@@ -27137,8 +27384,11 @@ mod tests {
             pre_tx_write32: Vec::new(),
             pre_tx_rmw32: Vec::new(),
             pre_tx_apply_registers_from: Vec::new(),
+            pre_tx_apply_register_sequence_from: Vec::new(),
             pre_tx_apply_min_address: 0x0100,
             pre_tx_apply_max_address: 0x0fff,
+            pre_tx_apply_min_event: None,
+            pre_tx_apply_max_event: None,
             post_tx_write8: Vec::new(),
             post_tx_write16: Vec::new(),
             post_tx_write32: Vec::new(),
@@ -28343,6 +28593,96 @@ ffff 3 S Bo:1:004:2 -115 64 = 01020304
             .as_ref()
             .is_some_and(|writes| writes.len() == 2));
         assert!(output.contains("\"address_hex\": \"0x0cb0\""));
+    }
+
+    #[test]
+    fn trace_registers_full_report_can_feed_ordered_replay() {
+        let stamp = started_at_unix_ms();
+        let input_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-reg-seq-usbmon-{}-{stamp}.txt",
+            std::process::id()
+        ));
+        fs::write(
+            &input_path,
+            "\
+ffff 0 S Co:1:004:0 s 40 05 0100 0000 0001 1 = 12
+ffff 1 S Co:1:004:0 s 40 05 0102 0000 0002 2 = 3412
+ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
+",
+        )
+        .expect("write usbmon");
+
+        let report = trace_registers_report(TraceRegistersArgs {
+            input: input_path.clone(),
+            output: None,
+            include_writes: true,
+            min_address: Some(0x0100),
+            max_address: Some(0x01ff),
+        });
+        let report_json = serde_json::to_string(&report).expect("serialize report");
+        let writes = parse_trace_register_writes_json(&report_json).expect("parse writes");
+        let _ = fs::remove_file(input_path);
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[1].event_index, 1);
+        assert_eq!(writes[1].address_hex, "0x0102");
+        assert_eq!(writes[1].value_le_hex, "0x1234");
+    }
+
+    #[test]
+    fn trace_register_sequence_plan_filters_by_address_and_event() {
+        let input = r#"[
+  {
+    "event_index": 10,
+    "address": 256,
+    "address_hex": "0x0100",
+    "width": 1,
+    "data_hex": "12",
+    "value_le_hex": "0x12",
+    "value_be_hex": "0x12"
+  },
+  {
+    "event_index": 11,
+    "address": 512,
+    "address_hex": "0x0200",
+    "width": 2,
+    "data_hex": "3412",
+    "value_le_hex": "0x1234",
+    "value_be_hex": "0x3412"
+  },
+  {
+    "event_index": 20,
+    "address": 768,
+    "address_hex": "0x0300",
+    "width": 4,
+    "data_hex": "78563412",
+    "value_le_hex": "0x12345678",
+    "value_be_hex": "0x78563412"
+  }
+]"#;
+
+        let (report, writes) = bridge_tx_bench_trace_sequence_apply_plan(
+            Path::new("/tmp/trace-registers-report.json"),
+            input,
+            0x0100,
+            0x02ff,
+            Some(11),
+            Some(11),
+        )
+        .expect("plan");
+
+        assert_eq!(report.mode, "ordered-sequence");
+        assert_eq!(report.writes_loaded, 3);
+        assert_eq!(report.writes_selected, 1);
+        assert_eq!(report.skipped_out_of_range, 1);
+        assert_eq!(report.skipped_out_of_event_range, 1);
+        assert_eq!(report.first_applied_event_index, Some(11));
+        assert_eq!(report.last_applied_event_index, Some(11));
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].event_index, Some(11));
+        assert_eq!(writes[0].address, 0x0200);
+        assert_eq!(writes[0].value, 0x1234);
     }
 
     #[test]

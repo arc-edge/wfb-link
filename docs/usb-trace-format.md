@@ -60,6 +60,8 @@ cargo run -p wfb-radio-diag -- --json bridge-tx-bench \
 
 `bridge-tx-bench --pre-tx-apply-registers-from PATH` is a guarded brute-force experiment for narrowing static register gaps. It reads the same `trace-registers --output` JSON, filters writes to `--pre-tx-apply-min-address..--pre-tx-apply-max-address` (default `0x0100..0x0fff`), applies supported 1-, 2-, and 4-byte writes before the TX loop, and reports a summary in `pre_tx_register_apply` plus individual read/write/read results in `pre_tx_register_writes`. Use narrow ranges first; Linux-final state includes volatile and adapter-specific registers, and matching final values is not equivalent to replaying runtime firmware sequencing.
 
+`bridge-tx-bench --pre-tx-apply-register-sequence-from PATH` replays ordered register writes from a full `trace-registers` report instead of applying only the final map. Generate that input with `trace-registers --include-writes --report /tmp/linux-register-writes-report.json`; the `--output` path remains the compact final map. Sequence replay uses the same address range flags plus optional `--pre-tx-apply-min-event` and `--pre-tx-apply-max-event`, writes registers directly without per-register readback, and summarizes loaded, selected, skipped, and applied writes in `pre_tx_register_apply`. This mode is intended for sequence-sensitive TX gates, so start with a small event window before replaying thousands of writes.
+
 ## Capturing On Linux
 
 For a quick software capture, mount debugfs and capture the adapter's USB bus with usbmon:
