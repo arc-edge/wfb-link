@@ -2,6 +2,7 @@ use std::{
     fs,
     fs::File,
     io::Write,
+    net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -112,6 +113,8 @@ enum Command {
     TxRepeat(TxRepeatArgs),
     /// Submit one WFB distributor-style datagram through the live radio TX bridge path.
     BridgeTxOnce(BridgeTxOnceArgs),
+    /// Listen for WFB distributor-style datagrams and submit them through live radio TX.
+    BridgeTxListen(BridgeTxListenArgs),
     /// Compare normalized USB trace event sequences.
     TraceCompare(TraceCompareArgs),
     /// Import Linux usbmon text into normalized USB trace JSON.
@@ -1141,6 +1144,39 @@ struct BridgeTxOnceArgs {
     macos_usbhost: MacosUsbHostArgs,
 }
 
+#[derive(Debug, Parser, Clone)]
+struct BridgeTxListenArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Channel to transmit on.
+    #[arg(long)]
+    channel: u8,
+
+    /// Fallback bandwidth used for channel validation and reporting.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// UDP address to bind for WFB distributor/injector datagrams.
+    #[arg(long, default_value = "127.0.0.1:5600")]
+    bind: SocketAddr,
+
+    /// Maximum datagrams to receive before exiting.
+    #[arg(long, default_value = "1")]
+    max_datagrams: u32,
+
+    /// Stop listening after this many milliseconds without a datagram.
+    #[arg(long, default_value = "3000")]
+    idle_timeout_ms: u64,
+
+    /// Required acknowledgement for live bridge TX submission.
+    #[arg(long)]
+    i_understand_this_transmits: bool,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+}
+
 #[derive(Debug, Parser, Clone, Default)]
 struct TxOptionArgs {
     /// TX descriptor rate: ofdm6m, mcs7, or vht2ss-mcs9.
@@ -1554,6 +1590,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::BridgeTxListen(args) => {
+            let report = bridge_tx_listen_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_bridge_tx_listen_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::TraceCompare(args) => {
             let report = trace_compare_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -1898,6 +1944,34 @@ struct BridgeTxDatagramReport {
     frame_len: usize,
     packet_len: Option<usize>,
     tx_options: TxOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct BridgeTxListenReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    bind_addr: String,
+    max_datagrams: u32,
+    idle_timeout_ms: u64,
+    datagrams_received: u64,
+    last_peer: Option<String>,
+    last_datagram: Option<BridgeTxDatagramReport>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_hex: Option<String>,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -15341,6 +15415,402 @@ fn bridge_tx_once_failure(
     report
 }
 
+fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
+    let selector = args.adapter.selector();
+    let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
+    let mut report = bridge_tx_listen_base_report(&args, selector, channel);
+    if result == DiagnosticResult::Fail {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listen arguments did not pass local validation",
+            error.expect("unsupported channel error"),
+        );
+    }
+    let channel = channel.expect("channel resolved before bridge TX listen");
+
+    if !args.i_understand_this_transmits {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listen requires explicit operator authorization",
+            DiagnosticErrorReport {
+                code: "missing_tx_authorization",
+                message: "bridge-tx-listen requires --i-understand-this-transmits".to_string(),
+            },
+        );
+    }
+    if args.max_datagrams == 0 {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listen requires at least one datagram",
+            DiagnosticErrorReport {
+                code: "invalid_max_datagrams",
+                message: "--max-datagrams must be greater than zero".to_string(),
+            },
+        );
+    }
+    if args.idle_timeout_ms == 0 {
+        return bridge_tx_listen_failure(
+            report,
+            "argument_validation",
+            "bridge TX listen requires a nonzero idle timeout",
+            DiagnosticErrorReport {
+                code: "invalid_idle_timeout",
+                message: "--idle-timeout-ms must be greater than zero".to_string(),
+            },
+        );
+    }
+
+    let socket = match UdpSocket::bind(args.bind) {
+        Ok(socket) => socket,
+        Err(error) => {
+            return bridge_tx_listen_failure(
+                report,
+                "socket_bind",
+                "failed to bind bridge TX UDP listener",
+                DiagnosticErrorReport {
+                    code: "udp_bind_failed",
+                    message: format!("failed to bind {}: {error}", args.bind),
+                },
+            );
+        }
+    };
+    if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(args.idle_timeout_ms))) {
+        return bridge_tx_listen_failure(
+            report,
+            "socket_bind",
+            "failed to configure bridge TX UDP listener timeout",
+            DiagnosticErrorReport {
+                code: "udp_timeout_config_failed",
+                message: error.to_string(),
+            },
+        );
+    }
+
+    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
+        if args.macos_usbhost.enabled {
+            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "opened retained macOS IOUSBHost session for live bridge TX listener",
+                ),
+                Err(error) => {
+                    return bridge_tx_listen_failure(
+                        report,
+                        "usb_claim",
+                        "macOS IOUSBHost retained-session open failed",
+                        error,
+                    );
+                }
+            }
+        } else {
+            let selected = match select_supported_adapter(selector) {
+                Ok(device) => device,
+                Err(error) => {
+                    return bridge_tx_listen_failure(
+                        report,
+                        "usb_claim",
+                        "no supported adapter matched the selector",
+                        error,
+                    );
+                }
+            };
+            let claimed = match radio_core::usb::claim_usb_device(&selected) {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    report.adapter = Some(selected);
+                    return bridge_tx_listen_failure(
+                        report,
+                        "usb_claim",
+                        "USB interface claim failed",
+                        DiagnosticErrorReport {
+                            code: "usb_claim_failed",
+                            message: error.to_string(),
+                        },
+                    );
+                }
+            };
+            let adapter = claimed.info.clone();
+            let endpoints = claimed.endpoints.clone();
+            (
+                InitUsbTransport::Libusb(Box::new(claimed)),
+                adapter,
+                endpoints,
+                DiagnosticCounters::default(),
+                "claimed initialized adapter for live bridge TX listener",
+            )
+        };
+
+    let bulk_out = match endpoints.bulk_out {
+        Some(endpoint) => endpoint,
+        None => {
+            report.adapter = Some(adapter);
+            report.endpoints = Some(endpoints);
+            report.counters = claim_counters;
+            return bridge_tx_listen_failure(
+                report,
+                "bulk_out",
+                "claimed interface has no bulk OUT endpoint",
+                DiagnosticErrorReport {
+                    code: "missing_bulk_out_endpoint",
+                    message: "claimed interface has no bulk OUT endpoint".to_string(),
+                },
+            );
+        }
+    };
+    report.adapter = Some(adapter);
+    report.endpoints = Some(endpoints);
+    report.bulk_out_endpoint = Some(bulk_out);
+    report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
+
+    let mut bridge_counters = TxCounters::default();
+    let mut submit_counters = TxSubmitCounters::default();
+    let mut buf = vec![0u8; u16::MAX as usize];
+    for _ in 0..args.max_datagrams {
+        let (len, peer) = match socket.recv_from(&mut buf) {
+            Ok(received) => received,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                bridge_tx_listen_update_counters(
+                    &mut report,
+                    claim_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                let (code, message) = if report.datagrams_received == 0 {
+                    (
+                        "bridge_tx_listen_timeout",
+                        "timed out before receiving any bridge TX datagrams".to_string(),
+                    )
+                } else {
+                    (
+                        "bridge_tx_listen_idle",
+                        format!(
+                            "stopped after {} received datagram(s) and an idle timeout",
+                            report.datagrams_received
+                        ),
+                    )
+                };
+                return bridge_tx_listen_failure(
+                    report,
+                    "bridge_listen",
+                    "bridge TX listener timed out",
+                    DiagnosticErrorReport { code, message },
+                );
+            }
+            Err(error) => {
+                bridge_tx_listen_update_counters(
+                    &mut report,
+                    claim_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                return bridge_tx_listen_failure(
+                    report,
+                    "bridge_listen",
+                    "bridge TX UDP receive failed",
+                    DiagnosticErrorReport {
+                        code: "udp_receive_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        };
+
+        report.datagrams_received += 1;
+        report.last_peer = Some(peer.to_string());
+        let datagram = &buf[..len];
+        let parsed = match parse_tx_datagram(datagram) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                bridge_counters = bridge_tx_parse_error_counters(&error);
+                bridge_tx_listen_update_counters(
+                    &mut report,
+                    claim_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                return bridge_tx_listen_failure(
+                    report,
+                    "bridge_parse",
+                    "received WFB distributor datagram could not be parsed",
+                    DiagnosticErrorReport {
+                        code: "invalid_bridge_tx_datagram",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        };
+        let packet_len = match build_tx_packet(parsed.ieee80211_frame, channel, parsed.tx_options) {
+            Ok(packet) => packet.len(),
+            Err(error) => {
+                bridge_tx_listen_update_counters(
+                    &mut report,
+                    claim_counters,
+                    bridge_counters,
+                    submit_counters,
+                );
+                return bridge_tx_listen_failure(
+                    report,
+                    "tx_descriptor",
+                    "received bridge TX datagram could not build a TX descriptor",
+                    DiagnosticErrorReport {
+                        code: "tx_descriptor_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        };
+        report.last_datagram = Some(BridgeTxDatagramReport {
+            source: "udp",
+            datagram_len: len,
+            fwmark: parsed.fwmark,
+            fwmark_hex: format_value(parsed.fwmark, 8),
+            radiotap_len: parsed.radiotap_len,
+            frame_len: parsed.ieee80211_frame.len(),
+            packet_len: Some(packet_len),
+            tx_options: parsed.tx_options,
+        });
+
+        let submit_result = {
+            let mut radio = BridgeTxRadio {
+                transport: &mut transport,
+                bulk_out,
+                channel,
+                submit_counters: &mut submit_counters,
+            };
+            submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+        };
+        if let Err(error) = submit_result {
+            bridge_tx_listen_update_counters(
+                &mut report,
+                claim_counters,
+                bridge_counters,
+                submit_counters,
+            );
+            return bridge_tx_listen_failure(
+                report,
+                "bridge_submit",
+                "bridge TX listener submission failed",
+                DiagnosticErrorReport {
+                    code: "bridge_tx_submit_failed",
+                    message: error.to_string(),
+                },
+            );
+        }
+    }
+
+    bridge_tx_listen_update_counters(
+        &mut report,
+        claim_counters,
+        bridge_counters,
+        submit_counters,
+    );
+    report.result = DiagnosticResult::Pass;
+    report.phases = vec![
+        DiagnosticPhase {
+            id: "argument_validation",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "operator supplied channel, socket bounds, and live TX authorization",
+        },
+        DiagnosticPhase {
+            id: "socket_bind",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "bound UDP socket for WFB distributor-style TX datagrams",
+        },
+        DiagnosticPhase {
+            id: "usb_claim",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: claim_detail,
+        },
+        DiagnosticPhase {
+            id: "bridge_listen",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "received bounded UDP datagrams and submitted them through live radio TX",
+        },
+    ];
+    report.notes = vec![
+        "live bridge TX listener assumes the adapter has already completed init on the requested channel",
+        "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+    ];
+    report
+}
+
+fn bridge_tx_listen_base_report(
+    args: &BridgeTxListenArgs,
+    selector: DeviceSelector,
+    channel: Option<Channel>,
+) -> BridgeTxListenReport {
+    BridgeTxListenReport {
+        schema_version: 1,
+        command: "bridge-tx-listen",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.bandwidth,
+        bind_addr: args.bind.to_string(),
+        max_datagrams: args.max_datagrams,
+        idle_timeout_ms: args.idle_timeout_ms,
+        datagrams_received: 0,
+        last_peer: None,
+        last_datagram: None,
+        bulk_out_endpoint: None,
+        bulk_out_endpoint_hex: None,
+        bridge_counters: TxCounters::default(),
+        submit_counters: TxSubmitCounters::default(),
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::NotImplemented,
+        phases: Vec::new(),
+        error: None,
+        notes: vec!["live bridge TX listener stopped before completing bounded submission"],
+    }
+}
+
+fn bridge_tx_listen_failure(
+    mut report: BridgeTxListenReport,
+    phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> BridgeTxListenReport {
+    report.result = DiagnosticResult::Fail;
+    report.phases = vec![DiagnosticPhase {
+        id: phase_id,
+        status: DiagnosticPhaseStatus::Blocked,
+        detail: phase_detail,
+    }];
+    report.error = Some(error);
+    report
+}
+
+fn bridge_tx_listen_update_counters(
+    report: &mut BridgeTxListenReport,
+    claim_counters: DiagnosticCounters,
+    bridge_counters: TxCounters,
+    submit_counters: TxSubmitCounters,
+) {
+    report.bridge_counters = bridge_counters;
+    report.submit_counters = submit_counters;
+    report.counters = DiagnosticCounters {
+        usb_control_writes: claim_counters.usb_control_writes,
+        usb_bulk_out_writes: report.submit_counters.submitted + report.submit_counters.failed,
+        tx_frames: report.submit_counters.submitted,
+        dropped_frames: report.bridge_counters.dropped,
+        ..DiagnosticCounters::default()
+    };
+}
+
 fn bridge_tx_datagram_from_args(
     args: &BridgeTxOnceArgs,
 ) -> std::result::Result<(Vec<u8>, &'static str), DiagnosticErrorReport> {
@@ -18434,6 +18904,61 @@ fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
     }
 }
 
+fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Listen: bind={} max_datagrams={} idle_timeout_ms={} received={}",
+        report.bind_addr, report.max_datagrams, report.idle_timeout_ms, report.datagrams_received
+    );
+    if let Some(peer) = &report.last_peer {
+        println!("Last peer: {peer}");
+    }
+    if let Some(endpoint) = &report.bulk_out_endpoint_hex {
+        println!("Bulk OUT endpoint: {endpoint}");
+    }
+    if let Some(datagram) = &report.last_datagram {
+        println!(
+            "Last datagram: len={} fwmark={} radiotap={} frame={} packet={}",
+            datagram.datagram_len,
+            datagram.fwmark_hex,
+            datagram.radiotap_len,
+            datagram.frame_len,
+            datagram
+                .packet_len
+                .map(|len| len.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    println!(
+        "Bridge TX: incoming={} injected={} dropped={} malformed={} unsupported_radiotap={}",
+        report.bridge_counters.incoming,
+        report.bridge_counters.injected,
+        report.bridge_counters.dropped,
+        report.bridge_counters.malformed,
+        report.bridge_counters.unsupported_radiotap
+    );
+    println!(
+        "Radio TX: attempted={} submitted={} rejected={} failed={} short_writes={} bytes={}",
+        report.submit_counters.attempted,
+        report.submit_counters.submitted,
+        report.submit_counters.rejected,
+        report.submit_counters.failed,
+        report.submit_counters.short_writes,
+        report.submit_counters.bytes_written
+    );
+    println!("Phases:");
+    for phase in &report.phases {
+        println!("  - {}: {:?} - {}", phase.id, phase.status, phase.detail);
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
 fn print_usb_probe_human(report: &radio_core::UsbProbeReport) {
     println!("USB probe: {}", report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -19542,6 +20067,19 @@ mod tests {
         }
     }
 
+    fn bridge_tx_listen_args(authorized: bool) -> BridgeTxListenArgs {
+        BridgeTxListenArgs {
+            adapter: adapter_args(),
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            bind: "127.0.0.1:0".parse().expect("socket addr"),
+            max_datagrams: 1,
+            idle_timeout_ms: 1,
+            i_understand_this_transmits: authorized,
+            macos_usbhost: MacosUsbHostArgs::default(),
+        }
+    }
+
     #[test]
     fn parse_bandwidth_accepts_common_forms() {
         assert_eq!(parse_bandwidth("20").expect("20"), Bandwidth::Mhz20);
@@ -20025,6 +20563,34 @@ mod tests {
         assert_eq!(report.bridge_counters.dropped, 1);
         assert_eq!(report.bridge_counters.malformed, 1);
         assert_eq!(report.bridge_counters.unsupported_radiotap, 1);
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_listen_requires_authorization_before_socket_or_usb() {
+        let report = bridge_tx_listen_report(bridge_tx_listen_args(false));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "missing_tx_authorization"
+        );
+        assert_eq!(report.datagrams_received, 0);
+        assert!(report.adapter.is_none());
+        assert_eq!(report.submit_counters.attempted, 0);
+    }
+
+    #[test]
+    fn bridge_tx_listen_rejects_zero_max_datagrams_before_usb() {
+        let mut args = bridge_tx_listen_args(true);
+        args.max_datagrams = 0;
+        let report = bridge_tx_listen_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_max_datagrams"
+        );
         assert!(report.adapter.is_none());
     }
 
