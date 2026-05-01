@@ -1437,6 +1437,14 @@ struct BridgeTxBenchArgs {
     #[arg(long, default_value_t = 1024)]
     payload_len: usize,
 
+    /// Synthetic IEEE 802.11 frame shape to generate when --frame-hex is not supplied.
+    #[arg(long, value_enum, default_value = "wfb-data")]
+    frame_kind: BridgeTxBenchFrameKind,
+
+    /// UTF-8 marker bytes to place at the start of the synthetic payload.
+    #[arg(long)]
+    payload_marker: Option<String>,
+
     /// Override the generated synthetic WFB data frame with explicit IEEE 802.11 frame bytes.
     #[arg(long)]
     frame_hex: Option<String>,
@@ -1705,6 +1713,19 @@ struct TxOptionArgs {
     /// Set the TX descriptor STBC bit.
     #[arg(long)]
     stbc: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum BridgeTxBenchFrameKind {
+    /// WFB-ng data frame with ToDS set, matching build_wfb_data_header.
+    WfbData,
+    /// WFB-ng data frame with both ToDS and FromDS cleared.
+    WfbDataNoDs,
+    /// Generic broadcast data frame with a locally administered source address.
+    BroadcastData,
+    /// Generic broadcast QoS data frame with a zero QoS-control field.
+    BroadcastQosData,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -2567,6 +2588,8 @@ struct BridgeTxBenchReport {
     bandwidth: Bandwidth,
     count: u32,
     payload_len: usize,
+    frame_kind: BridgeTxBenchFrameKind,
+    payload_marker: Option<String>,
     frame_hex: Option<String>,
     packet_hex: Option<String>,
     interval_us: u64,
@@ -15662,6 +15685,8 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         bandwidth: args.bandwidth,
         count: 1,
         payload_len: 0,
+        frame_kind: BridgeTxBenchFrameKind::WfbData,
+        payload_marker: None,
         frame_hex: None,
         packet_hex: None,
         interval_us: 0,
@@ -15728,6 +15753,8 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         bandwidth: args.bandwidth,
         count: 1,
         payload_len: 0,
+        frame_kind: BridgeTxBenchFrameKind::WfbData,
+        payload_marker: None,
         frame_hex: None,
         packet_hex: None,
         interval_us: 0,
@@ -20263,6 +20290,21 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             },
         );
     }
+    if args
+        .payload_marker
+        .as_ref()
+        .is_some_and(|marker| marker.len() > args.payload_len)
+    {
+        return bridge_tx_bench_failure(
+            report,
+            "argument_validation",
+            "bridge TX benchmark payload marker is longer than the requested payload",
+            DiagnosticErrorReport {
+                code: "invalid_bench_payload_marker",
+                message: "--payload-marker bytes must fit within --payload-len".to_string(),
+            },
+        );
+    }
     if args.mcs > 31 {
         return bridge_tx_bench_failure(
             report,
@@ -21108,6 +21150,8 @@ fn bridge_tx_bench_base_report(
         bandwidth: args.bandwidth,
         count: args.count,
         payload_len: args.payload_len,
+        frame_kind: args.frame_kind,
+        payload_marker: args.payload_marker.clone(),
         frame_hex: args.frame_hex.clone(),
         packet_hex: args.packet_hex.clone(),
         interval_us: args.interval_us,
@@ -21254,24 +21298,73 @@ fn build_bridge_tx_bench_datagram(
     sequence: u16,
 ) -> std::result::Result<Vec<u8>, DiagnosticErrorReport> {
     let radiotap = bridge_tx_bench_ht_radiotap(args.bandwidth, args.mcs)?;
-    let frame = if let Some(frame_hex) = args.frame_hex.as_deref() {
-        parse_hex_bytes(frame_hex).map_err(|message| DiagnosticErrorReport {
-            code: "invalid_bench_frame_hex",
-            message,
-        })?
-    } else {
-        let mut frame = Vec::with_capacity(24usize.saturating_add(args.payload_len));
-        frame.extend_from_slice(&build_wfb_data_header(channel_id, sequence));
-        for index in 0..args.payload_len {
-            frame.push((index % 251) as u8);
-        }
-        frame
-    };
+    let frame = build_bridge_tx_bench_frame(args, channel_id, sequence)?;
     let mut datagram = Vec::with_capacity(4 + radiotap.len() + frame.len());
     datagram.extend_from_slice(&args.fwmark.to_be_bytes());
     datagram.extend_from_slice(&radiotap);
     datagram.extend_from_slice(&frame);
     Ok(datagram)
+}
+
+fn build_bridge_tx_bench_frame(
+    args: &BridgeTxBenchArgs,
+    channel_id: WfbChannelId,
+    sequence: u16,
+) -> std::result::Result<Vec<u8>, DiagnosticErrorReport> {
+    if let Some(frame_hex) = args.frame_hex.as_deref() {
+        return parse_hex_bytes(frame_hex).map_err(|message| DiagnosticErrorReport {
+            code: "invalid_bench_frame_hex",
+            message,
+        });
+    }
+
+    let payload = bridge_tx_bench_payload(args);
+    let mut frame = match args.frame_kind {
+        BridgeTxBenchFrameKind::WfbData => {
+            let mut frame = Vec::with_capacity(24usize.saturating_add(payload.len()));
+            frame.extend_from_slice(&build_wfb_data_header(channel_id, sequence));
+            frame
+        }
+        BridgeTxBenchFrameKind::WfbDataNoDs => {
+            let mut header = build_wfb_data_header(channel_id, sequence);
+            header[1] &= !0x03;
+            let mut frame = Vec::with_capacity(24usize.saturating_add(payload.len()));
+            frame.extend_from_slice(&header);
+            frame
+        }
+        BridgeTxBenchFrameKind::BroadcastData => {
+            let mut frame = Vec::with_capacity(24usize.saturating_add(payload.len()));
+            frame.extend_from_slice(&bridge_tx_bench_broadcast_data_header(0x08, sequence));
+            frame
+        }
+        BridgeTxBenchFrameKind::BroadcastQosData => {
+            let mut frame = Vec::with_capacity(26usize.saturating_add(payload.len()));
+            frame.extend_from_slice(&bridge_tx_bench_broadcast_data_header(0x88, sequence));
+            frame.extend_from_slice(&[0x00, 0x00]);
+            frame
+        }
+    };
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+fn bridge_tx_bench_payload(args: &BridgeTxBenchArgs) -> Vec<u8> {
+    let marker = args.payload_marker.as_deref().unwrap_or("").as_bytes();
+    let mut payload = Vec::with_capacity(args.payload_len);
+    payload.extend_from_slice(marker);
+    for index in payload.len()..args.payload_len {
+        payload.push((index % 251) as u8);
+    }
+    payload
+}
+
+fn bridge_tx_bench_broadcast_data_header(subtype: u8, sequence: u16) -> [u8; 24] {
+    let mut header = [
+        subtype, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02, 0x11, 0x22, 0x33,
+        0x44, 0x55, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00,
+    ];
+    header[22..24].copy_from_slice(&sequence.to_le_bytes());
+    header
 }
 
 fn bridge_tx_bench_ht_radiotap(
@@ -24595,9 +24688,11 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
     println!(
-        "Bench: count={} payload_len={} interval_us={} link_id={} radio_port={} mcs={} tx_rate={:?} tx_queue={:?} mac_id={} first_segment={} aggregate_break={}",
+        "Bench: count={} payload_len={} frame_kind={:?} marker={} interval_us={} link_id={} radio_port={} mcs={} tx_rate={:?} tx_queue={:?} mac_id={} first_segment={} aggregate_break={}",
         report.count,
         report.payload_len,
+        report.frame_kind,
+        report.payload_marker.as_deref().unwrap_or("-"),
         report.interval_us,
         report.link_id_hex,
         report.radio_port_hex,
@@ -25962,6 +26057,8 @@ mod tests {
             bandwidth: Bandwidth::Mhz20,
             count: 10,
             payload_len: 128,
+            frame_kind: BridgeTxBenchFrameKind::WfbData,
+            payload_marker: None,
             frame_hex: None,
             packet_hex: None,
             interval_us: 0,
@@ -26667,6 +26764,50 @@ mod tests {
             "invalid_bench_packet_hex"
         );
         assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_rejects_payload_marker_longer_than_payload_before_usb_open() {
+        let mut args = bridge_tx_bench_args(true);
+        args.payload_len = 3;
+        args.payload_marker = Some("marker".to_string());
+        let report = bridge_tx_bench_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "invalid_bench_payload_marker"
+        );
+        assert!(report.adapter.is_none());
+    }
+
+    #[test]
+    fn bridge_tx_bench_generates_marked_data_frame_variants() {
+        let channel_id = WfbChannelId::new(0x000001, 0x23).expect("channel id");
+        let variants = [
+            (BridgeTxBenchFrameKind::WfbData, 0x08, 0x01, 24),
+            (BridgeTxBenchFrameKind::WfbDataNoDs, 0x08, 0x00, 24),
+            (BridgeTxBenchFrameKind::BroadcastData, 0x08, 0x00, 24),
+            (BridgeTxBenchFrameKind::BroadcastQosData, 0x88, 0x00, 26),
+        ];
+
+        for (kind, fc0, fc1, payload_offset) in variants {
+            let mut args = bridge_tx_bench_args(true);
+            args.frame_kind = kind;
+            args.payload_len = 16;
+            args.payload_marker = Some("MARK".to_string());
+
+            let datagram =
+                build_bridge_tx_bench_datagram(&args, channel_id, 0x1122).expect("datagram");
+            let parsed = parse_tx_datagram(&datagram).expect("parsed datagram");
+
+            assert_eq!(parsed.ieee80211_frame[0], fc0);
+            assert_eq!(parsed.ieee80211_frame[1], fc1);
+            assert_eq!(
+                &parsed.ieee80211_frame[payload_offset..payload_offset + 4],
+                b"MARK"
+            );
+        }
     }
 
     #[test]
