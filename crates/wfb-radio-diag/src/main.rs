@@ -2949,6 +2949,7 @@ struct BridgeRunReport {
     tx_burst_limit: u32,
     max_datagrams: u32,
     datagrams_received: u64,
+    stop_reason: &'static str,
     last_peer: Option<String>,
     last_datagram: Option<BridgeTxDatagramReport>,
     bulk_in_endpoint: Option<u8>,
@@ -4459,6 +4460,7 @@ const MAX_TX_STATUS_POLL_COUNT: u32 = 64;
 const MAX_TX_STATUS_TOTAL_POLL_MS: u64 = 60_000;
 const BRIDGE_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 const BRIDGE_RUN_TX_RECEIVE_TIMEOUT_MS: u64 = 100;
+static BRIDGE_RUN_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const RTL8812_MAX_H2C_BOX_NUMS: u8 = 4;
 const RTL8812_MESSAGE_BOX_SIZE: u16 = 4;
 const RTL8812_EX_MESSAGE_BOX_SIZE: u16 = 4;
@@ -20549,6 +20551,32 @@ impl Drop for BridgeRunTxReceiver {
 }
 
 #[cfg(unix)]
+extern "C" fn bridge_run_signal_handler(_signal: libc::c_int) {
+    BRIDGE_RUN_STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_bridge_run_signal_handlers() -> std::io::Result<()> {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = bridge_run_signal_handler as *const () as libc::sighandler_t;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_bridge_run_signal_handlers() -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn set_udp_receive_buffer(socket: &UdpSocket, bytes: usize) -> std::io::Result<()> {
     let value: libc::c_int = bytes.try_into().unwrap_or(libc::c_int::MAX);
     let result = unsafe {
@@ -20728,7 +20756,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             },
         );
     }
-
     let wfb_forward_configs = match bridge_run_wfb_forward_configs(&args) {
         Ok(configs) => configs,
         Err(error) => {
@@ -20764,6 +20791,18 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
+    BRIDGE_RUN_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    if let Err(error) = install_bridge_run_signal_handlers() {
+        return bridge_run_failure(
+            report,
+            "signal_handler",
+            "bridge run signal handler setup failed",
+            DiagnosticErrorReport {
+                code: "signal_handler_failed",
+                message: format!("failed to install bridge-run SIGINT/SIGTERM handler: {error}"),
+            },
+        );
+    }
 
     let tx_sockets = match bridge_run_bind_tx_sockets(&args) {
         Ok(sockets) => sockets,
@@ -20796,7 +20835,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     open.adapter,
                     open.endpoints,
                     open.counters,
-                    "opened retained macOS IOUSBHost session for bounded bridge run",
+                    "opened retained macOS IOUSBHost session for bridge run",
                 ),
                 Err(error) => {
                     return bridge_run_failure(
@@ -20841,7 +20880,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
-                "claimed adapter for bounded bridge run",
+                "claimed adapter for bridge run",
             )
         };
 
@@ -21024,14 +21063,16 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let mut datagram_bytes = 0u64;
     let mut frame_bytes = 0u64;
     let mut rx_buf = vec![0u8; 16 * 1024];
-
-    loop {
+    let stop_reason = loop {
+        if BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst) {
+            break "signal";
+        }
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
-                break;
+                break "duration_elapsed";
             }
         } else if !unlimited_datagrams && report.datagrams_received >= max_datagrams {
-            break;
+            break "tx_datagram_limit";
         }
 
         let mut tx_burst_count = 0u32;
@@ -21160,7 +21201,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    break;
+                    break "duration_elapsed";
                 }
                 Duration::from_millis(args.rx_timeout_ms).min(remaining)
             }
@@ -21218,7 +21259,8 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 );
             }
         }
-    }
+    };
+    report.stop_reason = stop_reason;
 
     if let Err(error) = flush_optional_pcap(&mut pcap) {
         return bridge_run_failure(report, "rx_pcap", "failed to flush RX PCAP", error);
@@ -21293,7 +21335,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         DiagnosticPhase {
             id: "bridge_run",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "ran bounded interleaved RX forwarding and TX injection loop",
+            detail: "ran interleaved RX forwarding and TX injection loop",
         },
     ]);
     report.phases = phases;
@@ -21338,6 +21380,7 @@ fn bridge_run_base_report(
         tx_burst_limit: args.tx_burst_limit,
         max_datagrams: args.tx.max_datagrams,
         datagrams_received: 0,
+        stop_reason: "not_started",
         last_peer: None,
         last_datagram: None,
         bulk_in_endpoint: None,
@@ -28577,8 +28620,9 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         );
     }
     println!(
-        "Bridge run: duration_ms={} tx_binds={} tx_datagrams={} max_datagrams={} tx_burst_limit={} rx_buffers={} rx_frames={}",
+        "Bridge run: duration_ms={} stop_reason={} tx_binds={} tx_datagrams={} max_datagrams={} tx_burst_limit={} rx_buffers={} rx_frames={}",
         report.duration_ms,
+        report.stop_reason,
         report.bind_addrs.join(","),
         report.datagrams_received,
         report.max_datagrams,
