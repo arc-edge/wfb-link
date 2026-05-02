@@ -1,0 +1,57 @@
+{
+  "profile": {
+    "name": "close-range-ch36-ht20-efuse-20260502-012427",
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_power_mode": "efuse_derived",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {
+      "link_id": "0x000001",
+      "radio_port": "0x00",
+      "fec_k": 8,
+      "fec_n": 12
+    },
+    "payload_len": 1000,
+    "expected_payloads": 2000
+  },
+  "automation": {
+    "runner": "scripts/run-rf-quality-close-range.sh",
+    "local_artifact_dir": "/tmp/wfb-rfq-auto-live-20260502-012427",
+    "remote_prefix": "/tmp/wfb-rfq-auto-20260502-012427",
+    "relay": {
+      "source": "10.42.0.162:5610",
+      "destination": "127.0.0.1:5611",
+      "forwarded_datagrams": 3000
+    }
+  },
+  "comparison": {
+    "status": "matched",
+    "outcome": {
+      "macos": {
+        "submitted_datagrams": 3000,
+        "source_payloads": 2000,
+        "recovered_payloads": 2000,
+        "loss_percent": 0.0
+      },
+      "linux_baseline": {
+        "submitted_datagrams": 3000,
+        "source_payloads": 2000,
+        "recovered_payloads": 1999,
+        "loss_percent": 0.05
+      },
+      "recovered_payload_delta": 1,
+      "throughput_ratio_macos_to_linux": 0.8812292512045061,
+      "acceptance_margin": {
+        "status": "within_margin",
+        "loss_delta_percent_points": -0.05,
+        "throughput_evaluated": false
+      }
+    }
+  },
+  "acceptance": {
+    "status": "baseline_comparable"
+  },
+  "result": "pass"
+}

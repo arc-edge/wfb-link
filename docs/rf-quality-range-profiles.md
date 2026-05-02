@@ -112,6 +112,25 @@ Accepted on May 2, 2026:
   points versus Linux. Throughput ratio was recorded as informational only
   because bridge timing included init and relay/orchestration delay.
 
+### Automated Close-Range Runner Validation
+
+Validated on May 2, 2026 with `scripts/run-rf-quality-close-range.sh`:
+
+- Local artifact directory: `/tmp/wfb-rfq-auto-live-20260502-012427`.
+- RF-quality report:
+  `/tmp/wfb-rfq-auto-live-20260502-012427/rf-quality-report.json`.
+- Compact fixture:
+  `fixtures/rf-quality/rf-quality-close-range-automation-summary.json`.
+- Mac bridge result: `pass`, `3000/3000` datagrams received and submitted.
+- Linux receiver counter: `2000/2000` marked `RFQCLSEF` payloads recovered.
+- Report result: `pass`, `acceptance.status=baseline_comparable`,
+  `comparison.status=matched`, and
+  `comparison.outcome.acceptance_margin.status=within_margin`.
+- Operational note: the hardware Mac checkout could not `git pull` from GitHub
+  via SSH, so the live run used `SYNC_HW_REPO=0`. The runner now collects Linux
+  artifacts by streaming them through the same nested SSH path used for peer
+  control rather than relying on local `scp -o ProxyJump` target identity.
+
 ## Stepped Or Attenuated
 
 Use this profile before outdoor work when an RF attenuator, repeatable

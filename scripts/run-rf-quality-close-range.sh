@@ -559,9 +559,10 @@ copy_hw_artifact() {
 copy_linux_artifact() {
   local remote_path=$1
   local name=${2:-$(basename "$remote_path")}
-  if scp -q -o "ProxyJump=$HW_MAC_HOST" "$LINUX_HOST:$remote_path" "$OUT_DIR/$name" >/dev/null 2>&1; then
+  if ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") cat $(quote "$remote_path")" >"$OUT_DIR/$name" 2>/dev/null; then
     log "collected Linux artifact: $name"
   else
+    rm -f "$OUT_DIR/$name"
     printf 'linux:%s\n' "$remote_path" >>"$MISSING_ARTIFACTS"
   fi
 }
