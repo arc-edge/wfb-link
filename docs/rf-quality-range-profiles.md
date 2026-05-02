@@ -28,6 +28,18 @@ channel, bandwidth, payload settings, antenna, or adapter changes. Keep both
 radios close enough that a healthy Linux reference has effectively no RF margin
 pressure; this profile is for regression detection, not range proof.
 
+The preferred close-range runner is:
+
+```sh
+scripts/run-rf-quality-close-range.sh
+```
+
+Use `scripts/run-rf-quality-close-range.sh --dry-run` to inspect the Mac relay,
+Mac bridge, Linux peer, artifact collection, and RF-quality report steps before
+touching hardware. The explicit envelope below remains useful for manual
+reproduction and for comparing a failed automated run against the raw
+`rf-quality-report` inputs.
+
 Required settings:
 
 - Channel 36, 20 MHz until another channel has a matching Linux baseline.

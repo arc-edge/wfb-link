@@ -34,6 +34,42 @@ sudo -n docker start arc-wfb-link-1
 sudo -n docker ps --filter name=arc-wfb-link-1 --format '{{.Names}} {{.Status}}'
 ```
 
+## Automated Close-Range Runner
+
+Use the automation script for the accepted close-range sanity workflow when the
+hardware Mac and Linux peer are reachable:
+
+```sh
+scripts/run-rf-quality-close-range.sh
+```
+
+The script runs from the local checkout, starts the hardware-Mac UDP relay and
+`bridge-tx-listen`, controls the Linux `wfb0` sender/receiver through the
+hardware Mac jump host, collects artifacts into a timestamped local `/tmp`
+directory, restores the Linux WFB service, and generates an `rf-quality-report`
+when the Mac report, EFUSE report, Linux baseline, and receiver counter are
+available.
+
+Inspect the command plan without claiming USB or transmitting RF:
+
+```sh
+scripts/run-rf-quality-close-range.sh --dry-run
+```
+
+Common site-specific overrides:
+
+```sh
+HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net \
+HW_REPO_PATH=projects/arc/wfb-mac-radio-agent \
+LINUX_HOST=drone-2f389.local \
+MAC_LAN_IP=10.42.0.162 \
+scripts/run-rf-quality-close-range.sh
+```
+
+Set `SYNC_HW_REPO=1` only when the hardware-Mac checkout should be fast-forwarded
+before the bridge starts. The manual commands below remain the fallback when a
+single stage needs to be isolated.
+
 ## Mac Close-Range Command
 
 The accepted close-range profile uses EFUSE-derived TX power and the current
