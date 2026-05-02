@@ -3085,6 +3085,7 @@ struct BridgeTxListenReport {
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
     pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
     pre_tx_rf_writes: Vec<BridgeTxBenchRfSerialWriteReport>,
@@ -3133,6 +3134,7 @@ struct BridgeRunReport {
     monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
@@ -3259,6 +3261,7 @@ struct BridgeTxBenchReport {
     fw_media_status_report: Option<BridgeTxBenchH2cReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     txdma_offset_check_write: Option<BridgeTxBenchRegisterClearReport>,
     cr_write: Option<BridgeTxBenchRegisterClearReport>,
     trxdma_ctrl_write: Option<BridgeTxBenchRegisterClearReport>,
@@ -3535,7 +3538,57 @@ struct BridgeTxBenchSameSessionInitReport {
     rf_delays_applied: u64,
     effective_channel: Option<Channel>,
     effective_bandwidth: Option<Bandwidth>,
+    calibration_state: Vec<RfCalibrationProbeReport>,
     counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfCalibrationProbeReport {
+    stage: &'static str,
+    semantics: &'static str,
+    mode: RfQualityCalibrationMode,
+    stop_gap: bool,
+    stop_gap_reason: Option<&'static str>,
+    stop_gap_registers: Vec<RfCalibrationStopGapRegisterReport>,
+    rfe_pinmux: Vec<RfCalibrationRegisterReadReport>,
+    rfe_inversion: Vec<RfCalibrationRegisterReadReport>,
+    rfe_timing: Vec<RfCalibrationRegisterReadReport>,
+    iqk: Vec<RfCalibrationRegisterReadReport>,
+    lck: Vec<RfCalibrationRegisterReadReport>,
+    thermal: RfCalibrationThermalProbeReport,
+    rf_path: Vec<RfCalibrationRegisterReadReport>,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfCalibrationRegisterReadReport {
+    register_name: &'static str,
+    address: u16,
+    address_hex: String,
+    width: &'static str,
+    value: u32,
+    value_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfCalibrationStopGapRegisterReport {
+    register_name: &'static str,
+    address: u16,
+    address_hex: String,
+    width: &'static str,
+    value: u32,
+    value_hex: String,
+    source: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfCalibrationThermalProbeReport {
+    source: &'static str,
+    live_readback_supported: bool,
+    value: Option<u8>,
+    value_hex: Option<String>,
+    note: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -3627,7 +3680,12 @@ struct RfQualityCalibrationReport {
     mode: RfQualityCalibrationMode,
     stop_gap: bool,
     label: &'static str,
+    stop_gap_sources: Vec<&'static str>,
+    probes: Vec<serde_json::Value>,
     rfe_pinmux: Option<serde_json::Value>,
+    rfe_inversion: Option<serde_json::Value>,
+    rfe_timing: Option<serde_json::Value>,
+    rf_path: Option<serde_json::Value>,
     iqk: Option<serde_json::Value>,
     lck: Option<serde_json::Value>,
     thermal: Option<serde_json::Value>,
@@ -6589,6 +6647,29 @@ fn add_diagnostic_counters(total: &mut DiagnosticCounters, extra: &DiagnosticCou
     total.rx_frames += extra.rx_frames;
     total.tx_frames += extra.tx_frames;
     total.dropped_frames += extra.dropped_frames;
+}
+
+fn diagnostic_counters_delta(
+    before: DiagnosticCounters,
+    after: DiagnosticCounters,
+) -> DiagnosticCounters {
+    DiagnosticCounters {
+        usb_control_reads: after
+            .usb_control_reads
+            .saturating_sub(before.usb_control_reads),
+        usb_control_writes: after
+            .usb_control_writes
+            .saturating_sub(before.usb_control_writes),
+        usb_bulk_in_reads: after
+            .usb_bulk_in_reads
+            .saturating_sub(before.usb_bulk_in_reads),
+        usb_bulk_out_writes: after
+            .usb_bulk_out_writes
+            .saturating_sub(before.usb_bulk_out_writes),
+        rx_frames: after.rx_frames.saturating_sub(before.rx_frames),
+        tx_frames: after.tx_frames.saturating_sub(before.tx_frames),
+        dropped_frames: after.dropped_frames.saturating_sub(before.dropped_frames),
+    }
 }
 
 fn add_tx_activity_led_counters(
@@ -13393,6 +13474,200 @@ where
     }
 
     Ok(())
+}
+
+type RfCalibrationRegisterSpec = (&'static str, u16);
+
+const RF_CALIBRATION_RFE_PINMUX_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR),
+];
+
+const RF_CALIBRATION_RFE_INVERSION_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR),
+];
+
+const RF_CALIBRATION_RFE_TIMING_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR),
+    ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR),
+];
+
+const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1),
+    ("rA_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 4),
+    ("rB_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x200),
+    ("rB_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x204),
+];
+
+const RF_CALIBRATION_LCK_RELATED_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    (
+        "rA_LSSIWrite_Jaguar_last_rf_transaction",
+        REG_RF_PATH_A_3WIRE,
+    ),
+    (
+        "rB_LSSIWrite_Jaguar_last_rf_transaction",
+        REG_RF_PATH_B_3WIRE,
+    ),
+];
+
+const RF_CALIBRATION_RF_PATH_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("rA_LSSIWrite_Jaguar", REG_RF_PATH_A_3WIRE),
+    ("rB_LSSIWrite_Jaguar", REG_RF_PATH_B_3WIRE),
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR),
+    ("rTxPath_Jaguar", REG_TX_PATH_JAGUAR),
+];
+
+fn rf_calibration_probe<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    stage: &'static str,
+    semantics: &'static str,
+    mode: RfQualityCalibrationMode,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    include_captured_tail_stop_gap: bool,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<RfCalibrationProbeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = *counters;
+    let stop_gap_registers = if include_captured_tail_stop_gap
+        && should_apply_captured_tx_bringup_tail(channel, bandwidth)
+    {
+        rf_calibration_captured_tail_stop_gap_registers(bandwidth)?
+    } else {
+        Vec::new()
+    };
+    let stop_gap = matches!(
+        mode,
+        RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
+    ) || !stop_gap_registers.is_empty();
+
+    let rfe_pinmux =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_RFE_PINMUX_REGISTERS)?;
+    let rfe_inversion =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_RFE_INVERSION_REGISTERS)?;
+    let rfe_timing =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_RFE_TIMING_REGISTERS)?;
+    let iqk = rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)?;
+    let lck =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_LCK_RELATED_REGISTERS)?;
+    let rf_path =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_RF_PATH_REGISTERS)?;
+
+    Ok(RfCalibrationProbeReport {
+        stage,
+        semantics,
+        mode,
+        stop_gap,
+        stop_gap_reason: stop_gap.then_some(
+            "captured/static calibration values are active until runtime IQK/LCK/RFE calibration is ported",
+        ),
+        stop_gap_registers,
+        rfe_pinmux,
+        rfe_inversion,
+        rfe_timing,
+        iqk,
+        lck,
+        thermal: RfCalibrationThermalProbeReport {
+            source: "not_sampled",
+            live_readback_supported: false,
+            value: None,
+            value_hex: None,
+            note: "runtime thermal-meter readback is not ported; EFUSE thermal and IQK/LCK bytes are attached in RF-quality reports when an EFUSE artifact is supplied",
+        },
+        rf_path,
+        counters: diagnostic_counters_delta(before, *counters),
+    })
+}
+
+fn rf_calibration_read32_group<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    specs: &[RfCalibrationRegisterSpec],
+) -> std::result::Result<Vec<RfCalibrationRegisterReadReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    specs
+        .iter()
+        .map(|(register_name, address)| {
+            let value = read32_with_counter(registers, counters, *address).map_err(|error| {
+                DiagnosticErrorReport {
+                    code: "rf_calibration_register_read_failed",
+                    message: format!("{register_name} calibration readback failed: {error}"),
+                }
+            })?;
+            Ok(RfCalibrationRegisterReadReport {
+                register_name,
+                address: *address,
+                address_hex: format_address(*address),
+                width: "u32",
+                value,
+                value_hex: format_value(value, 8),
+            })
+        })
+        .collect()
+}
+
+fn rf_calibration_captured_tail_stop_gap_registers(
+    bandwidth: Bandwidth,
+) -> std::result::Result<Vec<RfCalibrationStopGapRegisterReport>, DiagnosticErrorReport> {
+    captured_tx_bringup_tail_8812a(bandwidth).map(|writes| {
+        writes
+            .iter()
+            .map(
+                |&(register_name, address, value)| RfCalibrationStopGapRegisterReport {
+                    register_name,
+                    address,
+                    address_hex: format_address(address),
+                    width: "u32",
+                    value,
+                    value_hex: format_value(value, 8),
+                    source: "captured_linux_runtime_tail",
+                    reason: "bench bring-up stand-in for runtime RFE, TX power, IQK, and calibration routines",
+                },
+            )
+            .collect()
+    })
+}
+
+fn tx_pre_calibration_mode(
+    same_session_init: bool,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> RfQualityCalibrationMode {
+    if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
+        RfQualityCalibrationMode::StopGapCaptured
+    } else {
+        RfQualityCalibrationMode::Unknown
+    }
+}
+
+fn tx_pre_calibration_probe<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    same_session_init: bool,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<RfCalibrationProbeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    rf_calibration_probe(
+        registers,
+        "before_tx",
+        "read final RF calibration state after command-level pre-TX register and TXAGC overrides",
+        tx_pre_calibration_mode(same_session_init, channel, bandwidth),
+        channel,
+        bandwidth,
+        same_session_init,
+        counters,
+    )
 }
 
 type TxPowerAgcRegister = (&'static str, u16);
@@ -21283,6 +21558,31 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if report.same_session_init.is_some() || tx_power_control_requested(&args.tx_power) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match tx_pre_calibration_probe(
+            &registers,
+            report.same_session_init.is_some(),
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(probe) => {
+                report.rf_calibration_pre_tx = Some(probe);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "rf_calibration_probe",
+                    "bridge TX listener RF calibration probe failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
     let mut tx_status = tx_status_probe_report(&args.tx_status);
@@ -21572,6 +21872,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             detail: "applied explicit TXAGC power control before the TX loop",
         });
     }
+    if report.rf_calibration_pre_tx.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "rf_calibration_probe",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "sampled RF calibration state before the TX loop",
+        });
+    }
     phases.push(DiagnosticPhase {
         id: "bridge_listen",
         status: DiagnosticPhaseStatus::Completed,
@@ -21618,6 +21925,7 @@ fn bridge_tx_listen_base_report(
         same_session_init: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        rf_calibration_pre_tx: None,
         pre_tx_register_writes: Vec::new(),
         pre_tx_register_masked_writes: Vec::new(),
         pre_tx_rf_writes: Vec::new(),
@@ -22172,6 +22480,31 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
+    {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match tx_pre_calibration_probe(
+            &registers,
+            report.same_session_init.is_some(),
+            channel,
+            args.tx.bandwidth,
+            &mut pre_counters,
+        ) {
+            Ok(probe) => {
+                report.rf_calibration_pre_tx = Some(probe);
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "rf_calibration_probe",
+                    "bridge run RF calibration probe failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
     let mut pcap = match create_optional_pcap(args.rx_pcap.as_deref()) {
         Ok(pcap) => pcap,
         Err(error) => {
@@ -22486,6 +22819,13 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             detail: "applied explicit TXAGC power control before RX/TX loops",
         });
     }
+    if report.rf_calibration_pre_tx.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "rf_calibration_probe",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "sampled RF calibration state before RX/TX loops",
+        });
+    }
     phases.extend([
         DiagnosticPhase {
             id: "socket_bind",
@@ -22557,6 +22897,7 @@ fn bridge_run_base_report(
         monitor_opmode: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        rf_calibration_pre_tx: None,
         tx_status: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
@@ -22819,6 +23160,7 @@ where
     let mut queue_layout = None;
     let mut bb_stats = BbSmokeStats::default();
     let mut rf_stats = RfSmokeStats::default();
+    let mut calibration_state = Vec::new();
 
     let power_args = PowerOnSmokeArgs {
         adapter: args.adapter.clone(),
@@ -22885,6 +23227,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -22919,6 +23262,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -22943,6 +23287,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -22968,6 +23313,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -22992,6 +23338,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -23023,6 +23370,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -23061,6 +23409,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -23091,6 +23440,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -23131,6 +23481,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -23187,6 +23538,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -23225,6 +23577,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -23272,6 +23625,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -23289,6 +23643,57 @@ where
         before,
         *counters,
     );
+
+    let before = *counters;
+    match rf_calibration_probe(
+        registers,
+        "before_channel",
+        "read RF/RFE/IQK/LCK-related state after static BB/RF table load and before channel-specific runtime writes",
+        RfQualityCalibrationMode::Unknown,
+        channel,
+        args.bandwidth,
+        false,
+        counters,
+    ) {
+        Ok(probe) => {
+            calibration_state.push(probe);
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_before_channel",
+                DiagnosticPhaseStatus::Completed,
+                "sampled RF calibration state before channel setup",
+                before,
+                *counters,
+            );
+        }
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_before_channel",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    calibration_state.clone(),
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    }
 
     let mut channel_steps = Vec::new();
     let before = *counters;
@@ -23325,6 +23730,7 @@ where
                 queue_layout,
                 &bb_stats,
                 &rf_stats,
+                calibration_state.clone(),
                 *counters,
                 DiagnosticResult::Fail,
             ),
@@ -23346,6 +23752,57 @@ where
         before,
         *counters,
     );
+
+    let before = *counters;
+    match rf_calibration_probe(
+        registers,
+        "after_channel",
+        "read RF/RFE/IQK/LCK-related state after channel and captured runtime TX bring-up tail",
+        tx_pre_calibration_mode(true, channel, args.bandwidth),
+        channel,
+        args.bandwidth,
+        true,
+        counters,
+    ) {
+        Ok(probe) => {
+            calibration_state.push(probe);
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_after_channel",
+                DiagnosticPhaseStatus::Completed,
+                "sampled RF calibration state after channel setup",
+                before,
+                *counters,
+            );
+        }
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_after_channel",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    calibration_state.clone(),
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    }
 
     let before = *counters;
     let tx_tail_steps = match run_tx_scheduler_tail_sequence(registers, counters) {
@@ -23370,6 +23827,7 @@ where
                     queue_layout,
                     &bb_stats,
                     &rf_stats,
+                    calibration_state.clone(),
                     *counters,
                     DiagnosticResult::Fail,
                 ),
@@ -23386,6 +23844,57 @@ where
         *counters,
     );
 
+    let before = *counters;
+    match rf_calibration_probe(
+        registers,
+        "before_tx",
+        "read final init-time RF calibration state after TX scheduler tail and before command-level TX overrides",
+        tx_pre_calibration_mode(true, channel, args.bandwidth),
+        channel,
+        args.bandwidth,
+        true,
+        counters,
+    ) {
+        Ok(probe) => {
+            calibration_state.push(probe);
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_before_tx",
+                DiagnosticPhaseStatus::Completed,
+                "sampled RF calibration state before command-level TX operations",
+                before,
+                *counters,
+            );
+        }
+        Err(error) => {
+            push_init_live_phase(
+                &mut phase_summaries,
+                "rf_calibration_before_tx",
+                DiagnosticPhaseStatus::Blocked,
+                error.message.clone(),
+                before,
+                *counters,
+            );
+            return Err((
+                bridge_tx_bench_same_session_init_report(
+                    args,
+                    channel,
+                    assets,
+                    phase_summaries,
+                    firmware_payload_len,
+                    &llt_stats,
+                    queue_layout,
+                    &bb_stats,
+                    &rf_stats,
+                    calibration_state.clone(),
+                    *counters,
+                    DiagnosticResult::Fail,
+                ),
+                error,
+            ));
+        }
+    }
+
     Ok(bridge_tx_bench_same_session_init_report(
         args,
         channel,
@@ -23396,6 +23905,7 @@ where
         queue_layout,
         &bb_stats,
         &rf_stats,
+        calibration_state.clone(),
         *counters,
         DiagnosticResult::Pass,
     ))
@@ -23792,6 +24302,7 @@ fn bridge_tx_bench_same_session_init_report(
     queue_layout: Option<QueueLayout>,
     bb_stats: &BbSmokeStats,
     rf_stats: &RfSmokeStats,
+    calibration_state: Vec<RfCalibrationProbeReport>,
     counters: DiagnosticCounters,
     result: DiagnosticResult,
 ) -> BridgeTxBenchSameSessionInitReport {
@@ -23838,6 +24349,7 @@ fn bridge_tx_bench_same_session_init_report(
         } else {
             None
         },
+        calibration_state,
         counters,
     }
 }
@@ -25428,6 +25940,31 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if report.same_session_init.is_some() || tx_power_control_requested(&args.tx_power) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match tx_pre_calibration_probe(
+            &registers,
+            report.same_session_init.is_some(),
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(probe) => {
+                report.rf_calibration_pre_tx = Some(probe);
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "rf_calibration_probe",
+                    "bridge TX benchmark RF calibration probe failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
     let mut tx_status = tx_status_probe_report(&args.tx_status);
@@ -25559,6 +26096,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             || !args.pre_tx_rmw32.is_empty(),
         !args.pre_tx_rf_write.is_empty(),
         report.tx_power_control.is_some(),
+        report.rf_calibration_pre_tx.is_some(),
         args.fw_media_status,
         bridge_tx_bench_has_post_tx_register_mutation(&args),
         claim_detail,
@@ -25650,6 +26188,7 @@ fn bridge_tx_bench_pass_phases(
     generic_register_write: bool,
     rf_serial_write: bool,
     tx_power_control: bool,
+    rf_calibration_probe: bool,
     fw_media_status: bool,
     post_tx_register_write: bool,
     claim_detail: &'static str,
@@ -25748,6 +26287,13 @@ fn bridge_tx_bench_pass_phases(
             id: "tx_power_control",
             status: DiagnosticPhaseStatus::Completed,
             detail: "applied explicit TXAGC power control before the TX loop",
+        });
+    }
+    if rf_calibration_probe {
+        phases.push(DiagnosticPhase {
+            id: "rf_calibration_probe",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "sampled RF calibration state before the TX loop",
         });
     }
     if fw_media_status {
@@ -25894,6 +26440,7 @@ fn bridge_tx_bench_base_report(
         fw_media_status_report: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        rf_calibration_pre_tx: None,
         txdma_offset_check_write: None,
         cr_write: None,
         trxdma_ctrl_write: None,
@@ -26225,24 +26772,96 @@ fn rf_quality_macos_report(
                 })
                 .unwrap_or_default(),
         },
-        calibration: RfQualityCalibrationReport {
-            mode: args.calibration_mode,
-            stop_gap: matches!(
-                args.calibration_mode,
-                RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
-            ),
-            label: rf_quality_calibration_label(args.calibration_mode),
-            rfe_pinmux: mac_report.and_then(|value| {
-                rf_quality_json_clone(value, &["same_session_init", "rfe_type"])
-                    .or_else(|| rf_quality_json_clone(value, &["rfe_type"]))
-            }),
-            iqk: mac_report.and_then(|value| rf_quality_json_clone(value, &["iqk"])),
-            lck: mac_report.and_then(|value| rf_quality_json_clone(value, &["lck"])),
-            thermal: mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"])),
-        },
+        calibration: rf_quality_calibration_report(args, mac_report, efuse_report),
         wfb_outcome: rf_quality_wfb_outcome(args, mac_report),
         receiver_artifacts,
     }
+}
+
+fn rf_quality_calibration_report(
+    args: &RfQualityReportArgs,
+    mac_report: Option<&serde_json::Value>,
+    efuse_report: Option<&serde_json::Value>,
+) -> RfQualityCalibrationReport {
+    let probes = rf_quality_calibration_probes_from_mac(mac_report);
+    let final_probe = rf_quality_calibration_final_probe(&probes);
+    let probe_stop_gap = probes
+        .iter()
+        .any(|probe| rf_quality_json_bool(probe, &["stop_gap"]).unwrap_or(false));
+    let mode_stop_gap = matches!(
+        args.calibration_mode,
+        RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
+    );
+    let stop_gap = mode_stop_gap || probe_stop_gap;
+    let mut stop_gap_sources = Vec::new();
+    if mode_stop_gap {
+        stop_gap_sources.push("operator-selected calibration mode is stop-gap/static");
+    }
+    if probe_stop_gap {
+        stop_gap_sources.push("macOS report contains stop-gap calibration probe evidence");
+    }
+
+    let thermal_probe = final_probe.and_then(|value| rf_quality_json_clone(value, &["thermal"]));
+    let efuse_thermal_meter = efuse_report
+        .and_then(|value| rf_quality_efuse_named_byte(value, "EEPROM_THERMAL_METER_8812"));
+    let efuse_iqk_lck =
+        efuse_report.and_then(|value| rf_quality_efuse_named_byte(value, "EEPROM_IQK_LCK_8812"));
+    let thermal = (thermal_probe.is_some()
+        || efuse_thermal_meter.is_some()
+        || efuse_iqk_lck.is_some())
+    .then(|| {
+        serde_json::json!({
+            "probe": thermal_probe,
+            "efuse_thermal_meter": efuse_thermal_meter,
+            "efuse_iqk_lck": efuse_iqk_lck,
+        })
+    });
+
+    RfQualityCalibrationReport {
+        mode: args.calibration_mode,
+        stop_gap,
+        label: rf_quality_calibration_label(args.calibration_mode),
+        stop_gap_sources,
+        rfe_pinmux: final_probe
+            .and_then(|value| rf_quality_json_clone(value, &["rfe_pinmux"]))
+            .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["rfe_pinmux"]))),
+        rfe_inversion: final_probe
+            .and_then(|value| rf_quality_json_clone(value, &["rfe_inversion"])),
+        rfe_timing: final_probe.and_then(|value| rf_quality_json_clone(value, &["rfe_timing"])),
+        rf_path: final_probe.and_then(|value| rf_quality_json_clone(value, &["rf_path"])),
+        iqk: final_probe
+            .and_then(|value| rf_quality_json_clone(value, &["iqk"]))
+            .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["iqk"]))),
+        lck: final_probe
+            .and_then(|value| rf_quality_json_clone(value, &["lck"]))
+            .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["lck"]))),
+        thermal: thermal
+            .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"]))),
+        probes,
+    }
+}
+
+fn rf_quality_calibration_probes_from_mac(
+    mac_report: Option<&serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let Some(value) = mac_report else {
+        return Vec::new();
+    };
+    let mut probes =
+        rf_quality_json_array_clone(value, &["same_session_init", "calibration_state"])
+            .unwrap_or_default();
+    if let Some(pre_tx) = rf_quality_json_clone(value, &["rf_calibration_pre_tx"]) {
+        probes.push(pre_tx);
+    }
+    probes
+}
+
+fn rf_quality_calibration_final_probe(probes: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    probes
+        .iter()
+        .rev()
+        .find(|probe| rf_quality_json_string(probe, &["stage"]).as_deref() == Some("before_tx"))
+        .or_else(|| probes.last())
 }
 
 fn rf_quality_wfb_outcome(
@@ -26663,6 +27282,19 @@ fn rf_quality_json_string(value: &serde_json::Value, path: &[&str]) -> Option<St
     }
 }
 
+fn rf_quality_json_bool(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::Bool(boolean) => Some(*boolean),
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn rf_quality_json_u64(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
     let value = rf_quality_json_get(value, path)?;
     match value {
@@ -26718,6 +27350,24 @@ fn rf_quality_json_pathbufs(value: &serde_json::Value, path: &[&str]) -> Vec<Pat
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn rf_quality_efuse_named_byte(value: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    for path in [
+        &["efuse", "summary", "named_bytes"][..],
+        &["efuse_summary", "named_bytes"][..],
+        &["summary", "named_bytes"][..],
+    ] {
+        if let Some(bytes) = rf_quality_json_get(value, path).and_then(|value| value.as_array()) {
+            if let Some(entry) = bytes
+                .iter()
+                .find(|entry| rf_quality_json_string(entry, &["name"]).as_deref() == Some(name))
+            {
+                return Some(entry.clone());
+            }
+        }
+    }
+    None
 }
 
 fn parse_u64_text(input: &str) -> Option<u64> {
@@ -32542,6 +33192,108 @@ mod tests {
     }
 
     #[test]
+    fn rf_quality_macos_report_extracts_calibration_probe_state() {
+        let args = rf_quality_report_args();
+        let mac_report = serde_json::json!({
+            "command": "bridge-tx-listen",
+            "same_session_init": {
+                "calibration_state": [
+                    {
+                        "stage": "before_channel",
+                        "stop_gap": false,
+                        "rfe_pinmux": [
+                            {"register_name": "rA_RFE_Pinmux_Jaguar", "address_hex": "0x0cb0", "value_hex": "0x77547777"}
+                        ]
+                    }
+                ]
+            },
+            "rf_calibration_pre_tx": {
+                "stage": "before_tx",
+                "stop_gap": true,
+                "stop_gap_registers": [
+                    {"register_name": "rA_IQK_Result_Jaguar", "address_hex": "0x0c58", "value_hex": "0x30000c1c", "source": "captured_linux_runtime_tail"}
+                ],
+                "rfe_pinmux": [
+                    {"register_name": "rA_RFE_Pinmux_Jaguar", "address_hex": "0x0cb0", "value_hex": "0x54337717"}
+                ],
+                "rfe_inversion": [
+                    {"register_name": "rA_RFE_Inv_Jaguar", "address_hex": "0x0cb4", "value_hex": "0x01000077"}
+                ],
+                "rfe_timing": [
+                    {"register_name": "rA_RFE_Timing_Jaguar", "address_hex": "0x0cb8", "value_hex": "0x00508242"}
+                ],
+                "rf_path": [
+                    {"register_name": "rA_LSSIWrite_Jaguar", "address_hex": "0x0c90", "value_hex": "0x01817d24"}
+                ],
+                "iqk": [
+                    {"register_name": "rA_IQK_Result_Jaguar", "address_hex": "0x0c58", "value_hex": "0x30000c1c"}
+                ],
+                "lck": [
+                    {"register_name": "rA_LSSIWrite_Jaguar_last_rf_transaction", "address_hex": "0x0c90", "value_hex": "0x01817d24"}
+                ],
+                "thermal": {"source": "not_sampled", "live_readback_supported": false}
+            }
+        });
+        let efuse_report = serde_json::json!({
+            "efuse": {
+                "summary": {
+                    "named_bytes": [
+                        {"name": "EEPROM_THERMAL_METER_8812", "offset_hex": "0x0ba", "value": 34, "value_hex": "0x22"},
+                        {"name": "EEPROM_IQK_LCK_8812", "offset_hex": "0x0bb", "value": 255, "value_hex": "0xff"}
+                    ]
+                }
+            }
+        });
+
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), Some(&efuse_report));
+
+        assert!(macos.calibration.stop_gap);
+        assert_eq!(macos.calibration.probes.len(), 2);
+        assert!(macos
+            .calibration
+            .stop_gap_sources
+            .contains(&"operator-selected calibration mode is stop-gap/static"));
+        assert!(macos
+            .calibration
+            .stop_gap_sources
+            .contains(&"macOS report contains stop-gap calibration probe evidence"));
+        assert_eq!(
+            macos
+                .calibration
+                .rfe_pinmux
+                .as_ref()
+                .and_then(|value| { rf_quality_json_string(value, &["0", "value_hex"]) }),
+            Some("0x54337717".to_string())
+        );
+        assert_eq!(
+            macos
+                .calibration
+                .iqk
+                .as_ref()
+                .and_then(|value| { rf_quality_json_string(value, &["0", "address_hex"]) }),
+            Some("0x0c58".to_string())
+        );
+        assert_eq!(
+            macos.calibration.thermal.as_ref().and_then(|value| {
+                rf_quality_json_string(value, &["efuse_thermal_meter", "value_hex"])
+            }),
+            Some("0x22".to_string())
+        );
+    }
+
+    #[test]
+    fn rf_quality_runtime_calibration_mode_is_not_stop_gap_without_probe_evidence() {
+        let mut args = rf_quality_report_args();
+        args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
+
+        let macos = rf_quality_macos_report(&args, None, None);
+
+        assert!(!macos.calibration.stop_gap);
+        assert!(macos.calibration.stop_gap_sources.is_empty());
+        assert!(macos.calibration.probes.is_empty());
+    }
+
+    #[test]
     fn rf_quality_comparison_detects_parameter_mismatches() {
         let args = rf_quality_report_args();
         let profile =
@@ -32594,7 +33346,12 @@ mod tests {
                 mode: RfQualityCalibrationMode::StopGapCaptured,
                 stop_gap: true,
                 label: rf_quality_calibration_label(RfQualityCalibrationMode::StopGapCaptured),
+                stop_gap_sources: vec!["test"],
+                probes: Vec::new(),
                 rfe_pinmux: None,
+                rfe_inversion: None,
+                rfe_timing: None,
+                rf_path: None,
                 iqk: None,
                 lck: None,
                 thermal: None,

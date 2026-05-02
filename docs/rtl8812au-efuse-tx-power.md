@@ -79,9 +79,8 @@ This is a channel-36 HT20 bring-up implementation. It intentionally keeps the
 calculation pure and reportable, with no automatic promotion to default TX
 behavior. Remaining work before long-distance acceptance:
 
-- compare close-range receiver recovery for planted/captured, manual-index, and
-  EFUSE-derived modes;
-- add calibration-state evidence for IQK/LCK/thermal/RFE registers;
+- compare macOS calibration-state probes against a Linux run on the same
+  adapter/channel (`docs/rtl8812au-calibration-state.md`);
 - decide whether full Linux IQK/LCK ports are justified by measured RF outcome;
 - define accepted close-range and outdoor range profiles.
 

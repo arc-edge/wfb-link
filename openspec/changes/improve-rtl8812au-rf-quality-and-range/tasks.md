@@ -23,9 +23,9 @@
 
 ## 4. Calibration State and RF Path Quality
 
-- [ ] 4.1 Add report fields for IQK, LCK, thermal, RFE pinmux, RFE timing, and RF path state used by each RF-quality run
-- [ ] 4.2 Label all planted, captured, or static calibration values as stop-gap calibration in reports
-- [ ] 4.3 Add readback probes for IQK/LCK-related BB/RF registers before and after channel setup and before TX
+- [x] 4.1 Add report fields for IQK, LCK, thermal, RFE pinmux, RFE timing, and RF path state used by each RF-quality run
+- [x] 4.2 Label all planted, captured, or static calibration values as stop-gap calibration in reports
+- [x] 4.3 Add readback probes for IQK/LCK-related BB/RF registers before and after channel setup and before TX
 - [ ] 4.4 Compare macOS calibration state against a Linux baseline run on the same adapter and channel
 - [ ] 4.5 Decide whether a partial IQK/LCK approximation is sufficient or whether to port the Linux runtime routines, based on measured RF outcome
 - [ ] 4.6 If justified, implement the smallest calibration routine subset that improves receiver-backed RF-quality metrics
