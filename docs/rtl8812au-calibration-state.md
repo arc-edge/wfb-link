@@ -52,6 +52,12 @@ The next measurement step is to compare these macOS probe values against a
 Linux baseline on the same adapter, channel, and bandwidth before deciding
 whether a partial IQK/LCK approximation is enough for distance work.
 
+`rf-quality-report --linux-baseline` also recognizes Linux `trace-registers`
+final-register maps. When the baseline contains the RF/RFE/IQK/LCK register
+addresses tracked by the macOS probe, the report emits
+`comparison.calibration` with compared register count and per-register
+mismatches.
+
 ## Bench Validation
 
 On May 2, 2026, the remote macOS hardware Mac ran a one-frame
@@ -70,3 +76,33 @@ Artifacts on the hardware Mac:
 
 - Mac bridge report: `/tmp/wfb-agent-calibration-probe-smoke.json`.
 - RF-quality envelope: `/tmp/wfb-agent-calibration-rfq.json`.
+
+## Linux Calibration Comparison
+
+Using the channel-36 Linux WFB-TX final-register map
+`/tmp/linux-rtl8812au-ch36-wfbtx-final-registers.json` as
+`--linux-baseline`, the RF-quality comparison produced
+`/tmp/wfb-agent-calibration-linux-compare.json`.
+
+Summary:
+
+- macOS calibration registers: 15.
+- Linux calibration registers: 15.
+- Compared registers: 15.
+- Mismatches: 6.
+
+Observed mismatches:
+
+| Register | macOS | Linux final |
+| --- | --- | --- |
+| `0x0c1c` path A TX scale | `0x2d400003` | `0x40000003` |
+| `0x0c90` path A RF latch / TX BB control | `0x01817d24` | `0x01807c09` |
+| `0x0cb0` path A RFE pinmux | `0x54337717` | `0x54337770` |
+| `0x0e1c` path B TX scale | `0x2d400003` | `0x40000003` |
+| `0x0e90` path B RF latch / TX BB control | `0x01817d24` | `0x01807c09` |
+| `0x0eb0` path B RFE pinmux | `0x54337717` | `0x54337770` |
+
+The current macOS path is therefore close-range functional but not
+Linux-calibration-equivalent. The mismatch is now explicit enough to use in
+stepped or long-distance RF-quality decisions instead of treating packet
+recovery alone as calibration parity.

@@ -3717,6 +3717,7 @@ struct RfQualityLinuxBaselineReport {
     submitted_datagrams: Option<u64>,
     throughput_mbps: Option<f64>,
     receiver_artifacts: Vec<PathBuf>,
+    calibration_registers: Vec<RfQualityCalibrationRegisterValueReport>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -3737,6 +3738,45 @@ struct RfQualityComparisonReport {
     degraded_mismatch_count: usize,
     mismatches: Vec<RfQualityMismatchReport>,
     outcome: RfQualityOutcomeComparisonReport,
+    calibration: RfQualityCalibrationComparisonReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfQualityCalibrationRegisterValueReport {
+    register_name: Option<String>,
+    address: u16,
+    address_hex: String,
+    value_hex: String,
+    source: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityCalibrationComparisonReport {
+    status: RfQualityCalibrationComparisonStatus,
+    macos_register_count: usize,
+    linux_register_count: usize,
+    compared_register_count: usize,
+    mismatches: Vec<RfQualityCalibrationRegisterMismatchReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityCalibrationComparisonStatus {
+    NoBaseline,
+    NoLinuxCalibrationRegisters,
+    NoMacosCalibrationRegisters,
+    NoOverlap,
+    Matched,
+    Mismatched,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityCalibrationRegisterMismatchReport {
+    register_name: Option<String>,
+    address: u16,
+    address_hex: String,
+    macos_value_hex: String,
+    linux_value_hex: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -26958,6 +26998,7 @@ fn rf_quality_linux_baseline_report(
             .into_iter()
             .chain(rf_quality_json_pathbufs(value, &["artifacts", "receiver"]))
             .collect(),
+        calibration_registers: rf_quality_linux_calibration_registers(value),
     })
 }
 
@@ -26974,6 +27015,7 @@ fn rf_quality_compare_profile_to_baseline(
             degraded_mismatch_count: 0,
             mismatches: Vec::new(),
             outcome: rf_quality_outcome_comparison(profile, macos, None),
+            calibration: rf_quality_calibration_comparison(macos, None),
         };
     };
 
@@ -27069,6 +27111,7 @@ fn rf_quality_compare_profile_to_baseline(
         degraded_mismatch_count,
         mismatches,
         outcome: rf_quality_outcome_comparison(profile, macos, Some(baseline)),
+        calibration: rf_quality_calibration_comparison(macos, Some(baseline)),
     }
 }
 
@@ -27118,6 +27161,191 @@ fn rf_quality_outcome_comparison(
         recovered_payload_delta,
         throughput_ratio_macos_to_linux,
     }
+}
+
+fn rf_quality_calibration_comparison(
+    macos: &RfQualityMacosReport,
+    baseline: Option<&RfQualityLinuxBaselineReport>,
+) -> RfQualityCalibrationComparisonReport {
+    let macos_registers = rf_quality_macos_calibration_registers(&macos.calibration);
+    let Some(baseline) = baseline else {
+        return RfQualityCalibrationComparisonReport {
+            status: RfQualityCalibrationComparisonStatus::NoBaseline,
+            macos_register_count: macos_registers.len(),
+            linux_register_count: 0,
+            compared_register_count: 0,
+            mismatches: Vec::new(),
+        };
+    };
+    if baseline.calibration_registers.is_empty() {
+        return RfQualityCalibrationComparisonReport {
+            status: RfQualityCalibrationComparisonStatus::NoLinuxCalibrationRegisters,
+            macos_register_count: macos_registers.len(),
+            linux_register_count: 0,
+            compared_register_count: 0,
+            mismatches: Vec::new(),
+        };
+    }
+    if macos_registers.is_empty() {
+        return RfQualityCalibrationComparisonReport {
+            status: RfQualityCalibrationComparisonStatus::NoMacosCalibrationRegisters,
+            macos_register_count: 0,
+            linux_register_count: baseline.calibration_registers.len(),
+            compared_register_count: 0,
+            mismatches: Vec::new(),
+        };
+    }
+
+    let linux_by_address = baseline
+        .calibration_registers
+        .iter()
+        .map(|register| (register.address, register))
+        .collect::<BTreeMap<_, _>>();
+    let mut compared_register_count = 0usize;
+    let mut mismatches = Vec::new();
+    for macos_register in &macos_registers {
+        let Some(linux_register) = linux_by_address.get(&macos_register.address) else {
+            continue;
+        };
+        compared_register_count += 1;
+        if rf_quality_normalize_value_hex(&macos_register.value_hex)
+            != rf_quality_normalize_value_hex(&linux_register.value_hex)
+        {
+            mismatches.push(RfQualityCalibrationRegisterMismatchReport {
+                register_name: macos_register
+                    .register_name
+                    .clone()
+                    .or_else(|| linux_register.register_name.clone()),
+                address: macos_register.address,
+                address_hex: macos_register.address_hex.clone(),
+                macos_value_hex: macos_register.value_hex.clone(),
+                linux_value_hex: linux_register.value_hex.clone(),
+            });
+        }
+    }
+
+    RfQualityCalibrationComparisonReport {
+        status: if compared_register_count == 0 {
+            RfQualityCalibrationComparisonStatus::NoOverlap
+        } else if mismatches.is_empty() {
+            RfQualityCalibrationComparisonStatus::Matched
+        } else {
+            RfQualityCalibrationComparisonStatus::Mismatched
+        },
+        macos_register_count: macos_registers.len(),
+        linux_register_count: baseline.calibration_registers.len(),
+        compared_register_count,
+        mismatches,
+    }
+}
+
+fn rf_quality_linux_calibration_registers(
+    value: &serde_json::Value,
+) -> Vec<RfQualityCalibrationRegisterValueReport> {
+    let mut registers = BTreeMap::new();
+    rf_quality_collect_calibration_registers_from_array(
+        value.as_array(),
+        "linux_final_register_map",
+        &mut registers,
+    );
+    for path in [
+        &["final_writes"][..],
+        &["registers"][..],
+        &["calibration_registers"][..],
+    ] {
+        rf_quality_collect_calibration_registers_from_array(
+            rf_quality_json_get(value, path).and_then(|value| value.as_array()),
+            "linux_final_register_map",
+            &mut registers,
+        );
+    }
+    registers.into_values().collect()
+}
+
+fn rf_quality_macos_calibration_registers(
+    calibration: &RfQualityCalibrationReport,
+) -> Vec<RfQualityCalibrationRegisterValueReport> {
+    let mut registers = BTreeMap::new();
+    for group in [
+        calibration.rfe_pinmux.as_ref(),
+        calibration.rfe_inversion.as_ref(),
+        calibration.rfe_timing.as_ref(),
+        calibration.rf_path.as_ref(),
+        calibration.iqk.as_ref(),
+        calibration.lck.as_ref(),
+    ] {
+        rf_quality_collect_calibration_registers_from_array(
+            group.and_then(|value| value.as_array()),
+            "macos_calibration_probe",
+            &mut registers,
+        );
+    }
+    registers.into_values().collect()
+}
+
+fn rf_quality_collect_calibration_registers_from_array(
+    values: Option<&Vec<serde_json::Value>>,
+    source: &'static str,
+    registers: &mut BTreeMap<u16, RfQualityCalibrationRegisterValueReport>,
+) {
+    let Some(values) = values else {
+        return;
+    };
+    for value in values {
+        let Some(address) = rf_quality_json_register_address(value) else {
+            continue;
+        };
+        if !rf_quality_is_calibration_register_address(address) {
+            continue;
+        }
+        let Some(value_hex) = rf_quality_json_string(value, &["value_hex"])
+            .or_else(|| rf_quality_json_string(value, &["value_le_hex"]))
+            .or_else(|| rf_quality_json_string(value, &["after_hex"]))
+        else {
+            continue;
+        };
+        registers.insert(
+            address,
+            RfQualityCalibrationRegisterValueReport {
+                register_name: rf_quality_json_string(value, &["register_name"])
+                    .or_else(|| rf_quality_json_string(value, &["name"])),
+                address,
+                address_hex: format_address(address),
+                value_hex: rf_quality_normalize_value_hex(&value_hex),
+                source,
+            },
+        );
+    }
+}
+
+fn rf_quality_json_register_address(value: &serde_json::Value) -> Option<u16> {
+    rf_quality_json_u64(value, &["address"])
+        .or_else(|| {
+            rf_quality_json_string(value, &["address_hex"])
+                .as_deref()
+                .and_then(parse_u64_text)
+        })
+        .and_then(|value| u16::try_from(value).ok())
+}
+
+fn rf_quality_is_calibration_register_address(address: u16) -> bool {
+    [
+        RF_CALIBRATION_RFE_PINMUX_REGISTERS,
+        RF_CALIBRATION_RFE_INVERSION_REGISTERS,
+        RF_CALIBRATION_RFE_TIMING_REGISTERS,
+        RF_CALIBRATION_IQK_REGISTERS,
+        RF_CALIBRATION_LCK_RELATED_REGISTERS,
+        RF_CALIBRATION_RF_PATH_REGISTERS,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(_, candidate)| *candidate == address)
+}
+
+fn rf_quality_normalize_value_hex(value: &str) -> String {
+    parse_u64_text(value)
+        .map(|value| format_value(value, 8))
+        .unwrap_or_else(|| value.trim().to_ascii_lowercase())
 }
 
 fn rf_quality_loss_percent(
@@ -33294,6 +33522,54 @@ mod tests {
     }
 
     #[test]
+    fn rf_quality_calibration_comparison_detects_linux_register_mismatch() {
+        let args = rf_quality_report_args();
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let mac_report = serde_json::json!({
+            "rf_calibration_pre_tx": {
+                "stage": "before_tx",
+                "stop_gap": true,
+                "rfe_pinmux": [
+                    {"register_name": "rA_RFE_Pinmux_Jaguar", "address": REG_RFE_PINMUX_A_JAGUAR, "value_hex": "0x54337717"}
+                ],
+                "iqk": [
+                    {"register_name": "rA_IQK_Result_Jaguar", "address": REG_OFDM0_XBAGCCORE1, "value_hex": "0x30000c1c"}
+                ]
+            }
+        });
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), None);
+        let linux_final = serde_json::json!([
+            {"address": REG_RFE_PINMUX_A_JAGUAR, "value_le_hex": "0x54337717"},
+            {"address": REG_OFDM0_XBAGCCORE1, "value_le_hex": "0x1c0c0030"}
+        ]);
+        let baseline =
+            rf_quality_linux_baseline_report(Path::new("/tmp/linux-final.json"), &linux_final)
+                .expect("linux baseline");
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+
+        assert_eq!(
+            comparison.calibration.status,
+            RfQualityCalibrationComparisonStatus::Mismatched
+        );
+        assert_eq!(comparison.calibration.compared_register_count, 2);
+        assert_eq!(comparison.calibration.mismatches.len(), 1);
+        assert_eq!(
+            comparison.calibration.mismatches[0].address,
+            REG_OFDM0_XBAGCCORE1
+        );
+        assert_eq!(
+            comparison.calibration.mismatches[0].macos_value_hex,
+            "0x30000c1c"
+        );
+        assert_eq!(
+            comparison.calibration.mismatches[0].linux_value_hex,
+            "0x1c0c0030"
+        );
+    }
+
+    #[test]
     fn rf_quality_comparison_detects_parameter_mismatches() {
         let args = rf_quality_report_args();
         let profile =
@@ -33320,6 +33596,7 @@ mod tests {
             submitted_datagrams: Some(90),
             throughput_mbps: Some(1.2),
             receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
         };
 
         let macos = RfQualityMacosReport {
