@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2029
+# shellcheck disable=SC2029,SC2088
 set -euo pipefail
 
 usage() {
@@ -11,7 +11,8 @@ Runs the accepted close-range channel 36 HT20 RF-quality workflow across:
 
 Configuration is via environment variables. Common overrides:
   HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net
-  HW_REPO_PATH=~/projects/arc/wfb-mac-radio-agent
+  HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
+  HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
   LINUX_HOST=drone-2f389.local
   MAC_LAN_IP=10.42.0.162
   FIRMWARE=/tmp/rtl8812aefw.bin
@@ -89,6 +90,9 @@ LINUX_HOST=${LINUX_HOST:-drone-2f389.local}
 MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-rfq-auto-$RUN_ID}
 SYNC_HW_REPO=${SYNC_HW_REPO:-0}
+HW_DEPLOY=${HW_DEPLOY:-0}
+HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-deploy}
+ALLOW_DEPLOY_OVER_WORKTREE=${ALLOW_DEPLOY_OVER_WORKTREE:-0}
 
 CHANNEL=${CHANNEL:-36}
 BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
@@ -151,6 +155,9 @@ if (( DRY_RUN == 0 )); then
   require_command scp
   require_command python3
   require_command cargo
+  if [[ "$HW_DEPLOY" == "1" ]]; then
+    require_command rsync
+  fi
   [[ -f "$LINUX_BASELINE" ]] || die "Linux baseline not found: $LINUX_BASELINE"
 fi
 
@@ -165,7 +172,49 @@ export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC LINK_ID RADIO_PORT RADIO_
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
 export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
-export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO
+export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO HW_DEPLOY HW_DEPLOY_PATH ALLOW_DEPLOY_OVER_WORKTREE
+
+normalize_remote_path_for_guard() {
+  local path=$1
+  path=${path%/}
+  case "$path" in
+    "~/"*) path=${path#~/} ;;
+  esac
+  printf '%s' "$path"
+}
+
+deploy_hw_repo() {
+  local repo_guard deploy_guard remote_cmd rsync_target
+  repo_guard=$(normalize_remote_path_for_guard "$HW_REPO_PATH")
+  deploy_guard=$(normalize_remote_path_for_guard "$HW_DEPLOY_PATH")
+  if [[ "$repo_guard" == "$deploy_guard" && "$ALLOW_DEPLOY_OVER_WORKTREE" != "1" ]]; then
+    die "HW_DEPLOY_PATH matches HW_REPO_PATH; set a separate deploy path or ALLOW_DEPLOY_OVER_WORKTREE=1"
+  fi
+
+  remote_cmd="$(env_assignments HW_DEPLOY_PATH) bash -s"
+  log "creating hardware-Mac deploy directory: $HW_DEPLOY_PATH"
+  ssh "$HW_MAC_HOST" "$remote_cmd" <<'MAC_DEPLOY_DIR'
+set -euo pipefail
+repo=$HW_DEPLOY_PATH
+case "$repo" in
+  "~/"*) repo="$HOME/${repo#~/}" ;;
+  /*) ;;
+  *) repo="$HOME/$repo" ;;
+esac
+mkdir -p "$repo"
+MAC_DEPLOY_DIR
+
+  rsync_target="${HW_MAC_HOST}:${HW_DEPLOY_PATH%/}/"
+  log "deploying local checkout to hardware Mac: $rsync_target"
+  rsync -az --delete \
+    --exclude '.git/' \
+    --exclude 'target/' \
+    --exclude '.DS_Store' \
+    --exclude '.direnv/' \
+    "$REPO_ROOT/" "$rsync_target"
+  HW_REPO_PATH=$HW_DEPLOY_PATH
+  export HW_REPO_PATH
+}
 
 write_config() {
   python3 - "$OUT_DIR/run-config.json" <<'PY'
@@ -182,7 +231,8 @@ keys = [
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
     "BRIDGE_BIND_PORT", "IFACE", "WFB_SERVICE", "WFB_KEY",
     "LINUX_SOURCE_PORT", "LINUX_RX_PORT", "FIRMWARE", "EFUSE_REPORT",
-    "LINUX_BASELINE", "SYNC_HW_REPO",
+    "LINUX_BASELINE", "SYNC_HW_REPO", "HW_DEPLOY", "HW_DEPLOY_PATH",
+    "ALLOW_DEPLOY_OVER_WORKTREE",
 ]
 config = {key.lower(): os.environ.get(key, "") for key in keys}
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
@@ -192,6 +242,10 @@ PY
 }
 
 print_dry_run() {
+  local dry_bridge_path=$HW_REPO_PATH
+  if [[ "$HW_DEPLOY" == "1" ]]; then
+    dry_bridge_path=$HW_DEPLOY_PATH
+  fi
   write_config
   cat <<EOF
 Dry run only. No remote processes will be started and no RF will be transmitted.
@@ -200,15 +254,17 @@ Configuration written to:
   $OUT_DIR/run-config.json
 
 Hardware Mac:
+  HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
+  $(if [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   ssh $(quote "$HW_MAC_HOST") '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
-  ssh $(quote "$HW_MAC_HOST") '<cd $HW_REPO_PATH && cargo run ... bridge-tx-listen --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
+  ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... bridge-tx-listen --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
 
 Linux peer through hardware Mac:
   ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <stop $WFB_SERVICE; iw dev $IFACE set channel $CHANNEL HT${BANDWIDTH_MHZ}; start tcpdump/wfb_rx/wfb_tx; generate $EXPECTED_PAYLOADS payloads>'
 
 Local collection:
   scp hardware Mac reports from $REMOTE_PREFIX-*
-  scp Linux artifacts through ProxyJump=$HW_MAC_HOST
+  stream Linux artifacts through nested ssh via $HW_MAC_HOST
   cargo run -p wfb-radio-diag -- --json --report $OUT_DIR/rf-quality-report.json rf-quality-report ...
 EOF
 }
@@ -216,6 +272,11 @@ EOF
 if (( DRY_RUN == 1 )); then
   print_dry_run
   exit 0
+fi
+
+if [[ "$HW_DEPLOY" == "1" ]]; then
+  deploy_hw_repo
+  export HW_REPO_PATH
 fi
 
 write_config

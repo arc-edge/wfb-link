@@ -70,6 +70,20 @@ Set `SYNC_HW_REPO=1` only when the hardware-Mac checkout should be fast-forwarde
 before the bridge starts. The manual commands below remain the fallback when a
 single stage needs to be isolated.
 
+If the hardware Mac cannot pull from GitHub or its working checkout is dirty,
+use opt-in deploy sync. This copies the local checkout to a separate run
+directory and starts the bridge from there:
+
+```sh
+HW_DEPLOY=1 \
+HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy \
+scripts/run-rf-quality-close-range.sh
+```
+
+Deploy sync excludes `.git`, `target`, and local transient files. By default it
+refuses to deploy over `HW_REPO_PATH`; set `ALLOW_DEPLOY_OVER_WORKTREE=1` only
+when overwriting that destination is intentional.
+
 ## Mac Close-Range Command
 
 The accepted close-range profile uses EFUSE-derived TX power and the current
