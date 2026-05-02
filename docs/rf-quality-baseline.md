@@ -92,10 +92,48 @@ TX_CALIBRATION_PROFILE=rtl8812a-lck \
 ./scripts/run-rf-quality-close-range.sh
 ```
 
+For read-only IQK staging evidence:
+
+```sh
+TX_CALIBRATION_PROFILE=rtl8812a-iqk-probe \
+./scripts/run-rf-quality-close-range.sh
+```
+
 When `CALIBRATION_MODE` is omitted, the script derives
 `targeted-linux-parity` for `TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20`
-and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck`;
-otherwise it keeps `stop-gap-captured`.
+and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck`.
+`rtl8812a-iqk-probe` remains `stop-gap-captured` because it is a marker for
+safe IQK readback already captured by the bridge report; it does not perform
+runtime IQK or additional profile-time hardware reads.
+
+Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
+`ceil(expected_payloads * fec_n / fec_k)` count while still recovering every
+source payload. The script now records this as
+`datagram-evidence.json` and attaches it as a receiver artifact. Tune with:
+
+```sh
+DATAGRAM_SHORTFALL_TOLERANCE=1
+```
+
+This does not make a failed bridge artifact disappear; it preserves the
+expected-versus-observed datagram evidence so the RF-quality envelope can still
+be interpreted when receiver recovery is complete.
+
+The runner also records `${REMOTE_PREFIX}-receiver-health.json` and lifts the
+same health into `datagram-evidence.json`. `rf-quality-report` exposes this
+under `macos.wfb_outcome` as:
+
+- `receiver_status`
+- `receiver_session_observed`
+- `receiver_unable_decrypt_count`
+- `receiver_total_datagrams`
+- `receiver_evidence`
+
+This matters because WFB can receive strong RF frames but recover zero payloads
+when the receiver misses the session frame. That condition now appears as
+`receiver_status = "missing_session"` instead of looking like a generic RF or
+TX-power failure. The runner passes `LINK_ID` through to both `wfb_tx -i` and
+`wfb_rx -i`, so the WFB tuple in the report matches the Linux peer commands.
 
 ## Current Close-Range Baseline
 

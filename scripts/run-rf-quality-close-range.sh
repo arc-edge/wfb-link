@@ -103,10 +103,14 @@ BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
 FEC_K=${FEC_K:-8}
 FEC_N=${FEC_N:-12}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-2000}
-MAX_DATAGRAMS=${MAX_DATAGRAMS:-$(((EXPECTED_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))}
+THEORETICAL_MAX_DATAGRAMS=${THEORETICAL_MAX_DATAGRAMS:-$(((EXPECTED_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))}
+MAX_DATAGRAMS=${MAX_DATAGRAMS:-$THEORETICAL_MAX_DATAGRAMS}
+DATAGRAM_SHORTFALL_TOLERANCE=${DATAGRAM_SHORTFALL_TOLERANCE:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_MARKER=${PAYLOAD_MARKER:-RFQCLSEF}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.0005}
+RX_STARTUP_SECONDS=${RX_STARTUP_SECONDS:-3}
+TX_STARTUP_SECONDS=${TX_STARTUP_SECONDS:-2}
 
 LINK_ID=${LINK_ID:-0x000001}
 RADIO_PORT=${RADIO_PORT:-0}
@@ -121,6 +125,8 @@ if [[ -z "${CALIBRATION_MODE+x}" ]]; then
     CALIBRATION_MODE=targeted-linux-parity
   elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-lck" ]]; then
     CALIBRATION_MODE=runtime-approximation
+  elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-iqk-probe" ]]; then
+    CALIBRATION_MODE=stop-gap-captured
   else
     CALIBRATION_MODE=stop-gap-captured
   fi
@@ -181,8 +187,8 @@ MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 
 export RUN_ID HW_MAC_HOST HW_REPO_PATH LINUX_HOST MAC_LAN_IP REMOTE_PREFIX
 export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
-export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS MAX_DATAGRAMS
-export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC LINK_ID RADIO_PORT RADIO_PORT_HEX
+export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS THEORETICAL_MAX_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
+export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
 export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
@@ -239,7 +245,8 @@ import sys
 keys = [
     "RUN_ID", "HW_MAC_HOST", "HW_REPO_PATH", "LINUX_HOST", "MAC_LAN_IP",
     "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
-    "EXPECTED_PAYLOADS", "MAX_DATAGRAMS", "PAYLOAD_LEN", "PAYLOAD_MARKER",
+    "EXPECTED_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
+    "RX_STARTUP_SECONDS", "TX_STARTUP_SECONDS",
     "LINK_ID", "RADIO_PORT", "TX_RATE", "TX_PROFILE", "TX_POWER_MODE",
     "TX_POWER_SAFETY_PROFILE", "TX_CALIBRATION_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
@@ -447,7 +454,7 @@ MAC_BRIDGE
 
 run_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
   log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
   STARTED_LINUX=1
   ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" <<'LINUX_RUN'
@@ -458,6 +465,7 @@ setup_log="${REMOTE_PREFIX}-setup.log"
 restore_log="${REMOTE_PREFIX}-restore.log"
 summary_json="${REMOTE_PREFIX}-summary.json"
 counter_json="${REMOTE_PREFIX}-counter.json"
+receiver_health_json="${REMOTE_PREFIX}-receiver-health.json"
 preflight_json="${REMOTE_PREFIX}-preflight.json"
 preflight_log="${REMOTE_PREFIX}-preflight.log"
 
@@ -622,7 +630,7 @@ cleanup_linux() {
 trap cleanup_linux EXIT INT TERM
 
 rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.log \
-  "${REMOTE_PREFIX}"-{summary,counter}.json \
+  "${REMOTE_PREFIX}"-{summary,counter,receiver-health}.json \
   "${REMOTE_PREFIX}-rf.pcap"
 
 {
@@ -632,6 +640,13 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
     "$SUDO_BIN" -n "$DOCKER_BIN" stop "$WFB_SERVICE" || true
   else
     echo "docker or sudo unavailable; skipped service stop"
+  fi
+  if [[ -n "$SUDO_BIN" && -n "$PKILL_BIN" ]]; then
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "tcpdump -i ${IFACE} .*${REMOTE_PREFIX}-rf.pcap" >/dev/null 2>&1 || true
+  else
+    echo "sudo or pkill unavailable; skipped stale test process cleanup"
   fi
   if [[ -n "$SUDO_BIN" && -n "$IW_BIN" ]]; then
     "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"
@@ -702,19 +717,19 @@ else
 fi
 
 "$SUDO_BIN" -n "$TIMEOUT_BIN" "$RX_SECONDS" \
-  "$WFB_RX_BIN" -K "$WFB_KEY" -p "$RADIO_PORT" -c 127.0.0.1 -u "$LINUX_RX_PORT" "$IFACE" \
+  "$WFB_RX_BIN" -K "$WFB_KEY" -i "$LINK_ID" -p "$RADIO_PORT" -c 127.0.0.1 -u "$LINUX_RX_PORT" "$IFACE" \
   > "${REMOTE_PREFIX}-rx.log" 2>&1 &
 rx_pid=$!
 
-sleep 2
+sleep "$RX_STARTUP_SECONDS"
 
 "$SUDO_BIN" -n "$TIMEOUT_BIN" "$TX_SECONDS" \
-  "$WFB_TX_BIN" -d -K "$WFB_KEY" -p "$RADIO_PORT" -B "$BANDWIDTH_MHZ" -k "$FEC_K" -n "$FEC_N" \
+  "$WFB_TX_BIN" -d -K "$WFB_KEY" -i "$LINK_ID" -p "$RADIO_PORT" -B "$BANDWIDTH_MHZ" -k "$FEC_K" -n "$FEC_N" \
   -u "$LINUX_SOURCE_PORT" "${MAC_LAN_IP}:${RELAY_PORT}" \
   > "${REMOTE_PREFIX}-tx.log" 2>&1 &
 tx_pid=$!
 
-sleep 2
+sleep "$TX_STARTUP_SECONDS"
 
 "$PYTHON3_BIN" - "$LINUX_SOURCE_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$PAYLOAD_MARKER" "$PAYLOAD_INTERVAL_SEC" <<'PY' > "${REMOTE_PREFIX}-source.log" 2>&1
 import socket
@@ -746,7 +761,62 @@ if [[ -n "$tcpdump_pid" ]]; then "$SUDO_BIN" -n kill "$tcpdump_pid" >/dev/null 2
 wait "$rx_pid" >/dev/null 2>&1 || true
 if [[ -n "$tcpdump_pid" ]]; then wait "$tcpdump_pid" >/dev/null 2>&1 || true; fi
 
-"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" <<'PY'
+"$PYTHON3_BIN" - "$receiver_health_json" "${REMOTE_PREFIX}-rx.log" "$counter_json" "$EXPECTED_PAYLOADS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+rx_path = Path(sys.argv[2])
+counter_path = Path(sys.argv[3])
+expected = int(sys.argv[4])
+
+rx_text = rx_path.read_text(errors="ignore") if rx_path.exists() else ""
+counter = {}
+if counter_path.exists():
+    counter = json.loads(counter_path.read_text())
+
+pkt_lines = [line for line in rx_text.splitlines() if "\tPKT\t" in line]
+nonzero_pkt_lines = []
+for line in pkt_lines:
+    fields = line.split("\t", 2)
+    if len(fields) != 3:
+        continue
+    counters = [part for part in fields[2].split(":") if part]
+    if any(part != "0" for part in counters):
+        nonzero_pkt_lines.append(line)
+
+recovered = int(counter.get("recovered_payloads") or 0)
+session_observed = "\tSESSION\t" in rx_text
+unable_decrypt_count = rx_text.count("Unable to decrypt packet")
+if recovered >= expected:
+    status = "ok"
+elif not session_observed and unable_decrypt_count > 0:
+    status = "missing_session"
+elif unable_decrypt_count > 0:
+    status = "decrypt_errors"
+elif recovered == 0:
+    status = "no_payloads"
+else:
+    status = "partial_payloads"
+
+report = {
+    "source": "scripts/run-rf-quality-close-range.sh",
+    "status": status,
+    "session_observed": session_observed,
+    "unable_decrypt_count": unable_decrypt_count,
+    "rx_antenna_report_count": rx_text.count("\tRX_ANT\t"),
+    "rx_pkt_line_count": len(pkt_lines),
+    "rx_nonzero_pkt_line_count": len(nonzero_pkt_lines),
+    "last_nonzero_pkt_line": nonzero_pkt_lines[-1] if nonzero_pkt_lines else None,
+    "expected_payloads": expected,
+    "recovered_payloads": recovered,
+    "counter": counter,
+}
+out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+PY
+
+"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" "$receiver_health_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -760,11 +830,17 @@ preflight = {}
 preflight_path = Path(sys.argv[5])
 if preflight_path.exists():
     preflight = json.loads(preflight_path.read_text())
+receiver_health = {}
+receiver_health_path = Path(sys.argv[6])
+if receiver_health_path.exists():
+    receiver_health = json.loads(receiver_health_path.read_text())
 summary = {
     "preflight": preflight,
     "counter": counter,
+    "receiver_health": receiver_health,
     "artifacts": {
         "counter": str(counter_path),
+        "receiver_health": sys.argv[6],
         "setup_log": sys.argv[3],
         "restore_log": sys.argv[4],
         "preflight": sys.argv[5],
@@ -835,6 +911,7 @@ collect_artifacts() {
   copy_linux_artifact "${REMOTE_PREFIX}-rx.log"
   copy_linux_artifact "${REMOTE_PREFIX}-tx.log"
   copy_linux_artifact "${REMOTE_PREFIX}-counter.json"
+  copy_linux_artifact "${REMOTE_PREFIX}-receiver-health.json"
   copy_linux_artifact "${REMOTE_PREFIX}-source.log"
   copy_linux_artifact "${REMOTE_PREFIX}-setup.log"
   copy_linux_artifact "${REMOTE_PREFIX}-preflight.json"
@@ -867,11 +944,14 @@ generate_report() {
   local mac_report
   local counter_report
   local efuse_report
+  local receiver_health_report
   local recovered
+  local datagram_evidence
   local receiver_args=()
 
   mac_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-listen.json")"
   counter_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-counter.json")"
+  receiver_health_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-receiver-health.json")"
   efuse_report="$OUT_DIR/$(basename "$EFUSE_REPORT")"
 
   if [[ ! -f "$mac_report" || ! -f "$counter_report" || ! -f "$efuse_report" ]]; then
@@ -888,10 +968,80 @@ generate_report() {
   recovered=$(counter_recovered "$counter_report")
   [[ -n "$recovered" ]] || die "counter report did not include recovered_payloads"
 
+  datagram_evidence="$OUT_DIR/datagram-evidence.json"
+  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+mac_report = json.loads(Path(sys.argv[2]).read_text())
+counter_report = json.loads(Path(sys.argv[3]).read_text())
+receiver_health_path = Path(sys.argv[4])
+receiver_health = {}
+if receiver_health_path.exists():
+    receiver_health = json.loads(receiver_health_path.read_text())
+
+def env_int(name):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return int(value, 0)
+
+submit = mac_report.get("submit_counters") or {}
+bridge = mac_report.get("bridge_counters") or {}
+submitted = submit.get("submitted")
+if submitted is None:
+    submitted = bridge.get("injected")
+observed = mac_report.get("datagrams_received")
+if observed is None:
+    observed = submitted
+
+expected_payloads = env_int("EXPECTED_PAYLOADS")
+recovered = counter_report.get("recovered_payloads")
+theoretical = env_int("THEORETICAL_MAX_DATAGRAMS")
+bridge_max = env_int("MAX_DATAGRAMS")
+tolerance = env_int("DATAGRAM_SHORTFALL_TOLERANCE") or 0
+shortfall = theoretical - observed if theoretical is not None and observed is not None else None
+complete_payload_recovery = (
+    expected_payloads is not None
+    and recovered is not None
+    and recovered >= expected_payloads
+)
+within_tolerance = (
+    shortfall is not None
+    and 0 < shortfall <= tolerance
+    and complete_payload_recovery
+)
+
+report = {
+    "source": "scripts/run-rf-quality-close-range.sh",
+    "theoretical_max_datagrams": theoretical,
+    "bridge_max_datagrams": bridge_max,
+    "observed_datagrams": observed,
+    "submitted_datagrams": submitted,
+    "datagram_shortfall": shortfall,
+    "shortfall_tolerance": tolerance,
+    "short_run_tolerance_applied": within_tolerance,
+    "expected_payloads": expected_payloads,
+    "recovered_payloads": recovered,
+    "complete_payload_recovery": complete_payload_recovery,
+    "receiver_health": receiver_health,
+    "receiver_session_observed": receiver_health.get("session_observed"),
+    "receiver_status": receiver_health.get("status"),
+    "receiver_unable_decrypt_count": receiver_health.get("unable_decrypt_count"),
+    "note": "short smoke runs can emit one fewer WFB datagram than the FEC ceiling while still recovering every source payload",
+}
+out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+PY
+
   for artifact in \
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-rf.pcap")" \
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-rx.log")" \
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-tx.log")" \
+    "$datagram_evidence" \
+    "$receiver_health_report" \
     "$counter_report"; do
     [[ -f "$artifact" ]] && receiver_args+=(--receiver-artifact "$artifact")
   done

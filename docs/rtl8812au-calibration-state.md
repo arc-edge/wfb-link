@@ -17,7 +17,8 @@ also include `same_session_init.calibration_state` with probes at:
 Each probe records readback groups for:
 
 - RFE pinmux, inversion, and timing registers.
-- IQK result and shadow registers.
+- IQK result/shadow registers plus the upstream IQK tone, PI, AGC, and
+  before/after power readback registers.
 - LCK-related RF 3-wire latch registers.
 - TX/RF path state registers.
 - Thermal-meter status. Runtime thermal readback is not ported yet, so the
@@ -191,13 +192,55 @@ AWUS036ACH. It does not validate long-distance RF quality; the run used a
 short 256-byte/100-payload smoke profile and is not comparable to the sustained
 1,000-byte Linux baseline.
 
+## Read-Only IQK Probe Profile
+
+`bridge-tx-listen`, `bridge-run`, and `bridge-tx-bench` now expose:
+
+```sh
+--tx-calibration-profile rtl8812a-iqk-probe
+```
+
+This is not runtime IQK. It is a non-perturbing pre-TX marker profile for the
+full `phy_iq_calibrate_8812a` port. The profile intentionally performs no
+additional hardware reads in the TX calibration hook; IQK final-state evidence
+comes from the existing `rf_calibration_pre_tx.iqk` probe, which now covers
+expanded IQK result, tone, PI, AGC, and before/after power registers from
+`Hal8812PhyReg.h`.
+
+Reports label this under `tx_calibration_profile.iqk` with
+`mode = "deferred_hardware_probe"` and `read_only = true`. MAC/BB backup,
+AFE backup, RF serial backup offsets `0x65`, `0x8f`, `0x00`, and page-C1 latch
+reads at `0x0cb8`/`0x0eb8` are deliberately skipped in this pre-TX profile.
+Hardware smoke showed that even read-only profile-time IQK probing can perturb
+WFB recovery, so those reads should move to a standalone non-TX diagnostic or
+the full IQK port rather than the live TX path.
+
+`rf-quality-report` lifts the safe profile evidence into
+`macos.calibration.profile_report` and `macos.calibration.iqk`, but the
+calibration mode remains stop-gap/unknown unless a real runtime IQK routine is
+selected later.
+
+Hardware validation after the receiver-session hardening:
+
+- Current-default control: `/tmp/wfb-rfq-rtl8812a-current-default-session-hardened`.
+- IQK marker profile: `/tmp/wfb-rfq-rtl8812a-iqk-marker-session-hardened`.
+- Both runs submitted `149/149` bridge datagrams and recovered `100/100`
+  marked Linux receiver payloads.
+- Both reports show `receiver_session_observed = true`,
+  `receiver_unable_decrypt_count = 0`, and
+  `short_run_datagram_tolerance_applied = true`.
+- The IQK marker report uses `tx_calibration_profile.profile =
+  "rtl8812a_iqk_probe"` and `tx_calibration_profile.iqk.mode =
+  "deferred_hardware_probe"` with no profile-time IQK register reads.
+
 ## IQK/LCK Porting Decision
 
 Decision as of May 2, 2026: keep the current captured/partial calibration path
 for default close-range testing, add the targeted Linux-parity profile for
 controlled A/B runs, add the guarded LCK runtime profile for opt-in testing,
-and do not treat any of these as long-distance accepted calibration until
-stepped or outdoor evidence supports that claim.
+add the read-only IQK probe for staged porting evidence, and do not treat any
+of these as long-distance accepted calibration until stepped or outdoor
+evidence supports that claim.
 
 Rationale:
 
@@ -208,7 +251,8 @@ Rationale:
   differences, so close-range success is not calibration parity.
 - Full `phy_iq_calibrate_8812a` is sequence-sensitive and remains the largest
   calibration blocker. LCK is now available as the first runtime-calibration
-  candidate and should be tested as an A/B profile before making it default.
+  candidate, and IQK backup/page-C1/RF evidence is now available without
+  running the destructive sweep.
 
 Next action:
 
@@ -220,6 +264,12 @@ Next action:
 - Add `--tx-calibration-profile rtl8812a-lck` to the same A/B matrix once the
   adapter and receiver geometry can show whether LCK improves stability,
   margin, or decode rate.
+- Use `--tx-calibration-profile rtl8812a-iqk-probe` on close-range smokes to
+  label staged IQK evidence while relying on `rf_calibration_pre_tx.iqk` for
+  the safe final-state register readback.
+- Keep RF-serial IQK backup reads and page-C1 latch reads out of the pre-TX
+  path until they can be run as a standalone diagnostic or as part of the full
+  Linux IQK sequence.
 - Do not use `linux-parity-ch36-ht20` as a production profile until it recovers
   close-range payloads. Its current value is as a negative control proving that
   final-register replay alone is insufficient.

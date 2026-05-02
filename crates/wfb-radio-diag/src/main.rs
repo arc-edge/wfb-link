@@ -1930,6 +1930,7 @@ enum TxCalibrationProfileArg {
     CurrentDefault,
     LinuxParityCh36Ht20,
     Rtl8812aLck,
+    Rtl8812aIqkProbe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -3394,6 +3395,7 @@ struct TxCalibrationProfileReport {
     register_count: usize,
     writes: Vec<BridgeTxBenchRegisterClearReport>,
     lck: Option<TxLckCalibrationReport>,
+    iqk: Option<TxIqkProbeReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3419,6 +3421,35 @@ struct TxLckCalibrationReport {
     rf_chnlbw_after_restore: RfSerialReadReport,
     rf_lck_after_exit: RfSerialReadReport,
     counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct TxIqkProbeReport {
+    semantics: &'static str,
+    upstream_basis: &'static str,
+    mode: &'static str,
+    read_only: bool,
+    deep_probe_skipped_reason: Option<&'static str>,
+    macbb_backup: Vec<RfCalibrationRegisterReadReport>,
+    afe_backup: Vec<RfCalibrationRegisterReadReport>,
+    hssi_read_register: Option<RfCalibrationRegisterReadReport>,
+    hssi_read_restore: Option<RfCalibrationRegisterReadReport>,
+    hssi_read_restored: Option<bool>,
+    rf_backup_path_a: Vec<RfSerialReadReport>,
+    rf_backup_path_b: Vec<RfSerialReadReport>,
+    page_c1_latches: Option<TxIqkPageC1LatchReport>,
+    iqk_registers: Vec<RfCalibrationRegisterReadReport>,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Serialize)]
+struct TxIqkPageC1LatchReport {
+    page_select_register: RfCalibrationRegisterReadReport,
+    page_select_value: u32,
+    page_select_value_hex: String,
+    latches: Vec<RfCalibrationRegisterReadReport>,
+    restore_register: RfCalibrationRegisterReadReport,
+    restored: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3868,10 +3899,20 @@ struct RfQualityCalibrationReport {
 
 #[derive(Debug, Default, Serialize)]
 struct RfQualityWfbOutcomeReport {
+    expected_datagrams: Option<u64>,
+    observed_datagrams: Option<u64>,
+    datagram_shortfall: Option<i64>,
+    short_run_datagram_tolerance: Option<u64>,
+    short_run_datagram_tolerance_applied: bool,
+    receiver_status: Option<String>,
+    receiver_session_observed: Option<bool>,
+    receiver_unable_decrypt_count: Option<u64>,
+    receiver_total_datagrams: Option<u64>,
     submitted_datagrams: Option<u64>,
     recovered_payloads: Option<u64>,
     dropped_datagrams: Option<u64>,
     malformed_datagrams: Option<u64>,
+    receiver_evidence: Option<serde_json::Value>,
     throughput: Option<serde_json::Value>,
     cpu: Option<serde_json::Value>,
 }
@@ -5027,6 +5068,7 @@ const RTL8812AU_EFUSE_TX_POWER_LEN: usize = 84;
 const RTL8812AU_TX_POWER_INDEX_MAX: u8 = 0x3f;
 const RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS: f64 = 2.0;
 const RF_QUALITY_MIN_THROUGHPUT_RATIO: f64 = 0.85;
+const RF_QUALITY_SHORT_RUN_DATAGRAM_TOLERANCE: u64 = 1;
 
 const FEN_ELDR: u16 = 1 << 12;
 const ANA8M: u16 = 1 << 1;
@@ -5159,9 +5201,13 @@ const REG_FC_AREA_JAGUAR: u16 = 0x0860;
 const REG_EDCCA_JAGUAR: u16 = 0x08a4;
 const REG_RF_MOD_JAGUAR: u16 = 0x08ac;
 const REG_ADC_BUF_CLK_JAGUAR: u16 = 0x08c4;
+#[cfg(test)]
+const REG_IQK_MACBB_0X0520: u16 = 0x0520;
 const REG_CCK_SYSTEM_JAGUAR: u16 = 0x0a00;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_CCA_JAGUAR: u16 = 0x0a08;
+#[cfg(test)]
+const REG_IQK_MACBB_0X090C: u16 = 0x090c;
 const REG_ANTSEL_SW_JAGUAR: u16 = 0x0900;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
@@ -5181,6 +5227,14 @@ const REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0c4c;
 const REG_TX_PWR_OFFSET_A_JAGUAR: u16 = 0x0c50;
 const REG_TX_PWR_TRAIN_A_JAGUAR: u16 = 0x0c54;
 const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
+#[cfg(test)]
+const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
+#[cfg(test)]
+const REG_IQK_AFE_A_C60: u16 = 0x0c60;
+#[cfg(test)]
+const REG_IQK_AFE_A_C64: u16 = 0x0c64;
+#[cfg(test)]
+const REG_IQK_AFE_A_C68: u16 = 0x0c68;
 const REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR: u16 = 0x0c24;
 const REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR: u16 = 0x0c28;
 const REG_TX_AGC_A_MCS3_MCS0_JAGUAR: u16 = 0x0c2c;
@@ -5204,6 +5258,40 @@ const REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0e44;
 const REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0e48;
 const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
 const REG_TX_PWR_OFFSET_B_JAGUAR: u16 = 0x0e50;
+const REG_FPGA0_IQK_JAGUAR: u16 = 0x0e28;
+const REG_TX_IQK_TONE_A_JAGUAR: u16 = 0x0e30;
+const REG_RX_IQK_TONE_A_JAGUAR: u16 = 0x0e34;
+const REG_TX_IQK_PI_A_JAGUAR: u16 = 0x0e38;
+const REG_RX_IQK_PI_A_JAGUAR: u16 = 0x0e3c;
+const REG_TX_IQK_JAGUAR: u16 = 0x0e40;
+const REG_RX_IQK_JAGUAR: u16 = 0x0e44;
+const REG_IQK_AGC_PTS_JAGUAR: u16 = 0x0e48;
+const REG_IQK_AGC_RSP_JAGUAR: u16 = 0x0e4c;
+const REG_TX_IQK_TONE_B_JAGUAR: u16 = 0x0e50;
+const REG_RX_IQK_TONE_B_JAGUAR: u16 = 0x0e54;
+const REG_TX_IQK_PI_B_JAGUAR: u16 = 0x0e58;
+const REG_RX_IQK_PI_B_JAGUAR: u16 = 0x0e5c;
+const REG_IQK_AGC_CONT_JAGUAR: u16 = 0x0e60;
+#[cfg(test)]
+const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
+#[cfg(test)]
+const REG_IQK_AFE_B_E60: u16 = 0x0e60;
+#[cfg(test)]
+const REG_IQK_AFE_B_E64: u16 = 0x0e64;
+#[cfg(test)]
+const REG_IQK_AFE_B_E68: u16 = 0x0e68;
+const REG_TX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0e94;
+const REG_TX_POWER_AFTER_IQK_A_JAGUAR: u16 = 0x0e9c;
+const REG_RX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0ea0;
+const REG_RX_POWER_BEFORE_IQK_A_2_JAGUAR: u16 = 0x0ea4;
+const REG_RX_POWER_AFTER_IQK_A_JAGUAR: u16 = 0x0ea8;
+const REG_RX_POWER_AFTER_IQK_A_2_JAGUAR: u16 = 0x0eac;
+const REG_TX_POWER_BEFORE_IQK_B_JAGUAR: u16 = 0x0eb4;
+const REG_TX_POWER_AFTER_IQK_B_JAGUAR: u16 = 0x0ebc;
+const REG_RX_POWER_BEFORE_IQK_B_JAGUAR: u16 = 0x0ec0;
+const REG_RX_POWER_BEFORE_IQK_B_2_JAGUAR: u16 = 0x0ec4;
+const REG_RX_POWER_AFTER_IQK_B_JAGUAR: u16 = 0x0ec8;
+const REG_RX_POWER_AFTER_IQK_B_2_JAGUAR: u16 = 0x0ecc;
 const REG_RX_WAIT_CCA_JAGUAR: u16 = 0x0e70;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RFE_INV_B_JAGUAR: u16 = 0x0eb4;
@@ -13779,7 +13867,77 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("rA_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 4),
     ("rB_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x200),
     ("rB_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x204),
+    ("rFPGA0_IQK", REG_FPGA0_IQK_JAGUAR),
+    ("rTx_IQK_Tone_A", REG_TX_IQK_TONE_A_JAGUAR),
+    ("rRx_IQK_Tone_A", REG_RX_IQK_TONE_A_JAGUAR),
+    ("rTx_IQK_PI_A", REG_TX_IQK_PI_A_JAGUAR),
+    ("rRx_IQK_PI_A", REG_RX_IQK_PI_A_JAGUAR),
+    ("rTx_IQK", REG_TX_IQK_JAGUAR),
+    ("rRx_IQK", REG_RX_IQK_JAGUAR),
+    ("rIQK_AGC_Pts", REG_IQK_AGC_PTS_JAGUAR),
+    ("rIQK_AGC_Rsp", REG_IQK_AGC_RSP_JAGUAR),
+    ("rTx_IQK_Tone_B", REG_TX_IQK_TONE_B_JAGUAR),
+    ("rRx_IQK_Tone_B", REG_RX_IQK_TONE_B_JAGUAR),
+    ("rTx_IQK_PI_B", REG_TX_IQK_PI_B_JAGUAR),
+    ("rRx_IQK_PI_B", REG_RX_IQK_PI_B_JAGUAR),
+    ("rIQK_AGC_Cont", REG_IQK_AGC_CONT_JAGUAR),
+    ("rTx_Power_Before_IQK_A", REG_TX_POWER_BEFORE_IQK_A_JAGUAR),
+    ("rTx_Power_After_IQK_A", REG_TX_POWER_AFTER_IQK_A_JAGUAR),
+    ("rRx_Power_Before_IQK_A", REG_RX_POWER_BEFORE_IQK_A_JAGUAR),
+    (
+        "rRx_Power_Before_IQK_A_2",
+        REG_RX_POWER_BEFORE_IQK_A_2_JAGUAR,
+    ),
+    ("rRx_Power_After_IQK_A", REG_RX_POWER_AFTER_IQK_A_JAGUAR),
+    ("rRx_Power_After_IQK_A_2", REG_RX_POWER_AFTER_IQK_A_2_JAGUAR),
+    ("rTx_Power_Before_IQK_B", REG_TX_POWER_BEFORE_IQK_B_JAGUAR),
+    ("rTx_Power_After_IQK_B", REG_TX_POWER_AFTER_IQK_B_JAGUAR),
+    ("rRx_Power_Before_IQK_B", REG_RX_POWER_BEFORE_IQK_B_JAGUAR),
+    (
+        "rRx_Power_Before_IQK_B_2",
+        REG_RX_POWER_BEFORE_IQK_B_2_JAGUAR,
+    ),
+    ("rRx_Power_After_IQK_B", REG_RX_POWER_AFTER_IQK_B_JAGUAR),
+    ("rRx_Power_After_IQK_B_2", REG_RX_POWER_AFTER_IQK_B_2_JAGUAR),
 ];
+
+#[cfg(test)]
+const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("R_0x520", REG_IQK_MACBB_0X0520),
+    ("REG_BCN_CTRL", REG_BCN_CTRL),
+    ("REG_OFDMCCKEN_JAGUAR", REG_OFDMCCKEN_JAGUAR),
+    ("REG_CCK_RX_JAGUAR", REG_CCK_RX_JAGUAR),
+    ("R_0x90c", REG_IQK_MACBB_0X090C),
+    ("rA_PI_Mode_Jaguar", REG_RF_PI_MODE_A_JAGUAR),
+    ("rB_PI_Mode_Jaguar", REG_RF_PI_MODE_B_JAGUAR),
+    ("REG_CCA_ON_SEC_JAGUAR", REG_CCA_ON_SEC_JAGUAR),
+    ("REG_AGC_TABLE_JAGUAR", REG_AGC_TABLE_JAGUAR),
+];
+
+#[cfg(test)]
+const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("R_0xc5c", REG_IQK_AFE_A_C5C),
+    ("R_0xc60", REG_IQK_AFE_A_C60),
+    ("R_0xc64", REG_IQK_AFE_A_C64),
+    ("R_0xc68", REG_IQK_AFE_A_C68),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR),
+    ("R_0xe5c", REG_IQK_AFE_B_E5C),
+    ("R_0xe60", REG_IQK_AFE_B_E60),
+    ("R_0xe64", REG_IQK_AFE_B_E64),
+    ("R_0xe68", REG_IQK_AFE_B_E68),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR),
+];
+
+#[cfg(test)]
+const RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS: &[RfCalibrationRegisterSpec] = &[
+    ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
+    ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
+];
+
+#[cfg(test)]
+const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[0x65, 0x8f, 0x00];
 
 const RF_CALIBRATION_LCK_RELATED_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     (
@@ -13933,6 +14091,15 @@ fn tx_pre_calibration_mode(
     }
     if matches!(calibration_profile, TxCalibrationProfileArg::Rtl8812aLck) {
         return RfQualityCalibrationMode::RuntimeApproximation;
+    }
+    if matches!(
+        calibration_profile,
+        TxCalibrationProfileArg::Rtl8812aIqkProbe
+    ) {
+        if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
+            return RfQualityCalibrationMode::StopGapCaptured;
+        }
+        return RfQualityCalibrationMode::Unknown;
     }
     if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
         RfQualityCalibrationMode::StopGapCaptured
@@ -14780,7 +14947,9 @@ fn tx_calibration_profile_writes(
     bandwidth: Bandwidth,
 ) -> std::result::Result<Option<&'static [CapturedTxBringupWrite]>, DiagnosticErrorReport> {
     match profile {
-        TxCalibrationProfileArg::CurrentDefault | TxCalibrationProfileArg::Rtl8812aLck => Ok(None),
+        TxCalibrationProfileArg::CurrentDefault
+        | TxCalibrationProfileArg::Rtl8812aLck
+        | TxCalibrationProfileArg::Rtl8812aIqkProbe => Ok(None),
         TxCalibrationProfileArg::LinuxParityCh36Ht20
             if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
         {
@@ -15033,6 +15202,32 @@ where
     })
 }
 
+fn run_rtl8812a_iqk_probe<T>(
+    _registers: &Rtl8812auRegisterAccess<T>,
+    _counters: &mut DiagnosticCounters,
+) -> std::result::Result<TxIqkProbeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    Ok(TxIqkProbeReport {
+        semantics: "non-perturbing RTL8812A IQK pre-TX marker; live hardware IQK probing is deferred because profile-time reads perturbed WFB recovery on hardware",
+        upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a backup arrays plus Hal8812PhyReg IQK result registers",
+        mode: "deferred_hardware_probe",
+        read_only: true,
+        deep_probe_skipped_reason: Some("pre-TX profile performs no additional hardware reads; use rf_calibration_pre_tx.iqk for the existing safe final-state readback and add a standalone IQK diagnostic before porting the full Linux IQK sweep"),
+        macbb_backup: Vec::new(),
+        afe_backup: Vec::new(),
+        hssi_read_register: None,
+        hssi_read_restore: None,
+        hssi_read_restored: None,
+        rf_backup_path_a: Vec::new(),
+        rf_backup_path_b: Vec::new(),
+        page_c1_latches: None,
+        iqk_registers: Vec::new(),
+        counters: DiagnosticCounters::default(),
+    })
+}
+
 fn apply_tx_calibration_profile<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     args: &TxCalibrationProfileArgs,
@@ -15060,6 +15255,35 @@ where
             register_count,
             writes: Vec::new(),
             lck: Some(lck),
+            iqk: None,
+        }));
+    }
+
+    if matches!(
+        args.tx_calibration_profile,
+        TxCalibrationProfileArg::Rtl8812aIqkProbe
+    ) {
+        let iqk = run_rtl8812a_iqk_probe(registers, counters)?;
+        let register_count = iqk.macbb_backup.len()
+            + iqk.afe_backup.len()
+            + iqk.rf_backup_path_a.len()
+            + iqk.rf_backup_path_b.len()
+            + iqk
+                .page_c1_latches
+                .as_ref()
+                .map(|page| page.latches.len())
+                .unwrap_or_default()
+            + iqk.iqk_registers.len();
+        return Ok(Some(TxCalibrationProfileReport {
+            semantics: "explicit guarded RTL8812A IQK marker profile; performs no extra live hardware reads, relies on rf_calibration_pre_tx.iqk evidence, and does not claim runtime IQK calibration",
+            upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a backup arrays, page-C1 latch reads, and Hal8812PhyReg IQK result registers",
+            profile: args.tx_calibration_profile,
+            channel: channel.number,
+            bandwidth_mhz: bandwidth.mhz(),
+            register_count,
+            writes: Vec::new(),
+            lck: None,
+            iqk: Some(iqk),
         }));
     }
 
@@ -15084,6 +15308,7 @@ where
         register_count: writes.len(),
         writes,
         lck: None,
+        iqk: None,
     }))
 }
 
@@ -25381,6 +25606,9 @@ fn rf_serial_write_targets(path: TxPowerPathArg) -> &'static [RfSerialWriteTarge
 
 fn rf_register_display_name(rf_offset: u32) -> &'static str {
     match rf_offset {
+        0x00 => "RF_0x00",
+        0x65 => "RF_0x65_IQK_backup",
+        0x8f => "RF_0x8f_IQK_backup",
         RF_CHNLBW_JAGUAR => "RF_CHNLBW_Jaguar",
         RF_LCK_JAGUAR => "RF_LCK",
         _ => "RF register",
@@ -27603,8 +27831,13 @@ fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
         });
     }
 
-    let macos =
-        rf_quality_macos_report(&args, mac_report_json.as_ref(), efuse_report_json.as_ref());
+    let receiver_evidence = rf_quality_receiver_evidence_from_artifacts(&args.receiver_artifacts);
+    let macos = rf_quality_macos_report(
+        &args,
+        mac_report_json.as_ref(),
+        efuse_report_json.as_ref(),
+        receiver_evidence.as_ref(),
+    );
     let comparison =
         rf_quality_compare_profile_to_baseline(&profile, &macos, linux_baseline.as_ref());
     let acceptance = rf_quality_acceptance(result, &comparison, &profile_gate);
@@ -27709,6 +27942,7 @@ fn rf_quality_macos_report(
     args: &RfQualityReportArgs,
     mac_report: Option<&serde_json::Value>,
     efuse_report: Option<&serde_json::Value>,
+    receiver_evidence: Option<&serde_json::Value>,
 ) -> RfQualityMacosReport {
     let command = mac_report.and_then(|value| rf_quality_json_string(value, &["command"]));
     let result = mac_report.and_then(|value| rf_quality_json_string(value, &["result"]));
@@ -27779,7 +28013,7 @@ fn rf_quality_macos_report(
                 .unwrap_or_default(),
         },
         calibration: rf_quality_calibration_report(args, mac_report, efuse_report),
-        wfb_outcome: rf_quality_wfb_outcome(args, mac_report),
+        wfb_outcome: rf_quality_wfb_outcome(args, mac_report, receiver_evidence),
         receiver_artifacts,
     }
 }
@@ -27841,9 +28075,19 @@ fn rf_quality_calibration_report(
         rf_path: final_probe.and_then(|value| rf_quality_json_clone(value, &["rf_path"])),
         iqk: final_probe
             .and_then(|value| rf_quality_json_clone(value, &["iqk"]))
+            .or_else(|| {
+                mac_report.and_then(|value| {
+                    rf_quality_json_clone(value, &["tx_calibration_profile", "iqk"])
+                })
+            })
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["iqk"]))),
         lck: final_probe
             .and_then(|value| rf_quality_json_clone(value, &["lck"]))
+            .or_else(|| {
+                mac_report.and_then(|value| {
+                    rf_quality_json_clone(value, &["tx_calibration_profile", "lck"])
+                })
+            })
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["lck"]))),
         thermal: thermal
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"]))),
@@ -27877,16 +28121,100 @@ fn rf_quality_calibration_final_probe(probes: &[serde_json::Value]) -> Option<&s
 fn rf_quality_wfb_outcome(
     args: &RfQualityReportArgs,
     mac_report: Option<&serde_json::Value>,
+    receiver_evidence: Option<&serde_json::Value>,
 ) -> RfQualityWfbOutcomeReport {
+    let expected_datagrams = args.expected_payloads.and_then(|payloads| {
+        (args.fec_k > 0).then(|| {
+            (payloads
+                .saturating_mul(u64::from(args.fec_n))
+                .saturating_add(u64::from(args.fec_k).saturating_sub(1)))
+                / u64::from(args.fec_k)
+        })
+    });
     let Some(value) = mac_report else {
         return RfQualityWfbOutcomeReport {
+            expected_datagrams,
+            observed_datagrams: None,
+            datagram_shortfall: None,
+            short_run_datagram_tolerance: Some(RF_QUALITY_SHORT_RUN_DATAGRAM_TOLERANCE),
+            short_run_datagram_tolerance_applied: false,
+            receiver_status: receiver_evidence
+                .and_then(|value| rf_quality_json_string(value, &["receiver_status"]))
+                .or_else(|| {
+                    receiver_evidence.and_then(|value| {
+                        rf_quality_json_string(value, &["receiver_health", "status"])
+                    })
+                }),
+            receiver_session_observed: receiver_evidence
+                .and_then(|value| rf_quality_json_bool(value, &["receiver_session_observed"]))
+                .or_else(|| {
+                    receiver_evidence.and_then(|value| {
+                        rf_quality_json_bool(value, &["receiver_health", "session_observed"])
+                    })
+                }),
+            receiver_unable_decrypt_count: receiver_evidence
+                .and_then(|value| rf_quality_json_u64(value, &["receiver_unable_decrypt_count"]))
+                .or_else(|| {
+                    receiver_evidence.and_then(|value| {
+                        rf_quality_json_u64(value, &["receiver_health", "unable_decrypt_count"])
+                    })
+                }),
+            receiver_total_datagrams: receiver_evidence.and_then(|value| {
+                rf_quality_json_u64(value, &["receiver_health", "counter", "total_datagrams"])
+            }),
+            receiver_evidence: receiver_evidence.cloned(),
             recovered_payloads: args.recovered_payloads,
             ..RfQualityWfbOutcomeReport::default()
         };
     };
+    let submitted_datagrams = rf_quality_json_u64(value, &["submit_counters", "submitted"])
+        .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"]));
+    let observed_datagrams =
+        rf_quality_json_u64(value, &["datagrams_received"]).or(submitted_datagrams);
+    let datagram_shortfall = expected_datagrams
+        .zip(observed_datagrams)
+        .map(|(expected, observed)| expected as i64 - observed as i64);
+    let short_run_datagram_tolerance_applied = datagram_shortfall
+        .map(|shortfall| {
+            shortfall > 0
+                && shortfall <= RF_QUALITY_SHORT_RUN_DATAGRAM_TOLERANCE as i64
+                && args
+                    .expected_payloads
+                    .zip(args.recovered_payloads)
+                    .map(|(expected, recovered)| recovered >= expected)
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
     RfQualityWfbOutcomeReport {
-        submitted_datagrams: rf_quality_json_u64(value, &["submit_counters", "submitted"])
-            .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"])),
+        expected_datagrams,
+        observed_datagrams,
+        datagram_shortfall,
+        short_run_datagram_tolerance: Some(RF_QUALITY_SHORT_RUN_DATAGRAM_TOLERANCE),
+        short_run_datagram_tolerance_applied,
+        receiver_status: receiver_evidence
+            .and_then(|value| rf_quality_json_string(value, &["receiver_status"]))
+            .or_else(|| {
+                receiver_evidence
+                    .and_then(|value| rf_quality_json_string(value, &["receiver_health", "status"]))
+            }),
+        receiver_session_observed: receiver_evidence
+            .and_then(|value| rf_quality_json_bool(value, &["receiver_session_observed"]))
+            .or_else(|| {
+                receiver_evidence.and_then(|value| {
+                    rf_quality_json_bool(value, &["receiver_health", "session_observed"])
+                })
+            }),
+        receiver_unable_decrypt_count: receiver_evidence
+            .and_then(|value| rf_quality_json_u64(value, &["receiver_unable_decrypt_count"]))
+            .or_else(|| {
+                receiver_evidence.and_then(|value| {
+                    rf_quality_json_u64(value, &["receiver_health", "unable_decrypt_count"])
+                })
+            }),
+        receiver_total_datagrams: receiver_evidence.and_then(|value| {
+            rf_quality_json_u64(value, &["receiver_health", "counter", "total_datagrams"])
+        }),
+        submitted_datagrams,
         recovered_payloads: args
             .recovered_payloads
             .or_else(|| rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "forwarded"]))
@@ -27899,9 +28227,25 @@ fn rf_quality_wfb_outcome(
         malformed_datagrams: rf_quality_json_u64(value, &["bridge_counters", "malformed"]).or_else(
             || rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"]),
         ),
+        receiver_evidence: receiver_evidence.cloned(),
         throughput: rf_quality_json_clone(value, &["throughput"]),
         cpu: rf_quality_json_clone(value, &["cpu"]),
     }
+}
+
+fn rf_quality_receiver_evidence_from_artifacts(paths: &[PathBuf]) -> Option<serde_json::Value> {
+    paths.iter().find_map(|path| {
+        let file_name = path.file_name()?.to_str()?;
+        if file_name != "datagram-evidence.json" {
+            return None;
+        }
+        rf_quality_load_json(
+            path,
+            "receiver_evidence_read_failed",
+            "receiver_evidence_parse_failed",
+        )
+        .ok()
+    })
 }
 
 fn rf_quality_linux_baseline_report(
@@ -32615,6 +32959,26 @@ fn print_tx_calibration_profile_human(profile: &TxCalibrationProfileReport) {
             lck.rf_lck_after_exit.value_hex
         );
     }
+    if let Some(iqk) = profile.iqk.as_ref() {
+        println!(
+            "  IQK probe: mode={} read_only={} macbb={} afe={} rf_a={} rf_b={} latches={} restored={}",
+            iqk.mode,
+            iqk.read_only,
+            iqk.macbb_backup.len(),
+            iqk.afe_backup.len(),
+            iqk.rf_backup_path_a.len(),
+            iqk.rf_backup_path_b.len(),
+            iqk.page_c1_latches
+                .as_ref()
+                .map(|page| page.latches.len())
+                .unwrap_or_default(),
+            iqk.page_c1_latches
+                .as_ref()
+                .map(|page| page.restored)
+                .unwrap_or(true)
+                && iqk.hssi_read_restored.unwrap_or(true)
+        );
+    }
 }
 
 fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
@@ -35087,7 +35451,7 @@ mod tests {
             }
         });
 
-        let macos = rf_quality_macos_report(&args, Some(&mac_report), Some(&efuse_report));
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), Some(&efuse_report), None);
 
         assert!(macos.calibration.stop_gap);
         assert_eq!(macos.calibration.probes.len(), 2);
@@ -35128,7 +35492,7 @@ mod tests {
         let mut args = rf_quality_report_args();
         args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
 
-        let macos = rf_quality_macos_report(&args, None, None);
+        let macos = rf_quality_macos_report(&args, None, None, None);
 
         assert!(!macos.calibration.stop_gap);
         assert!(macos.calibration.stop_gap_sources.is_empty());
@@ -35152,7 +35516,7 @@ mod tests {
                 ]
             }
         });
-        let macos = rf_quality_macos_report(&args, Some(&mac_report), None);
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), None, None);
         let linux_final = serde_json::json!([
             {"address": REG_RFE_PINMUX_A_JAGUAR, "value_le_hex": "0x54337717"},
             {"address": REG_OFDM0_XBAGCCORE1, "value_le_hex": "0x1c0c0030"}
@@ -35249,10 +35613,20 @@ mod tests {
                 thermal: None,
             },
             wfb_outcome: RfQualityWfbOutcomeReport {
+                expected_datagrams: Some(90),
+                observed_datagrams: Some(90),
+                datagram_shortfall: Some(0),
+                short_run_datagram_tolerance: Some(RF_QUALITY_SHORT_RUN_DATAGRAM_TOLERANCE),
+                short_run_datagram_tolerance_applied: false,
+                receiver_status: None,
+                receiver_session_observed: None,
+                receiver_unable_decrypt_count: None,
+                receiver_total_datagrams: None,
                 submitted_datagrams: Some(90),
                 recovered_payloads: Some(29),
                 dropped_datagrams: None,
                 malformed_datagrams: None,
+                receiver_evidence: None,
                 throughput: None,
                 cpu: None,
             },
@@ -35284,7 +35658,7 @@ mod tests {
         args.recovered_payloads = Some(90);
         let profile =
             rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
-        let macos = rf_quality_macos_report(&args, None, None);
+        let macos = rf_quality_macos_report(&args, None, None, None);
         let baseline = RfQualityLinuxBaselineReport {
             source_report: PathBuf::from("/tmp/linux-baseline.json"),
             command: Some("linux-wfb-baseline".to_string()),
@@ -37327,6 +37701,13 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         )
         .expect("lck profile")
         .is_none());
+        assert!(tx_calibration_profile_writes(
+            TxCalibrationProfileArg::Rtl8812aIqkProbe,
+            channel_36,
+            Bandwidth::Mhz40,
+        )
+        .expect("iqk probe profile")
+        .is_none());
         assert_eq!(
             tx_pre_calibration_mode(
                 false,
@@ -37344,6 +37725,134 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 TxCalibrationProfileArg::Rtl8812aLck
             ),
             RfQualityCalibrationMode::RuntimeApproximation
+        );
+        assert_eq!(
+            tx_pre_calibration_mode(
+                true,
+                channel_36,
+                Bandwidth::Mhz20,
+                TxCalibrationProfileArg::Rtl8812aIqkProbe
+            ),
+            RfQualityCalibrationMode::StopGapCaptured
+        );
+        assert_eq!(
+            tx_pre_calibration_mode(
+                false,
+                channel_36,
+                Bandwidth::Mhz20,
+                TxCalibrationProfileArg::Rtl8812aIqkProbe
+            ),
+            RfQualityCalibrationMode::Unknown
+        );
+    }
+
+    #[test]
+    fn rtl8812a_iqk_probe_inventory_matches_upstream_backup_sets() {
+        assert_eq!(RTL8812A_IQK_MACBB_BACKUP_REGISTERS.len(), 9);
+        assert_eq!(RTL8812A_IQK_AFE_BACKUP_REGISTERS.len(), 12);
+        assert_eq!(RTL8812A_IQK_RF_BACKUP_OFFSETS, &[0x65, 0x8f, 0x00]);
+        assert_eq!(
+            RTL8812A_IQK_MACBB_BACKUP_REGISTERS
+                .iter()
+                .map(|(_, address)| *address)
+                .collect::<Vec<_>>(),
+            vec![
+                0x0520,
+                REG_BCN_CTRL,
+                REG_OFDMCCKEN_JAGUAR,
+                REG_CCK_RX_JAGUAR,
+                0x090c,
+                REG_RF_PI_MODE_A_JAGUAR,
+                REG_RF_PI_MODE_B_JAGUAR,
+                REG_CCA_ON_SEC_JAGUAR,
+                REG_AGC_TABLE_JAGUAR,
+            ]
+        );
+        assert!(RF_CALIBRATION_IQK_REGISTERS
+            .iter()
+            .any(|(_, address)| *address == REG_TX_IQK_PI_B_JAGUAR));
+        assert_eq!(
+            RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS,
+            &[
+                ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
+                ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
+            ]
+        );
+    }
+
+    #[test]
+    fn rf_quality_report_records_short_run_datagram_evidence() {
+        let stamp = started_at_unix_ms();
+        let mac_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-short-run-mac-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let evidence_dir = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-short-run-evidence-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&evidence_dir).expect("create evidence dir");
+        let evidence_path = evidence_dir.join("datagram-evidence.json");
+        fs::write(
+            &mac_path,
+            r#"{
+  "command": "bridge-tx-listen",
+  "result": "fail",
+  "datagrams_received": 149,
+  "submit_counters": {"submitted": 149},
+  "bridge_counters": {"injected": 149, "dropped": 0, "malformed": 0}
+}"#,
+        )
+        .expect("write mac report");
+        fs::write(
+            &evidence_path,
+            r#"{
+  "receiver_status": "ok",
+  "receiver_session_observed": true,
+  "receiver_unable_decrypt_count": 0,
+  "receiver_health": {
+    "counter": {"total_datagrams": 100},
+    "session_observed": true,
+    "status": "ok",
+    "unable_decrypt_count": 0
+  }
+}"#,
+        )
+        .expect("write receiver evidence");
+        let mut args = rf_quality_report_args();
+        args.mac_report = Some(mac_path.clone());
+        args.receiver_artifacts.push(evidence_path.clone());
+        args.fec_k = 8;
+        args.fec_n = 12;
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = Some(100);
+
+        let report = rf_quality_report(args);
+        fs::remove_file(mac_path).ok();
+        fs::remove_file(evidence_path).ok();
+        fs::remove_dir(evidence_dir).ok();
+
+        assert_eq!(report.macos.wfb_outcome.expected_datagrams, Some(150));
+        assert_eq!(report.macos.wfb_outcome.observed_datagrams, Some(149));
+        assert_eq!(report.macos.wfb_outcome.datagram_shortfall, Some(1));
+        assert_eq!(
+            report.macos.wfb_outcome.receiver_status.as_deref(),
+            Some("ok")
+        );
+        assert_eq!(
+            report.macos.wfb_outcome.receiver_session_observed,
+            Some(true)
+        );
+        assert_eq!(
+            report.macos.wfb_outcome.receiver_unable_decrypt_count,
+            Some(0)
+        );
+        assert_eq!(report.macos.wfb_outcome.receiver_total_datagrams, Some(100));
+        assert!(
+            report
+                .macos
+                .wfb_outcome
+                .short_run_datagram_tolerance_applied
         );
     }
 
