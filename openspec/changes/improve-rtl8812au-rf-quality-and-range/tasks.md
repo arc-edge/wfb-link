@@ -1,9 +1,9 @@
 ## 1. Measurement Foundation
 
-- [ ] 1.1 Add an RF-quality report model covering adapter identity, EFUSE summary, RFE type, channel, bandwidth, TX descriptor profile, TX power mode, calibration state, WFB settings, receiver artifacts, and acceptance status
-- [ ] 1.2 Add a diagnostic command or subcommand that can run a macOS RF-quality profile and write the structured report without changing existing bridge defaults
-- [ ] 1.3 Add report support for referencing a Linux baseline run and recording parameter mismatches that make a comparison invalid or degraded
-- [ ] 1.4 Add tests for RF-quality report serialization, parameter mismatch detection, and safe behavior when no Linux baseline is supplied
+- [x] 1.1 Add an RF-quality report model covering adapter identity, EFUSE summary, RFE type, channel, bandwidth, TX descriptor profile, TX power mode, calibration state, WFB settings, receiver artifacts, and acceptance status
+- [x] 1.2 Add a diagnostic command or subcommand that can run a macOS RF-quality profile and write the structured report without changing existing bridge defaults
+- [x] 1.3 Add report support for referencing a Linux baseline run and recording parameter mismatches that make a comparison invalid or degraded
+- [x] 1.4 Add tests for RF-quality report serialization, parameter mismatch detection, and safe behavior when no Linux baseline is supplied
 
 ## 2. Linux Baseline Capture
 

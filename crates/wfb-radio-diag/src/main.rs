@@ -129,6 +129,8 @@ enum Command {
     BridgeRun(BridgeRunArgs),
     /// Generate WFB distributor-style datagrams and submit a bounded TX throughput burst.
     BridgeTxBench(BridgeTxBenchArgs),
+    /// Build a structured RF-quality report from macOS and optional Linux baseline artifacts.
+    RfQualityReport(RfQualityReportArgs),
     /// Compare normalized USB trace event sequences.
     TraceCompare(TraceCompareArgs),
     /// Import Linux usbmon text into normalized USB trace JSON.
@@ -1977,6 +1979,108 @@ impl Default for BridgeTxProfileArg {
 }
 
 #[derive(Debug, Parser, Clone)]
+struct RfQualityReportArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Operator-visible profile name for this RF-quality run.
+    #[arg(long, default_value = "close-range-20mhz")]
+    profile_name: String,
+
+    /// RF-quality profile class being recorded.
+    #[arg(long, value_enum, default_value = "close-range")]
+    profile_kind: RfQualityProfileKind,
+
+    /// Existing macOS bridge-run or bridge-tx-bench JSON report to summarize.
+    #[arg(long, value_name = "PATH")]
+    mac_report: Option<PathBuf>,
+
+    /// Existing EFUSE dump JSON report to attach to the RF-quality summary.
+    #[arg(long, value_name = "PATH")]
+    efuse_report: Option<PathBuf>,
+
+    /// Linux baseline JSON report to compare against this macOS profile.
+    #[arg(long, value_name = "PATH")]
+    linux_baseline: Option<PathBuf>,
+
+    /// RF channel used by the macOS run.
+    #[arg(long, default_value_t = 36)]
+    channel: u8,
+
+    /// Channel context bandwidth: 20, 40, or 80 MHz.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// Fixed TX rate/MCS label used by the test profile.
+    #[arg(long, default_value = "mcs1")]
+    tx_rate: String,
+
+    /// TX descriptor profile used by bridge TX traffic.
+    #[arg(long, value_enum, default_value = "linux-monitor")]
+    tx_profile: BridgeTxProfileArg,
+
+    /// TX-power behavior used by this RF-quality run.
+    #[arg(long, value_enum, default_value = "current-default")]
+    tx_power_mode: RfQualityTxPowerMode,
+
+    /// Calibration behavior used by this RF-quality run.
+    #[arg(long, value_enum, default_value = "stop-gap-captured")]
+    calibration_mode: RfQualityCalibrationMode,
+
+    /// WFB link ID used by the test traffic.
+    #[arg(long, default_value = "0x000001", value_parser = parse_u32)]
+    wfb_link_id: u32,
+
+    /// WFB radio port used by the test traffic.
+    #[arg(long, default_value = "0x23", value_parser = parse_u8)]
+    wfb_radio_port: u8,
+
+    /// WFB FEC source packet count.
+    #[arg(long, default_value_t = 1)]
+    fec_k: u8,
+
+    /// WFB FEC total packet count.
+    #[arg(long, default_value_t = 3)]
+    fec_n: u8,
+
+    /// WFB source payload length when known.
+    #[arg(long)]
+    payload_len: Option<usize>,
+
+    /// Receiver-side artifact path associated with this run. Repeatable.
+    #[arg(long = "receiver-artifact", value_name = "PATH")]
+    receiver_artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityProfileKind {
+    CloseRange,
+    SteppedAttenuated,
+    OutdoorLongDistance,
+    WideBandwidthEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityTxPowerMode {
+    CurrentDefault,
+    ManualIndex,
+    EfuseDerived,
+    LinuxCaptured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityCalibrationMode {
+    StopGapCaptured,
+    Static,
+    RuntimeApproximation,
+    LinuxPorted,
+    Unknown,
+}
+
+#[derive(Debug, Parser, Clone)]
 struct TxActivityLedArgs {
     /// Blink the confirmed software LED around live bulk-OUT TX submissions.
     #[arg(long)]
@@ -2433,6 +2537,16 @@ fn main() -> Result<()> {
             emit_report(&report, emit_json, report_path.as_deref())?;
             if !emit_json {
                 print_bridge_tx_bench_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
+        Command::RfQualityReport(args) => {
+            let report = rf_quality_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_rf_quality_report_human(&report);
             }
             if let Some(code) = report.result.exit_code() {
                 std::process::exit(code);
@@ -3298,6 +3412,179 @@ struct BridgeTxBenchThroughputReport {
     usb_bytes_per_second: Option<f64>,
     payload_bytes_per_second: Option<f64>,
     datagram_bytes_per_second: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    profile: RfQualityProfileReport,
+    macos: RfQualityMacosReport,
+    linux_baseline: Option<RfQualityLinuxBaselineReport>,
+    comparison: RfQualityComparisonReport,
+    acceptance: RfQualityAcceptanceReport,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityProfileReport {
+    name: String,
+    kind: RfQualityProfileKind,
+    channel: u8,
+    channel_frequency_mhz: Option<u16>,
+    bandwidth: Bandwidth,
+    bandwidth_mhz: u16,
+    tx_rate: String,
+    tx_descriptor_profile: BridgeTxProfileArg,
+    tx_power_mode: RfQualityTxPowerMode,
+    calibration_mode: RfQualityCalibrationMode,
+    wfb: RfQualityWfbSettingsReport,
+    payload_len: Option<usize>,
+    receiver_artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityWfbSettingsReport {
+    link_id: u32,
+    link_id_hex: String,
+    radio_port: u8,
+    radio_port_hex: String,
+    fec_k: u8,
+    fec_n: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityMacosReport {
+    source_report: Option<PathBuf>,
+    efuse_report: Option<PathBuf>,
+    command: Option<String>,
+    result: Option<String>,
+    adapter: Option<serde_json::Value>,
+    endpoints: Option<serde_json::Value>,
+    efuse_summary: Option<serde_json::Value>,
+    rfe_type: Option<u8>,
+    rfe_type_hex: Option<String>,
+    channel: Option<u8>,
+    bandwidth_mhz: Option<u16>,
+    tx_descriptor_profile: Option<String>,
+    tx_descriptor_hex: Option<String>,
+    tx_options: Option<serde_json::Value>,
+    tx_power: RfQualityTxPowerReport,
+    calibration: RfQualityCalibrationReport,
+    wfb_outcome: RfQualityWfbOutcomeReport,
+    receiver_artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityTxPowerReport {
+    mode: RfQualityTxPowerMode,
+    control_report: Option<serde_json::Value>,
+    register_evidence: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityCalibrationReport {
+    mode: RfQualityCalibrationMode,
+    stop_gap: bool,
+    label: &'static str,
+    rfe_pinmux: Option<serde_json::Value>,
+    iqk: Option<serde_json::Value>,
+    lck: Option<serde_json::Value>,
+    thermal: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RfQualityWfbOutcomeReport {
+    submitted_datagrams: Option<u64>,
+    recovered_payloads: Option<u64>,
+    dropped_datagrams: Option<u64>,
+    malformed_datagrams: Option<u64>,
+    throughput: Option<serde_json::Value>,
+    cpu: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityLinuxBaselineReport {
+    source_report: PathBuf,
+    command: Option<String>,
+    adapter: Option<serde_json::Value>,
+    channel: Option<u8>,
+    bandwidth_mhz: Option<u16>,
+    tx_rate: Option<String>,
+    tx_descriptor_profile: Option<String>,
+    wfb: RfQualityBaselineWfbReport,
+    payload_len: Option<usize>,
+    recovered_payloads: Option<u64>,
+    submitted_datagrams: Option<u64>,
+    throughput_mbps: Option<f64>,
+    receiver_artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RfQualityBaselineWfbReport {
+    link_id: Option<u32>,
+    link_id_hex: Option<String>,
+    radio_port: Option<u8>,
+    radio_port_hex: Option<String>,
+    fec_k: Option<u8>,
+    fec_n: Option<u8>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityComparisonReport {
+    status: RfQualityComparisonStatus,
+    mismatch_count: usize,
+    invalidating_mismatch_count: usize,
+    degraded_mismatch_count: usize,
+    mismatches: Vec<RfQualityMismatchReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityComparisonStatus {
+    NoBaseline,
+    Matched,
+    Mismatched,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityMismatchReport {
+    field: &'static str,
+    macos_value: String,
+    linux_value: String,
+    severity: RfQualityMismatchSeverity,
+    impact: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityMismatchSeverity {
+    InvalidComparison,
+    DegradedComparison,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityAcceptanceReport {
+    status: RfQualityAcceptanceStatus,
+    reason: &'static str,
+    criteria_version: &'static str,
+    baseline_required_for_range_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityAcceptanceStatus {
+    NotEvaluated,
+    BaselineComparable,
+    DegradedComparison,
+    InvalidComparison,
+    ReportGenerationFailed,
 }
 
 #[derive(Debug, Serialize)]
@@ -24807,6 +25094,727 @@ fn bridge_tx_bench_update_metrics(
     report.cpu = cpu;
 }
 
+fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
+    let selector = args.adapter.selector();
+    let (channel, channel_result, channel_error) =
+        resolve_report_channel(args.channel, args.bandwidth);
+    let mut result = if channel_result == DiagnosticResult::Fail {
+        DiagnosticResult::Fail
+    } else {
+        DiagnosticResult::Pass
+    };
+    let mut error = channel_error;
+    let mut phases = vec![DiagnosticPhase {
+        id: "argument_validation",
+        status: if result == DiagnosticResult::Fail {
+            DiagnosticPhaseStatus::Blocked
+        } else {
+            DiagnosticPhaseStatus::Completed
+        },
+        detail: "validated RF-quality profile channel, bandwidth, descriptor profile, and WFB comparison parameters",
+    }];
+
+    let mac_report_json = match args.mac_report.as_deref() {
+        Some(path) if result != DiagnosticResult::Fail => {
+            match rf_quality_load_json(path, "mac_report_read_failed", "mac_report_parse_failed") {
+                Ok(value) => {
+                    phases.push(DiagnosticPhase {
+                        id: "macos_artifact",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "loaded macOS bridge or benchmark JSON artifact",
+                    });
+                    Some(value)
+                }
+                Err(load_error) => {
+                    result = DiagnosticResult::Fail;
+                    error = Some(load_error);
+                    phases.push(DiagnosticPhase {
+                        id: "macos_artifact",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "failed to load macOS RF-quality input artifact",
+                    });
+                    None
+                }
+            }
+        }
+        Some(_) => None,
+        None => {
+            phases.push(DiagnosticPhase {
+                id: "macos_artifact",
+                status: DiagnosticPhaseStatus::Pending,
+                detail: "no macOS bridge or benchmark artifact was supplied",
+            });
+            None
+        }
+    };
+
+    let efuse_report_json = match args.efuse_report.as_deref() {
+        Some(path) if result != DiagnosticResult::Fail => {
+            match rf_quality_load_json(
+                path,
+                "efuse_report_read_failed",
+                "efuse_report_parse_failed",
+            ) {
+                Ok(value) => {
+                    phases.push(DiagnosticPhase {
+                        id: "efuse_artifact",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "loaded EFUSE JSON artifact for adapter and TX-power context",
+                    });
+                    Some(value)
+                }
+                Err(load_error) => {
+                    result = DiagnosticResult::Fail;
+                    error = Some(load_error);
+                    phases.push(DiagnosticPhase {
+                        id: "efuse_artifact",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "failed to load EFUSE RF-quality input artifact",
+                    });
+                    None
+                }
+            }
+        }
+        Some(_) => None,
+        None => None,
+    };
+
+    let linux_baseline = match args.linux_baseline.as_deref() {
+        Some(path) if result != DiagnosticResult::Fail => {
+            match rf_quality_load_json(
+                path,
+                "linux_baseline_read_failed",
+                "linux_baseline_parse_failed",
+            )
+            .and_then(|value| rf_quality_linux_baseline_report(path, &value))
+            {
+                Ok(baseline) => {
+                    phases.push(DiagnosticPhase {
+                        id: "linux_baseline",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "loaded Linux baseline artifact and extracted comparable profile parameters",
+                    });
+                    Some(baseline)
+                }
+                Err(load_error) => {
+                    result = DiagnosticResult::Fail;
+                    error = Some(load_error);
+                    phases.push(DiagnosticPhase {
+                        id: "linux_baseline",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "failed to load Linux baseline RF-quality artifact",
+                    });
+                    None
+                }
+            }
+        }
+        Some(_) => None,
+        None => {
+            phases.push(DiagnosticPhase {
+                id: "linux_baseline",
+                status: DiagnosticPhaseStatus::Pending,
+                detail: "no Linux baseline was supplied; comparison and range acceptance remain unevaluated",
+            });
+            None
+        }
+    };
+
+    let profile = rf_quality_profile_report(&args, channel);
+    let macos =
+        rf_quality_macos_report(&args, mac_report_json.as_ref(), efuse_report_json.as_ref());
+    let comparison = rf_quality_compare_profile_to_baseline(&profile, linux_baseline.as_ref());
+    let acceptance = rf_quality_acceptance(result, &comparison);
+
+    RfQualityReport {
+        schema_version: 1,
+        command: "rf-quality-report",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        profile,
+        macos,
+        linux_baseline,
+        comparison,
+        acceptance,
+        result,
+        phases,
+        error,
+        notes: vec![
+            "RF-quality reports are evidence envelopes; USB submission alone is not range acceptance",
+            "this command does not initialize the adapter, transmit frames, or alter existing bridge defaults",
+        ],
+    }
+}
+
+fn rf_quality_profile_report(
+    args: &RfQualityReportArgs,
+    channel: Option<Channel>,
+) -> RfQualityProfileReport {
+    RfQualityProfileReport {
+        name: args.profile_name.clone(),
+        kind: args.profile_kind,
+        channel: args.channel,
+        channel_frequency_mhz: channel.map(|channel| channel.frequency_mhz),
+        bandwidth: args.bandwidth,
+        bandwidth_mhz: args.bandwidth.mhz(),
+        tx_rate: args.tx_rate.clone(),
+        tx_descriptor_profile: args.tx_profile,
+        tx_power_mode: args.tx_power_mode,
+        calibration_mode: args.calibration_mode,
+        wfb: RfQualityWfbSettingsReport {
+            link_id: args.wfb_link_id,
+            link_id_hex: format_value(args.wfb_link_id, 6),
+            radio_port: args.wfb_radio_port,
+            radio_port_hex: format_value(args.wfb_radio_port, 2),
+            fec_k: args.fec_k,
+            fec_n: args.fec_n,
+        },
+        payload_len: args.payload_len,
+        receiver_artifacts: args.receiver_artifacts.clone(),
+    }
+}
+
+fn rf_quality_macos_report(
+    args: &RfQualityReportArgs,
+    mac_report: Option<&serde_json::Value>,
+    efuse_report: Option<&serde_json::Value>,
+) -> RfQualityMacosReport {
+    let command = mac_report.and_then(|value| rf_quality_json_string(value, &["command"]));
+    let result = mac_report.and_then(|value| rf_quality_json_string(value, &["result"]));
+    let adapter = mac_report.and_then(|value| rf_quality_json_clone(value, &["adapter"]));
+    let endpoints = mac_report.and_then(|value| rf_quality_json_clone(value, &["endpoints"]));
+    let efuse_summary = efuse_report
+        .and_then(|value| rf_quality_json_clone(value, &["efuse", "summary"]))
+        .or_else(|| {
+            mac_report.and_then(|value| rf_quality_json_clone(value, &["efuse", "summary"]))
+        })
+        .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["efuse_summary"])));
+    let rfe_type = mac_report
+        .and_then(|value| rf_quality_json_u8(value, &["same_session_init", "rfe_type"]))
+        .or_else(|| mac_report.and_then(|value| rf_quality_json_u8(value, &["rfe_type"])));
+    let channel = mac_report
+        .and_then(|value| rf_quality_json_u8(value, &["channel", "number"]))
+        .or_else(|| mac_report.and_then(|value| rf_quality_json_u8(value, &["channel"])));
+    let bandwidth_mhz = mac_report
+        .and_then(|value| rf_quality_json_bandwidth_mhz(value, &["bandwidth"]))
+        .or_else(|| {
+            mac_report.and_then(|value| {
+                rf_quality_json_bandwidth_mhz(value, &["same_session_init", "effective_bandwidth"])
+            })
+        });
+    let tx_descriptor_profile = mac_report
+        .and_then(|value| rf_quality_json_string(value, &["last_datagram", "tx_profile"]))
+        .or_else(|| mac_report.and_then(|value| rf_quality_json_string(value, &["tx_profile"])));
+    let tx_descriptor_hex = mac_report
+        .and_then(|value| rf_quality_json_string(value, &["last_datagram", "tx_descriptor_hex"]))
+        .or_else(|| {
+            mac_report.and_then(|value| rf_quality_json_string(value, &["tx_descriptor_hex"]))
+        });
+    let tx_options =
+        mac_report.and_then(|value| rf_quality_json_clone(value, &["last_datagram", "tx_options"]));
+    let mut receiver_artifacts = args.receiver_artifacts.clone();
+    if let Some(value) = mac_report {
+        receiver_artifacts.extend(rf_quality_json_pathbufs(value, &["receiver_artifacts"]));
+        receiver_artifacts.extend(rf_quality_json_pathbufs(value, &["rx_pcap_path"]));
+        receiver_artifacts.extend(rf_quality_json_pathbufs(value, &["rx_frame_jsonl_path"]));
+    }
+
+    RfQualityMacosReport {
+        source_report: args.mac_report.clone(),
+        efuse_report: args.efuse_report.clone(),
+        command,
+        result,
+        adapter,
+        endpoints,
+        efuse_summary,
+        rfe_type,
+        rfe_type_hex: rfe_type.map(|value| format_value(value, 2)),
+        channel,
+        bandwidth_mhz,
+        tx_descriptor_profile,
+        tx_descriptor_hex,
+        tx_options,
+        tx_power: RfQualityTxPowerReport {
+            mode: args.tx_power_mode,
+            control_report: mac_report
+                .and_then(|value| rf_quality_json_clone(value, &["tx_power_control"])),
+            register_evidence: mac_report
+                .and_then(|value| {
+                    rf_quality_json_array_clone(
+                        value,
+                        &["tx_status", "rf_summary", "activity_registers"],
+                    )
+                })
+                .unwrap_or_default(),
+        },
+        calibration: RfQualityCalibrationReport {
+            mode: args.calibration_mode,
+            stop_gap: matches!(
+                args.calibration_mode,
+                RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
+            ),
+            label: rf_quality_calibration_label(args.calibration_mode),
+            rfe_pinmux: mac_report.and_then(|value| {
+                rf_quality_json_clone(value, &["same_session_init", "rfe_type"])
+                    .or_else(|| rf_quality_json_clone(value, &["rfe_type"]))
+            }),
+            iqk: mac_report.and_then(|value| rf_quality_json_clone(value, &["iqk"])),
+            lck: mac_report.and_then(|value| rf_quality_json_clone(value, &["lck"])),
+            thermal: mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"])),
+        },
+        wfb_outcome: rf_quality_wfb_outcome(mac_report),
+        receiver_artifacts,
+    }
+}
+
+fn rf_quality_wfb_outcome(mac_report: Option<&serde_json::Value>) -> RfQualityWfbOutcomeReport {
+    let Some(value) = mac_report else {
+        return RfQualityWfbOutcomeReport::default();
+    };
+    RfQualityWfbOutcomeReport {
+        submitted_datagrams: rf_quality_json_u64(value, &["submit_counters", "submitted"])
+            .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"])),
+        recovered_payloads: rf_quality_json_u64(
+            value,
+            &["rx", "wfb_forward", "counters", "forwarded"],
+        )
+        .or_else(|| {
+            rf_quality_json_u64(value, &["rx", "wfb_forwards", "0", "counters", "forwarded"])
+        })
+        .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
+        dropped_datagrams: rf_quality_json_u64(value, &["bridge_counters", "dropped"])
+            .or_else(|| rf_quality_json_u64(value, &["rx", "dropped_packets"])),
+        malformed_datagrams: rf_quality_json_u64(value, &["bridge_counters", "malformed"]).or_else(
+            || rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"]),
+        ),
+        throughput: rf_quality_json_clone(value, &["throughput"]),
+        cpu: rf_quality_json_clone(value, &["cpu"]),
+    }
+}
+
+fn rf_quality_linux_baseline_report(
+    path: &Path,
+    value: &serde_json::Value,
+) -> std::result::Result<RfQualityLinuxBaselineReport, DiagnosticErrorReport> {
+    let channel = rf_quality_json_u8(value, &["profile", "channel"])
+        .or_else(|| rf_quality_json_u8(value, &["channel", "number"]))
+        .or_else(|| rf_quality_json_u8(value, &["channel"]));
+    let bandwidth_mhz = rf_quality_json_bandwidth_mhz(value, &["profile", "bandwidth"])
+        .or_else(|| rf_quality_json_bandwidth_mhz(value, &["bandwidth"]))
+        .or_else(|| rf_quality_json_bandwidth_mhz(value, &["bandwidth_mhz"]));
+    let tx_rate = rf_quality_json_string(value, &["profile", "tx_rate"])
+        .or_else(|| rf_quality_json_string(value, &["tx_rate"]));
+    let tx_descriptor_profile =
+        rf_quality_json_string(value, &["profile", "tx_descriptor_profile"])
+            .or_else(|| rf_quality_json_string(value, &["tx_profile"]))
+            .or_else(|| rf_quality_json_string(value, &["tx_descriptor_profile"]));
+    let link_id = rf_quality_json_u32(value, &["profile", "wfb", "link_id"])
+        .or_else(|| rf_quality_json_u32(value, &["wfb", "link_id"]))
+        .or_else(|| rf_quality_json_u32(value, &["wfb_link_id"]))
+        .or_else(|| rf_quality_json_u32(value, &["link_id"]));
+    let radio_port = rf_quality_json_u8(value, &["profile", "wfb", "radio_port"])
+        .or_else(|| rf_quality_json_u8(value, &["wfb", "radio_port"]))
+        .or_else(|| rf_quality_json_u8(value, &["wfb_radio_port"]))
+        .or_else(|| rf_quality_json_u8(value, &["radio_port"]));
+    let fec_k = rf_quality_json_u8(value, &["profile", "wfb", "fec_k"])
+        .or_else(|| rf_quality_json_u8(value, &["wfb", "fec_k"]))
+        .or_else(|| rf_quality_json_u8(value, &["fec_k"]));
+    let fec_n = rf_quality_json_u8(value, &["profile", "wfb", "fec_n"])
+        .or_else(|| rf_quality_json_u8(value, &["wfb", "fec_n"]))
+        .or_else(|| rf_quality_json_u8(value, &["fec_n"]));
+
+    Ok(RfQualityLinuxBaselineReport {
+        source_report: path.to_path_buf(),
+        command: rf_quality_json_string(value, &["command"]),
+        adapter: rf_quality_json_clone(value, &["adapter"]),
+        channel,
+        bandwidth_mhz,
+        tx_rate,
+        tx_descriptor_profile,
+        wfb: RfQualityBaselineWfbReport {
+            link_id,
+            link_id_hex: link_id.map(|value| format_value(value, 6)),
+            radio_port,
+            radio_port_hex: radio_port.map(|value| format_value(value, 2)),
+            fec_k,
+            fec_n,
+        },
+        payload_len: rf_quality_json_usize(value, &["profile", "payload_len"])
+            .or_else(|| rf_quality_json_usize(value, &["payload_len"])),
+        recovered_payloads: rf_quality_json_u64(value, &["metrics", "recovered_payloads"])
+            .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
+        submitted_datagrams: rf_quality_json_u64(value, &["metrics", "submitted_datagrams"])
+            .or_else(|| rf_quality_json_u64(value, &["submitted_datagrams"]))
+            .or_else(|| rf_quality_json_u64(value, &["submit_counters", "submitted"])),
+        throughput_mbps: rf_quality_json_f64(value, &["metrics", "throughput_mbps"])
+            .or_else(|| rf_quality_json_f64(value, &["throughput_mbps"])),
+        receiver_artifacts: rf_quality_json_pathbufs(value, &["receiver_artifacts"])
+            .into_iter()
+            .chain(rf_quality_json_pathbufs(value, &["artifacts", "receiver"]))
+            .collect(),
+    })
+}
+
+fn rf_quality_compare_profile_to_baseline(
+    profile: &RfQualityProfileReport,
+    baseline: Option<&RfQualityLinuxBaselineReport>,
+) -> RfQualityComparisonReport {
+    let Some(baseline) = baseline else {
+        return RfQualityComparisonReport {
+            status: RfQualityComparisonStatus::NoBaseline,
+            mismatch_count: 0,
+            invalidating_mismatch_count: 0,
+            degraded_mismatch_count: 0,
+            mismatches: Vec::new(),
+        };
+    };
+
+    let mut mismatches = Vec::new();
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "channel",
+        u64::from(profile.channel),
+        baseline.channel.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "channel mismatch makes RF and range comparison invalid",
+    );
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "bandwidth_mhz",
+        u64::from(profile.bandwidth_mhz),
+        baseline.bandwidth_mhz.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "bandwidth mismatch makes RF and range comparison invalid",
+    );
+    rf_quality_compare_normalized_string(
+        &mut mismatches,
+        "tx_rate",
+        &profile.tx_rate,
+        baseline.tx_rate.as_deref(),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "fixed TX rate mismatch makes payload recovery and range comparison invalid",
+    );
+    rf_quality_compare_normalized_string(
+        &mut mismatches,
+        "tx_descriptor_profile",
+        bridge_tx_profile_label(profile.tx_descriptor_profile),
+        baseline.tx_descriptor_profile.as_deref(),
+        RfQualityMismatchSeverity::DegradedComparison,
+        "descriptor profile mismatch can change RF behavior and degrades comparison confidence",
+    );
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "wfb.link_id",
+        u64::from(profile.wfb.link_id),
+        baseline.wfb.link_id.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "WFB link ID mismatch means the receiver may be observing different traffic",
+    );
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "wfb.radio_port",
+        u64::from(profile.wfb.radio_port),
+        baseline.wfb.radio_port.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "WFB radio port mismatch means the receiver may be observing different traffic",
+    );
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "wfb.fec_k",
+        u64::from(profile.wfb.fec_k),
+        baseline.wfb.fec_k.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "FEC source packet mismatch changes recovery behavior",
+    );
+    rf_quality_compare_u64(
+        &mut mismatches,
+        "wfb.fec_n",
+        u64::from(profile.wfb.fec_n),
+        baseline.wfb.fec_n.map(u64::from),
+        RfQualityMismatchSeverity::InvalidComparison,
+        "FEC total packet mismatch changes recovery behavior",
+    );
+    if let Some(payload_len) = profile.payload_len {
+        rf_quality_compare_u64(
+            &mut mismatches,
+            "payload_len",
+            payload_len as u64,
+            baseline.payload_len.map(|value| value as u64),
+            RfQualityMismatchSeverity::InvalidComparison,
+            "payload size mismatch changes airtime, FEC packing, and throughput comparison",
+        );
+    }
+
+    let invalidating_mismatch_count = mismatches
+        .iter()
+        .filter(|mismatch| mismatch.severity == RfQualityMismatchSeverity::InvalidComparison)
+        .count();
+    let degraded_mismatch_count = mismatches.len().saturating_sub(invalidating_mismatch_count);
+    RfQualityComparisonReport {
+        status: if mismatches.is_empty() {
+            RfQualityComparisonStatus::Matched
+        } else {
+            RfQualityComparisonStatus::Mismatched
+        },
+        mismatch_count: mismatches.len(),
+        invalidating_mismatch_count,
+        degraded_mismatch_count,
+        mismatches,
+    }
+}
+
+fn rf_quality_compare_u64(
+    mismatches: &mut Vec<RfQualityMismatchReport>,
+    field: &'static str,
+    macos_value: u64,
+    linux_value: Option<u64>,
+    severity: RfQualityMismatchSeverity,
+    impact: &'static str,
+) {
+    if let Some(linux_value) = linux_value {
+        if macos_value != linux_value {
+            mismatches.push(RfQualityMismatchReport {
+                field,
+                macos_value: macos_value.to_string(),
+                linux_value: linux_value.to_string(),
+                severity,
+                impact,
+            });
+        }
+    }
+}
+
+fn rf_quality_compare_normalized_string(
+    mismatches: &mut Vec<RfQualityMismatchReport>,
+    field: &'static str,
+    macos_value: &str,
+    linux_value: Option<&str>,
+    severity: RfQualityMismatchSeverity,
+    impact: &'static str,
+) {
+    if let Some(linux_value) = linux_value {
+        if rf_quality_normalize_token(macos_value) != rf_quality_normalize_token(linux_value) {
+            mismatches.push(RfQualityMismatchReport {
+                field,
+                macos_value: macos_value.to_string(),
+                linux_value: linux_value.to_string(),
+                severity,
+                impact,
+            });
+        }
+    }
+}
+
+fn rf_quality_acceptance(
+    result: DiagnosticResult,
+    comparison: &RfQualityComparisonReport,
+) -> RfQualityAcceptanceReport {
+    if result == DiagnosticResult::Fail {
+        return RfQualityAcceptanceReport {
+            status: RfQualityAcceptanceStatus::ReportGenerationFailed,
+            reason: "the RF-quality report could not be generated from the supplied inputs",
+            criteria_version: "rf-quality-v1",
+            baseline_required_for_range_ready: true,
+        };
+    }
+
+    match comparison.status {
+        RfQualityComparisonStatus::NoBaseline => RfQualityAcceptanceReport {
+            status: RfQualityAcceptanceStatus::NotEvaluated,
+            reason: "no Linux baseline was supplied, so range readiness is not evaluated",
+            criteria_version: "rf-quality-v1",
+            baseline_required_for_range_ready: true,
+        },
+        RfQualityComparisonStatus::Matched => RfQualityAcceptanceReport {
+            status: RfQualityAcceptanceStatus::BaselineComparable,
+            reason:
+                "macOS and Linux baseline parameters match for the fields present in the baseline",
+            criteria_version: "rf-quality-v1",
+            baseline_required_for_range_ready: true,
+        },
+        RfQualityComparisonStatus::Mismatched if comparison.invalidating_mismatch_count > 0 => {
+            RfQualityAcceptanceReport {
+                status: RfQualityAcceptanceStatus::InvalidComparison,
+                reason: "one or more critical parameters differ from the Linux baseline",
+                criteria_version: "rf-quality-v1",
+                baseline_required_for_range_ready: true,
+            }
+        }
+        RfQualityComparisonStatus::Mismatched => RfQualityAcceptanceReport {
+            status: RfQualityAcceptanceStatus::DegradedComparison,
+            reason: "only degraded-confidence parameter mismatches were found",
+            criteria_version: "rf-quality-v1",
+            baseline_required_for_range_ready: true,
+        },
+    }
+}
+
+fn rf_quality_load_json(
+    path: &Path,
+    read_code: &'static str,
+    parse_code: &'static str,
+) -> std::result::Result<serde_json::Value, DiagnosticErrorReport> {
+    let text = fs::read_to_string(path).map_err(|error| DiagnosticErrorReport {
+        code: read_code,
+        message: format!("{}: {error}", path.display()),
+    })?;
+    serde_json::from_str(&text).map_err(|error| DiagnosticErrorReport {
+        code: parse_code,
+        message: format!("{}: {error}", path.display()),
+    })
+}
+
+fn rf_quality_json_get<'a>(
+    value: &'a serde_json::Value,
+    path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path {
+        match current {
+            serde_json::Value::Object(map) => current = map.get(*key)?,
+            serde_json::Value::Array(values) => {
+                let index = key.parse::<usize>().ok()?;
+                current = values.get(index)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn rf_quality_json_clone(value: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
+    rf_quality_json_get(value, path).cloned()
+}
+
+fn rf_quality_json_array_clone(
+    value: &serde_json::Value,
+    path: &[&str],
+) -> Option<Vec<serde_json::Value>> {
+    rf_quality_json_get(value, path)?
+        .as_array()
+        .map(|values| values.to_vec())
+}
+
+fn rf_quality_json_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+fn rf_quality_json_u64(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(text) => parse_u64_text(text),
+        _ => None,
+    }
+}
+
+fn rf_quality_json_u32(value: &serde_json::Value, path: &[&str]) -> Option<u32> {
+    rf_quality_json_u64(value, path).and_then(|value| u32::try_from(value).ok())
+}
+
+fn rf_quality_json_u8(value: &serde_json::Value, path: &[&str]) -> Option<u8> {
+    rf_quality_json_u64(value, path).and_then(|value| u8::try_from(value).ok())
+}
+
+fn rf_quality_json_usize(value: &serde_json::Value, path: &[&str]) -> Option<usize> {
+    rf_quality_json_u64(value, path).and_then(|value| usize::try_from(value).ok())
+}
+
+fn rf_quality_json_f64(value: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn rf_quality_json_bandwidth_mhz(value: &serde_json::Value, path: &[&str]) -> Option<u16> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::Number(number) => {
+            number.as_u64().and_then(|value| value.try_into().ok())
+        }
+        serde_json::Value::String(text) => rf_quality_bandwidth_mhz_from_text(text),
+        serde_json::Value::Object(_) => rf_quality_json_bandwidth_mhz(value, &["mhz"])
+            .or_else(|| rf_quality_json_bandwidth_mhz(value, &["bandwidth_mhz"])),
+        _ => None,
+    }
+}
+
+fn rf_quality_json_pathbufs(value: &serde_json::Value, path: &[&str]) -> Vec<PathBuf> {
+    let Some(value) = rf_quality_json_get(value, path) else {
+        return Vec::new();
+    };
+    match value {
+        serde_json::Value::String(text) => vec![PathBuf::from(text)],
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(PathBuf::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_u64_text(input: &str) -> Option<u64> {
+    let trimmed = input.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u64>().ok()
+    }
+}
+
+fn rf_quality_bandwidth_mhz_from_text(input: &str) -> Option<u16> {
+    let normalized = input
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-', ' '], "");
+    match normalized.as_str() {
+        "20" | "20mhz" | "mhz20" => Some(20),
+        "40" | "40mhz" | "mhz40" => Some(40),
+        "80" | "80mhz" | "mhz80" => Some(80),
+        _ => None,
+    }
+}
+
+fn rf_quality_calibration_label(mode: RfQualityCalibrationMode) -> &'static str {
+    match mode {
+        RfQualityCalibrationMode::StopGapCaptured => {
+            "stop-gap calibration from captured or planted values"
+        }
+        RfQualityCalibrationMode::Static => "stop-gap static calibration values",
+        RfQualityCalibrationMode::RuntimeApproximation => "runtime calibration approximation",
+        RfQualityCalibrationMode::LinuxPorted => "ported Linux runtime calibration routine",
+        RfQualityCalibrationMode::Unknown => "calibration state was not supplied",
+    }
+}
+
+fn bridge_tx_profile_label(profile: BridgeTxProfileArg) -> &'static str {
+    match profile {
+        BridgeTxProfileArg::LinuxMonitor => "linux_monitor",
+        BridgeTxProfileArg::RadiotapDirect => "radiotap_direct",
+    }
+}
+
+fn rf_quality_normalize_token(input: &str) -> String {
+    input
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
 fn build_bridge_tx_bench_datagram(
     args: &BridgeTxBenchArgs,
     channel_id: WfbChannelId,
@@ -28937,6 +29945,120 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     }
 }
 
+fn print_rf_quality_report_human(report: &RfQualityReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!(
+        "Profile: {} {:?} channel={} bandwidth={}MHz tx_rate={} tx_profile={:?}",
+        report.profile.name,
+        report.profile.kind,
+        report.profile.channel,
+        report.profile.bandwidth_mhz,
+        report.profile.tx_rate,
+        report.profile.tx_descriptor_profile
+    );
+    println!(
+        "WFB: link_id={} radio_port={} fec={}/{} payload_len={}",
+        report.profile.wfb.link_id_hex,
+        report.profile.wfb.radio_port_hex,
+        report.profile.wfb.fec_k,
+        report.profile.wfb.fec_n,
+        report
+            .profile
+            .payload_len
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    println!(
+        "Power/calibration: tx_power={:?} calibration={:?} stop_gap={}",
+        report.profile.tx_power_mode,
+        report.profile.calibration_mode,
+        report.macos.calibration.stop_gap
+    );
+    if let Some(path) = &report.macos.source_report {
+        println!("macOS artifact: {}", path.display());
+    }
+    if let Some(rfe_type) = &report.macos.rfe_type_hex {
+        println!("RFE type: {rfe_type}");
+    }
+    println!(
+        "macOS outcome: submitted={} recovered={} dropped={} malformed={}",
+        report
+            .macos
+            .wfb_outcome
+            .submitted_datagrams
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .macos
+            .wfb_outcome
+            .recovered_payloads
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .macos
+            .wfb_outcome
+            .dropped_datagrams
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .macos
+            .wfb_outcome
+            .malformed_datagrams
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    if let Some(baseline) = &report.linux_baseline {
+        println!("Linux baseline: {}", baseline.source_report.display());
+        println!(
+            "Linux outcome: submitted={} recovered={} throughput_mbps={}",
+            baseline
+                .submitted_datagrams
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            baseline
+                .recovered_payloads
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            baseline
+                .throughput_mbps
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    println!(
+        "Comparison: {:?} mismatches={} invalidating={} degraded={}",
+        report.comparison.status,
+        report.comparison.mismatch_count,
+        report.comparison.invalidating_mismatch_count,
+        report.comparison.degraded_mismatch_count
+    );
+    for mismatch in &report.comparison.mismatches {
+        println!(
+            "  {}: macOS={} Linux={} {:?} - {}",
+            mismatch.field,
+            mismatch.macos_value,
+            mismatch.linux_value,
+            mismatch.severity,
+            mismatch.impact
+        );
+    }
+    println!(
+        "Acceptance: {:?} - {}",
+        report.acceptance.status, report.acceptance.reason
+    );
+    println!("Phases:");
+    for phase in &report.phases {
+        println!("  - {}: {:?} - {}", phase.id, phase.status, phase.detail);
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
 fn print_usb_probe_human(report: &radio_core::UsbProbeReport) {
     println!("USB probe: {}", report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -30235,6 +31357,29 @@ mod tests {
         }
     }
 
+    fn rf_quality_report_args() -> RfQualityReportArgs {
+        RfQualityReportArgs {
+            adapter: adapter_args(),
+            profile_name: "close-range-20mhz".to_string(),
+            profile_kind: RfQualityProfileKind::CloseRange,
+            mac_report: None,
+            efuse_report: None,
+            linux_baseline: None,
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            tx_rate: "mcs1".to_string(),
+            tx_profile: BridgeTxProfileArg::LinuxMonitor,
+            tx_power_mode: RfQualityTxPowerMode::CurrentDefault,
+            calibration_mode: RfQualityCalibrationMode::StopGapCaptured,
+            wfb_link_id: 0x000001,
+            wfb_radio_port: 0x23,
+            fec_k: 1,
+            fec_n: 3,
+            payload_len: Some(1024),
+            receiver_artifacts: Vec::new(),
+        }
+    }
+
     fn rx_scan_args() -> RxScanArgs {
         RxScanArgs {
             adapter: adapter_args(),
@@ -30364,6 +31509,113 @@ mod tests {
         assert!(parse_tx_power_index("0x40")
             .expect_err("above guarded max")
             .contains("0x00..=0x3f"));
+    }
+
+    #[test]
+    fn rf_quality_report_serializes_without_linux_baseline() {
+        let report = rf_quality_report(rf_quality_report_args());
+        let json = serde_json::to_string(&report).expect("serialize report");
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(
+            report.comparison.status,
+            RfQualityComparisonStatus::NoBaseline
+        );
+        assert_eq!(
+            report.acceptance.status,
+            RfQualityAcceptanceStatus::NotEvaluated
+        );
+        assert!(json.contains("\"command\":\"rf-quality-report\""));
+        assert!(json.contains("\"baseline_required_for_range_ready\":true"));
+    }
+
+    #[test]
+    fn rf_quality_comparison_detects_parameter_mismatches() {
+        let args = rf_quality_report_args();
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(40),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("radiotap_direct".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000002),
+                link_id_hex: Some("0x000002".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(4),
+            },
+            payload_len: Some(2048),
+            recovered_payloads: Some(30),
+            submitted_datagrams: Some(90),
+            throughput_mbps: Some(1.2),
+            receiver_artifacts: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, Some(&baseline));
+        let fields = comparison
+            .mismatches
+            .iter()
+            .map(|mismatch| mismatch.field)
+            .collect::<Vec<_>>();
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Mismatched);
+        assert!(fields.contains(&"channel"));
+        assert!(fields.contains(&"tx_descriptor_profile"));
+        assert!(fields.contains(&"wfb.link_id"));
+        assert!(fields.contains(&"wfb.fec_n"));
+        assert!(fields.contains(&"payload_len"));
+        assert!(comparison.invalidating_mismatch_count >= 4);
+        assert_eq!(comparison.degraded_mismatch_count, 1);
+    }
+
+    #[test]
+    fn rf_quality_report_loads_matching_linux_baseline() {
+        let stamp = started_at_unix_ms();
+        let baseline_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-rf-baseline-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &baseline_path,
+            r#"{
+  "command": "linux-wfb-baseline",
+  "profile": {
+    "channel": 36,
+    "bandwidth": "20MHz",
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux-monitor",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024
+  },
+  "metrics": {"submitted_datagrams": 90, "recovered_payloads": 30, "throughput_mbps": 1.25},
+  "receiver_artifacts": ["/tmp/linux-rx.log"]
+}"#,
+        )
+        .expect("write baseline");
+
+        let mut args = rf_quality_report_args();
+        args.linux_baseline = Some(baseline_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(baseline_path);
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(report.comparison.status, RfQualityComparisonStatus::Matched);
+        assert_eq!(
+            report.acceptance.status,
+            RfQualityAcceptanceStatus::BaselineComparable
+        );
+        let baseline = report.linux_baseline.expect("baseline");
+        assert_eq!(baseline.recovered_payloads, Some(30));
+        assert_eq!(
+            baseline.receiver_artifacts,
+            vec![PathBuf::from("/tmp/linux-rx.log")]
+        );
     }
 
     #[test]
