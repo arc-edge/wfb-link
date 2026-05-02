@@ -527,10 +527,47 @@ missing_optional=()
 [[ -n "$GREP_BIN" ]] || missing_optional+=(grep)
 [[ -n "$DATE_BIN" ]] || missing_optional+=(date)
 
+sudo_noninteractive=unknown
+iface_status=unknown
+wfb_key_status=unknown
+docker_service_state=unknown
+policy_blockers=()
+
+if [[ -n "$SUDO_BIN" ]]; then
+  if "$SUDO_BIN" -n true >/dev/null 2>&1; then
+    sudo_noninteractive=ok
+  else
+    sudo_noninteractive=blocked
+    policy_blockers+=(sudo_noninteractive_unavailable)
+  fi
+fi
+
+if [[ -n "$IP_BIN" ]]; then
+  if "$IP_BIN" link show "$IFACE" >/dev/null 2>&1; then
+    iface_status=present
+  else
+    iface_status=missing
+    policy_blockers+=(interface_missing)
+  fi
+fi
+
+if [[ -n "$SUDO_BIN" && "$sudo_noninteractive" == "ok" ]]; then
+  if "$SUDO_BIN" -n test -r "$WFB_KEY" >/dev/null 2>&1; then
+    wfb_key_status=readable
+  else
+    wfb_key_status=unreadable
+    policy_blockers+=(wfb_key_unreadable)
+  fi
+fi
+
+if [[ -n "$SUDO_BIN" && "$sudo_noninteractive" == "ok" && -n "$DOCKER_BIN" ]]; then
+  docker_service_state=$("$SUDO_BIN" -n "$DOCKER_BIN" ps -a --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}' 2>/dev/null || true)
+  [[ -n "$docker_service_state" ]] || docker_service_state=not_found
+fi
+
 preflight_status=ok
 preflight_degraded=0
-policy_blockers=()
-if (( ${#missing_required[@]} > 0 )); then
+if (( ${#missing_required[@]} > 0 || ${#policy_blockers[@]} > 0 )); then
   preflight_status=blocked
 elif [[ -z "$IW_BIN" && "$LINUX_REQUIRE_IW" == "1" ]]; then
   preflight_status=blocked
@@ -557,6 +594,10 @@ fi
   printf 'ps=%s\n' "${PS_BIN:-MISSING}"
   printf 'grep=%s\n' "${GREP_BIN:-MISSING}"
   printf 'date=%s\n' "${DATE_BIN:-MISSING}"
+  printf 'sudo_noninteractive=%s\n' "$sudo_noninteractive"
+  printf 'iface_status=%s\n' "$iface_status"
+  printf 'wfb_key_status=%s\n' "$wfb_key_status"
+  printf 'docker_service_state=%s\n' "$docker_service_state"
   printf 'missing_required=%s\n' "${missing_required[*]:-}"
   printf 'missing_optional=%s\n' "${missing_optional[*]:-}"
   printf 'policy_blockers=%s\n' "${policy_blockers[*]:-}"
@@ -564,8 +605,9 @@ fi
 
 if [[ -n "$PYTHON3_BIN" ]]; then
   export preflight_status preflight_degraded
+  export sudo_noninteractive iface_status wfb_key_status docker_service_state
   export PYTHON3_BIN SUDO_BIN TIMEOUT_BIN WFB_RX_BIN WFB_TX_BIN DOCKER_BIN IW_BIN IP_BIN TCPDUMP_BIN PKILL_BIN PS_BIN GREP_BIN DATE_BIN
-  export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
+  export LINUX_REMOTE_PATH LINUX_REQUIRE_IW IFACE WFB_KEY WFB_SERVICE
   "$PYTHON3_BIN" - "$preflight_json" "${missing_required[*]:-}" "${missing_optional[*]:-}" "${policy_blockers[*]:-}" <<'PY'
 import json
 import os
@@ -594,7 +636,14 @@ report = {
     "degraded": os.environ["preflight_degraded"] == "1",
     "linux_remote_path": os.environ.get("LINUX_REMOTE_PATH", ""),
     "linux_require_iw": os.environ.get("LINUX_REQUIRE_IW", "") == "1",
+    "interface": os.environ.get("IFACE", ""),
+    "wfb_key": os.environ.get("WFB_KEY", ""),
+    "wfb_service": os.environ.get("WFB_SERVICE", ""),
     "commands": commands,
+    "sudo_noninteractive": os.environ.get("sudo_noninteractive"),
+    "iface_status": os.environ.get("iface_status"),
+    "wfb_key_status": os.environ.get("wfb_key_status"),
+    "docker_service_state": os.environ.get("docker_service_state"),
     "missing_required": missing_required,
     "missing_optional": missing_optional,
     "policy_blockers": policy_blockers,

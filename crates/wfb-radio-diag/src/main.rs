@@ -3579,6 +3579,10 @@ struct TxRuntimeIqkCalibrationReport {
     semantics: &'static str,
     upstream_basis: &'static str,
     mode: &'static str,
+    sweep_index: u8,
+    sweep_count: u8,
+    max_sweeps: u8,
+    sweep_summaries: Vec<TxRuntimeIqkSweepSummaryReport>,
     status: &'static str,
     cleanup_status: &'static str,
     cleanup_failures: Vec<String>,
@@ -3589,6 +3593,30 @@ struct TxRuntimeIqkCalibrationReport {
     before_iqk_registers: Vec<RfCalibrationRegisterReadReport>,
     after_iqk_registers: Vec<RfCalibrationRegisterReadReport>,
     counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxRuntimeIqkSweepSummaryReport {
+    sweep_index: u8,
+    status: &'static str,
+    cleanup_status: &'static str,
+    fallback_stage_count: usize,
+    path_statuses: Vec<TxRuntimeIqkSweepPathSummaryReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxRuntimeIqkSweepPathSummaryReport {
+    path_name: &'static str,
+    tx_status: &'static str,
+    tx_retry_count: u8,
+    tx_average_count: u8,
+    tx_fallback_used: bool,
+    tx_failure_label: Option<&'static str>,
+    rx_status: &'static str,
+    rx_retry_count: u8,
+    rx_average_count: u8,
+    rx_fallback_used: bool,
+    rx_failure_label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4184,6 +4212,9 @@ struct RfQualityCalibrationReport {
 struct RfQualityRuntimeIqkSummaryReport {
     status: Option<String>,
     cleanup_status: Option<String>,
+    sweep_index: Option<u64>,
+    sweep_count: Option<u64>,
+    max_sweeps: Option<u64>,
     completed: bool,
     cleanup_restored: bool,
     fallback_stage_count: usize,
@@ -14250,6 +14281,7 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
 
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
+const RTL8812A_IQK_MAX_SWEEPS: u8 = 3;
 const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
 const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
 const RTL8812A_IQK_RX_FAIL_MASK: u32 = 1 << 11;
@@ -17604,6 +17636,81 @@ fn run_rtl8812a_runtime_iqk_calibration<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
+    let before_all_sweeps = *counters;
+    let mut sweep_summaries = Vec::new();
+    let mut last_report = None;
+
+    for sweep_index in 1..=RTL8812A_IQK_MAX_SWEEPS {
+        let mut report =
+            run_rtl8812a_runtime_iqk_calibration_sweep(registers, channel, rfe_type, counters)?;
+        sweep_summaries.push(runtime_iqk_sweep_summary(&report, sweep_index));
+        report.sweep_index = sweep_index;
+        report.sweep_count = sweep_index;
+        report.max_sweeps = RTL8812A_IQK_MAX_SWEEPS;
+        report.sweep_summaries = sweep_summaries.clone();
+        report.counters = diagnostic_counters_delta(before_all_sweeps, *counters);
+
+        if report.status == "completed" {
+            return Ok(report);
+        }
+        last_report = Some(report);
+    }
+
+    last_report.ok_or_else(|| DiagnosticErrorReport {
+        code: "rtl8812a_runtime_iqk_failed",
+        message: "runtime IQK did not execute any calibration sweeps".to_string(),
+    })
+}
+
+fn runtime_iqk_sweep_summary(
+    report: &TxRuntimeIqkCalibrationReport,
+    sweep_index: u8,
+) -> TxRuntimeIqkSweepSummaryReport {
+    let mut fallback_stage_count = 0;
+    let path_statuses = report
+        .paths
+        .iter()
+        .map(|path| {
+            if path.tx.fallback_used || path.tx.status != "success" {
+                fallback_stage_count += 1;
+            }
+            if path.rx.fallback_used || path.rx.status != "success" {
+                fallback_stage_count += 1;
+            }
+            TxRuntimeIqkSweepPathSummaryReport {
+                path_name: path.path_name,
+                tx_status: path.tx.status,
+                tx_retry_count: path.tx.retry_count,
+                tx_average_count: path.tx.average_count,
+                tx_fallback_used: path.tx.fallback_used,
+                tx_failure_label: path.tx.failure_label,
+                rx_status: path.rx.status,
+                rx_retry_count: path.rx.retry_count,
+                rx_average_count: path.rx.average_count,
+                rx_fallback_used: path.rx.fallback_used,
+                rx_failure_label: path.rx.failure_label,
+            }
+        })
+        .collect();
+
+    TxRuntimeIqkSweepSummaryReport {
+        sweep_index,
+        status: report.status,
+        cleanup_status: report.cleanup_status,
+        fallback_stage_count,
+        path_statuses,
+    }
+}
+
+fn run_rtl8812a_runtime_iqk_calibration_sweep<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    channel: Channel,
+    rfe_type: u8,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<TxRuntimeIqkCalibrationReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
     let before_counters = *counters;
     let before_iqk_registers =
         rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)?;
@@ -17682,6 +17789,10 @@ where
         semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected or fallback IQC values, and restores saved RF/BB state",
         upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a, _iqk_tx_8812a, _iqk_tx_fill_iqc_8812a, and _iqk_rx_fill_iqc_8812a for RTL8812A",
         mode: "runtime_iqk",
+        sweep_index: 1,
+        sweep_count: 1,
+        max_sweeps: 1,
+        sweep_summaries: Vec::new(),
         status,
         cleanup_status,
         cleanup_failures,
@@ -31402,6 +31513,9 @@ fn rf_quality_runtime_iqk_summary(
     }
     let status = rf_quality_json_string(runtime_iqk, &["status"]);
     let cleanup_status = rf_quality_json_string(runtime_iqk, &["cleanup_status"]);
+    let sweep_index = rf_quality_json_u64(runtime_iqk, &["sweep_index"]);
+    let sweep_count = rf_quality_json_u64(runtime_iqk, &["sweep_count"]);
+    let max_sweeps = rf_quality_json_u64(runtime_iqk, &["max_sweeps"]);
     let cleanup_restored = cleanup_status.as_deref() == Some("restored");
     let mut fallback_stages = Vec::new();
 
@@ -31449,6 +31563,9 @@ fn rf_quality_runtime_iqk_summary(
     Some(RfQualityRuntimeIqkSummaryReport {
         status,
         cleanup_status,
+        sweep_index,
+        sweep_count,
+        max_sweeps,
         completed,
         cleanup_restored,
         fallback_stage_count: fallback_stages.len(),
@@ -39270,6 +39387,9 @@ mod tests {
                 "runtime_iqk": {
                     "status": "fallback_applied",
                     "cleanup_status": "restored",
+                    "sweep_index": 3,
+                    "sweep_count": 3,
+                    "max_sweeps": 3,
                     "paths": [
                         {
                             "path": "a",
@@ -39303,6 +39423,9 @@ mod tests {
 
         assert!(!summary.completed);
         assert!(summary.cleanup_restored);
+        assert_eq!(summary.sweep_index, Some(3));
+        assert_eq!(summary.sweep_count, Some(3));
+        assert_eq!(summary.max_sweeps, Some(3));
         assert_eq!(summary.risk, RfQualityRuntimeIqkRiskStatus::FallbackApplied);
         assert_eq!(summary.fallback_stage_count, 1);
         assert_eq!(summary.fallback_stages[0].path.as_deref(), Some("A"));

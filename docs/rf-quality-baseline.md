@@ -72,10 +72,15 @@ LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ```
 
 Required commands are `python3`, `sudo`, `timeout`, `wfb_rx`, and `wfb_tx`.
-Missing required commands block the run before RF. `docker`, `iw`, `ip`,
-`tcpdump`, `pkill`, `ps`, `grep`, and `date` are optional by default and are
-recorded as degraded preflight state when absent. Set `LINUX_REQUIRE_IW=1` to
-fail before RF if the runner cannot set and verify the Linux interface channel.
+Missing required commands block the run before RF. The runner also blocks
+before RF if non-interactive sudo is unavailable, the configured WFB key is not
+readable through sudo, or `ip` confirms that the configured interface is
+missing. `docker`, `iw`, `ip`, `tcpdump`, `pkill`, `ps`, `grep`, and `date` are
+optional by default and are recorded as degraded preflight state when absent.
+Set `LINUX_REQUIRE_IW=1` to fail before RF if the runner cannot set and verify
+the Linux interface channel. The preflight JSON records `sudo_noninteractive`,
+`iface_status`, `wfb_key_status`, and `docker_service_state` so failed field
+runs can distinguish missing peer prerequisites from RF loss.
 
 The automation also accepts the targeted calibration profile:
 
@@ -138,11 +143,11 @@ signed-selection path as close-range safe.
 
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
-present. Use `risk`, `completed`, `cleanup_restored`, `fallback_stage_count`,
-and `fallback_stages[]` as the compact machine-readable calibration health
-signal for release gating and field notes. Outdoor profile gating rejects a
-close-range gate artifact with `runtime_iqk_summary.risk` other than
-`completed`.
+present. Use `risk`, `completed`, `cleanup_restored`, `sweep_count`,
+`fallback_stage_count`, and `fallback_stages[]` as the compact
+machine-readable calibration health signal for release gating and field notes.
+Outdoor profile gating rejects a close-range gate artifact with
+`runtime_iqk_summary.risk` other than `completed`.
 
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
 `ceil(expected_payloads * fec_n / fec_k)` count while still recovering every

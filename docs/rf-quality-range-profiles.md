@@ -166,6 +166,14 @@ Runtime IQK validation on May 2, 2026:
   `fallback_applied` because path-A RX IQK failed and used fallback IQC. This
   confirms the runtime-IQK TX path is close-range usable while the calibration
   result is still not clean enough for outdoor gate promotion.
+- Bounded multi-sweep rerun:
+  `/tmp/wfb-rfq-prod-runtime-iqk-multisweep-a1/rf-quality-report.json`
+  recovered `1995/2000`, had zero decrypt failures, and remained
+  `baseline_comparable` / `within_margin`. The report recorded
+  `runtime_iqk_summary.sweep_count=3`, but path-A RX IQK fell back in all
+  three sweeps, so `runtime_iqk_summary.risk` stayed `fallback_applied`.
+  Multi-sweep retry improves evidence quality, but it is not the path-A RX IQK
+  root fix.
 
 Telemetry-gated default rerun on May 2, 2026:
 
@@ -365,7 +373,10 @@ Do not classify a run as range-ready when any of the following are true:
   outside the Linux baseline margin.
 - `rtl8812a-runtime-iqk` was selected but the Mac report shows
   `tx_calibration_profile.runtime_iqk.cleanup_status != "restored"` or any
-  per-path TX/RX stage used fallback unexpectedly.
+  per-path TX/RX stage used fallback unexpectedly. Check
+  `runtime_iqk.sweep_summaries[]` and `runtime_iqk_summary.sweep_count` before
+  deciding whether the failure is a one-off sweep or repeatable calibration
+  instability.
 
 ## Wide-Bandwidth Evidence
 

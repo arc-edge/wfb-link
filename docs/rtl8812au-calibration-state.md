@@ -305,6 +305,8 @@ the saved state.
 
 Reports label this under `tx_calibration_profile.runtime_iqk` with:
 
+- `sweep_index`, `sweep_count`, `max_sweeps`, and `sweep_summaries` for the
+  bounded retry wrapper around the Linux-derived IQK sweep;
 - per-path `tx` and `rx` stage status, retry count, max ready-poll delay,
   per-attempt ready/fail/raw-result evidence, candidates, selected IQC value,
   fallback flag, and fill plan;
@@ -318,7 +320,8 @@ Reports label this under `tx_calibration_profile.runtime_iqk` with:
 `rf-quality-report` lifts the same data into
 `macos.calibration.runtime_iqk` and adds
 `macos.calibration.runtime_iqk_summary` with compact `risk`, `completed`,
-`cleanup_restored`, and fallback-stage fields for production gating.
+`cleanup_restored`, sweep-count, and fallback-stage fields for production
+gating.
 
 This is now a real runtime IQK implementation, but it remains experimental for
 range work until receiver-backed A/B evidence exists for the same channel,
@@ -358,6 +361,14 @@ Hardware validation on May 2, 2026:
   `within_margin`, but path-A RX IQK failed with `rx_iqk_failed_flag` and used
   fallback IQC (`0x200/0x000`), so `runtime_iqk_summary.risk` was
   `fallback_applied`.
+- A bounded three-sweep runtime-IQK rerun at
+  `/tmp/wfb-rfq-prod-runtime-iqk-multisweep-a1/rf-quality-report.json`
+  recovered `1995/2000`, logged zero decrypt failures, stayed `within_margin`
+  with a `0.2` percentage-point loss delta, and recorded receiver `RX_ANT`
+  telemetry. All three IQK sweeps restored cleanup state and completed TX on
+  both paths plus RX on path B, but path-A RX still fell back in every sweep.
+  This rules out a single unlucky sweep as the only cause of the path-A RX
+  instability.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
   paths A and B, RX IQK succeeded on path B, and RX IQK on path A remains
   intermittent: it fell back in the full close-range runs but completed in the
