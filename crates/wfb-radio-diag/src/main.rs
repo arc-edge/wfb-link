@@ -1414,6 +1414,9 @@ struct BridgeTxListenArgs {
     #[command(flatten)]
     tx_power: TxPowerControlArgs,
 
+    #[command(flatten)]
+    tx_calibration: TxCalibrationProfileArgs,
+
     /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
     #[arg(long)]
     clear_txdma_status_before_tx: bool,
@@ -1759,6 +1762,9 @@ struct BridgeTxBenchArgs {
     #[command(flatten)]
     tx_power: TxPowerControlArgs,
 
+    #[command(flatten)]
+    tx_calibration: TxCalibrationProfileArgs,
+
     /// Write REG_TXDMA_STATUS before the TX loop as a guarded TXDMA-clear experiment.
     #[arg(long)]
     clear_txdma_status_before_tx: bool,
@@ -1901,6 +1907,28 @@ impl Default for TxPowerControlArgs {
             tx_power_max_index: RTL8812AU_TX_POWER_INDEX_MAX,
         }
     }
+}
+
+#[derive(Debug, Parser, Clone)]
+struct TxCalibrationProfileArgs {
+    /// Guarded RF/TX calibration profile applied after init and before TX.
+    #[arg(long, value_enum, default_value = "current-default")]
+    tx_calibration_profile: TxCalibrationProfileArg,
+}
+
+impl Default for TxCalibrationProfileArgs {
+    fn default() -> Self {
+        Self {
+            tx_calibration_profile: TxCalibrationProfileArg::CurrentDefault,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum TxCalibrationProfileArg {
+    CurrentDefault,
+    LinuxParityCh36Ht20,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -2167,6 +2195,7 @@ enum RfQualityTxPowerMode {
 enum RfQualityCalibrationMode {
     StopGapCaptured,
     Static,
+    TargetedLinuxParity,
     RuntimeApproximation,
     LinuxPorted,
     Unknown,
@@ -3028,9 +3057,18 @@ struct RxFrameJsonRecord {
     timestamp_unix_ms: u64,
     frame_len: usize,
     rssi_dbm: i8,
+    rssi_dbm_valid: bool,
+    rssi_dbm_source: radio_core::RxRssiSource,
+    noise_dbm: Option<i8>,
+    snr_db: Option<i8>,
     channel: Channel,
     frequency_mhz: u16,
     band: Band,
+    phy_status: bool,
+    driver_info_size: usize,
+    rx_shift: usize,
+    raw_phy_status_len: usize,
+    raw_phy_status_hex: String,
     rx_rate_raw: u8,
     rx_rate_raw_hex: String,
     rx_rate: Option<TxRate>,
@@ -3121,6 +3159,7 @@ struct BridgeTxListenReport {
     same_session_init: Option<BridgeTxBenchSameSessionInitReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    tx_calibration_profile: Option<TxCalibrationProfileReport>,
     rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     pre_tx_register_writes: Vec<BridgeTxBenchRegisterClearReport>,
     pre_tx_register_masked_writes: Vec<BridgeTxBenchRegisterMaskedWriteReport>,
@@ -3170,6 +3209,7 @@ struct BridgeRunReport {
     monitor_opmode: Option<BridgeTxBenchMonitorOpmodeReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    tx_calibration_profile: Option<TxCalibrationProfileReport>,
     rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     tx_status: Option<TxStatusProbeReport>,
     bridge_counters: TxCounters,
@@ -3297,6 +3337,7 @@ struct BridgeTxBenchReport {
     fw_media_status_report: Option<BridgeTxBenchH2cReport>,
     txdma_status_clear: Option<BridgeTxBenchRegisterClearReport>,
     tx_power_control: Option<TxPowerControlReport>,
+    tx_calibration_profile: Option<TxCalibrationProfileReport>,
     rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     txdma_offset_check_write: Option<BridgeTxBenchRegisterClearReport>,
     cr_write: Option<BridgeTxBenchRegisterClearReport>,
@@ -3339,6 +3380,17 @@ struct TxPowerControlReport {
     repeated_value_hex: Option<String>,
     efuse_source: Option<TxPowerEfuseSourceReport>,
     efuse_plan: Option<TxPowerEfusePlanReport>,
+    writes: Vec<BridgeTxBenchRegisterClearReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxCalibrationProfileReport {
+    semantics: &'static str,
+    upstream_basis: &'static str,
+    profile: TxCalibrationProfileArg,
+    channel: u8,
+    bandwidth_mhz: u16,
+    register_count: usize,
     writes: Vec<BridgeTxBenchRegisterClearReport>,
 }
 
@@ -3750,6 +3802,7 @@ struct RfQualityCalibrationReport {
     stop_gap: bool,
     label: &'static str,
     stop_gap_sources: Vec<&'static str>,
+    profile_report: Option<serde_json::Value>,
     probes: Vec<serde_json::Value>,
     rfe_pinmux: Option<serde_json::Value>,
     rfe_inversion: Option<serde_json::Value>,
@@ -13707,7 +13760,9 @@ where
     };
     let stop_gap = matches!(
         mode,
-        RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
+        RfQualityCalibrationMode::StopGapCaptured
+            | RfQualityCalibrationMode::Static
+            | RfQualityCalibrationMode::TargetedLinuxParity
     ) || !stop_gap_registers.is_empty();
 
     let rfe_pinmux =
@@ -13803,7 +13858,14 @@ fn tx_pre_calibration_mode(
     same_session_init: bool,
     channel: Channel,
     bandwidth: Bandwidth,
+    calibration_profile: TxCalibrationProfileArg,
 ) -> RfQualityCalibrationMode {
+    if matches!(
+        calibration_profile,
+        TxCalibrationProfileArg::LinuxParityCh36Ht20
+    ) {
+        return RfQualityCalibrationMode::TargetedLinuxParity;
+    }
     if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
         RfQualityCalibrationMode::StopGapCaptured
     } else {
@@ -13816,6 +13878,7 @@ fn tx_pre_calibration_probe<T>(
     same_session_init: bool,
     channel: Channel,
     bandwidth: Bandwidth,
+    calibration_profile: TxCalibrationProfileArg,
     counters: &mut DiagnosticCounters,
 ) -> std::result::Result<RfCalibrationProbeReport, DiagnosticErrorReport>
 where
@@ -13825,7 +13888,7 @@ where
         registers,
         "before_tx",
         "read final RF calibration state after command-level pre-TX register and TXAGC overrides",
-        tx_pre_calibration_mode(same_session_init, channel, bandwidth),
+        tx_pre_calibration_mode(same_session_init, channel, bandwidth, calibration_profile),
         channel,
         bandwidth,
         same_session_init,
@@ -14625,6 +14688,78 @@ where
             }))
         }
     }
+}
+
+fn tx_calibration_profile_requested(args: &TxCalibrationProfileArgs) -> bool {
+    !matches!(
+        args.tx_calibration_profile,
+        TxCalibrationProfileArg::CurrentDefault
+    )
+}
+
+const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[CapturedTxBringupWrite] = &[
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x4000_0003),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x4000_0003),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7770),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7770),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0180_7c09),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0180_7c09),
+];
+
+fn tx_calibration_profile_writes(
+    profile: TxCalibrationProfileArg,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> std::result::Result<Option<&'static [CapturedTxBringupWrite]>, DiagnosticErrorReport> {
+    match profile {
+        TxCalibrationProfileArg::CurrentDefault => Ok(None),
+        TxCalibrationProfileArg::LinuxParityCh36Ht20
+            if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
+        {
+            Ok(Some(LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES))
+        }
+        TxCalibrationProfileArg::LinuxParityCh36Ht20 => Err(DiagnosticErrorReport {
+            code: "tx_calibration_profile_unsupported",
+            message: format!(
+                "tx calibration profile linux-parity-ch36-ht20 only supports channel 36 HT20; requested channel {} {} MHz",
+                channel.number,
+                bandwidth.mhz()
+            ),
+        }),
+    }
+}
+
+fn apply_tx_calibration_profile<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    args: &TxCalibrationProfileArgs,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Option<TxCalibrationProfileReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let Some(profile_writes) =
+        tx_calibration_profile_writes(args.tx_calibration_profile, channel, bandwidth)?
+    else {
+        return Ok(None);
+    };
+    let mut writes = Vec::new();
+    for &(name, address, value) in profile_writes {
+        writes.push(bridge_tx_bench_write32_register(
+            registers, name, address, value, counters,
+        )?);
+    }
+
+    Ok(Some(TxCalibrationProfileReport {
+        semantics: "explicit targeted RF/TX calibration override; rewrites known Linux-final RTL8812AU RFE, TX scale, and TX BB control values after init and before TX while full IQK/LCK remains unported",
+        upstream_basis: "aircrack-ng RTL8812AU Linux final register capture for AWUS036ACH channel 36 HT20",
+        profile: args.tx_calibration_profile,
+        channel: channel.number,
+        bandwidth_mhz: bandwidth.mhz(),
+        register_count: writes.len(),
+        writes,
+    }))
 }
 
 fn data_secondary_channel_setting(
@@ -18591,6 +18726,7 @@ fn rx_scan_init_bridge_args(args: &RxScanArgs) -> BridgeTxBenchArgs {
         crystal_cap: args.crystal_cap,
         rfe_type: args.rfe_type,
         tx_power: TxPowerControlArgs::default(),
+        tx_calibration: TxCalibrationProfileArgs::default(),
         clear_txdma_status_before_tx: false,
         txdma_status_clear_value: 0,
         txdma_offset_check_value: None,
@@ -18670,6 +18806,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         crystal_cap: args.crystal_cap,
         rfe_type: args.rfe_type,
         tx_power: args.tx_power.clone(),
+        tx_calibration: args.tx_calibration.clone(),
         clear_txdma_status_before_tx: args.clear_txdma_status_before_tx,
         txdma_status_clear_value: args.txdma_status_clear_value,
         txdma_offset_check_value: None,
@@ -19600,9 +19737,18 @@ fn write_rx_frame_record(
         timestamp_unix_ms: started_at_unix_ms(),
         frame_len: frame.data.len(),
         rssi_dbm: frame.rssi_dbm,
+        rssi_dbm_valid: frame.rssi_dbm_valid,
+        rssi_dbm_source: frame.rssi_dbm_source,
+        noise_dbm: frame.noise_dbm,
+        snr_db: frame.snr_db,
         channel,
         frequency_mhz: channel.frequency_mhz,
         band: channel.band,
+        phy_status: frame.phy_status,
+        driver_info_size: frame.driver_info_size,
+        rx_shift: frame.rx_shift,
+        raw_phy_status_len: frame.raw_phy_status.len(),
+        raw_phy_status_hex: encode_hex(&frame.raw_phy_status),
         rx_rate_raw: frame.rx_rate_raw,
         rx_rate_raw_hex: format!("0x{:02x}", frame.rx_rate_raw),
         rx_rate: frame.rx_rate,
@@ -21696,6 +21842,31 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if tx_calibration_profile_requested(&args.tx_calibration) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_calibration_profile(
+            &registers,
+            &args.tx_calibration,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(profile_report) => {
+                report.tx_calibration_profile = profile_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "tx_calibration_profile",
+                    "bridge TX listener calibration profile failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_power_control_requested(&args.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -21721,7 +21892,10 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
-    if report.same_session_init.is_some() || tx_power_control_requested(&args.tx_power) {
+    if report.same_session_init.is_some()
+        || tx_power_control_requested(&args.tx_power)
+        || tx_calibration_profile_requested(&args.tx_calibration)
+    {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match tx_pre_calibration_probe(
@@ -21729,6 +21903,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             report.same_session_init.is_some(),
             channel,
             args.bandwidth,
+            args.tx_calibration.tx_calibration_profile,
             &mut pre_tx_counters,
         ) {
             Ok(probe) => {
@@ -22035,6 +22210,13 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             detail: "applied explicit TXAGC power control before the TX loop",
         });
     }
+    if report.tx_calibration_profile.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "tx_calibration_profile",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit targeted calibration profile before the TX loop",
+        });
+    }
     if report.rf_calibration_pre_tx.is_some() {
         phases.push(DiagnosticPhase {
             id: "rf_calibration_probe",
@@ -22088,6 +22270,7 @@ fn bridge_tx_listen_base_report(
         same_session_init: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        tx_calibration_profile: None,
         rf_calibration_pre_tx: None,
         pre_tx_register_writes: Vec::new(),
         pre_tx_register_masked_writes: Vec::new(),
@@ -22618,6 +22801,31 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
+    if tx_calibration_profile_requested(&args.tx.tx_calibration) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match apply_tx_calibration_profile(
+            &registers,
+            &args.tx.tx_calibration,
+            channel,
+            args.tx.bandwidth,
+            &mut pre_counters,
+        ) {
+            Ok(profile_report) => {
+                report.tx_calibration_profile = profile_report;
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "tx_calibration_profile",
+                    "bridge run calibration profile failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_power_control_requested(&args.tx.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
@@ -22651,6 +22859,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             report.same_session_init.is_some(),
             channel,
             args.tx.bandwidth,
+            args.tx.tx_calibration.tx_calibration_profile,
             &mut pre_counters,
         ) {
             Ok(probe) => {
@@ -22982,6 +23191,13 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             detail: "applied explicit TXAGC power control before RX/TX loops",
         });
     }
+    if report.tx_calibration_profile.is_some() {
+        phases.push(DiagnosticPhase {
+            id: "tx_calibration_profile",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit targeted calibration profile before RX/TX loops",
+        });
+    }
     if report.rf_calibration_pre_tx.is_some() {
         phases.push(DiagnosticPhase {
             id: "rf_calibration_probe",
@@ -23060,6 +23276,7 @@ fn bridge_run_base_report(
         monitor_opmode: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        tx_calibration_profile: None,
         rf_calibration_pre_tx: None,
         tx_status: None,
         bridge_counters: TxCounters::default(),
@@ -23921,7 +24138,12 @@ where
         registers,
         "after_channel",
         "read RF/RFE/IQK/LCK-related state after channel and captured runtime TX bring-up tail",
-        tx_pre_calibration_mode(true, channel, args.bandwidth),
+        tx_pre_calibration_mode(
+            true,
+            channel,
+            args.bandwidth,
+            TxCalibrationProfileArg::CurrentDefault,
+        ),
         channel,
         args.bandwidth,
         true,
@@ -24012,7 +24234,12 @@ where
         registers,
         "before_tx",
         "read final init-time RF calibration state after TX scheduler tail and before command-level TX overrides",
-        tx_pre_calibration_mode(true, channel, args.bandwidth),
+        tx_pre_calibration_mode(
+            true,
+            channel,
+            args.bandwidth,
+            TxCalibrationProfileArg::CurrentDefault,
+        ),
         channel,
         args.bandwidth,
         true,
@@ -26054,6 +26281,31 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if tx_calibration_profile_requested(&args.tx_calibration) {
+        let registers = Rtl8812auRegisterAccess::new(&transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_calibration_profile(
+            &registers,
+            &args.tx_calibration,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(profile_report) => {
+                report.tx_calibration_profile = profile_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "tx_calibration_profile",
+                    "bridge TX benchmark calibration profile failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_power_control_requested(&args.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -26103,7 +26355,10 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
-    if report.same_session_init.is_some() || tx_power_control_requested(&args.tx_power) {
+    if report.same_session_init.is_some()
+        || tx_power_control_requested(&args.tx_power)
+        || tx_calibration_profile_requested(&args.tx_calibration)
+    {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match tx_pre_calibration_probe(
@@ -26111,6 +26366,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             report.same_session_init.is_some(),
             channel,
             args.bandwidth,
+            args.tx_calibration.tx_calibration_profile,
             &mut pre_tx_counters,
         ) {
             Ok(probe) => {
@@ -26259,6 +26515,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             || !args.pre_tx_rmw32.is_empty(),
         !args.pre_tx_rf_write.is_empty(),
         report.tx_power_control.is_some(),
+        report.tx_calibration_profile.is_some(),
         report.rf_calibration_pre_tx.is_some(),
         args.fw_media_status,
         bridge_tx_bench_has_post_tx_register_mutation(&args),
@@ -26351,6 +26608,7 @@ fn bridge_tx_bench_pass_phases(
     generic_register_write: bool,
     rf_serial_write: bool,
     tx_power_control: bool,
+    tx_calibration_profile: bool,
     rf_calibration_probe: bool,
     fw_media_status: bool,
     post_tx_register_write: bool,
@@ -26450,6 +26708,13 @@ fn bridge_tx_bench_pass_phases(
             id: "tx_power_control",
             status: DiagnosticPhaseStatus::Completed,
             detail: "applied explicit TXAGC power control before the TX loop",
+        });
+    }
+    if tx_calibration_profile {
+        phases.push(DiagnosticPhase {
+            id: "tx_calibration_profile",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "applied explicit targeted calibration profile before the TX loop",
         });
     }
     if rf_calibration_probe {
@@ -26603,6 +26868,7 @@ fn bridge_tx_bench_base_report(
         fw_media_status_report: None,
         txdma_status_clear: None,
         tx_power_control: None,
+        tx_calibration_profile: None,
         rf_calibration_pre_tx: None,
         txdma_offset_check_write: None,
         cr_write: None,
@@ -27050,7 +27316,9 @@ fn rf_quality_calibration_report(
         .any(|probe| rf_quality_json_bool(probe, &["stop_gap"]).unwrap_or(false));
     let mode_stop_gap = matches!(
         args.calibration_mode,
-        RfQualityCalibrationMode::StopGapCaptured | RfQualityCalibrationMode::Static
+        RfQualityCalibrationMode::StopGapCaptured
+            | RfQualityCalibrationMode::Static
+            | RfQualityCalibrationMode::TargetedLinuxParity
     );
     let stop_gap = mode_stop_gap || probe_stop_gap;
     let mut stop_gap_sources = Vec::new();
@@ -27082,6 +27350,8 @@ fn rf_quality_calibration_report(
         stop_gap,
         label: rf_quality_calibration_label(args.calibration_mode),
         stop_gap_sources,
+        profile_report: mac_report
+            .and_then(|value| rf_quality_json_clone(value, &["tx_calibration_profile"])),
         rfe_pinmux: final_probe
             .and_then(|value| rf_quality_json_clone(value, &["rfe_pinmux"]))
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["rfe_pinmux"]))),
@@ -28163,6 +28433,9 @@ fn rf_quality_calibration_label(mode: RfQualityCalibrationMode) -> &'static str 
             "stop-gap calibration from captured or planted values"
         }
         RfQualityCalibrationMode::Static => "stop-gap static calibration values",
+        RfQualityCalibrationMode::TargetedLinuxParity => {
+            "targeted Linux-parity calibration register overrides"
+        }
         RfQualityCalibrationMode::RuntimeApproximation => "runtime calibration approximation",
         RfQualityCalibrationMode::LinuxPorted => "ported Linux runtime calibration routine",
         RfQualityCalibrationMode::Unknown => "calibration state was not supplied",
@@ -28182,6 +28455,7 @@ fn rf_quality_calibration_mode_label(mode: RfQualityCalibrationMode) -> &'static
     match mode {
         RfQualityCalibrationMode::StopGapCaptured => "stop_gap_captured",
         RfQualityCalibrationMode::Static => "static",
+        RfQualityCalibrationMode::TargetedLinuxParity => "targeted_linux_parity",
         RfQualityCalibrationMode::RuntimeApproximation => "runtime_approximation",
         RfQualityCalibrationMode::LinuxPorted => "linux_ported",
         RfQualityCalibrationMode::Unknown => "unknown",
@@ -31834,6 +32108,24 @@ fn print_tx_power_control_human(tx_power: &TxPowerControlReport) {
     }
 }
 
+fn print_tx_calibration_profile_human(profile: &TxCalibrationProfileReport) {
+    println!(
+        "TX calibration profile: {:?} channel={} bandwidth={} MHz registers={}",
+        profile.profile, profile.channel, profile.bandwidth_mhz, profile.register_count
+    );
+    for write in &profile.writes {
+        println!(
+            "  {} {}: {} -> {} (wrote {}, changed={})",
+            write.register_name,
+            write.address_hex,
+            write.before_hex,
+            write.after_hex,
+            write.written_hex,
+            write.changed
+        );
+    }
+}
+
 fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
     for write in writes {
         println!(
@@ -31918,6 +32210,9 @@ fn print_bridge_tx_listen_human(report: &BridgeTxListenReport) {
     print_pre_tx_rf_writes_human(&report.pre_tx_rf_writes);
     if let Some(tx_power) = &report.tx_power_control {
         print_tx_power_control_human(tx_power);
+    }
+    if let Some(profile) = &report.tx_calibration_profile {
+        print_tx_calibration_profile_human(profile);
     }
     if let Some(datagram) = &report.last_datagram {
         println!(
@@ -32086,6 +32381,9 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
     if let Some(tx_power) = &report.tx_power_control {
         print_tx_power_control_human(tx_power);
     }
+    if let Some(profile) = &report.tx_calibration_profile {
+        print_tx_calibration_profile_human(profile);
+    }
     if let Some(throughput) = &report.throughput {
         println!(
             "Throughput: elapsed_us={} received/s={} submitted/s={} UDP bytes/s={} frame bytes/s={} USB bytes/s={}",
@@ -32200,6 +32498,9 @@ fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     }
     if let Some(tx_power) = &report.tx_power_control {
         print_tx_power_control_human(tx_power);
+    }
+    if let Some(profile) = &report.tx_calibration_profile {
+        print_tx_calibration_profile_human(profile);
     }
     if let Some(write) = &report.txdma_offset_check_write {
         println!(
@@ -33744,6 +34045,7 @@ mod tests {
             crystal_cap: 0x20,
             rfe_type: DEFAULT_RFE_TYPE,
             tx_power: TxPowerControlArgs::default(),
+            tx_calibration: TxCalibrationProfileArgs::default(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
             pre_tx_write8: Vec::new(),
@@ -33829,6 +34131,7 @@ mod tests {
             crystal_cap: 0x20,
             rfe_type: DEFAULT_RFE_TYPE,
             tx_power: TxPowerControlArgs::default(),
+            tx_calibration: TxCalibrationProfileArgs::default(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
             txdma_offset_check_value: None,
@@ -34444,6 +34747,7 @@ mod tests {
                 stop_gap: true,
                 label: rf_quality_calibration_label(RfQualityCalibrationMode::StopGapCaptured),
                 stop_gap_sources: vec!["test"],
+                profile_report: None,
                 probes: Vec::new(),
                 rfe_pinmux: None,
                 rfe_inversion: None,
@@ -36482,6 +36786,58 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             0x2b2b_2b2b
         );
         assert!(captured_tx_bringup_tail_8812a(Bandwidth::Mhz80).is_err());
+    }
+
+    #[test]
+    fn targeted_linux_parity_profile_selects_ch36_ht20_overrides() {
+        fn value_for(
+            writes: &[CapturedTxBringupWrite],
+            address: u16,
+        ) -> std::result::Result<u32, &'static str> {
+            writes
+                .iter()
+                .find(|(_, candidate, _)| *candidate == address)
+                .map(|(_, _, value)| *value)
+                .ok_or("missing register")
+        }
+
+        let channel_36 = Channel::from_number(36).expect("channel 36");
+        let writes = tx_calibration_profile_writes(
+            TxCalibrationProfileArg::LinuxParityCh36Ht20,
+            channel_36,
+            Bandwidth::Mhz20,
+        )
+        .expect("profile")
+        .expect("writes");
+
+        assert_eq!(writes.len(), 6);
+        assert_eq!(
+            value_for(writes, REG_TX_SCALE_A_JAGUAR).expect("tx scale A"),
+            0x4000_0003
+        );
+        assert_eq!(
+            value_for(writes, REG_RFE_PINMUX_A_JAGUAR).expect("rfe pinmux A"),
+            0x5433_7770
+        );
+        assert_eq!(
+            value_for(writes, REG_TX_BB_CTRL_A_JAGUAR).expect("tx bb A"),
+            0x0180_7c09
+        );
+        assert!(tx_calibration_profile_writes(
+            TxCalibrationProfileArg::LinuxParityCh36Ht20,
+            channel_36,
+            Bandwidth::Mhz40,
+        )
+        .is_err());
+        assert_eq!(
+            tx_pre_calibration_mode(
+                false,
+                channel_36,
+                Bandwidth::Mhz20,
+                TxCalibrationProfileArg::LinuxParityCh36Ht20
+            ),
+            RfQualityCalibrationMode::TargetedLinuxParity
+        );
     }
 
     #[test]

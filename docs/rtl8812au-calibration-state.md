@@ -107,11 +107,51 @@ Linux-calibration-equivalent. The mismatch is now explicit enough to use in
 stepped or long-distance RF-quality decisions instead of treating packet
 recovery alone as calibration parity.
 
+## Targeted Linux-Parity Profile
+
+`bridge-tx-listen`, `bridge-run`, and `bridge-tx-bench` now expose:
+
+```sh
+--tx-calibration-profile linux-parity-ch36-ht20
+```
+
+For channel 36 HT20 only, this applies the six Linux-final values listed in
+the mismatch table above after init and before TX:
+
+- Path A/B TX scale: `0x40000003`.
+- Path A/B RFE pinmux: `0x54337770`.
+- Path A/B TX BB control: `0x01807c09`.
+
+The command report records these writes under `tx_calibration_profile` with
+before/write/after readback. The final `rf_calibration_pre_tx` probe is labeled
+`targeted_linux_parity`, and `rf-quality-report` lifts the profile report into
+`macos.calibration.profile_report`.
+
+This is not full Linux runtime calibration. It is a targeted, guarded A/B tool
+for the exact channel-36/HT20 parity gap we can test now. Full IQK/LCK remains
+separate because the Linux routines are sequence-sensitive and should be
+validated against receiver-backed or spectrum-backed evidence.
+
+Live close-range smoke on May 2, 2026 showed this profile is not safe to
+promote yet:
+
+- `current-default` calibration recovered `100/100` marked source payloads.
+- `linux-parity-ch36-ht20` applied all six writes with matching readback but
+  recovered `0/100` marked source payloads.
+- Both runs had Linux peer preflight `status=ok`, `iw` available, and channel
+  36 HT20 confirmed.
+
+Interpretation: copying the final Linux register values in isolation is not
+equivalent to running the Linux calibration sequence. At least one of these
+values depends on prior sequence state, IQK/LCK state, or surrounding RF/BB
+runtime writes. Keep this profile opt-in for diagnostics only.
+
 ## IQK/LCK Porting Decision
 
 Decision as of May 2, 2026: keep the current captured/partial calibration path
-for close-range and controlled stepped testing, but do not treat it as
-long-distance accepted calibration.
+for default close-range testing, add the targeted Linux-parity profile for
+controlled A/B runs, and do not treat either as long-distance accepted
+calibration.
 
 Rationale:
 
@@ -120,19 +160,26 @@ Rationale:
   modes.
 - The Linux calibration comparison still shows six RFE/TX-scale/TX-BB-control
   differences, so close-range success is not calibration parity.
-- Full `phy_iq_calibrate_8812a` and `phy_lc_calibrate_8812a` ports are large,
-  sequence-sensitive, and not yet tied to a measured receiver-backed failure.
+- Full `phy_iq_calibrate_8812a` and `phy_lc_calibrate_8812a` ports are
+  sequence-sensitive. LCK is smaller and should be the first true runtime
+  calibration candidate; IQK is larger and should be ported with staged
+  readback/sanity gates.
 
 Next action:
 
 - Run stepped/attenuated or outdoor 20 MHz profiles with the current
   EFUSE-derived TX power mode and captured calibration labels intact.
-- If those profiles fall outside the Linux baseline margin, try the smallest
-  targeted calibration subset first: Linux-aligned RFE pinmux / TX scale /
-  TX-BB-control values for the measured channel and bandwidth.
-- Port full IQK/LCK only if the targeted subset does not close the measured
-  RF-quality gap or if receiver/spectrum evidence specifically points to IQ/LO
-  impairment.
+- Run close-range and later stepped/outdoor profiles both with
+  `--tx-calibration-profile current-default` and
+  `--tx-calibration-profile linux-parity-ch36-ht20`.
+- Do not use `linux-parity-ch36-ht20` as a production profile until it recovers
+  close-range payloads. Its current value is as a negative control proving that
+  final-register replay alone is insufficient.
+- Port LCK first if distance evidence points to LO/channel drift or if a
+  sequence-faithful replay shows sensitivity to LCK state.
+- Port full IQK when receiver/spectrum evidence points to IQ imbalance, EVM,
+  or asymmetric path quality that the targeted profile and EFUSE-derived TXAGC
+  do not fix.
 
 Follow-up after the accepted May 2, 2026 close-range profile: the channel 36
 HT20 EFUSE-derived run recovered `2000/2000` marked WFB source payloads and was

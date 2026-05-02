@@ -53,6 +53,42 @@ WFB_RX_CMD='wfb_rx -K /var/lib/arc/wfb/drone.key -p 0 -c 127.0.0.1 -u 5800 wfb0'
 
 The helper writes `linux-baseline.json` plus command, process, link, and optional packet-capture artifacts. It does not assume `iw`, `tcpdump`, `lsusb`, or `docker` exist; missing tools are recorded as missing artifacts rather than failing the run.
 
+## Close-Range Automation Hardening
+
+`scripts/run-rf-quality-close-range.sh` controls the hardware Mac and the Linux
+peer for the accepted close-range workflow. The Linux side now performs a
+preflight before RF transmission and collects:
+
+- `${REMOTE_PREFIX}-preflight.json`
+- `${REMOTE_PREFIX}-preflight.log`
+- `${REMOTE_PREFIX}-setup.log`
+- `${REMOTE_PREFIX}-summary.json`
+
+The preflight searches `LINUX_REMOTE_PATH` in addition to the remote shell
+path. Default:
+
+```sh
+LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+Required commands are `python3`, `sudo`, `timeout`, `wfb_rx`, and `wfb_tx`.
+Missing required commands block the run before RF. `docker`, `iw`, `ip`,
+`tcpdump`, `pkill`, `ps`, `grep`, and `date` are optional by default and are
+recorded as degraded preflight state when absent. Set `LINUX_REQUIRE_IW=1` to
+fail before RF if the runner cannot set and verify the Linux interface channel.
+
+The automation also accepts the targeted calibration profile:
+
+```sh
+TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20 \
+CALIBRATION_MODE=targeted-linux-parity \
+./scripts/run-rf-quality-close-range.sh
+```
+
+When `CALIBRATION_MODE` is omitted, the script derives
+`targeted-linux-parity` only for `TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20`;
+otherwise it keeps `stop-gap-captured`.
+
 ## Current Close-Range Baseline
 
 The current close-range 20 MHz reference is the sustained 1,000-byte run from May 1, 2026:

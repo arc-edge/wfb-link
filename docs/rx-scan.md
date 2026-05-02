@@ -84,8 +84,13 @@ When frames are parsed, each JSONL record includes:
 
 - Unix millisecond timestamp
 - frame length and raw 802.11 frame hex
-- RSSI dBm
+- RSSI dBm plus `rssi_dbm_valid` and `rssi_dbm_source`; fallback RSSI remains
+  present for compatibility but is marked invalid when PHY status was absent
+- nullable `noise_dbm` and `snr_db` fields, currently `null` until the
+  RTL8812AU PHY-status noise/EVM mapping is promoted
 - channel number, frequency, and band
+- PHY-status evidence: `phy_status`, `driver_info_size`, `rx_shift`,
+  `raw_phy_status_len`, and bounded `raw_phy_status_hex`
 - RTL8812AU RX descriptor rate metadata: raw rate byte, decoded CCK/OFDM/HT/VHT rate, raw bandwidth field, decoded bandwidth in MHz, SGI, LDPC, and STBC flags
 - frame type
 

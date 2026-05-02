@@ -29,7 +29,7 @@ pub use registry::{known_adapters, lookup_known_adapter, Chipset, KnownAdapter};
 pub use rtl8812au::{
     build_tx_packet, parse_rx_packet, submit_tx_frame, ParsedRxPacket, RegisterWidth,
     Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxError, Rtl8812auTxSubmitError,
-    RxFrame, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
+    RxFrame, RxParseOutcome, RxRssiSource, TxOptions, TxRate, TxSubmitCounters,
 };
 pub use trace::{
     compare_usb_traces, import_usbmon_text, UsbTraceComparison, UsbTraceComparisonResult,

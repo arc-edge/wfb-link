@@ -14,6 +14,8 @@ Configuration is via environment variables. Common overrides:
   HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
   HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
   LINUX_HOST=drone-2f389.local
+  LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  LINUX_REQUIRE_IW=0
   MAC_LAN_IP=10.42.0.162
   FIRMWARE=/tmp/rtl8812aefw.bin
   EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json
@@ -87,6 +89,8 @@ if [[ -z "$HW_REPO_PATH" ]]; then
   HW_REPO_PATH='projects/arc/wfb-mac-radio-agent'
 fi
 LINUX_HOST=${LINUX_HOST:-drone-2f389.local}
+LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+LINUX_REQUIRE_IW=${LINUX_REQUIRE_IW:-0}
 MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-rfq-auto-$RUN_ID}
 SYNC_HW_REPO=${SYNC_HW_REPO:-0}
@@ -111,7 +115,14 @@ TX_RATE=${TX_RATE:-mcs1}
 TX_PROFILE=${TX_PROFILE:-linux-monitor}
 TX_POWER_MODE=${TX_POWER_MODE:-efuse-derived}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
-CALIBRATION_MODE=${CALIBRATION_MODE:-stop-gap-captured}
+TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+if [[ -z "${CALIBRATION_MODE+x}" ]]; then
+  if [[ "$TX_CALIBRATION_PROFILE" == "linux-parity-ch36-ht20" ]]; then
+    CALIBRATION_MODE=targeted-linux-parity
+  else
+    CALIBRATION_MODE=stop-gap-captured
+  fi
+fi
 PROFILE_KIND=${PROFILE_KIND:-close-range}
 PROFILE_NAME=${PROFILE_NAME:-close-range-ch36-ht20-efuse-$RUN_ID}
 
@@ -167,9 +178,10 @@ MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 : >"$MISSING_ARTIFACTS"
 
 export RUN_ID HW_MAC_HOST HW_REPO_PATH LINUX_HOST MAC_LAN_IP REMOTE_PREFIX
+export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS MAX_DATAGRAMS
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC LINK_ID RADIO_PORT RADIO_PORT_HEX
-export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
+export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
 export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
 export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO HW_DEPLOY HW_DEPLOY_PATH ALLOW_DEPLOY_OVER_WORKTREE
@@ -224,10 +236,10 @@ import sys
 
 keys = [
     "RUN_ID", "HW_MAC_HOST", "HW_REPO_PATH", "LINUX_HOST", "MAC_LAN_IP",
-    "REMOTE_PREFIX", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
+    "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
     "EXPECTED_PAYLOADS", "MAX_DATAGRAMS", "PAYLOAD_LEN", "PAYLOAD_MARKER",
     "LINK_ID", "RADIO_PORT", "TX_RATE", "TX_PROFILE", "TX_POWER_MODE",
-    "TX_POWER_SAFETY_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
+    "TX_POWER_SAFETY_PROFILE", "TX_CALIBRATION_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
     "BRIDGE_BIND_PORT", "IFACE", "WFB_SERVICE", "WFB_KEY",
     "LINUX_SOURCE_PORT", "LINUX_RX_PORT", "FIRMWARE", "EFUSE_REPORT",
@@ -255,12 +267,14 @@ Configuration written to:
 
 Hardware Mac:
   HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
+  TX_POWER_MODE=$TX_POWER_MODE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
   $(if [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   ssh $(quote "$HW_MAC_HOST") '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
   ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... bridge-tx-listen --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
 
 Linux peer through hardware Mac:
-  ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <stop $WFB_SERVICE; iw dev $IFACE set channel $CHANNEL HT${BANDWIDTH_MHZ}; start tcpdump/wfb_rx/wfb_tx; generate $EXPECTED_PAYLOADS payloads>'
+  LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
+  ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $EXPECTED_PAYLOADS payloads>'
 
 Local collection:
   scp hardware Mac reports from $REMOTE_PREFIX-*
@@ -307,13 +321,26 @@ stop_hw_pid_file() {
 
 restore_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments WFB_SERVICE LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT IFACE) bash -s"
+  remote_cmd="$(env_assignments WFB_SERVICE LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT IFACE LINUX_REMOTE_PATH) bash -s"
   ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" >"$OUT_DIR/cleanup-linux-restore.log" 2>&1 <<'LINUX_RESTORE' || true
 set +e
-sudo -n pkill -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
-sudo -n pkill -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
-sudo -n docker restart "$WFB_SERVICE" >/dev/null 2>&1 || sudo -n docker start "$WFB_SERVICE" >/dev/null 2>&1 || true
-sudo -n docker ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}'
+export PATH="$LINUX_REMOTE_PATH:$PATH"
+resolve_cmd() {
+  command -v "$1" 2>/dev/null || return 1
+}
+sudo_bin=$(resolve_cmd sudo || true)
+pkill_bin=$(resolve_cmd pkill || true)
+docker_bin=$(resolve_cmd docker || true)
+if [[ -n "$sudo_bin" && -n "$pkill_bin" ]]; then
+  "$sudo_bin" -n "$pkill_bin" -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
+  "$sudo_bin" -n "$pkill_bin" -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
+fi
+if [[ -n "$sudo_bin" && -n "$docker_bin" ]]; then
+  "$sudo_bin" -n "$docker_bin" restart "$WFB_SERVICE" >/dev/null 2>&1 || "$sudo_bin" -n "$docker_bin" start "$WFB_SERVICE" >/dev/null 2>&1 || true
+  "$sudo_bin" -n "$docker_bin" ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}'
+else
+  echo "docker or sudo unavailable during restore; skipped service restart"
+fi
 LINUX_RESTORE
 }
 
@@ -377,7 +404,7 @@ MAC_RELAY
 
 start_bridge() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
   log "starting hardware-Mac bridge listener"
   ssh "$HW_MAC_HOST" "$remote_cmd" <<'MAC_BRIDGE'
 set -euo pipefail
@@ -405,6 +432,7 @@ nohup cargo run -p wfb-radio-diag -- --json \
   --tx-power-mode "$TX_POWER_MODE" \
   --tx-power-efuse-report "$EFUSE_REPORT" \
   --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE" \
+  --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
   --i-understand-this-transmits \
   > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
 pid=$!
@@ -417,16 +445,150 @@ MAC_BRIDGE
 
 run_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
   log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
   STARTED_LINUX=1
   ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" <<'LINUX_RUN'
 set -euo pipefail
+export PATH="$LINUX_REMOTE_PATH:$PATH"
 
 setup_log="${REMOTE_PREFIX}-setup.log"
 restore_log="${REMOTE_PREFIX}-restore.log"
 summary_json="${REMOTE_PREFIX}-summary.json"
 counter_json="${REMOTE_PREFIX}-counter.json"
+preflight_json="${REMOTE_PREFIX}-preflight.json"
+preflight_log="${REMOTE_PREFIX}-preflight.log"
+
+resolve_cmd() {
+  local name=$1
+  local path dir
+  if path=$(command -v "$name" 2>/dev/null); then
+    printf '%s\n' "$path"
+    return 0
+  fi
+  IFS=: read -r -a search_dirs <<< "$LINUX_REMOTE_PATH"
+  for dir in "${search_dirs[@]}"; do
+    [[ -n "$dir" && -x "$dir/$name" ]] || continue
+    printf '%s\n' "$dir/$name"
+    return 0
+  done
+  return 1
+}
+
+PYTHON3_BIN=$(resolve_cmd python3 || true)
+SUDO_BIN=$(resolve_cmd sudo || true)
+TIMEOUT_BIN=$(resolve_cmd timeout || true)
+WFB_RX_BIN=$(resolve_cmd wfb_rx || true)
+WFB_TX_BIN=$(resolve_cmd wfb_tx || true)
+DOCKER_BIN=$(resolve_cmd docker || true)
+IW_BIN=$(resolve_cmd iw || true)
+IP_BIN=$(resolve_cmd ip || true)
+TCPDUMP_BIN=$(resolve_cmd tcpdump || true)
+PKILL_BIN=$(resolve_cmd pkill || true)
+PS_BIN=$(resolve_cmd ps || true)
+GREP_BIN=$(resolve_cmd grep || true)
+DATE_BIN=$(resolve_cmd date || true)
+
+missing_required=()
+[[ -n "$PYTHON3_BIN" ]] || missing_required+=(python3)
+[[ -n "$SUDO_BIN" ]] || missing_required+=(sudo)
+[[ -n "$TIMEOUT_BIN" ]] || missing_required+=(timeout)
+[[ -n "$WFB_RX_BIN" ]] || missing_required+=(wfb_rx)
+[[ -n "$WFB_TX_BIN" ]] || missing_required+=(wfb_tx)
+missing_optional=()
+[[ -n "$DOCKER_BIN" ]] || missing_optional+=(docker)
+[[ -n "$IW_BIN" ]] || missing_optional+=(iw)
+[[ -n "$IP_BIN" ]] || missing_optional+=(ip)
+[[ -n "$TCPDUMP_BIN" ]] || missing_optional+=(tcpdump)
+[[ -n "$PKILL_BIN" ]] || missing_optional+=(pkill)
+[[ -n "$PS_BIN" ]] || missing_optional+=(ps)
+[[ -n "$GREP_BIN" ]] || missing_optional+=(grep)
+[[ -n "$DATE_BIN" ]] || missing_optional+=(date)
+
+preflight_status=ok
+preflight_degraded=0
+policy_blockers=()
+if (( ${#missing_required[@]} > 0 )); then
+  preflight_status=blocked
+elif [[ -z "$IW_BIN" && "$LINUX_REQUIRE_IW" == "1" ]]; then
+  preflight_status=blocked
+  policy_blockers+=(iw_required_but_missing)
+elif (( ${#missing_optional[@]} > 0 )); then
+  preflight_status=degraded
+  preflight_degraded=1
+fi
+
+{
+  printf 'status=%s\n' "$preflight_status"
+  printf 'linux_remote_path=%s\n' "$LINUX_REMOTE_PATH"
+  printf 'linux_require_iw=%s\n' "$LINUX_REQUIRE_IW"
+  printf 'python3=%s\n' "${PYTHON3_BIN:-MISSING}"
+  printf 'sudo=%s\n' "${SUDO_BIN:-MISSING}"
+  printf 'timeout=%s\n' "${TIMEOUT_BIN:-MISSING}"
+  printf 'wfb_rx=%s\n' "${WFB_RX_BIN:-MISSING}"
+  printf 'wfb_tx=%s\n' "${WFB_TX_BIN:-MISSING}"
+  printf 'docker=%s\n' "${DOCKER_BIN:-MISSING}"
+  printf 'iw=%s\n' "${IW_BIN:-MISSING}"
+  printf 'ip=%s\n' "${IP_BIN:-MISSING}"
+  printf 'tcpdump=%s\n' "${TCPDUMP_BIN:-MISSING}"
+  printf 'pkill=%s\n' "${PKILL_BIN:-MISSING}"
+  printf 'ps=%s\n' "${PS_BIN:-MISSING}"
+  printf 'grep=%s\n' "${GREP_BIN:-MISSING}"
+  printf 'date=%s\n' "${DATE_BIN:-MISSING}"
+  printf 'missing_required=%s\n' "${missing_required[*]:-}"
+  printf 'missing_optional=%s\n' "${missing_optional[*]:-}"
+  printf 'policy_blockers=%s\n' "${policy_blockers[*]:-}"
+} > "$preflight_log"
+
+if [[ -n "$PYTHON3_BIN" ]]; then
+  export preflight_status preflight_degraded
+  export PYTHON3_BIN SUDO_BIN TIMEOUT_BIN WFB_RX_BIN WFB_TX_BIN DOCKER_BIN IW_BIN IP_BIN TCPDUMP_BIN PKILL_BIN PS_BIN GREP_BIN DATE_BIN
+  export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
+  "$PYTHON3_BIN" - "$preflight_json" "${missing_required[*]:-}" "${missing_optional[*]:-}" "${policy_blockers[*]:-}" <<'PY'
+import json
+import os
+import sys
+
+commands = {
+    "python3": os.environ.get("PYTHON3_BIN") or None,
+    "sudo": os.environ.get("SUDO_BIN") or None,
+    "timeout": os.environ.get("TIMEOUT_BIN") or None,
+    "wfb_rx": os.environ.get("WFB_RX_BIN") or None,
+    "wfb_tx": os.environ.get("WFB_TX_BIN") or None,
+    "docker": os.environ.get("DOCKER_BIN") or None,
+    "iw": os.environ.get("IW_BIN") or None,
+    "ip": os.environ.get("IP_BIN") or None,
+    "tcpdump": os.environ.get("TCPDUMP_BIN") or None,
+    "pkill": os.environ.get("PKILL_BIN") or None,
+    "ps": os.environ.get("PS_BIN") or None,
+    "grep": os.environ.get("GREP_BIN") or None,
+    "date": os.environ.get("DATE_BIN") or None,
+}
+missing_required = [name for name in sys.argv[2].split() if name]
+missing_optional = [name for name in sys.argv[3].split() if name]
+policy_blockers = [name for name in sys.argv[4].split() if name]
+report = {
+    "status": os.environ["preflight_status"],
+    "degraded": os.environ["preflight_degraded"] == "1",
+    "linux_remote_path": os.environ.get("LINUX_REMOTE_PATH", ""),
+    "linux_require_iw": os.environ.get("LINUX_REQUIRE_IW", "") == "1",
+    "commands": commands,
+    "missing_required": missing_required,
+    "missing_optional": missing_optional,
+    "policy_blockers": policy_blockers,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(report, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+else
+  printf '{"status":"blocked","missing_required":["python3"]}\n' > "$preflight_json"
+fi
+
+if [[ "$preflight_status" == "blocked" ]]; then
+  cat "$preflight_log" > "$setup_log"
+  exit 2
+fi
 
 case "$BANDWIDTH_MHZ" in
   20) iw_bandwidth=HT20 ;;
@@ -436,15 +598,23 @@ esac
 
 cleanup_linux() {
   set +e
-  sudo -n pkill -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
-  sudo -n pkill -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
-  sudo -n pkill -f "tcpdump -i ${IFACE} .*${REMOTE_PREFIX}-rf.pcap" >/dev/null 2>&1 || true
+  if [[ -n "$SUDO_BIN" && -n "$PKILL_BIN" ]]; then
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
+    "$SUDO_BIN" -n "$PKILL_BIN" -f "tcpdump -i ${IFACE} .*${REMOTE_PREFIX}-rf.pcap" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${counter_pid:-}" ]]; then kill "$counter_pid" >/dev/null 2>&1 || true; fi
   {
-    date
-    sudo -n docker start "$WFB_SERVICE" || true
-    sudo -n docker ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}'
-    ps -eo pid,user,comm,args | grep -Ei 'arc-wfb|wfb' | grep -v grep || true
+    if [[ -n "$DATE_BIN" ]]; then "$DATE_BIN"; else date; fi
+    if [[ -n "$SUDO_BIN" && -n "$DOCKER_BIN" ]]; then
+      "$SUDO_BIN" -n "$DOCKER_BIN" start "$WFB_SERVICE" || true
+      "$SUDO_BIN" -n "$DOCKER_BIN" ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}'
+    else
+      echo "docker or sudo unavailable; skipped service restore"
+    fi
+    if [[ -n "$PS_BIN" && -n "$GREP_BIN" ]]; then
+      "$PS_BIN" -eo pid,user,comm,args | "$GREP_BIN" -Ei 'arc-wfb|wfb' | "$GREP_BIN" -v grep || true
+    fi
   } > "$restore_log" 2>&1
 }
 trap cleanup_linux EXIT INT TERM
@@ -454,14 +624,27 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
   "${REMOTE_PREFIX}-rf.pcap"
 
 {
-  date
-  sudo -n docker stop "$WFB_SERVICE" || true
-  sudo -n iw dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"
-  iw dev "$IFACE" info || true
-  ip addr show "$IFACE" || true
+  if [[ -n "$DATE_BIN" ]]; then "$DATE_BIN"; else date; fi
+  cat "$preflight_log"
+  if [[ -n "$SUDO_BIN" && -n "$DOCKER_BIN" ]]; then
+    "$SUDO_BIN" -n "$DOCKER_BIN" stop "$WFB_SERVICE" || true
+  else
+    echo "docker or sudo unavailable; skipped service stop"
+  fi
+  if [[ -n "$SUDO_BIN" && -n "$IW_BIN" ]]; then
+    "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"
+    "$IW_BIN" dev "$IFACE" info || true
+  else
+    echo "iw or sudo unavailable; skipped channel set and channel-state evidence"
+  fi
+  if [[ -n "$IP_BIN" ]]; then
+    "$IP_BIN" addr show "$IFACE" || true
+  else
+    echo "ip unavailable; skipped interface address evidence"
+  fi
 } > "$setup_log" 2>&1
 
-python3 - "$counter_json" "$LINUX_RX_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_MARKER" "$COUNTER_SECONDS" <<'PY' &
+"$PYTHON3_BIN" - "$counter_json" "$LINUX_RX_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_MARKER" "$COUNTER_SECONDS" <<'PY' &
 import json
 import socket
 import sys
@@ -508,25 +691,30 @@ with open(out_path, "w", encoding="utf-8") as fh:
 PY
 counter_pid=$!
 
-sudo -n timeout "$TCPDUMP_SECONDS" tcpdump -i "$IFACE" -s 256 -w "${REMOTE_PREFIX}-rf.pcap" > "${REMOTE_PREFIX}-tcpdump.log" 2>&1 &
-tcpdump_pid=$!
+tcpdump_pid=
+if [[ -n "$TCPDUMP_BIN" ]]; then
+  "$SUDO_BIN" -n "$TIMEOUT_BIN" "$TCPDUMP_SECONDS" "$TCPDUMP_BIN" -i "$IFACE" -s 256 -w "${REMOTE_PREFIX}-rf.pcap" > "${REMOTE_PREFIX}-tcpdump.log" 2>&1 &
+  tcpdump_pid=$!
+else
+  echo "tcpdump unavailable; skipped RF pcap capture" > "${REMOTE_PREFIX}-tcpdump.log"
+fi
 
-sudo -n timeout "$RX_SECONDS" \
-  wfb_rx -K "$WFB_KEY" -p "$RADIO_PORT" -c 127.0.0.1 -u "$LINUX_RX_PORT" "$IFACE" \
+"$SUDO_BIN" -n "$TIMEOUT_BIN" "$RX_SECONDS" \
+  "$WFB_RX_BIN" -K "$WFB_KEY" -p "$RADIO_PORT" -c 127.0.0.1 -u "$LINUX_RX_PORT" "$IFACE" \
   > "${REMOTE_PREFIX}-rx.log" 2>&1 &
 rx_pid=$!
 
 sleep 2
 
-sudo -n timeout "$TX_SECONDS" \
-  wfb_tx -d -K "$WFB_KEY" -p "$RADIO_PORT" -B "$BANDWIDTH_MHZ" -k "$FEC_K" -n "$FEC_N" \
+"$SUDO_BIN" -n "$TIMEOUT_BIN" "$TX_SECONDS" \
+  "$WFB_TX_BIN" -d -K "$WFB_KEY" -p "$RADIO_PORT" -B "$BANDWIDTH_MHZ" -k "$FEC_K" -n "$FEC_N" \
   -u "$LINUX_SOURCE_PORT" "${MAC_LAN_IP}:${RELAY_PORT}" \
   > "${REMOTE_PREFIX}-tx.log" 2>&1 &
 tx_pid=$!
 
 sleep 2
 
-python3 - "$LINUX_SOURCE_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$PAYLOAD_MARKER" "$PAYLOAD_INTERVAL_SEC" <<'PY' > "${REMOTE_PREFIX}-source.log" 2>&1
+"$PYTHON3_BIN" - "$LINUX_SOURCE_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$PAYLOAD_MARKER" "$PAYLOAD_INTERVAL_SEC" <<'PY' > "${REMOTE_PREFIX}-source.log" 2>&1
 import socket
 import sys
 import time
@@ -551,12 +739,12 @@ PY
 
 wait "$tx_pid" || true
 wait "$counter_pid" || true
-sudo -n kill "$rx_pid" >/dev/null 2>&1 || true
-sudo -n kill "$tcpdump_pid" >/dev/null 2>&1 || true
+"$SUDO_BIN" -n kill "$rx_pid" >/dev/null 2>&1 || true
+if [[ -n "$tcpdump_pid" ]]; then "$SUDO_BIN" -n kill "$tcpdump_pid" >/dev/null 2>&1 || true; fi
 wait "$rx_pid" >/dev/null 2>&1 || true
-wait "$tcpdump_pid" >/dev/null 2>&1 || true
+if [[ -n "$tcpdump_pid" ]]; then wait "$tcpdump_pid" >/dev/null 2>&1 || true; fi
 
-python3 - "$summary_json" "$counter_json" "$setup_log" "$restore_log" <<'PY'
+"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -566,12 +754,18 @@ counter_path = Path(sys.argv[2])
 counter = {}
 if counter_path.exists():
     counter = json.loads(counter_path.read_text())
+preflight = {}
+preflight_path = Path(sys.argv[5])
+if preflight_path.exists():
+    preflight = json.loads(preflight_path.read_text())
 summary = {
+    "preflight": preflight,
     "counter": counter,
     "artifacts": {
         "counter": str(counter_path),
         "setup_log": sys.argv[3],
         "restore_log": sys.argv[4],
+        "preflight": sys.argv[5],
     },
 }
 summary_path.write_text(json.dumps(summary, indent=2) + "\n")
@@ -641,6 +835,8 @@ collect_artifacts() {
   copy_linux_artifact "${REMOTE_PREFIX}-counter.json"
   copy_linux_artifact "${REMOTE_PREFIX}-source.log"
   copy_linux_artifact "${REMOTE_PREFIX}-setup.log"
+  copy_linux_artifact "${REMOTE_PREFIX}-preflight.json"
+  copy_linux_artifact "${REMOTE_PREFIX}-preflight.log"
   copy_linux_artifact "${REMOTE_PREFIX}-restore.log"
   copy_linux_artifact "${REMOTE_PREFIX}-summary.json"
   copy_linux_artifact "${REMOTE_PREFIX}-tcpdump.log"

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use radio_core::RxFrame;
+use radio_core::{RxFrame, TxRate};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -55,10 +55,21 @@ pub fn build_rx_forward_datagram(
         config.wlan_idx,
         frame.rssi_dbm,
         frame.channel.frequency_mhz,
-        config.mcs_index,
-        config.bandwidth_mhz,
+        rx_forward_mcs_index(frame).unwrap_or(config.mcs_index),
+        frame
+            .rx_bandwidth
+            .map(|bandwidth| bandwidth.mhz() as u8)
+            .unwrap_or(config.bandwidth_mhz),
     );
     Some(header.prepend_to_payload(payload))
+}
+
+fn rx_forward_mcs_index(frame: &RxFrame) -> Option<u8> {
+    match frame.rx_rate {
+        Some(TxRate::Mcs(mcs)) => Some(mcs),
+        Some(TxRate::Vht { mcs, .. }) => Some(mcs),
+        _ => None,
+    }
 }
 
 pub async fn forward_rx_frame_udp(
@@ -100,7 +111,15 @@ mod tests {
         RxFrame {
             data,
             rssi_dbm: -47,
+            rssi_dbm_valid: true,
+            rssi_dbm_source: radio_core::RxRssiSource::PhyStatusFirstByte,
+            noise_dbm: None,
+            snr_db: None,
             channel: Channel::from_number(149).expect("channel"),
+            phy_status: true,
+            driver_info_size: 8,
+            rx_shift: 0,
+            raw_phy_status: vec![63],
             rx_rate_raw: 0x0d,
             rx_rate: Some(radio_core::TxRate::Mcs(1)),
             rx_bandwidth_raw: 0,
@@ -132,6 +151,8 @@ mod tests {
         .expect("forward packet");
 
         assert_eq!(&packet[WFB_FORWARD_HEADER_LEN..], b"payload");
+        assert_eq!(packet[15], 1);
+        assert_eq!(packet[16], 20);
         assert_eq!(counters.received, 1);
         assert_eq!(counters.matched, 1);
         assert_eq!(counters.filtered, 0);

@@ -165,11 +165,26 @@ impl Default for TxOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RxRssiSource {
+    PhyStatusFirstByte,
+    FallbackNoPhyStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RxFrame {
     pub data: Vec<u8>,
     pub rssi_dbm: i8,
+    pub rssi_dbm_valid: bool,
+    pub rssi_dbm_source: RxRssiSource,
+    pub noise_dbm: Option<i8>,
+    pub snr_db: Option<i8>,
     pub channel: Channel,
+    pub phy_status: bool,
+    pub driver_info_size: usize,
+    pub rx_shift: usize,
+    pub raw_phy_status: Vec<u8>,
     pub rx_rate_raw: u8,
     pub rx_rate: Option<TxRate>,
     pub rx_bandwidth_raw: u8,
@@ -465,11 +480,19 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
         };
     }
 
-    let rssi_dbm = if phy_status && drvinfo_size > 0 {
-        let raw = buf[RX_DESC_SIZE] as i16;
-        (raw - 110).clamp(-127, 0) as i8
+    let raw_phy_status = if phy_status && drvinfo_size > 0 {
+        buf[RX_DESC_SIZE..RX_DESC_SIZE + drvinfo_size.min(32)].to_vec()
     } else {
-        -80
+        Vec::new()
+    };
+    let (rssi_dbm, rssi_dbm_valid, rssi_dbm_source) = if let Some(raw) = raw_phy_status.first() {
+        (
+            ((*raw as i16) - 110).clamp(-127, 0) as i8,
+            true,
+            RxRssiSource::PhyStatusFirstByte,
+        )
+    } else {
+        (-80, false, RxRssiSource::FallbackNoPhyStatus)
     };
 
     ParsedRxPacket {
@@ -478,7 +501,15 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
         frame: Some(RxFrame {
             data: buf[data_start..data_start + frame_len].to_vec(),
             rssi_dbm,
+            rssi_dbm_valid,
+            rssi_dbm_source,
+            noise_dbm: None,
+            snr_db: None,
             channel,
+            phy_status,
+            driver_info_size: drvinfo_size,
+            rx_shift: shift,
+            raw_phy_status,
             rx_rate_raw,
             rx_rate: rx_rate_from_hw(rx_rate_raw),
             rx_bandwidth_raw,
@@ -1250,6 +1281,12 @@ mod tests {
         let rx = parsed.frame.expect("frame");
         assert_eq!(rx.data, frame);
         assert_eq!(rx.rssi_dbm, -80);
+        assert!(!rx.rssi_dbm_valid);
+        assert_eq!(rx.rssi_dbm_source, RxRssiSource::FallbackNoPhyStatus);
+        assert!(!rx.phy_status);
+        assert_eq!(rx.driver_info_size, 0);
+        assert_eq!(rx.rx_shift, 0);
+        assert!(rx.raw_phy_status.is_empty());
         assert_eq!(rx.rx_rate_raw, 0x0d);
         assert_eq!(rx.rx_rate, Some(TxRate::Mcs(1)));
         assert_eq!(rx.rx_bandwidth_raw, 1);
@@ -1258,6 +1295,32 @@ mod tests {
         assert!(rx.ldpc);
         assert!(rx.stbc);
         assert!(!rx.crc_error);
+    }
+
+    #[test]
+    fn rx_parser_labels_phy_status_rssi_as_measured() {
+        let channel = Channel::from_number(36).expect("channel 36");
+        let frame = sample_data_frame();
+        let mut payload = frame.clone();
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let drvinfo_size = 8usize;
+        let mut bulk = vec![0u8; RX_DESC_SIZE + drvinfo_size + payload.len()];
+        let dw0 = (payload.len() as u32) | (1 << 16) | (1 << 26);
+        bulk[0..4].copy_from_slice(&dw0.to_le_bytes());
+        bulk[RX_DESC_SIZE] = 72;
+        bulk[RX_DESC_SIZE + drvinfo_size..RX_DESC_SIZE + drvinfo_size + payload.len()]
+            .copy_from_slice(&payload);
+
+        let parsed = parse_rx_packet(&bulk, channel);
+
+        assert_eq!(parsed.outcome, RxParseOutcome::Frame);
+        let rx = parsed.frame.expect("frame");
+        assert_eq!(rx.rssi_dbm, -38);
+        assert!(rx.rssi_dbm_valid);
+        assert_eq!(rx.rssi_dbm_source, RxRssiSource::PhyStatusFirstByte);
+        assert!(rx.phy_status);
+        assert_eq!(rx.driver_info_size, drvinfo_size);
+        assert_eq!(rx.raw_phy_status, vec![72, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
