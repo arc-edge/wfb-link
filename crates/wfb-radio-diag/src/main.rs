@@ -4226,6 +4226,7 @@ struct RfQualityWfbOutcomeReport {
     dropped_datagrams: Option<u64>,
     malformed_datagrams: Option<u64>,
     receiver_evidence: Option<serde_json::Value>,
+    receiver_telemetry: Option<serde_json::Value>,
     throughput: Option<serde_json::Value>,
     cpu: Option<serde_json::Value>,
 }
@@ -31520,6 +31521,7 @@ fn rf_quality_wfb_outcome(
                 rf_quality_json_u64(value, &["receiver_health", "counter", "total_datagrams"])
             }),
             receiver_evidence: receiver_evidence.cloned(),
+            receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
             recovered_payloads: args.recovered_payloads,
             ..RfQualityWfbOutcomeReport::default()
         };
@@ -31585,9 +31587,27 @@ fn rf_quality_wfb_outcome(
             || rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"]),
         ),
         receiver_evidence: receiver_evidence.cloned(),
+        receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
         throughput: rf_quality_json_clone(value, &["throughput"]),
         cpu: rf_quality_json_clone(value, &["cpu"]),
     }
+}
+
+fn rf_quality_receiver_telemetry(
+    receiver_evidence: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let receiver_evidence = receiver_evidence?;
+    let summary = rf_quality_json_clone(
+        receiver_evidence,
+        &["receiver_health", "rx_antenna_summary"],
+    )
+    .or_else(|| rf_quality_json_clone(receiver_evidence, &["rx_antenna_summary"]))?;
+    Some(serde_json::json!({
+        "source": "linux_wfb_rx_rx_ant",
+        "rx_antenna_summary": summary,
+        "rx_antenna_report_count": rf_quality_json_u64(receiver_evidence, &["receiver_health", "rx_antenna_report_count"])
+            .or_else(|| rf_quality_json_u64(receiver_evidence, &["rx_antenna_report_count"])),
+    }))
 }
 
 fn rf_quality_receiver_evidence_from_artifacts(paths: &[PathBuf]) -> Option<serde_json::Value> {
@@ -39257,6 +39277,7 @@ mod tests {
                 dropped_datagrams: None,
                 malformed_datagrams: None,
                 receiver_evidence: None,
+                receiver_telemetry: None,
                 throughput: None,
                 cpu: None,
             },
@@ -41840,6 +41861,24 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         "snr_avg_db": 28
       }
     ],
+    "rx_antenna_summary": {
+      "report_count": 1,
+      "rssi_avg_dbm_min": -42,
+      "rssi_avg_dbm_max": -42,
+      "snr_avg_db_min": 28,
+      "snr_avg_db_max": 28,
+      "latest_by_antenna": [
+        {
+          "freq_mhz": 5180,
+          "mcs_index": 1,
+          "bandwidth_mhz": 20,
+          "antenna_id": 0,
+          "count_all": 100,
+          "rssi_avg_dbm": -42,
+          "snr_avg_db": 28
+        }
+      ]
+    },
     "session_observed": true,
     "status": "ok",
     "unable_decrypt_count": 0
@@ -41876,6 +41915,29 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             Some(0)
         );
         assert_eq!(report.macos.wfb_outcome.receiver_total_datagrams, Some(100));
+        assert_eq!(
+            report
+                .macos
+                .wfb_outcome
+                .receiver_telemetry
+                .as_ref()
+                .and_then(|value| rf_quality_json_u64(value, &["rx_antenna_report_count"])),
+            Some(1)
+        );
+        assert_eq!(
+            report
+                .macos
+                .wfb_outcome
+                .receiver_telemetry
+                .as_ref()
+                .and_then(|value| {
+                    rf_quality_json_u64(
+                        value,
+                        &["rx_antenna_summary", "latest_by_antenna", "0", "mcs_index"],
+                    )
+                }),
+            Some(1)
+        );
         assert_eq!(
             report
                 .comparison

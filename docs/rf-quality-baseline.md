@@ -171,7 +171,9 @@ When `wfb_rx` emits `RX_ANT` lines, the runner also parses them into
 `receiver_evidence.receiver_health.rx_antenna_reports` and
 `rx_antenna_summary`. Each report records frequency, MCS index, bandwidth,
 antenna id, packet count, RSSI min/avg/max, and SNR min/avg/max from the
-Linux receiver log.
+Linux receiver log. `rf-quality-report` also exposes the compact copy at
+`macos.wfb_outcome.receiver_telemetry` so release tooling can read MCS/RSSI/SNR
+health without parsing the full receiver artifact.
 
 This matters because WFB can receive strong RF frames but recover zero payloads
 when the receiver misses the session frame. That condition now appears as
