@@ -4175,8 +4175,39 @@ struct RfQualityCalibrationReport {
     rf_path: Option<serde_json::Value>,
     iqk: Option<serde_json::Value>,
     runtime_iqk: Option<serde_json::Value>,
+    runtime_iqk_summary: Option<RfQualityRuntimeIqkSummaryReport>,
     lck: Option<serde_json::Value>,
     thermal: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityRuntimeIqkSummaryReport {
+    status: Option<String>,
+    cleanup_status: Option<String>,
+    completed: bool,
+    cleanup_restored: bool,
+    fallback_stage_count: usize,
+    fallback_stages: Vec<RfQualityRuntimeIqkFallbackStageReport>,
+    risk: RfQualityRuntimeIqkRiskStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityRuntimeIqkRiskStatus {
+    Completed,
+    FallbackApplied,
+    CleanupNotRestored,
+    UnknownStatus,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityRuntimeIqkFallbackStageReport {
+    path: Option<String>,
+    stage: Option<String>,
+    status: Option<String>,
+    fallback_used: bool,
+    failure_label: Option<String>,
+    selected_iqc: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -31318,6 +31349,9 @@ fn rf_quality_calibration_report(
             "efuse_iqk_lck": efuse_iqk_lck,
         })
     });
+    let runtime_iqk = mac_report
+        .and_then(|value| rf_quality_json_clone(value, &["tx_calibration_profile", "runtime_iqk"]));
+    let runtime_iqk_summary = rf_quality_runtime_iqk_summary(runtime_iqk.as_ref());
 
     RfQualityCalibrationReport {
         mode: args.calibration_mode,
@@ -31341,9 +31375,8 @@ fn rf_quality_calibration_report(
                 })
             })
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["iqk"]))),
-        runtime_iqk: mac_report.and_then(|value| {
-            rf_quality_json_clone(value, &["tx_calibration_profile", "runtime_iqk"])
-        }),
+        runtime_iqk,
+        runtime_iqk_summary,
         lck: final_probe
             .and_then(|value| rf_quality_json_clone(value, &["lck"]))
             .or_else(|| {
@@ -31356,6 +31389,67 @@ fn rf_quality_calibration_report(
             .or_else(|| mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"]))),
         probes,
     }
+}
+
+fn rf_quality_runtime_iqk_summary(
+    runtime_iqk: Option<&serde_json::Value>,
+) -> Option<RfQualityRuntimeIqkSummaryReport> {
+    let runtime_iqk = runtime_iqk?;
+    let status = rf_quality_json_string(runtime_iqk, &["status"]);
+    let cleanup_status = rf_quality_json_string(runtime_iqk, &["cleanup_status"]);
+    let cleanup_restored = cleanup_status.as_deref() == Some("restored");
+    let mut fallback_stages = Vec::new();
+
+    if let Some(paths) =
+        rf_quality_json_get(runtime_iqk, &["paths"]).and_then(|value| value.as_array())
+    {
+        for path in paths {
+            let path_name = rf_quality_json_string(path, &["path_name"])
+                .or_else(|| rf_quality_json_string(path, &["path"]));
+            for stage_name in ["tx", "rx"] {
+                let Some(stage) = rf_quality_json_get(path, &[stage_name]) else {
+                    continue;
+                };
+                let stage_status = rf_quality_json_string(stage, &["status"]);
+                let fallback_used =
+                    rf_quality_json_bool(stage, &["fallback_used"]).unwrap_or(false);
+                let stage_failed = stage_status
+                    .as_deref()
+                    .is_some_and(|status| status != "success" && status != "skipped");
+                if fallback_used || stage_failed {
+                    fallback_stages.push(RfQualityRuntimeIqkFallbackStageReport {
+                        path: path_name.clone(),
+                        stage: Some(stage_name.to_string()),
+                        status: stage_status,
+                        fallback_used,
+                        failure_label: rf_quality_json_string(stage, &["failure_label"]),
+                        selected_iqc: rf_quality_json_clone(stage, &["selected_iqc"]),
+                    });
+                }
+            }
+        }
+    }
+
+    let risk = if !cleanup_restored {
+        RfQualityRuntimeIqkRiskStatus::CleanupNotRestored
+    } else if !fallback_stages.is_empty() || status.as_deref() == Some("fallback_applied") {
+        RfQualityRuntimeIqkRiskStatus::FallbackApplied
+    } else if status.as_deref() == Some("completed") {
+        RfQualityRuntimeIqkRiskStatus::Completed
+    } else {
+        RfQualityRuntimeIqkRiskStatus::UnknownStatus
+    };
+    let completed = risk == RfQualityRuntimeIqkRiskStatus::Completed;
+
+    Some(RfQualityRuntimeIqkSummaryReport {
+        status,
+        cleanup_status,
+        completed,
+        cleanup_restored,
+        fallback_stage_count: fallback_stages.len(),
+        fallback_stages,
+        risk,
+    })
 }
 
 fn rf_quality_calibration_probes_from_mac(
@@ -38911,6 +39005,59 @@ mod tests {
     }
 
     #[test]
+    fn rf_quality_runtime_iqk_summary_surfaces_fallback_stages() {
+        let mut args = rf_quality_report_args();
+        args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
+        let mac_report = serde_json::json!({
+            "tx_calibration_profile": {
+                "profile": "rtl8812a_runtime_iqk",
+                "runtime_iqk": {
+                    "status": "fallback_applied",
+                    "cleanup_status": "restored",
+                    "paths": [
+                        {
+                            "path": "a",
+                            "path_name": "A",
+                            "tx": {"stage": "tx", "status": "success", "fallback_used": false},
+                            "rx": {
+                                "stage": "rx",
+                                "status": "failed",
+                                "fallback_used": true,
+                                "failure_label": "rx_iqk_failed_flag",
+                                "selected_iqc": {"x_hex": "0x200", "y_hex": "0x000"}
+                            }
+                        },
+                        {
+                            "path": "b",
+                            "path_name": "B",
+                            "tx": {"stage": "tx", "status": "success", "fallback_used": false},
+                            "rx": {"stage": "rx", "status": "success", "fallback_used": false}
+                        }
+                    ]
+                }
+            }
+        });
+
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), None, None);
+        let summary = macos
+            .calibration
+            .runtime_iqk_summary
+            .as_ref()
+            .expect("runtime IQK summary");
+
+        assert!(!summary.completed);
+        assert!(summary.cleanup_restored);
+        assert_eq!(summary.risk, RfQualityRuntimeIqkRiskStatus::FallbackApplied);
+        assert_eq!(summary.fallback_stage_count, 1);
+        assert_eq!(summary.fallback_stages[0].path.as_deref(), Some("A"));
+        assert_eq!(summary.fallback_stages[0].stage.as_deref(), Some("rx"));
+        assert_eq!(
+            summary.fallback_stages[0].failure_label.as_deref(),
+            Some("rx_iqk_failed_flag")
+        );
+    }
+
+    #[test]
     fn rf_quality_calibration_comparison_detects_linux_register_mismatch() {
         let args = rf_quality_report_args();
         let profile =
@@ -39021,6 +39168,7 @@ mod tests {
                 rf_path: None,
                 iqk: None,
                 runtime_iqk: None,
+                runtime_iqk_summary: None,
                 lck: None,
                 thermal: None,
             },

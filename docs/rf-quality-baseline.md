@@ -136,6 +136,12 @@ completed both TX/RX IQK paths in the sustained receiver-backed flow, recovered
 work until it has stepped or outdoor evidence, but this run establishes the
 signed-selection path as close-range safe.
 
+`rf-quality-report` also emits
+`macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
+present. Use `risk`, `completed`, `cleanup_restored`, `fallback_stage_count`,
+and `fallback_stages[]` as the compact machine-readable calibration health
+signal for release gating and field notes.
+
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
 `ceil(expected_payloads * fec_n / fec_k)` count while still recovering every
 source payload. The script now records this as

@@ -299,6 +299,11 @@ Reports label this under `tx_calibration_profile.runtime_iqk` with:
   and `0x0e10`;
 - USB counter deltas for the calibration sequence.
 
+`rf-quality-report` lifts the same data into
+`macos.calibration.runtime_iqk` and adds
+`macos.calibration.runtime_iqk_summary` with compact `risk`, `completed`,
+`cleanup_restored`, and fallback-stage fields for production gating.
+
 This is now a real runtime IQK implementation, but it remains experimental for
 range work until receiver-backed A/B evidence exists for the same channel,
 bandwidth, rate, TX power mode, payload, FEC, and antenna geometry. Treat any
