@@ -106,3 +106,30 @@ The current macOS path is therefore close-range functional but not
 Linux-calibration-equivalent. The mismatch is now explicit enough to use in
 stepped or long-distance RF-quality decisions instead of treating packet
 recovery alone as calibration parity.
+
+## IQK/LCK Porting Decision
+
+Decision as of May 2, 2026: keep the current captured/partial calibration path
+for close-range and controlled stepped testing, but do not treat it as
+long-distance accepted calibration.
+
+Rationale:
+
+- Receiver-backed close-range runs already recovered all expected WFB payloads
+  for the current default/captured, manual TXAGC, and EFUSE-derived TXAGC
+  modes.
+- The Linux calibration comparison still shows six RFE/TX-scale/TX-BB-control
+  differences, so close-range success is not calibration parity.
+- Full `phy_iq_calibrate_8812a` and `phy_lc_calibrate_8812a` ports are large,
+  sequence-sensitive, and not yet tied to a measured receiver-backed failure.
+
+Next action:
+
+- Run stepped/attenuated or outdoor 20 MHz profiles with the current
+  EFUSE-derived TX power mode and captured calibration labels intact.
+- If those profiles fall outside the Linux baseline margin, try the smallest
+  targeted calibration subset first: Linux-aligned RFE pinmux / TX scale /
+  TX-BB-control values for the measured channel and bandwidth.
+- Port full IQK/LCK only if the targeted subset does not close the measured
+  RF-quality gap or if receiver/spectrum evidence specifically points to IQ/LO
+  impairment.
