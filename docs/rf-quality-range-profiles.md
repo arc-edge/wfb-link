@@ -159,6 +159,13 @@ Runtime IQK validation on May 2, 2026:
   `runtime_iqk.status=completed` with both RX paths selected. Keep the profile
   experimental until stepped or outdoor evidence shows whether runtime IQK
   improves distance margin.
+- Fresh telemetry-gated rerun:
+  `/tmp/wfb-rfq-prod-runtime-iqk-telemetry-gate/rf-quality-report.json`
+  recovered `1982/2000`, had zero decrypt failures, and remained
+  `baseline_comparable` / `within_margin`, but `runtime_iqk_summary.risk` was
+  `fallback_applied` because path-A RX IQK failed and used fallback IQC. This
+  confirms the runtime-IQK TX path is close-range usable while the calibration
+  result is still not clean enough for outdoor gate promotion.
 
 Telemetry-gated default rerun on May 2, 2026:
 

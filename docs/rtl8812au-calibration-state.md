@@ -352,6 +352,12 @@ Hardware validation on May 2, 2026:
   datagrams, recovered `1964/2000` marked payloads, matched the Linux baseline
   tuple, and stayed `within_margin` with a `1.75` percentage-point payload-loss
   delta and `0.8603379958870349` macOS/Linux throughput ratio.
+- A fresh telemetry-gated runtime-IQK rerun at
+  `/tmp/wfb-rfq-prod-runtime-iqk-telemetry-gate/rf-quality-report.json`
+  recovered `1982/2000`, logged zero decrypt failures, and stayed
+  `within_margin`, but path-A RX IQK failed with `rx_iqk_failed_flag` and used
+  fallback IQC (`0x200/0x000`), so `runtime_iqk_summary.risk` was
+  `fallback_applied`.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
   paths A and B, RX IQK succeeded on path B, and RX IQK on path A remains
   intermittent: it fell back in the full close-range runs but completed in the
