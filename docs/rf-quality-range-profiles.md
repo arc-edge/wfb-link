@@ -160,6 +160,24 @@ Runtime IQK validation on May 2, 2026:
   experimental until stepped or outdoor evidence shows whether runtime IQK
   improves distance margin.
 
+Telemetry-gated default rerun on May 2, 2026:
+
+- Local artifact directory: `/tmp/wfb-rfq-prod-default-telemetry-gate2`.
+- RF-quality report:
+  `/tmp/wfb-rfq-prod-default-telemetry-gate2/rf-quality-report.json`.
+- Mac bridge result: `pass`, `3000/3000` datagrams received and submitted.
+- Linux receiver counter: `1986/2000` marked payloads recovered with zero
+  decrypt failures and six `RX_ANT` reports.
+- Receiver telemetry: MCS1, 20 MHz, latest RSSI averages `-24 dBm` on antenna
+  `0x1` and `-16 dBm` on antenna `0x0`; SNR fields were reported as `0 dB` by
+  the Linux receiver.
+- Report result: `pass`, `acceptance.status=baseline_comparable`,
+  `comparison.status=matched`, and
+  `comparison.outcome.acceptance_margin.status=within_margin`.
+- This is the current close-range artifact shape expected by outdoor gates:
+  payload recovery, Linux-margin comparison, and
+  `macos.wfb_outcome.receiver_telemetry` are all present.
+
 ## Stepped Or Attenuated
 
 Use this profile before outdoor work when an RF attenuator, repeatable
