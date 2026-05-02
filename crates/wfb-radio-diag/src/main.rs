@@ -3635,11 +3635,24 @@ struct TxRuntimeIqkStageReport {
     retry_count: u8,
     average_count: u8,
     delay_count_max: Option<u8>,
+    attempts: Vec<TxRuntimeIqkAttemptReport>,
     candidates: Vec<TxRuntimeIqkIqcValue>,
     selected_iqc: Option<TxRuntimeIqkIqcValue>,
     fallback_used: bool,
     failure_label: Option<&'static str>,
     fill_plan: Vec<TxRuntimeIqkMaskedBbWritePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct TxRuntimeIqkAttemptReport {
+    attempt_index: u8,
+    ready: Option<bool>,
+    failed: Option<bool>,
+    delay_count: Option<u8>,
+    status_raw: Option<u32>,
+    status_raw_hex: Option<String>,
+    candidate: Option<TxRuntimeIqkIqcValue>,
+    label: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -16376,6 +16389,7 @@ fn rtl8812a_runtime_iqk_setup_plan(
 
 #[derive(Debug, Clone, Default)]
 struct RuntimeIqkOneShotPathState {
+    attempts: Vec<TxRuntimeIqkAttemptReport>,
     candidates: Vec<TxRuntimeIqkIqcValue>,
     selected_iqc: Option<TxRuntimeIqkIqcValue>,
     retry_count: u8,
@@ -16403,6 +16417,28 @@ impl RuntimeIqkOneShotPathState {
             self.finished = true;
             self.failure_label = None;
         }
+    }
+
+    fn push_attempt(
+        &mut self,
+        ready: Option<bool>,
+        failed: Option<bool>,
+        delay_count: Option<u8>,
+        status_raw: Option<u32>,
+        candidate: Option<TxRuntimeIqkIqcValue>,
+        label: Option<&'static str>,
+    ) {
+        let attempt_index = u8::try_from(self.attempts.len() + 1).unwrap_or(u8::MAX);
+        self.attempts.push(TxRuntimeIqkAttemptReport {
+            attempt_index,
+            ready,
+            failed,
+            delay_count,
+            status_raw,
+            status_raw_hex: status_raw.map(|value| format_value(value, 8)),
+            candidate,
+            label,
+        });
     }
 
     fn note_retry(&mut self, label: &'static str) {
@@ -16439,6 +16475,7 @@ impl RuntimeIqkOneShotPathState {
             retry_count: self.retry_count,
             average_count: u8::try_from(self.candidates.len()).unwrap_or(u8::MAX),
             delay_count_max: self.delay_count_max,
+            attempts: self.attempts,
             candidates: self.candidates,
             selected_iqc,
             fallback_used,
@@ -16789,6 +16826,14 @@ where
                 let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
                 path_a.failed = Some(failed);
                 if failed {
+                    path_a.push_attempt(
+                        path_a.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("tx_iqk_failed_flag"),
+                    );
                     path_a.note_retry("tx_iqk_failed_flag");
                 } else {
                     let candidate = runtime_iqk_capture_tx_candidate(
@@ -16800,6 +16845,14 @@ where
                         "R_0xd00",
                         REG_IQK_RESULT_A_D00,
                     )?;
+                    path_a.push_attempt(
+                        path_a.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
                     path_a.push_candidate(candidate);
                 }
             }
@@ -16814,6 +16867,14 @@ where
                 let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
                 path_b.failed = Some(failed);
                 if failed {
+                    path_b.push_attempt(
+                        path_b.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("tx_iqk_failed_flag"),
+                    );
                     path_b.note_retry("tx_iqk_failed_flag");
                 } else {
                     let candidate = runtime_iqk_capture_tx_candidate(
@@ -16825,14 +16886,38 @@ where
                         "R_0xd40",
                         REG_IQK_RESULT_B_D40,
                     )?;
+                    path_b.push_attempt(
+                        path_b.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
                     path_b.push_candidate(candidate);
                 }
             }
         } else {
             if !path_a.finished {
+                path_a.push_attempt(
+                    path_a.ready,
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("tx_iqk_not_ready"),
+                );
                 path_a.note_retry("tx_iqk_not_ready");
             }
             if !path_b.finished {
+                path_b.push_attempt(
+                    path_b.ready,
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("tx_iqk_not_ready"),
+                );
                 path_b.note_retry("tx_iqk_not_ready");
             }
         }
@@ -16866,6 +16951,7 @@ fn runtime_iqk_skipped_stage_report(
         retry_count: 0,
         average_count: 0,
         delay_count_max: None,
+        attempts: Vec::new(),
         candidates: Vec::new(),
         selected_iqc: Some(runtime_iqk_iqc_value(0x200, 0)),
         fallback_used: true,
@@ -17289,16 +17375,33 @@ where
                 let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
                 path_a.failed = Some(failed);
                 if failed {
+                    path_a.push_attempt(
+                        path_a.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("rx_iqk_failed_flag"),
+                    );
                     path_a.note_retry("rx_iqk_failed_flag");
                 } else {
-                    path_a.push_candidate(runtime_iqk_capture_rx_candidate(
+                    let candidate = runtime_iqk_capture_rx_candidate(
                         registers,
                         counters,
                         "R_0xcb8",
                         REG_RFE_TIMING_A_JAGUAR,
                         "R_0xd00",
                         REG_IQK_RESULT_A_D00,
-                    )?);
+                    )?;
+                    path_a.push_attempt(
+                        path_a.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_a.push_candidate(candidate);
                 }
             }
             if !path_b.finished && tx_b_iqc.is_some() {
@@ -17312,23 +17415,56 @@ where
                 let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
                 path_b.failed = Some(failed);
                 if failed {
+                    path_b.push_attempt(
+                        path_b.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("rx_iqk_failed_flag"),
+                    );
                     path_b.note_retry("rx_iqk_failed_flag");
                 } else {
-                    path_b.push_candidate(runtime_iqk_capture_rx_candidate(
+                    let candidate = runtime_iqk_capture_rx_candidate(
                         registers,
                         counters,
                         "R_0xeb8",
                         REG_RFE_TIMING_B_JAGUAR,
                         "R_0xd40",
                         REG_IQK_RESULT_B_D40,
-                    )?);
+                    )?;
+                    path_b.push_attempt(
+                        path_b.ready,
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_b.push_candidate(candidate);
                 }
             }
         } else {
             if !path_a.finished && tx_a_iqc.is_some() {
+                path_a.push_attempt(
+                    path_a.ready,
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("rx_iqk_not_ready"),
+                );
                 path_a.note_retry("rx_iqk_not_ready");
             }
             if !path_b.finished && tx_b_iqc.is_some() {
+                path_b.push_attempt(
+                    path_b.ready,
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("rx_iqk_not_ready"),
+                );
                 path_b.note_retry("rx_iqk_not_ready");
             }
         }
@@ -41211,6 +41347,16 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             retry_count: 10,
             average_count: 0,
             delay_count_max: Some(21),
+            attempts: vec![TxRuntimeIqkAttemptReport {
+                attempt_index: 1,
+                ready: Some(false),
+                failed: Some(true),
+                delay_count: Some(21),
+                status_raw: Some(RTL8812A_IQK_TX_FAIL_MASK),
+                status_raw_hex: Some(format_value(RTL8812A_IQK_TX_FAIL_MASK, 8)),
+                candidate: None,
+                label: Some("tx_iqk_not_ready"),
+            }],
             candidates: Vec::new(),
             selected_iqc: Some(TxRuntimeIqkIqcValue {
                 x: 0x200,
@@ -41227,6 +41373,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(value["stage"], "tx");
         assert_eq!(value["failure_label"], "tx_iqk_not_ready");
         assert_eq!(value["fallback_used"], true);
+        assert_eq!(value["attempts"][0]["status_raw_hex"], "0x00001000");
         assert_eq!(value["fill_plan"].as_array().expect("fill plan").len(), 7);
     }
 

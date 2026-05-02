@@ -290,7 +290,8 @@ the saved state.
 Reports label this under `tx_calibration_profile.runtime_iqk` with:
 
 - per-path `tx` and `rx` stage status, retry count, max ready-poll delay,
-  candidates, selected IQC value, fallback flag, and fill plan;
+  per-attempt ready/fail/raw-result evidence, candidates, selected IQC value,
+  fallback flag, and fill plan;
 - `backup` and `cleanup` evidence, including restore counts and
   `cleanup_status`;
 - `before_iqk_registers`, `after_iqk_registers`, and final affected IQK
@@ -315,6 +316,8 @@ Hardware validation on May 2, 2026:
 - Baseline-compatible receiver-backed run:
   `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`; follow-up:
   `/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`.
+- Attempt-evidence one-frame smoke:
+  `/tmp/wfb-rtl8812a-runtime-iqk-attempts.json`.
 - The first close-range run submitted and observed `3000/3000` WFB datagrams,
   recovered `1978/2000` marked payloads, matched the Linux baseline tuple, and
   stayed `within_margin` with a `1.05` percentage-point payload-loss delta.
@@ -327,6 +330,10 @@ Hardware validation on May 2, 2026:
   intermittent: it fell back in the full close-range runs but completed in the
   one-frame IQC-readback smoke. Keep this profile experimental until path-A RX
   one-shot stability is understood at distance.
+- The attempt-evidence smoke showed path-A RX was ready immediately on every
+  attempt, but alternated usable candidates with explicit hardware fail flags
+  (`0x0000ee00`/`0x0000ef00`) before fallback. That points at IQK candidate
+  quality or sequence sensitivity rather than a ready-poll timeout.
 
 ## Standalone IQK Diagnostic
 
