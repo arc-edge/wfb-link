@@ -46,8 +46,10 @@ Required settings:
 - Fixed `mcs1` / `linux-monitor` TX profile.
 - Current preferred Mac power mode: `efuse-derived` with
   `linux-ch36-ht20` safety clamp.
-- Current calibration label: `stop-gap-captured` until runtime calibration is
-  ported and measured.
+- Current accepted calibration label: `stop-gap-captured`. The guarded
+  `rtl8812a-runtime-iqk` profile is available for experimental A/B runs, but it
+  is not a long-distance accepted calibration mode until it has a passing
+  receiver-backed close-range comparison and stepped or outdoor evidence.
 - At least 120 source payloads for quick checks; use 2,000 source payloads for
   an accepted reference.
 - Linux baseline or Linux receiver artifact paths attached to the report.
@@ -130,6 +132,20 @@ Validated on May 2, 2026 with `scripts/run-rf-quality-close-range.sh`:
   via SSH, so the live run used `SYNC_HW_REPO=0`. The runner now collects Linux
   artifacts by streaming them through the same nested SSH path used for peer
   control rather than relying on local `scp -o ProxyJump` target identity.
+
+Runtime IQK validation on May 2, 2026:
+
+- Local artifact directory: `/tmp/wfb-rfq-runtime-iqk-a2`.
+- RF-quality report: `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`.
+- Mac bridge result: `pass`, `3000/3000` datagrams received and submitted.
+- Linux receiver counter: `1978/2000` marked `RFQCLSEF` payloads recovered
+  with zero decrypt failures and six `RX_ANT` telemetry reports.
+- Report result: `pass`, `acceptance.status=baseline_comparable`,
+  `comparison.status=matched`, and
+  `comparison.outcome.acceptance_margin.status=within_margin`.
+- Calibration note: `runtime_iqk.status=fallback_applied` because path-A RX IQK
+  fell back; this is full-flow evidence for the experimental profile, not
+  long-distance calibration acceptance.
 
 ## Stepped Or Attenuated
 
@@ -293,6 +309,9 @@ Do not classify a run as range-ready when any of the following are true:
   and decoded PPDU is wider than 20 MHz.
 - Stop-gap calibration is still active and the stepped or outdoor result falls
   outside the Linux baseline margin.
+- `rtl8812a-runtime-iqk` was selected but the Mac report shows
+  `tx_calibration_profile.runtime_iqk.cleanup_status != "restored"` or any
+  per-path TX/RX stage used fallback unexpectedly.
 
 ## Wide-Bandwidth Evidence
 

@@ -270,6 +270,55 @@ Interpretation: the read-only IQK marker is safe for sustained close-range
 testing and does not itself improve or replace IQK. It exists to label the
 current state honestly while the full runtime IQK port is still pending.
 
+## Runtime IQK Profile
+
+`bridge-tx-listen`, `bridge-run`, and `bridge-tx-bench` also expose the guarded
+runtime IQK profile:
+
+```sh
+--tx-calibration-profile rtl8812a-runtime-iqk \
+--i-understand-this-writes-registers
+```
+
+This profile ports the bounded RTL8812A Linux IQK flow into the retained
+userspace USB session. It backs up MAC/BB, AFE, RF serial offsets, page-C1
+latches, `rHSSIRead_Jaguar`, `REG_AGC_TABLE_JAGUAR`, and `REG_TXPAUSE`; applies
+the upstream MAC/AFE/RF IQK setup; runs TX and RX one-shot IQK with the upstream
+retry limits; fills selected or fallback TX/RX IQC values; and then restores
+the saved state.
+
+Reports label this under `tx_calibration_profile.runtime_iqk` with:
+
+- per-path `tx` and `rx` stage status, retry count, max ready-poll delay,
+  candidates, selected IQC value, fallback flag, and fill plan;
+- `backup` and `cleanup` evidence, including restore counts and
+  `cleanup_status`;
+- `before_iqk_registers`, `after_iqk_registers`, and final affected IQK
+  register readback;
+- USB counter deltas for the calibration sequence.
+
+This is now a real runtime IQK implementation, but it remains experimental for
+range work until receiver-backed A/B evidence exists for the same channel,
+bandwidth, rate, TX power mode, payload, FEC, and antenna geometry. Treat any
+`cleanup_status != "restored"` or unexpected per-path fallback as a calibration
+failure, even if close-range WFB payload recovery still passes.
+
+Hardware validation on May 2, 2026:
+
+- Guarded one-frame runtime IQK smokes:
+  `/tmp/wfb-rtl8812a-runtime-iqk-smoke.json`,
+  `/tmp/wfb-rtl8812a-runtime-iqk-smoke-2.json`, and
+  `/tmp/wfb-rtl8812a-runtime-iqk-smoke-3.json`.
+- Baseline-compatible receiver-backed run:
+  `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`.
+- The close-range run submitted and observed `3000/3000` WFB datagrams,
+  recovered `1978/2000` marked payloads, matched the Linux baseline tuple, and
+  stayed `within_margin` with a `1.05` percentage-point payload-loss delta.
+- Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
+  paths A and B, RX IQK succeeded on path B, and RX IQK consistently fell back
+  on path A after candidate selection failed. Keep this profile experimental
+  until the path-A RX one-shot sequence matches Linux behavior without fallback.
+
 ## Standalone IQK Diagnostic
 
 `wfb-radio-diag` also exposes a standalone deep IQK evidence command:
@@ -312,9 +361,10 @@ treated as runtime IQK calibration or long-distance acceptance.
 Decision as of May 2, 2026: keep the current captured/partial calibration path
 for default close-range testing, add the targeted Linux-parity profile for
 controlled A/B runs, add the guarded LCK runtime profile for opt-in testing,
-add the read-only IQK probe for staged porting evidence, and do not treat any
-of these as long-distance accepted calibration until stepped or outdoor
-evidence supports that claim.
+add the read-only IQK probe for staged evidence, add the guarded runtime IQK
+profile for experimental A/B testing, and do not treat any of these as
+long-distance accepted calibration until stepped or outdoor evidence supports
+that claim.
 
 Rationale:
 
@@ -324,9 +374,9 @@ Rationale:
 - The Linux calibration comparison still shows six RFE/TX-scale/TX-BB-control
   differences, so close-range success is not calibration parity.
 - Full `phy_iq_calibrate_8812a` is sequence-sensitive and remains the largest
-  calibration blocker. LCK is now available as the first runtime-calibration
-  candidate, and IQK backup/page-C1/RF evidence is now available without
-  running the destructive sweep.
+  calibration risk. LCK is available as a runtime-calibration candidate, and
+  runtime IQK is now available as a guarded TX/RX one-shot profile that must be
+  validated against receiver evidence before production use.
 
 Next action:
 
@@ -338,6 +388,10 @@ Next action:
 - Add `--tx-calibration-profile rtl8812a-lck` to the same A/B matrix once the
   adapter and receiver geometry can show whether LCK improves stability,
   margin, or decode rate.
+- Add `--tx-calibration-profile rtl8812a-runtime-iqk` to the close-range A/B
+  matrix only with explicit write authorization, then inspect
+  `tx_calibration_profile.runtime_iqk.cleanup_status`, per-path fallback flags,
+  and receiver RSSI/SNR/MCS telemetry before considering stepped tests.
 - Use the sustained hardened close-range runs as the current software sanity
   baseline before changing IQK/LCK/RFE code: current-default recovered
   `1973/2000`, IQK marker recovered `1980/2000`, and LCK recovered `1970/2000`,
@@ -345,19 +399,17 @@ Next action:
 - Use `--tx-calibration-profile rtl8812a-iqk-probe` on close-range smokes to
   label staged IQK evidence while relying on `rf_calibration_pre_tx.iqk` for
   the safe final-state register readback.
-- Keep RF-serial IQK backup reads and page-C1 latch reads out of the pre-TX
-  path until they can be run as a standalone diagnostic or as part of the full
-  Linux IQK sequence.
+- Keep standalone IQK diagnostics available as non-traffic evidence; use the
+  runtime IQK profile when the goal is actual IQC selection and fill.
 - Do not use `linux-parity-ch36-ht20` as a production profile until it recovers
   close-range payloads. Its current value is as a negative control proving that
   final-register replay alone is insufficient.
-- Port full IQK when receiver/spectrum evidence points to IQ imbalance, EVM,
-  or asymmetric path quality that the targeted profile and EFUSE-derived TXAGC
-  do not fix.
+- Use receiver/spectrum evidence to decide whether runtime IQK improves
+  imbalance, EVM, or asymmetric path quality over EFUSE-derived TXAGC alone.
 
 Follow-up after the accepted May 2, 2026 close-range profile: the channel 36
 HT20 EFUSE-derived run recovered `2000/2000` marked WFB source payloads and was
 inside the Linux payload-loss margin. That was enough to defer deeper runtime
-calibration at the time. LCK has since been ported as an opt-in profile; full
-IQK is still deferred until receiver-backed or spectrum-backed evidence points
-to IQ imbalance, EVM, or path asymmetry.
+calibration at the time. LCK and runtime IQK have since been ported as opt-in
+profiles; both still need receiver-backed or spectrum-backed A/B evidence
+before being promoted for distance work.

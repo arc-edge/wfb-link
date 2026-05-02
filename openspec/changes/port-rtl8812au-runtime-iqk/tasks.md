@@ -12,12 +12,12 @@
 
 ## 3. Runtime IQK Execution
 
-- [ ] 3.1 Implement the TX IQK one-shot loops with upstream retry limits, readiness/failure checks, candidate averaging, and per-path reports.
-- [ ] 3.2 Implement the RX IQK one-shot loops that depend on successful TX IQK candidates.
-- [ ] 3.3 Apply selected or fallback TX/RX IQC values, restore saved state, and report before/after register evidence.
+- [x] 3.1 Implement the TX IQK one-shot loops with upstream retry limits, readiness/failure checks, candidate averaging, and per-path reports.
+- [x] 3.2 Implement the RX IQK one-shot loops that depend on successful TX IQK candidates.
+- [x] 3.3 Apply selected or fallback TX/RX IQC values, restore saved state, and report before/after register evidence.
 
 ## 4. Validation
 
 - [x] 4.1 Add unit tests for command parsing, profile gating, IQC fill plans, failure labels, and report serialization.
-- [ ] 4.2 Update calibration and RF-quality docs to describe runtime IQK status and remaining range gates.
-- [ ] 4.3 Run formatting, workspace tests, strict OpenSpec validation, deploy to the hardware Mac, run a guarded runtime IQK smoke, and run receiver-backed A/B close-range validation.
+- [x] 4.2 Update calibration and RF-quality docs to describe runtime IQK status and remaining range gates.
+- [x] 4.3 Run formatting, workspace tests, strict OpenSpec validation, deploy to the hardware Mac, run a guarded runtime IQK smoke, and run receiver-backed A/B close-range validation.

@@ -99,12 +99,31 @@ TX_CALIBRATION_PROFILE=rtl8812a-iqk-probe \
 ./scripts/run-rf-quality-close-range.sh
 ```
 
+For guarded runtime IQK testing:
+
+```sh
+TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk \
+./scripts/run-rf-quality-close-range.sh
+```
+
 When `CALIBRATION_MODE` is omitted, the script derives
 `targeted-linux-parity` for `TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20`
-and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck`.
+and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck` or
+`TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk`.
 `rtl8812a-iqk-probe` remains `stop-gap-captured` because it is a marker for
 safe IQK readback already captured by the bridge report; it does not perform
-runtime IQK or additional profile-time hardware reads.
+runtime IQK or additional profile-time hardware reads. The runtime IQK profile
+also adds `--i-understand-this-writes-registers` to the hardware-Mac bridge
+command because it runs the TX/RX IQK one-shot sequence and writes final IQC
+values before restoring saved RF/BB state.
+
+May 2, 2026 hardware evidence for `TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk`
+lives at `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`. It is
+baseline-comparable and within margin at close range, but the calibration
+report still says `runtime_iqk.status=fallback_applied` because path-A RX IQK
+uses fallback IQC. Do not promote it to a production or range-ready profile
+until that per-path fallback is resolved or deliberately accepted with stronger
+range evidence.
 
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
 `ceil(expected_payloads * fec_n / fec_k)` count while still recovering every
