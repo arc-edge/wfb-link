@@ -88,7 +88,10 @@ from Linux `wfb_rx` RX_ANT lines so the range report can compare payload
 recovery with MCS/RSSI/SNR health, not just USB submission and decoded payload
 counts. The gate checks the RX_ANT frequency, MCS index, and bandwidth against
 the outdoor profile tuple, so a passing bench artifact cannot promote a field
-run on a different channel, rate, or bandwidth.
+run on a different channel, rate, or bandwidth. The report also emits
+`macos.wfb_outcome.receiver_signal` with antenna count, tuple consistency, RSSI
+spread, and SNR sample/nonzero counts so field tooling has stable RF-health
+fields without parsing raw receiver logs.
 
 ### Accepted Close-Range 20 MHz Run
 
@@ -354,8 +357,9 @@ receiver-backed WFB outcomes as the primary signal:
   runner preserves RSSI/SNR/MCS/bandwidth telemetry and the report marks
   receiver metadata as `available`. Outdoor promotion now requires the
   close-range RX_ANT frequency/MCS/bandwidth tuple to match the profile. RSSI
-  and SNR remain diagnostic evidence and field-note inputs rather than scored
-  pass/fail margins.
+  and SNR are surfaced in `macos.wfb_outcome.receiver_signal` and remain
+  diagnostic evidence and field-note inputs rather than scored pass/fail
+  margins.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded

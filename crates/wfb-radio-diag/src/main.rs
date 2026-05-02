@@ -4258,8 +4258,34 @@ struct RfQualityWfbOutcomeReport {
     malformed_datagrams: Option<u64>,
     receiver_evidence: Option<serde_json::Value>,
     receiver_telemetry: Option<serde_json::Value>,
+    receiver_signal: Option<RfQualityReceiverSignalReport>,
     throughput: Option<serde_json::Value>,
     cpu: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityReceiverSignalReport {
+    source: &'static str,
+    report_count: Option<u64>,
+    antenna_count: usize,
+    tuple_count: usize,
+    tuple_consistent: Option<bool>,
+    tuples: Vec<RfQualityReceiverSignalTupleReport>,
+    rssi_avg_dbm_min: Option<i64>,
+    rssi_avg_dbm_max: Option<i64>,
+    rssi_avg_spread_db: Option<i64>,
+    snr_avg_db_min: Option<i64>,
+    snr_avg_db_max: Option<i64>,
+    snr_avg_spread_db: Option<i64>,
+    snr_avg_sample_count: usize,
+    snr_avg_nonzero_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityReceiverSignalTupleReport {
+    freq_mhz: Option<u64>,
+    mcs_index: Option<u64>,
+    bandwidth_mhz: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -31643,6 +31669,7 @@ fn rf_quality_wfb_outcome(
             }),
             receiver_evidence: receiver_evidence.cloned(),
             receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
+            receiver_signal: rf_quality_receiver_signal(receiver_evidence),
             recovered_payloads: args.recovered_payloads,
             ..RfQualityWfbOutcomeReport::default()
         };
@@ -31709,6 +31736,7 @@ fn rf_quality_wfb_outcome(
         ),
         receiver_evidence: receiver_evidence.cloned(),
         receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
+        receiver_signal: rf_quality_receiver_signal(receiver_evidence),
         throughput: rf_quality_json_clone(value, &["throughput"]),
         cpu: rf_quality_json_clone(value, &["cpu"]),
     }
@@ -31729,6 +31757,166 @@ fn rf_quality_receiver_telemetry(
         "rx_antenna_report_count": rf_quality_json_u64(receiver_evidence, &["receiver_health", "rx_antenna_report_count"])
             .or_else(|| rf_quality_json_u64(receiver_evidence, &["rx_antenna_report_count"])),
     }))
+}
+
+fn rf_quality_receiver_signal(
+    receiver_evidence: Option<&serde_json::Value>,
+) -> Option<RfQualityReceiverSignalReport> {
+    let receiver_evidence = receiver_evidence?;
+    let summary = rf_quality_json_get(
+        receiver_evidence,
+        &["receiver_health", "rx_antenna_summary"],
+    )
+    .or_else(|| rf_quality_json_get(receiver_evidence, &["rx_antenna_summary"]))?;
+    let samples = rf_quality_receiver_signal_samples(receiver_evidence);
+    if samples.is_empty() {
+        return None;
+    }
+    let all_samples = {
+        let all_samples = rf_quality_receiver_signal_all_samples(receiver_evidence);
+        if all_samples.is_empty() {
+            samples.clone()
+        } else {
+            all_samples
+        }
+    };
+
+    let mut antenna_ids = BTreeMap::new();
+    let mut tuple_values = BTreeMap::new();
+    for sample in &samples {
+        if let Some(antenna_id) = rf_quality_json_u64(sample, &["antenna_id"]) {
+            antenna_ids.insert(antenna_id, ());
+        }
+        let tuple = (
+            rf_quality_json_u64(sample, &["freq_mhz"])
+                .or_else(|| rf_quality_json_u64(sample, &["frequency_mhz"]))
+                .or_else(|| rf_quality_json_u64(sample, &["freq"])),
+            rf_quality_json_u64(sample, &["mcs_index"])
+                .or_else(|| rf_quality_json_u64(sample, &["mcs"])),
+            rf_quality_json_u64(sample, &["bandwidth_mhz"])
+                .or_else(|| rf_quality_json_u64(sample, &["bw_mhz"]))
+                .or_else(|| rf_quality_json_u64(sample, &["bandwidth"])),
+        );
+        if tuple.0.is_some() || tuple.1.is_some() || tuple.2.is_some() {
+            tuple_values.insert(tuple, ());
+        }
+    }
+
+    let tuples = tuple_values
+        .keys()
+        .map(
+            |(freq_mhz, mcs_index, bandwidth_mhz)| RfQualityReceiverSignalTupleReport {
+                freq_mhz: *freq_mhz,
+                mcs_index: *mcs_index,
+                bandwidth_mhz: *bandwidth_mhz,
+            },
+        )
+        .collect::<Vec<_>>();
+    let (rssi_avg_dbm_min, rssi_avg_dbm_max) = rf_quality_receiver_signal_i64_range(
+        summary,
+        &samples,
+        "rssi_avg_dbm_min",
+        "rssi_avg_dbm_max",
+        "rssi_avg_dbm",
+    );
+    let (snr_avg_db_min, snr_avg_db_max) = rf_quality_receiver_signal_i64_range(
+        summary,
+        &samples,
+        "snr_avg_db_min",
+        "snr_avg_db_max",
+        "snr_avg_db",
+    );
+    let snr_avg_values = rf_quality_receiver_signal_i64_values(&all_samples, "snr_avg_db");
+
+    Some(RfQualityReceiverSignalReport {
+        source: "linux_wfb_rx_rx_ant",
+        report_count: rf_quality_json_u64(summary, &["report_count"])
+            .or_else(|| {
+                rf_quality_json_u64(
+                    receiver_evidence,
+                    &["receiver_health", "rx_antenna_report_count"],
+                )
+            })
+            .or_else(|| rf_quality_json_u64(receiver_evidence, &["rx_antenna_report_count"])),
+        antenna_count: antenna_ids.len(),
+        tuple_count: tuples.len(),
+        tuple_consistent: (!tuples.is_empty()).then_some(tuples.len() == 1),
+        tuples,
+        rssi_avg_dbm_min,
+        rssi_avg_dbm_max,
+        rssi_avg_spread_db: rssi_avg_dbm_min
+            .zip(rssi_avg_dbm_max)
+            .map(|(min, max)| max - min),
+        snr_avg_db_min,
+        snr_avg_db_max,
+        snr_avg_spread_db: snr_avg_db_min
+            .zip(snr_avg_db_max)
+            .map(|(min, max)| max - min),
+        snr_avg_sample_count: snr_avg_values.len(),
+        snr_avg_nonzero_count: snr_avg_values.iter().filter(|value| **value != 0).count(),
+    })
+}
+
+fn rf_quality_receiver_signal_samples(
+    receiver_evidence: &serde_json::Value,
+) -> Vec<&serde_json::Value> {
+    for path in [
+        &["receiver_health", "rx_antenna_summary", "latest_by_antenna"][..],
+        &["rx_antenna_summary", "latest_by_antenna"],
+        &["receiver_health", "rx_antenna_reports"],
+        &["rx_antenna_reports"],
+    ] {
+        if let Some(values) =
+            rf_quality_json_get(receiver_evidence, path).and_then(|value| value.as_array())
+        {
+            if !values.is_empty() {
+                return values.iter().collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn rf_quality_receiver_signal_all_samples(
+    receiver_evidence: &serde_json::Value,
+) -> Vec<&serde_json::Value> {
+    for path in [
+        &["receiver_health", "rx_antenna_reports"][..],
+        &["rx_antenna_reports"],
+    ] {
+        if let Some(values) =
+            rf_quality_json_get(receiver_evidence, path).and_then(|value| value.as_array())
+        {
+            if !values.is_empty() {
+                return values.iter().collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn rf_quality_receiver_signal_i64_range(
+    summary: &serde_json::Value,
+    samples: &[&serde_json::Value],
+    min_key: &str,
+    max_key: &str,
+    sample_key: &str,
+) -> (Option<i64>, Option<i64>) {
+    let min_value = rf_quality_json_i64(summary, &[min_key]);
+    let max_value = rf_quality_json_i64(summary, &[max_key]);
+    if min_value.is_some() || max_value.is_some() {
+        return (min_value, max_value);
+    }
+
+    let values = rf_quality_receiver_signal_i64_values(samples, sample_key);
+    (values.iter().min().copied(), values.iter().max().copied())
+}
+
+fn rf_quality_receiver_signal_i64_values(samples: &[&serde_json::Value], key: &str) -> Vec<i64> {
+    samples
+        .iter()
+        .filter_map(|sample| rf_quality_json_i64(sample, &[key]))
+        .collect()
 }
 
 fn rf_quality_receiver_evidence_from_artifacts(paths: &[PathBuf]) -> Option<serde_json::Value> {
@@ -32918,6 +33106,15 @@ fn rf_quality_json_u64(value: &serde_json::Value, path: &[&str]) -> Option<u64> 
     match value {
         serde_json::Value::Number(number) => number.as_u64(),
         serde_json::Value::String(text) => parse_u64_text(text),
+        _ => None,
+    }
+}
+
+fn rf_quality_json_i64(value: &serde_json::Value, path: &[&str]) -> Option<i64> {
+    let value = rf_quality_json_get(value, path)?;
+    match value {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -39794,6 +39991,7 @@ mod tests {
                 malformed_datagrams: None,
                 receiver_evidence: None,
                 receiver_telemetry: None,
+                receiver_signal: None,
                 throughput: None,
                 cpu: None,
             },
@@ -42454,6 +42652,26 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 }),
             Some(1)
         );
+        let receiver_signal = report
+            .macos
+            .wfb_outcome
+            .receiver_signal
+            .as_ref()
+            .expect("receiver signal report");
+        assert_eq!(receiver_signal.report_count, Some(1));
+        assert_eq!(receiver_signal.antenna_count, 1);
+        assert_eq!(receiver_signal.tuple_count, 1);
+        assert_eq!(receiver_signal.tuple_consistent, Some(true));
+        assert_eq!(receiver_signal.tuples[0].freq_mhz, Some(5180));
+        assert_eq!(receiver_signal.tuples[0].mcs_index, Some(1));
+        assert_eq!(receiver_signal.tuples[0].bandwidth_mhz, Some(20));
+        assert_eq!(receiver_signal.rssi_avg_dbm_min, Some(-42));
+        assert_eq!(receiver_signal.rssi_avg_dbm_max, Some(-42));
+        assert_eq!(receiver_signal.rssi_avg_spread_db, Some(0));
+        assert_eq!(receiver_signal.snr_avg_db_min, Some(28));
+        assert_eq!(receiver_signal.snr_avg_db_max, Some(28));
+        assert_eq!(receiver_signal.snr_avg_sample_count, 1);
+        assert_eq!(receiver_signal.snr_avg_nonzero_count, 1);
         assert_eq!(
             report
                 .comparison

@@ -191,7 +191,10 @@ When `wfb_rx` emits `RX_ANT` lines, the runner also parses them into
 antenna id, packet count, RSSI min/avg/max, and SNR min/avg/max from the
 Linux receiver log. `rf-quality-report` also exposes the compact copy at
 `macos.wfb_outcome.receiver_telemetry` so release tooling can read MCS/RSSI/SNR
-health without parsing the full receiver artifact.
+health without parsing the full receiver artifact. It also publishes
+`macos.wfb_outcome.receiver_signal`, a typed summary with antenna count, unique
+RX_ANT tuple count, tuple consistency, RSSI average min/max/spread, and SNR
+average sample/nonzero counts for automated range-readiness checks.
 Outdoor profile gating now rejects a close-range gate that lacks this RX_ANT
 receiver telemetry or whose RX_ANT frequency/MCS/bandwidth tuple differs from
 the outdoor profile. Long-distance promotion needs RF health evidence in
