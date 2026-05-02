@@ -19,7 +19,7 @@
 - [x] 3.3 Add unit tests using captured EFUSE data and Linux-derived expected TXAGC values for at least channel 36 HT20
 - [x] 3.4 Add an explicit guarded EFUSE-derived TX power mode to bridge TX commands, preserving the existing manual `--tx-power-index` override
 - [x] 3.5 Report decoded source values, selected channel group, selected paths, per-rate indexes, clamps, and before/write/after TXAGC register evidence
-- [ ] 3.6 Run close-range macOS TX tests comparing planted/captured power behavior, manual power index behavior, and EFUSE-derived power behavior
+- [x] 3.6 Run close-range macOS TX tests comparing planted/captured power behavior, manual power index behavior, and EFUSE-derived power behavior
 
 ## 4. Calibration State and RF Path Quality
 

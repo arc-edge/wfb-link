@@ -84,3 +84,30 @@ behavior. Remaining work before long-distance acceptance:
 - add calibration-state evidence for IQK/LCK/thermal/RFE registers;
 - decide whether full Linux IQK/LCK ports are justified by measured RF outcome;
 - define accepted close-range and outdoor range profiles.
+
+## Close-Range Comparison
+
+On May 2, 2026, the hardware bench ran the same channel 36 HT20 WFB profile
+through three TX-power modes. Each run used Linux `wfb_tx -d` with
+`k=8,n=12`, 120 source payloads of exactly 1000 bytes, and Mac
+`bridge-tx-listen --macos-usbhost --init-before-tx` with `--max-datagrams 180`.
+The Linux peer was pinned to channel 36 HT20 for the run and the normal
+`arc-wfb-link-1` container was restarted afterward.
+
+| Mode | Mac report | TXAGC control | Mac injected | Linux recovered | Linux artifacts |
+| --- | --- | --- | ---: | ---: | --- |
+| Current default | `/tmp/wfb-agent-rfq-default-listen.json` | existing captured/default state | 180/180 | 120/120 | `/tmp/rfq-default-rx.log`, `/tmp/rfq-default-tx.log`, `/tmp/rfq-default-rf.pcap` |
+| Manual index `0x1a` | `/tmp/wfb-agent-rfq-manual1a-listen.json` | 24 TXAGC registers set to `0x1a1a1a1a` | 180/180 | 120/120 | `/tmp/rfq-manual1a-rx.log`, `/tmp/rfq-manual1a-tx.log`, `/tmp/rfq-manual1a-rf.pcap` |
+| EFUSE-derived | `/tmp/wfb-agent-rfq-efuse-listen.json` | 22 5 GHz OFDM/HT/VHT TXAGC registers from EFUSE group 0 + Linux channel-36 HT20 clamp | 180/180 | 120/120 | `/tmp/rfq-efuse-rx.log`, `/tmp/rfq-efuse-tx.log`, `/tmp/rfq-efuse-rf.pcap` |
+
+The EFUSE-derived report includes the decoded source region, selected
+`5g_group_00`, path A/B programming, per-lane EFUSE base and diff, default
+PHY_REG_PG by-rate offset, unclamped index, clamp, before/write/after register
+evidence, and the final Linux-derived channel 36 HT20 values such as
+`0x0c24=0x1b1b1b1b`, `0x0c2c=0x17171717`, `0x0c34=0x15151515`,
+`0x0e24=0x1d1d1d1d`, `0x0e2c=0x1c1c1c1c`, and `0x0e34=0x1a1a1a1a`.
+
+This close-range result proves that the EFUSE-derived mode does not regress
+basic WFB recovery on the bench. It is not yet a long-distance RF-quality
+acceptance result; the next work is calibration-state evidence and stepped or
+outdoor comparison against the Linux baseline.
