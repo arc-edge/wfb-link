@@ -128,9 +128,10 @@ before/write/after readback. The final `rf_calibration_pre_tx` probe is labeled
 `macos.calibration.profile_report`.
 
 This is not full Linux runtime calibration. It is a targeted, guarded A/B tool
-for the exact channel-36/HT20 parity gap we can test now. Full IQK/LCK remains
-separate because the Linux routines are sequence-sensitive and should be
-validated against receiver-backed or spectrum-backed evidence.
+for the exact channel-36/HT20 parity gap we can test now. Runtime IQK and LCK
+remain separate from this final-register replay because the Linux routines are
+sequence-sensitive and should be validated against receiver-backed or
+spectrum-backed evidence.
 
 Live close-range smoke on May 2, 2026 showed this profile is not safe to
 promote yet:
@@ -146,12 +147,57 @@ equivalent to running the Linux calibration sequence. At least one of these
 values depends on prior sequence state, IQK/LCK state, or surrounding RF/BB
 runtime writes. Keep this profile opt-in for diagnostics only.
 
+## Runtime LCK Profile
+
+`bridge-tx-listen`, `bridge-run`, and `bridge-tx-bench` also expose:
+
+```sh
+--tx-calibration-profile rtl8812a-lck
+```
+
+This ports the small RTL8812A local-oscillator calibration sequence from the
+Linux driver. The routine now performs RF serial readback on path A, reads and
+preserves RF `CHNLBW`, pauses packet TX when the chip is not in continuous-TX
+mode, sets RF `LCK` bit 14, triggers RF `CHNLBW` bit 15, waits 150 ms, clears
+RF `LCK`, restores `REG_TXPAUSE`, and restores RF `CHNLBW`.
+
+The command report records this under `tx_calibration_profile.lck` with:
+
+- the `REG_SINGLE_TONE_CONT_TX_JAGUAR` and `REG_TXPAUSE` inputs;
+- RF readback source evidence for PI/SI mode and the selected readback
+  register;
+- RF `LCK` and `CHNLBW` before/trigger/restore/after values;
+- the 150 ms calibration delay and best-effort cleanup behavior on error.
+
+This is a real runtime calibration step, but it is still not full Linux
+calibration parity. IQK remains unported, and the default profile remains
+`current-default` until LCK is validated against receiver-backed or
+spectrum-backed distance evidence.
+
+Live short smoke on May 2, 2026:
+
+- Artifact directory: `/tmp/wfb-rfq-rtl8812a-lck-smoke-pass`.
+- Linux peer preflight: `status=ok`, no missing required or optional commands,
+  `iw=/usr/sbin/iw`.
+- macOS bridge result: `pass`; submitted `149/149` datagrams.
+- Linux WFB recovery: `100/100` marked source payloads.
+- LCK readback used PI mode via `0x0d04`.
+- RF `CHNLBW`: `0x17d24 -> 0x1fd24 -> 0x17d24`.
+- RF `LCK`: `0x1a78d -> 0x1e78d -> 0x1a78d`.
+- `REG_TXPAUSE`: `0x00 -> 0xff -> 0x00`.
+
+This validates RF readback and the basic LCK sequence on the attached
+AWUS036ACH. It does not validate long-distance RF quality; the run used a
+short 256-byte/100-payload smoke profile and is not comparable to the sustained
+1,000-byte Linux baseline.
+
 ## IQK/LCK Porting Decision
 
 Decision as of May 2, 2026: keep the current captured/partial calibration path
 for default close-range testing, add the targeted Linux-parity profile for
-controlled A/B runs, and do not treat either as long-distance accepted
-calibration.
+controlled A/B runs, add the guarded LCK runtime profile for opt-in testing,
+and do not treat any of these as long-distance accepted calibration until
+stepped or outdoor evidence supports that claim.
 
 Rationale:
 
@@ -160,10 +206,9 @@ Rationale:
   modes.
 - The Linux calibration comparison still shows six RFE/TX-scale/TX-BB-control
   differences, so close-range success is not calibration parity.
-- Full `phy_iq_calibrate_8812a` and `phy_lc_calibrate_8812a` ports are
-  sequence-sensitive. LCK is smaller and should be the first true runtime
-  calibration candidate; IQK is larger and should be ported with staged
-  readback/sanity gates.
+- Full `phy_iq_calibrate_8812a` is sequence-sensitive and remains the largest
+  calibration blocker. LCK is now available as the first runtime-calibration
+  candidate and should be tested as an A/B profile before making it default.
 
 Next action:
 
@@ -172,18 +217,19 @@ Next action:
 - Run close-range and later stepped/outdoor profiles both with
   `--tx-calibration-profile current-default` and
   `--tx-calibration-profile linux-parity-ch36-ht20`.
+- Add `--tx-calibration-profile rtl8812a-lck` to the same A/B matrix once the
+  adapter and receiver geometry can show whether LCK improves stability,
+  margin, or decode rate.
 - Do not use `linux-parity-ch36-ht20` as a production profile until it recovers
   close-range payloads. Its current value is as a negative control proving that
   final-register replay alone is insufficient.
-- Port LCK first if distance evidence points to LO/channel drift or if a
-  sequence-faithful replay shows sensitivity to LCK state.
 - Port full IQK when receiver/spectrum evidence points to IQ imbalance, EVM,
   or asymmetric path quality that the targeted profile and EFUSE-derived TXAGC
   do not fix.
 
 Follow-up after the accepted May 2, 2026 close-range profile: the channel 36
 HT20 EFUSE-derived run recovered `2000/2000` marked WFB source payloads and was
-inside the Linux payload-loss margin. That is enough to keep full IQK/LCK and
-smaller targeted calibration-subset work deferred. Calibration is still labeled
-as stop-gap and remains a stepped/outdoor range risk, but there is not yet a
-receiver-backed failure that justifies porting more runtime calibration code.
+inside the Linux payload-loss margin. That was enough to defer deeper runtime
+calibration at the time. LCK has since been ported as an opt-in profile; full
+IQK is still deferred until receiver-backed or spectrum-backed evidence points
+to IQ imbalance, EVM, or path asymmetry.

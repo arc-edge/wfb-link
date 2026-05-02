@@ -85,8 +85,16 @@ CALIBRATION_MODE=targeted-linux-parity \
 ./scripts/run-rf-quality-close-range.sh
 ```
 
+For opt-in runtime LCK testing:
+
+```sh
+TX_CALIBRATION_PROFILE=rtl8812a-lck \
+./scripts/run-rf-quality-close-range.sh
+```
+
 When `CALIBRATION_MODE` is omitted, the script derives
-`targeted-linux-parity` only for `TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20`;
+`targeted-linux-parity` for `TX_CALIBRATION_PROFILE=linux-parity-ch36-ht20`
+and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck`;
 otherwise it keeps `stop-gap-captured`.
 
 ## Current Close-Range Baseline

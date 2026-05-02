@@ -1929,6 +1929,7 @@ impl Default for TxCalibrationProfileArgs {
 enum TxCalibrationProfileArg {
     CurrentDefault,
     LinuxParityCh36Ht20,
+    Rtl8812aLck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -3392,6 +3393,32 @@ struct TxCalibrationProfileReport {
     bandwidth_mhz: u16,
     register_count: usize,
     writes: Vec<BridgeTxBenchRegisterClearReport>,
+    lck: Option<TxLckCalibrationReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxLckCalibrationReport {
+    semantics: &'static str,
+    upstream_basis: &'static str,
+    rf_path: TxPowerPathArg,
+    rf_path_name: &'static str,
+    continuous_tx_register: RfCalibrationRegisterReadReport,
+    continuous_tx_active: bool,
+    tx_pause_before: RfCalibrationRegisterReadReport,
+    tx_pause_write: Option<BridgeTxBenchRegisterClearReport>,
+    tx_pause_restore: Option<BridgeTxBenchRegisterClearReport>,
+    rf_chnlbw_backup: RfSerialReadReport,
+    rf_lck_before_enter: RfSerialReadReport,
+    rf_lck_enter_write: BridgeTxBenchRfSerialWriteReport,
+    rf_chnlbw_before_trigger: RfSerialReadReport,
+    rf_chnlbw_trigger_write: BridgeTxBenchRfSerialWriteReport,
+    delay_ms: u64,
+    rf_lck_before_exit: RfSerialReadReport,
+    rf_lck_exit_write: BridgeTxBenchRfSerialWriteReport,
+    rf_chnlbw_restore_write: BridgeTxBenchRfSerialWriteReport,
+    rf_chnlbw_after_restore: RfSerialReadReport,
+    rf_lck_after_exit: RfSerialReadReport,
+    counters: DiagnosticCounters,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3570,6 +3597,32 @@ struct BridgeTxBenchRfSerialWriteReport {
     value_hex: String,
     encoded: u32,
     encoded_hex: String,
+    counters: DiagnosticCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RfSerialReadReport {
+    register_name: &'static str,
+    path: TxPowerPathArg,
+    path_name: &'static str,
+    rf_offset: u32,
+    rf_offset_hex: String,
+    hssi_register_name: &'static str,
+    hssi_register: u16,
+    hssi_register_hex: String,
+    hssi_mask_hex: String,
+    pi_mode_register_name: &'static str,
+    pi_mode_register: u16,
+    pi_mode_register_hex: String,
+    pi_mode_value: u32,
+    pi_mode_value_hex: String,
+    pi_mode: bool,
+    readback_register_name: &'static str,
+    readback_register: u16,
+    readback_register_hex: String,
+    readback_mask_hex: String,
+    value: u32,
+    value_hex: String,
     counters: DiagnosticCounters,
 }
 
@@ -5110,6 +5163,14 @@ const REG_CCK_SYSTEM_JAGUAR: u16 = 0x0a00;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_CCA_JAGUAR: u16 = 0x0a08;
 const REG_ANTSEL_SW_JAGUAR: u16 = 0x0900;
+const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
+const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
+const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
+const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
+const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
+const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
+const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
+const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
 const REG_TX_AGC_A_CCK_JAGUAR: u16 = 0x0c20;
 const REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0c34;
 const REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0c38;
@@ -5274,6 +5335,10 @@ const MACRXEN: u8 = 1 << 7;
 const MAC_TX_RX_ENABLE_MASK: u8 = MACTXEN | MACRXEN;
 const RTL8812_CRYSTAL_CAP_MASK: u32 = 0x7ff8_0000;
 const RF_CHNLBW_JAGUAR: u32 = 0x18;
+const RF_LCK_JAGUAR: u32 = 0xb4;
+const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
+const RF_LCK_MODE_BIT: u32 = 1 << 14;
+const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
 const RF_CHNLBW_MOD_AG_MASK: u32 = 0x0007_0300;
 const RF_CHNLBW_BW_MASK: u32 = 0x0000_0c00;
 const RF_CHNLBW_CHANNEL_MASK: u32 = 0x0000_00ff;
@@ -13866,6 +13931,9 @@ fn tx_pre_calibration_mode(
     ) {
         return RfQualityCalibrationMode::TargetedLinuxParity;
     }
+    if matches!(calibration_profile, TxCalibrationProfileArg::Rtl8812aLck) {
+        return RfQualityCalibrationMode::RuntimeApproximation;
+    }
     if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
         RfQualityCalibrationMode::StopGapCaptured
     } else {
@@ -14712,7 +14780,7 @@ fn tx_calibration_profile_writes(
     bandwidth: Bandwidth,
 ) -> std::result::Result<Option<&'static [CapturedTxBringupWrite]>, DiagnosticErrorReport> {
     match profile {
-        TxCalibrationProfileArg::CurrentDefault => Ok(None),
+        TxCalibrationProfileArg::CurrentDefault | TxCalibrationProfileArg::Rtl8812aLck => Ok(None),
         TxCalibrationProfileArg::LinuxParityCh36Ht20
             if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
         {
@@ -14729,6 +14797,242 @@ fn tx_calibration_profile_writes(
     }
 }
 
+#[derive(Default)]
+struct Rtl8812aLckCleanupState {
+    tx_pause_restore: Option<u8>,
+    rf_lck_restore: Option<u32>,
+    rf_chnlbw_restore: Option<u32>,
+}
+
+fn calibration_register_read_report(
+    register_name: &'static str,
+    address: u16,
+    width: &'static str,
+    value: u32,
+    digits: usize,
+) -> RfCalibrationRegisterReadReport {
+    RfCalibrationRegisterReadReport {
+        register_name,
+        address,
+        address_hex: format_address(address),
+        width,
+        value,
+        value_hex: format_value(value, digits),
+    }
+}
+
+fn cleanup_rtl8812a_lck_after_error<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    cleanup: &mut Rtl8812aLckCleanupState,
+) -> Vec<String>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let mut failures = Vec::new();
+    if let Some(value) = cleanup.rf_lck_restore.take() {
+        let encoded = encode_rf_serial_write(RF_LCK_JAGUAR, value);
+        if let Err(error) = write32_with_counter(registers, counters, REG_RF_PATH_A_3WIRE, encoded)
+        {
+            failures.push(format!(
+                "RF_LCK restore to {} failed: {error}",
+                format_value(value, 5)
+            ));
+        }
+        std::thread::sleep(Duration::from_micros(1));
+    }
+    if let Some(value) = cleanup.rf_chnlbw_restore.take() {
+        let encoded = encode_rf_serial_write(RF_CHNLBW_JAGUAR, value);
+        if let Err(error) = write32_with_counter(registers, counters, REG_RF_PATH_A_3WIRE, encoded)
+        {
+            failures.push(format!(
+                "RF_CHNLBW restore to {} failed: {error}",
+                format_value(value, 5)
+            ));
+        }
+        std::thread::sleep(Duration::from_micros(1));
+    }
+    if let Some(value) = cleanup.tx_pause_restore.take() {
+        if let Err(error) = write8_with_counter(registers, counters, REG_TXPAUSE, value) {
+            failures.push(format!(
+                "REG_TXPAUSE restore to {} failed: {error}",
+                format_value(value, 2)
+            ));
+        }
+    }
+    failures
+}
+
+fn run_rtl8812a_lck_calibration<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<TxLckCalibrationReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = *counters;
+    let mut cleanup = Rtl8812aLckCleanupState::default();
+    match run_rtl8812a_lck_calibration_inner(registers, counters, &mut cleanup) {
+        Ok(mut report) => {
+            report.counters = diagnostic_counters_delta(before, *counters);
+            Ok(report)
+        }
+        Err(mut error) => {
+            let cleanup_failures =
+                cleanup_rtl8812a_lck_after_error(registers, counters, &mut cleanup);
+            if !cleanup_failures.is_empty() {
+                error.message.push_str("; cleanup failures: ");
+                error.message.push_str(&cleanup_failures.join("; "));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn run_rtl8812a_lck_calibration_inner<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+    cleanup: &mut Rtl8812aLckCleanupState,
+) -> std::result::Result<TxLckCalibrationReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let continuous_tx_value =
+        read32_with_counter(registers, counters, REG_SINGLE_TONE_CONT_TX_JAGUAR).map_err(
+            |error| DiagnosticErrorReport {
+                code: "rtl8812a_lck_failed",
+                message: format!("REG_SINGLE_TONE_CONT_TX_JAGUAR read failed: {error}"),
+            },
+        )?;
+    let continuous_tx_register = calibration_register_read_report(
+        "REG_SINGLE_TONE_CONT_TX_JAGUAR",
+        REG_SINGLE_TONE_CONT_TX_JAGUAR,
+        "u32",
+        continuous_tx_value,
+        8,
+    );
+    let continuous_tx_active = continuous_tx_value & 0x0007_0000 != 0;
+
+    let tx_pause_before_value =
+        read8_with_counter(registers, counters, REG_TXPAUSE).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "rtl8812a_lck_failed",
+                message: format!("REG_TXPAUSE read failed before LCK: {error}"),
+            }
+        })?;
+    let tx_pause_before = calibration_register_read_report(
+        "REG_TXPAUSE",
+        REG_TXPAUSE,
+        "u8",
+        u32::from(tx_pause_before_value),
+        2,
+    );
+
+    let rf_chnlbw_backup =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_CHNLBW_JAGUAR, counters)?;
+
+    let tx_pause_write = if continuous_tx_active {
+        None
+    } else {
+        cleanup.tx_pause_restore = Some(tx_pause_before_value);
+        Some(bridge_tx_bench_write8_register(
+            registers,
+            "REG_TXPAUSE",
+            REG_TXPAUSE,
+            0xff,
+            counters,
+        )?)
+    };
+
+    let rf_lck_before_enter =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_LCK_JAGUAR, counters)?;
+    cleanup.rf_lck_restore = Some(rf_lck_before_enter.value);
+    let rf_lck_enter_write = rf_serial_write_single_path(
+        registers,
+        TxPowerPathArg::A,
+        RF_LCK_JAGUAR,
+        rf_lck_before_enter.value | RF_LCK_MODE_BIT,
+        counters,
+    )?;
+
+    let rf_chnlbw_before_trigger =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_CHNLBW_JAGUAR, counters)?;
+    cleanup.rf_chnlbw_restore = Some(rf_chnlbw_before_trigger.value);
+    let rf_chnlbw_trigger_write = rf_serial_write_single_path(
+        registers,
+        TxPowerPathArg::A,
+        RF_CHNLBW_JAGUAR,
+        rf_chnlbw_before_trigger.value | RF_CHNLBW_LCK_TRIGGER_BIT,
+        counters,
+    )?;
+
+    std::thread::sleep(Duration::from_millis(150));
+
+    let rf_lck_before_exit =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_LCK_JAGUAR, counters)?;
+    let rf_lck_exit_write = rf_serial_write_single_path(
+        registers,
+        TxPowerPathArg::A,
+        RF_LCK_JAGUAR,
+        rf_lck_before_exit.value & !RF_LCK_MODE_BIT,
+        counters,
+    )?;
+    cleanup.rf_lck_restore = None;
+
+    let tx_pause_restore = if let Some(restore_value) = cleanup.tx_pause_restore.take() {
+        Some(bridge_tx_bench_write8_register(
+            registers,
+            "REG_TXPAUSE",
+            REG_TXPAUSE,
+            restore_value,
+            counters,
+        )?)
+    } else {
+        None
+    };
+
+    let rf_chnlbw_restore_value = cleanup
+        .rf_chnlbw_restore
+        .take()
+        .unwrap_or(rf_chnlbw_before_trigger.value);
+    let rf_chnlbw_restore_write = rf_serial_write_single_path(
+        registers,
+        TxPowerPathArg::A,
+        RF_CHNLBW_JAGUAR,
+        rf_chnlbw_restore_value,
+        counters,
+    )?;
+
+    let rf_chnlbw_after_restore =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_CHNLBW_JAGUAR, counters)?;
+    let rf_lck_after_exit =
+        rf_serial_read_register(registers, TxPowerPathArg::A, RF_LCK_JAGUAR, counters)?;
+
+    Ok(TxLckCalibrationReport {
+        semantics: "guarded RTL8812A local-oscillator calibration; pauses packet TX when needed, runs the upstream RF_LCK/RF_CHNLBW sequence, and restores RF channel state",
+        upstream_basis: "aircrack-ng _phy_lc_calibrate_8812a / phy_RFSerialRead for RTL8812A",
+        rf_path: TxPowerPathArg::A,
+        rf_path_name: "A",
+        continuous_tx_register,
+        continuous_tx_active,
+        tx_pause_before,
+        tx_pause_write,
+        tx_pause_restore,
+        rf_chnlbw_backup,
+        rf_lck_before_enter,
+        rf_lck_enter_write,
+        rf_chnlbw_before_trigger,
+        rf_chnlbw_trigger_write,
+        delay_ms: 150,
+        rf_lck_before_exit,
+        rf_lck_exit_write,
+        rf_chnlbw_restore_write,
+        rf_chnlbw_after_restore,
+        rf_lck_after_exit,
+        counters: DiagnosticCounters::default(),
+    })
+}
+
 fn apply_tx_calibration_profile<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     args: &TxCalibrationProfileArgs,
@@ -14739,6 +15043,26 @@ fn apply_tx_calibration_profile<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
+    if matches!(
+        args.tx_calibration_profile,
+        TxCalibrationProfileArg::Rtl8812aLck
+    ) {
+        let lck = run_rtl8812a_lck_calibration(registers, counters)?;
+        let register_count = 4
+            + usize::from(lck.tx_pause_write.is_some())
+            + usize::from(lck.tx_pause_restore.is_some());
+        return Ok(Some(TxCalibrationProfileReport {
+            semantics: "explicit guarded RTL8812A runtime LCK calibration; ports the Linux local-oscillator calibration sequence without claiming full IQK/Linux parity",
+            upstream_basis: "aircrack-ng _phy_lc_calibrate_8812a and RTL8812A RF serial read/write helpers",
+            profile: args.tx_calibration_profile,
+            channel: channel.number,
+            bandwidth_mhz: bandwidth.mhz(),
+            register_count,
+            writes: Vec::new(),
+            lck: Some(lck),
+        }));
+    }
+
     let Some(profile_writes) =
         tx_calibration_profile_writes(args.tx_calibration_profile, channel, bandwidth)?
     else {
@@ -14759,6 +15083,7 @@ where
         bandwidth_mhz: bandwidth.mhz(),
         register_count: writes.len(),
         writes,
+        lck: None,
     }))
 }
 
@@ -24988,6 +25313,16 @@ where
 }
 
 type RfSerialWriteTarget = (TxPowerPathArg, &'static str, &'static str, u16);
+type RfSerialReadTarget = (
+    TxPowerPathArg,
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    u16,
+    &'static str,
+    u16,
+);
 
 const RF_SERIAL_TARGET_A: [RfSerialWriteTarget; 1] = [(
     TxPowerPathArg::A,
@@ -25015,6 +25350,26 @@ const RF_SERIAL_TARGET_BOTH: [RfSerialWriteTarget; 2] = [
         REG_RF_PATH_B_3WIRE,
     ),
 ];
+const RF_SERIAL_READ_TARGET_A: RfSerialReadTarget = (
+    TxPowerPathArg::A,
+    "A",
+    "rA_PI_Mode_Jaguar",
+    REG_RF_PI_MODE_A_JAGUAR,
+    "rA_PIRead_Jaguar",
+    REG_RF_PI_READ_A_JAGUAR,
+    "rA_SIRead_Jaguar",
+    REG_RF_SI_READ_A_JAGUAR,
+);
+const RF_SERIAL_READ_TARGET_B: RfSerialReadTarget = (
+    TxPowerPathArg::B,
+    "B",
+    "rB_PI_Mode_Jaguar",
+    REG_RF_PI_MODE_B_JAGUAR,
+    "rB_PIRead_Jaguar",
+    REG_RF_PI_READ_B_JAGUAR,
+    "rB_SIRead_Jaguar",
+    REG_RF_SI_READ_B_JAGUAR,
+);
 
 fn rf_serial_write_targets(path: TxPowerPathArg) -> &'static [RfSerialWriteTarget] {
     match path {
@@ -25027,8 +25382,133 @@ fn rf_serial_write_targets(path: TxPowerPathArg) -> &'static [RfSerialWriteTarge
 fn rf_register_display_name(rf_offset: u32) -> &'static str {
     match rf_offset {
         RF_CHNLBW_JAGUAR => "RF_CHNLBW_Jaguar",
+        RF_LCK_JAGUAR => "RF_LCK",
         _ => "RF register",
     }
+}
+
+fn rf_serial_read_target(path: TxPowerPathArg) -> Option<RfSerialReadTarget> {
+    match path {
+        TxPowerPathArg::A => Some(RF_SERIAL_READ_TARGET_A),
+        TxPowerPathArg::B => Some(RF_SERIAL_READ_TARGET_B),
+        TxPowerPathArg::Both => None,
+    }
+}
+
+fn rf_serial_write_single_path<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    path: TxPowerPathArg,
+    rf_offset: u32,
+    value: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<BridgeTxBenchRfSerialWriteReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let write = PreTxRfWriteArg {
+        path,
+        rf_offset,
+        value: value & RF_REGISTER_OFFSET_MASK,
+    };
+    let mut reports = bridge_tx_bench_write_rf_serial_register(registers, &write, counters)?;
+    reports.pop().ok_or_else(|| DiagnosticErrorReport {
+        code: "rf_serial_write_failed",
+        message: format!("RF serial write produced no report for path {path:?}"),
+    })
+}
+
+fn rf_serial_read_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    path: TxPowerPathArg,
+    rf_offset: u32,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<RfSerialReadReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let (
+        path,
+        path_name,
+        pi_mode_register_name,
+        pi_mode_register,
+        pi_readback_register_name,
+        pi_readback_register,
+        si_readback_register_name,
+        si_readback_register,
+    ) = rf_serial_read_target(path).ok_or_else(|| DiagnosticErrorReport {
+        code: "rf_serial_read_path_unsupported",
+        message: "RF serial read requires path A or path B, not both".to_string(),
+    })?;
+    let before = *counters;
+    let rf_offset = rf_offset & 0xff;
+
+    let pi_mode_value =
+        read32_with_counter(registers, counters, pi_mode_register).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "rf_serial_read_failed",
+                message: format!(
+                    "RF path {path_name} PI/SI mode read from {} failed: {error}",
+                    format_address(pi_mode_register)
+                ),
+            }
+        })?;
+    let pi_mode = pi_mode_value & 0x4 != 0;
+
+    bb_set_bb_reg(
+        registers,
+        counters,
+        REG_HSSI_READ_JAGUAR,
+        0x0000_00ff,
+        rf_offset,
+    )
+    .map_err(|error| DiagnosticErrorReport {
+        code: "rf_serial_read_failed",
+        message: format!(
+            "RF path {path_name} read-address select offset 0x{rf_offset:02x} through {} failed: {error}",
+            format_address(REG_HSSI_READ_JAGUAR)
+        ),
+    })?;
+    std::thread::sleep(Duration::from_micros(20));
+
+    let (readback_register_name, readback_register) = if pi_mode {
+        (pi_readback_register_name, pi_readback_register)
+    } else {
+        (si_readback_register_name, si_readback_register)
+    };
+    let value = read32_with_counter(registers, counters, readback_register).map_err(|error| {
+        DiagnosticErrorReport {
+            code: "rf_serial_read_failed",
+            message: format!(
+                "RF path {path_name} offset 0x{rf_offset:02x} readback from {} failed: {error}",
+                format_address(readback_register)
+            ),
+        }
+    })? & RF_REGISTER_OFFSET_MASK;
+
+    Ok(RfSerialReadReport {
+        register_name: rf_register_display_name(rf_offset),
+        path,
+        path_name,
+        rf_offset,
+        rf_offset_hex: format_value(rf_offset, 2),
+        hssi_register_name: "rHSSIRead_Jaguar",
+        hssi_register: REG_HSSI_READ_JAGUAR,
+        hssi_register_hex: format_address(REG_HSSI_READ_JAGUAR),
+        hssi_mask_hex: format_value(0x0000_00ff_u32, 8),
+        pi_mode_register_name,
+        pi_mode_register,
+        pi_mode_register_hex: format_address(pi_mode_register),
+        pi_mode_value,
+        pi_mode_value_hex: format_value(pi_mode_value, 8),
+        pi_mode,
+        readback_register_name,
+        readback_register,
+        readback_register_hex: format_address(readback_register),
+        readback_mask_hex: format_value(RF_REGISTER_OFFSET_MASK, 5),
+        value,
+        value_hex: format_value(value, 5),
+        counters: diagnostic_counters_delta(before, *counters),
+    })
 }
 
 fn bridge_tx_bench_write_rf_serial_register<T>(
@@ -32124,6 +32604,17 @@ fn print_tx_calibration_profile_human(profile: &TxCalibrationProfileReport) {
             write.changed
         );
     }
+    if let Some(lck) = profile.lck.as_ref() {
+        println!(
+            "  LCK path {}: RF_CHNLBW {} -> {} via {} ms delay; RF_LCK {} -> {}",
+            lck.rf_path_name,
+            lck.rf_chnlbw_before_trigger.value_hex,
+            lck.rf_chnlbw_after_restore.value_hex,
+            lck.delay_ms,
+            lck.rf_lck_before_enter.value_hex,
+            lck.rf_lck_after_exit.value_hex
+        );
+    }
 }
 
 fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
@@ -36829,6 +37320,13 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             Bandwidth::Mhz40,
         )
         .is_err());
+        assert!(tx_calibration_profile_writes(
+            TxCalibrationProfileArg::Rtl8812aLck,
+            channel_36,
+            Bandwidth::Mhz40,
+        )
+        .expect("lck profile")
+        .is_none());
         assert_eq!(
             tx_pre_calibration_mode(
                 false,
@@ -36837,6 +37335,34 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 TxCalibrationProfileArg::LinuxParityCh36Ht20
             ),
             RfQualityCalibrationMode::TargetedLinuxParity
+        );
+        assert_eq!(
+            tx_pre_calibration_mode(
+                false,
+                channel_36,
+                Bandwidth::Mhz20,
+                TxCalibrationProfileArg::Rtl8812aLck
+            ),
+            RfQualityCalibrationMode::RuntimeApproximation
+        );
+    }
+
+    #[test]
+    fn rf_serial_read_targets_match_rtl8812a_jaguar_registers() {
+        let target_a = rf_serial_read_target(TxPowerPathArg::A).expect("path A");
+        assert_eq!(target_a.3, REG_RF_PI_MODE_A_JAGUAR);
+        assert_eq!(target_a.5, REG_RF_PI_READ_A_JAGUAR);
+        assert_eq!(target_a.7, REG_RF_SI_READ_A_JAGUAR);
+
+        let target_b = rf_serial_read_target(TxPowerPathArg::B).expect("path B");
+        assert_eq!(target_b.3, REG_RF_PI_MODE_B_JAGUAR);
+        assert_eq!(target_b.5, REG_RF_PI_READ_B_JAGUAR);
+        assert_eq!(target_b.7, REG_RF_SI_READ_B_JAGUAR);
+
+        assert!(rf_serial_read_target(TxPowerPathArg::Both).is_none());
+        assert_eq!(
+            encode_rf_serial_write(RF_LCK_JAGUAR, RF_REGISTER_OFFSET_MASK),
+            0x0b4f_ffff
         );
     }
 

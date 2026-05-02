@@ -119,6 +119,8 @@ TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 if [[ -z "${CALIBRATION_MODE+x}" ]]; then
   if [[ "$TX_CALIBRATION_PROFILE" == "linux-parity-ch36-ht20" ]]; then
     CALIBRATION_MODE=targeted-linux-parity
+  elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-lck" ]]; then
+    CALIBRATION_MODE=runtime-approximation
   else
     CALIBRATION_MODE=stop-gap-captured
   fi
