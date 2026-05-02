@@ -44,6 +44,7 @@ Useful entry points:
 - `docs/tx-once.md`: guarded live single-frame bulk-OUT TX diagnostic and latest hardware result
 - `docs/tx-repeat.md`: guarded live repeated bulk-OUT TX diagnostic and latest hardware result
 - `docs/rf-quality-baseline.md`: Linux receiver-backed RF-quality baseline procedure, capture helper, and current close-range 20 MHz baseline fixture
+- `docs/rtl8812au-efuse-tx-power.md`: EFUSE-derived RTL8812AU TXAGC calculation, Linux basis, guarded CLI mode, and current channel-36 HT20 scope
 - `docs/init-dry-run.md`: hardware-free init transfer planning scaffold and limitations
 - `docs/rtl8812au-init-audit.md`: source audit reference points behind the dry-run init skeleton
 

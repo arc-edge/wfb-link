@@ -1858,15 +1858,63 @@ struct BridgeTxBenchArgs {
     macos_usbhost: MacosUsbHostArgs,
 }
 
-#[derive(Debug, Parser, Clone, Copy, Default)]
+#[derive(Debug, Parser, Clone)]
 struct TxPowerControlArgs {
     /// Explicit RTL8812AU TXAGC power index to write to all per-rate TX power registers.
     #[arg(long, value_parser = parse_tx_power_index)]
     tx_power_index: Option<u8>,
 
+    /// TX power programming mode. Manual mode requires --tx-power-index; EFUSE mode requires an EFUSE source.
+    #[arg(long, value_enum)]
+    tx_power_mode: Option<TxPowerControlModeArg>,
+
     /// RF path set affected by --tx-power-index.
     #[arg(long, value_enum, default_value = "both")]
     tx_power_path: TxPowerPathArg,
+
+    /// efuse-dump JSON report used by --tx-power-mode efuse-derived.
+    #[arg(long, value_name = "PATH")]
+    tx_power_efuse_report: Option<PathBuf>,
+
+    /// Binary EFUSE logical map or 84-byte TX-power region used by --tx-power-mode efuse-derived.
+    #[arg(long, value_name = "PATH")]
+    tx_power_efuse_logical_map: Option<PathBuf>,
+
+    /// Safety clamp profile for EFUSE-derived TXAGC indexes.
+    #[arg(long, value_enum, default_value = "linux-ch36-ht20")]
+    tx_power_safety_profile: TxPowerSafetyProfileArg,
+
+    /// Absolute maximum RTL8812AU TX power index allowed after EFUSE calculation.
+    #[arg(long, default_value = "0x3f", value_parser = parse_tx_power_index)]
+    tx_power_max_index: u8,
+}
+
+impl Default for TxPowerControlArgs {
+    fn default() -> Self {
+        Self {
+            tx_power_index: None,
+            tx_power_mode: None,
+            tx_power_path: TxPowerPathArg::Both,
+            tx_power_efuse_report: None,
+            tx_power_efuse_logical_map: None,
+            tx_power_safety_profile: TxPowerSafetyProfileArg::LinuxCh36Ht20,
+            tx_power_max_index: RTL8812AU_TX_POWER_INDEX_MAX,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum TxPowerControlModeArg {
+    ManualIndex,
+    EfuseDerived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum TxPowerSafetyProfileArg {
+    MaxIndex,
+    LinuxCh36Ht20,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -3243,13 +3291,90 @@ struct BridgeTxBenchLocalMacReport {
 #[derive(Debug, Serialize)]
 struct TxPowerControlReport {
     semantics: &'static str,
-    index: u8,
-    index_hex: String,
+    mode: TxPowerControlModeArg,
+    manual_index: Option<u8>,
+    manual_index_hex: Option<String>,
     path: TxPowerPathArg,
     register_count: usize,
+    repeated_value: Option<u32>,
+    repeated_value_hex: Option<String>,
+    efuse_source: Option<TxPowerEfuseSourceReport>,
+    efuse_plan: Option<TxPowerEfusePlanReport>,
+    writes: Vec<BridgeTxBenchRegisterClearReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxPowerEfuseSourceReport {
+    source_kind: &'static str,
+    source_path: Option<PathBuf>,
+    tx_power_start_offset: usize,
+    tx_power_length: usize,
+    tx_power_data_hex: String,
+    non_ff_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxPowerEfusePlanReport {
+    algorithm: &'static str,
+    upstream_basis: &'static str,
+    channel: u8,
+    bandwidth_mhz: u16,
+    channel_group: TxPowerChannelGroupReport,
+    selected_path: TxPowerPathArg,
+    programmed_paths: Vec<TxPowerRfPath>,
+    safety_profile: TxPowerSafetyProfileArg,
+    max_index: u8,
+    max_index_hex: String,
+    writes: Vec<TxPowerDerivedWriteReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxPowerChannelGroupReport {
+    band: &'static str,
+    group: u8,
+    group_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TxPowerRfPath {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxPowerDerivedWriteReport {
+    name: &'static str,
+    address: u16,
+    address_hex: String,
+    path: TxPowerRfPath,
     value: u32,
     value_hex: String,
-    writes: Vec<BridgeTxBenchRegisterClearReport>,
+    lanes: Vec<TxPowerDerivedLaneReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TxPowerDerivedLaneReport {
+    lane: u8,
+    rate: &'static str,
+    rate_section: &'static str,
+    tx_streams: u8,
+    efuse_base_offset: usize,
+    efuse_base_value: u8,
+    efuse_base_value_hex: String,
+    efuse_diff_kind: &'static str,
+    efuse_diff_offset: Option<usize>,
+    efuse_diff_source_hex: Option<String>,
+    efuse_diff_value: i8,
+    by_rate_offset: i8,
+    tracking_offset: i8,
+    unclamped_index: i16,
+    clamp_profile: TxPowerSafetyProfileArg,
+    clamp_max_index: u8,
+    clamp_max_index_hex: String,
+    final_index: u8,
+    final_index_hex: String,
+    clamped: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -4574,6 +4699,7 @@ const RTL8812AU_EFUSE_LOGICAL_MAP_LEN: usize = 512;
 const RTL8812AU_EFUSE_MAX_SECTION: u8 = 64;
 const RTL8812AU_EFUSE_TX_POWER_START: usize = 0x10;
 const RTL8812AU_EFUSE_TX_POWER_LEN: usize = 84;
+const RTL8812AU_TX_POWER_INDEX_MAX: u8 = 0x3f;
 
 const FEN_ELDR: u16 = 1 << 12;
 const ANA8M: u16 = 1 << 1;
@@ -13329,35 +13455,738 @@ fn tx_power_agc_registers(path: TxPowerPathArg) -> Vec<TxPowerAgcRegister> {
     }
 }
 
+#[derive(Debug)]
+struct TxPowerEfuseSource {
+    report: TxPowerEfuseSourceReport,
+    tx_power_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TxPowerRateFamily {
+    Ofdm,
+    Ht,
+    Vht,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TxPowerRateLaneSpec {
+    lane: u8,
+    rate: &'static str,
+    rate_section: &'static str,
+    family: TxPowerRateFamily,
+    tx_streams: u8,
+    by_rate_offset: i8,
+}
+
+#[derive(Debug)]
+struct TxPowerEfuseRegisterSpec {
+    name: &'static str,
+    address: u16,
+    path: TxPowerRfPath,
+    lanes: Vec<TxPowerRateLaneSpec>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TxPowerEfuseDiff {
+    kind: &'static str,
+    offset: Option<usize>,
+    source_byte: Option<u8>,
+    value: i8,
+}
+
+fn tx_power_lanes(
+    entries: &[(u8, &'static str, &'static str, TxPowerRateFamily, u8, i8)],
+) -> Vec<TxPowerRateLaneSpec> {
+    entries
+        .iter()
+        .map(
+            |&(lane, rate, rate_section, family, tx_streams, by_rate_offset)| TxPowerRateLaneSpec {
+                lane,
+                rate,
+                rate_section,
+                family,
+                tx_streams,
+                by_rate_offset,
+            },
+        )
+        .collect()
+}
+
+fn tx_power_efuse_register_specs(path: TxPowerPathArg) -> Vec<TxPowerEfuseRegisterSpec> {
+    let mut specs = Vec::new();
+    if matches!(path, TxPowerPathArg::A | TxPowerPathArg::Both) {
+        specs.extend(tx_power_efuse_path_register_specs(TxPowerRfPath::A));
+    }
+    if matches!(path, TxPowerPathArg::B | TxPowerPathArg::Both) {
+        specs.extend(tx_power_efuse_path_register_specs(TxPowerRfPath::B));
+    }
+    specs
+}
+
+fn tx_power_efuse_path_register_specs(path: TxPowerRfPath) -> Vec<TxPowerEfuseRegisterSpec> {
+    let (
+        ofdm_low,
+        ofdm_high,
+        ht1_low,
+        ht1_high,
+        ht2_low,
+        ht2_high,
+        vht1_low,
+        vht1_high,
+        vht_mixed,
+        vht2_mid,
+        vht2_high,
+    ) = match path {
+        TxPowerRfPath::A => (
+            REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+            REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+            REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+            REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+            REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+            REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+            REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+            REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+            REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+            REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+            REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+        ),
+        TxPowerRfPath::B => (
+            REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+            REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+            REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+            REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+            REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+            REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+            REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+            REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+            REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+            REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+            REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+        ),
+    };
+    vec![
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_OFDM18_OFDM6",
+                TxPowerRfPath::B => "rB_TxAGC_OFDM18_OFDM6",
+            },
+            address: ofdm_low,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "ofdm_6m", "ofdm", TxPowerRateFamily::Ofdm, 1, 14),
+                (1, "ofdm_9m", "ofdm", TxPowerRateFamily::Ofdm, 1, 14),
+                (2, "ofdm_12m", "ofdm", TxPowerRateFamily::Ofdm, 1, 12),
+                (3, "ofdm_18m", "ofdm", TxPowerRateFamily::Ofdm, 1, 12),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_OFDM54_OFDM24",
+                TxPowerRfPath::B => "rB_TxAGC_OFDM54_OFDM24",
+            },
+            address: ofdm_high,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "ofdm_24m", "ofdm", TxPowerRateFamily::Ofdm, 1, 10),
+                (1, "ofdm_36m", "ofdm", TxPowerRateFamily::Ofdm, 1, 6),
+                (2, "ofdm_48m", "ofdm", TxPowerRateFamily::Ofdm, 1, 2),
+                (3, "ofdm_54m", "ofdm", TxPowerRateFamily::Ofdm, 1, 0),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_MCS3_MCS0",
+                TxPowerRfPath::B => "rB_TxAGC_MCS3_MCS0",
+            },
+            address: ht1_low,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "mcs0", "ht_1ss", TxPowerRateFamily::Ht, 1, 16),
+                (1, "mcs1", "ht_1ss", TxPowerRateFamily::Ht, 1, 16),
+                (2, "mcs2", "ht_1ss", TxPowerRateFamily::Ht, 1, 14),
+                (3, "mcs3", "ht_1ss", TxPowerRateFamily::Ht, 1, 12),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_MCS7_MCS4",
+                TxPowerRfPath::B => "rB_TxAGC_MCS7_MCS4",
+            },
+            address: ht1_high,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "mcs4", "ht_1ss", TxPowerRateFamily::Ht, 1, 8),
+                (1, "mcs5", "ht_1ss", TxPowerRateFamily::Ht, 1, 4),
+                (2, "mcs6", "ht_1ss", TxPowerRateFamily::Ht, 1, 2),
+                (3, "mcs7", "ht_1ss", TxPowerRateFamily::Ht, 1, 0),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS1_7_NSS1_4",
+                TxPowerRfPath::B => "rB_TxAGC_NSS1_7_NSS1_4",
+            },
+            address: ht2_low,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "mcs8", "ht_2ss", TxPowerRateFamily::Ht, 2, 16),
+                (1, "mcs9", "ht_2ss", TxPowerRateFamily::Ht, 2, 16),
+                (2, "mcs10", "ht_2ss", TxPowerRateFamily::Ht, 2, 14),
+                (3, "mcs11", "ht_2ss", TxPowerRateFamily::Ht, 2, 12),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS1_11_NSS1_8",
+                TxPowerRfPath::B => "rB_TxAGC_NSS1_11_NSS1_8",
+            },
+            address: ht2_high,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "mcs12", "ht_2ss", TxPowerRateFamily::Ht, 2, 8),
+                (1, "mcs13", "ht_2ss", TxPowerRateFamily::Ht, 2, 4),
+                (2, "mcs14", "ht_2ss", TxPowerRateFamily::Ht, 2, 2),
+                (3, "mcs15", "ht_2ss", TxPowerRateFamily::Ht, 2, 0),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS1_3_NSS1_0",
+                TxPowerRfPath::B => "rB_TxAGC_NSS1_3_NSS1_0",
+            },
+            address: vht1_low,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "vht1ss_mcs0", "vht_1ss", TxPowerRateFamily::Vht, 1, 16),
+                (1, "vht1ss_mcs1", "vht_1ss", TxPowerRateFamily::Vht, 1, 16),
+                (2, "vht1ss_mcs2", "vht_1ss", TxPowerRateFamily::Vht, 1, 14),
+                (3, "vht1ss_mcs3", "vht_1ss", TxPowerRateFamily::Vht, 1, 12),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS2_3_NSS2_0",
+                TxPowerRfPath::B => "rB_TxAGC_NSS2_3_NSS2_0",
+            },
+            address: vht1_high,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "vht1ss_mcs4", "vht_1ss", TxPowerRateFamily::Vht, 1, 8),
+                (1, "vht1ss_mcs5", "vht_1ss", TxPowerRateFamily::Vht, 1, 4),
+                (2, "vht1ss_mcs6", "vht_1ss", TxPowerRateFamily::Vht, 1, 2),
+                (3, "vht1ss_mcs7", "vht_1ss", TxPowerRateFamily::Vht, 1, 0),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS2_7_NSS2_4",
+                TxPowerRfPath::B => "rB_TxAGC_NSS2_7_NSS2_4",
+            },
+            address: vht_mixed,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "vht1ss_mcs8", "vht_1ss", TxPowerRateFamily::Vht, 1, -2),
+                (1, "vht1ss_mcs9", "vht_1ss", TxPowerRateFamily::Vht, 1, -4),
+                (2, "vht2ss_mcs0", "vht_2ss", TxPowerRateFamily::Vht, 2, 16),
+                (3, "vht2ss_mcs1", "vht_2ss", TxPowerRateFamily::Vht, 2, 16),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS2_11_NSS2_8",
+                TxPowerRfPath::B => "rB_TxAGC_NSS2_11_NSS2_8",
+            },
+            address: vht2_mid,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "vht2ss_mcs2", "vht_2ss", TxPowerRateFamily::Vht, 2, 14),
+                (1, "vht2ss_mcs3", "vht_2ss", TxPowerRateFamily::Vht, 2, 12),
+                (2, "vht2ss_mcs4", "vht_2ss", TxPowerRateFamily::Vht, 2, 8),
+                (3, "vht2ss_mcs5", "vht_2ss", TxPowerRateFamily::Vht, 2, 4),
+            ]),
+        },
+        TxPowerEfuseRegisterSpec {
+            name: match path {
+                TxPowerRfPath::A => "rA_TxAGC_NSS3_3_NSS3_0",
+                TxPowerRfPath::B => "rB_TxAGC_NSS3_3_NSS3_0",
+            },
+            address: vht2_high,
+            path,
+            lanes: tx_power_lanes(&[
+                (0, "vht2ss_mcs6", "vht_2ss", TxPowerRateFamily::Vht, 2, 2),
+                (1, "vht2ss_mcs7", "vht_2ss", TxPowerRateFamily::Vht, 2, 0),
+                (2, "vht2ss_mcs8", "vht_2ss", TxPowerRateFamily::Vht, 2, -2),
+                (3, "vht2ss_mcs9", "vht_2ss", TxPowerRateFamily::Vht, 2, -4),
+            ]),
+        },
+    ]
+}
+
+fn tx_power_control_requested(args: &TxPowerControlArgs) -> bool {
+    args.tx_power_index.is_some() || args.tx_power_mode.is_some()
+}
+
+fn resolve_tx_power_control_mode(
+    args: &TxPowerControlArgs,
+) -> std::result::Result<Option<TxPowerControlModeArg>, DiagnosticErrorReport> {
+    match (args.tx_power_mode, args.tx_power_index) {
+        (Some(TxPowerControlModeArg::EfuseDerived), Some(_)) => Err(DiagnosticErrorReport {
+            code: "tx_power_mode_conflict",
+            message:
+                "--tx-power-mode efuse-derived cannot be combined with --tx-power-index; use one explicit mode"
+                    .to_string(),
+        }),
+        (Some(TxPowerControlModeArg::ManualIndex), None) => Err(DiagnosticErrorReport {
+            code: "tx_power_manual_index_missing",
+            message: "--tx-power-mode manual-index requires --tx-power-index".to_string(),
+        }),
+        (Some(mode), _) => Ok(Some(mode)),
+        (None, Some(_)) => Ok(Some(TxPowerControlModeArg::ManualIndex)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn tx_power_efuse_source_from_bytes(
+    bytes: Vec<u8>,
+    source_kind: &'static str,
+    source_path: Option<PathBuf>,
+) -> std::result::Result<TxPowerEfuseSource, DiagnosticErrorReport> {
+    let tx_power_data = if bytes.len() == RTL8812AU_EFUSE_TX_POWER_LEN {
+        bytes
+    } else if bytes.len() >= RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN {
+        bytes[RTL8812AU_EFUSE_TX_POWER_START
+            ..RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN]
+            .to_vec()
+    } else {
+        return Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_source_too_short",
+            message: format!(
+                "EFUSE source has {} bytes; expected an 84-byte TX-power region or a logical map at least {} bytes long",
+                bytes.len(),
+                RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN
+            ),
+        });
+    };
+    let non_ff_bytes = tx_power_data.iter().filter(|byte| **byte != 0xff).count();
+    Ok(TxPowerEfuseSource {
+        report: TxPowerEfuseSourceReport {
+            source_kind,
+            source_path,
+            tx_power_start_offset: RTL8812AU_EFUSE_TX_POWER_START,
+            tx_power_length: tx_power_data.len(),
+            tx_power_data_hex: encode_hex(&tx_power_data),
+            non_ff_bytes,
+        },
+        tx_power_data,
+    })
+}
+
+fn load_tx_power_efuse_source(
+    args: &TxPowerControlArgs,
+) -> std::result::Result<TxPowerEfuseSource, DiagnosticErrorReport> {
+    match (
+        args.tx_power_efuse_report.as_deref(),
+        args.tx_power_efuse_logical_map.as_deref(),
+    ) {
+        (Some(_), Some(_)) => Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_source_conflict",
+            message: "use only one of --tx-power-efuse-report or --tx-power-efuse-logical-map"
+                .to_string(),
+        }),
+        (Some(path), None) => {
+            let json = rf_quality_load_json(
+                path,
+                "tx_power_efuse_report_read_failed",
+                "tx_power_efuse_report_parse_failed",
+            )?;
+            let (source_kind, hex) =
+                if let Some(hex) = rf_quality_json_string(&json, &["efuse", "logical_map_hex"]) {
+                    ("efuse_report_logical_map", hex)
+                } else if let Some(hex) =
+                    rf_quality_json_string(&json, &["efuse", "summary", "tx_power", "data_hex"])
+                {
+                    ("efuse_report_tx_power_region", hex)
+                } else if let Some(hex) = rf_quality_json_string(&json, &["tx_power_data_hex"]) {
+                    ("efuse_report_tx_power_region", hex)
+                } else {
+                    return Err(DiagnosticErrorReport {
+                        code: "tx_power_efuse_report_missing_hex",
+                        message: format!(
+                            "{} does not contain efuse.logical_map_hex or efuse.summary.tx_power.data_hex",
+                            path.display()
+                        ),
+                    });
+                };
+            let bytes = parse_hex_bytes(&hex).map_err(|message| DiagnosticErrorReport {
+                code: "tx_power_efuse_report_hex_invalid",
+                message: format!("{}: {message}", path.display()),
+            })?;
+            tx_power_efuse_source_from_bytes(bytes, source_kind, Some(path.to_path_buf()))
+        }
+        (None, Some(path)) => {
+            let bytes = fs::read(path).map_err(|error| DiagnosticErrorReport {
+                code: "tx_power_efuse_logical_map_read_failed",
+                message: format!("{}: {error}", path.display()),
+            })?;
+            tx_power_efuse_source_from_bytes(
+                bytes,
+                "efuse_logical_map_or_tx_power_region_binary",
+                Some(path.to_path_buf()),
+            )
+        }
+        (None, None) => Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_source_missing",
+            message: "--tx-power-mode efuse-derived requires --tx-power-efuse-report or --tx-power-efuse-logical-map".to_string(),
+        }),
+    }
+}
+
+fn tx_power_5g_channel_group(channel: u8) -> Option<u8> {
+    match channel {
+        15..=42 => Some(0),
+        44..=48 => Some(1),
+        50..=58 => Some(2),
+        60..=80 => Some(3),
+        82..=106 => Some(4),
+        108..=114 => Some(5),
+        116..=122 => Some(6),
+        124..=130 => Some(7),
+        132..=138 => Some(8),
+        140..=144 => Some(9),
+        149..=155 => Some(10),
+        157..=161 => Some(11),
+        165..=171 => Some(12),
+        173..=177 => Some(13),
+        _ => None,
+    }
+}
+
+fn tx_power_5g_path_offset(path: TxPowerRfPath) -> usize {
+    match path {
+        TxPowerRfPath::A => 18,
+        TxPowerRfPath::B => 60,
+    }
+}
+
+fn tx_power_sign_extend_4bit(value: u8) -> i8 {
+    let nibble = value & 0x0f;
+    if nibble & 0x08 != 0 {
+        (nibble as i8) - 16
+    } else {
+        nibble as i8
+    }
+}
+
+fn tx_power_diff_from_byte(
+    data: &[u8],
+    offset: usize,
+    high_nibble: bool,
+    kind: &'static str,
+) -> std::result::Result<TxPowerEfuseDiff, DiagnosticErrorReport> {
+    let Some(byte) = data.get(offset).copied() else {
+        return Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_diff_out_of_range",
+            message: format!("EFUSE TX-power diff offset {offset} is outside the TX-power region"),
+        });
+    };
+    let nibble = if high_nibble { byte >> 4 } else { byte & 0x0f };
+    Ok(TxPowerEfuseDiff {
+        kind,
+        offset: Some(RTL8812AU_EFUSE_TX_POWER_START + offset),
+        source_byte: Some(byte),
+        value: tx_power_sign_extend_4bit(nibble),
+    })
+}
+
+fn tx_power_efuse_5g_diff(
+    data: &[u8],
+    path: TxPowerRfPath,
+    lane: TxPowerRateLaneSpec,
+    bandwidth: Bandwidth,
+) -> std::result::Result<TxPowerEfuseDiff, DiagnosticErrorReport> {
+    let tx_index = lane.tx_streams.saturating_sub(1);
+    let path_offset = tx_power_5g_path_offset(path);
+    match lane.family {
+        TxPowerRateFamily::Ofdm => match tx_index {
+            0 => tx_power_diff_from_byte(data, path_offset + 14, false, "ofdm_5g_diff"),
+            1 => tx_power_diff_from_byte(data, path_offset + 18, true, "ofdm_5g_diff"),
+            2 => tx_power_diff_from_byte(data, path_offset + 18, false, "ofdm_5g_diff"),
+            3 => tx_power_diff_from_byte(data, path_offset + 19, false, "ofdm_5g_diff"),
+            _ => Err(DiagnosticErrorReport {
+                code: "tx_power_stream_count_unsupported",
+                message: format!("unsupported OFDM TX stream count {}", lane.tx_streams),
+            }),
+        },
+        TxPowerRateFamily::Ht | TxPowerRateFamily::Vht => match bandwidth {
+            Bandwidth::Mhz20 => match tx_index {
+                0 => tx_power_diff_from_byte(data, path_offset + 14, true, "bw20_5g_diff"),
+                1 => tx_power_diff_from_byte(data, path_offset + 15, false, "bw20_5g_diff"),
+                2 => tx_power_diff_from_byte(data, path_offset + 16, false, "bw20_5g_diff"),
+                3 => tx_power_diff_from_byte(data, path_offset + 17, false, "bw20_5g_diff"),
+                _ => Err(DiagnosticErrorReport {
+                    code: "tx_power_stream_count_unsupported",
+                    message: format!("unsupported HT/VHT TX stream count {}", lane.tx_streams),
+                }),
+            },
+            Bandwidth::Mhz40 => match tx_index {
+                0 => Ok(TxPowerEfuseDiff {
+                    kind: "bw40_5g_diff_default_1ss",
+                    offset: None,
+                    source_byte: None,
+                    value: 0,
+                }),
+                1 => tx_power_diff_from_byte(data, path_offset + 15, true, "bw40_5g_diff"),
+                2 => tx_power_diff_from_byte(data, path_offset + 16, true, "bw40_5g_diff"),
+                3 => tx_power_diff_from_byte(data, path_offset + 17, true, "bw40_5g_diff"),
+                _ => Err(DiagnosticErrorReport {
+                    code: "tx_power_stream_count_unsupported",
+                    message: format!("unsupported HT/VHT TX stream count {}", lane.tx_streams),
+                }),
+            },
+            Bandwidth::Mhz80 => match tx_index {
+                0..=3 => tx_power_diff_from_byte(
+                    data,
+                    path_offset + 20 + usize::from(tx_index),
+                    true,
+                    "bw80_5g_diff",
+                ),
+                _ => Err(DiagnosticErrorReport {
+                    code: "tx_power_stream_count_unsupported",
+                    message: format!("unsupported HT/VHT TX stream count {}", lane.tx_streams),
+                }),
+            },
+        },
+    }
+}
+
+fn tx_power_safety_clamp(
+    profile: TxPowerSafetyProfileArg,
+    max_index: u8,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    path: TxPowerRfPath,
+    lane: TxPowerRateLaneSpec,
+) -> u8 {
+    let profile_max = match profile {
+        TxPowerSafetyProfileArg::MaxIndex => max_index,
+        TxPowerSafetyProfileArg::LinuxCh36Ht20
+            if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
+        {
+            match (path, lane.family, lane.tx_streams) {
+                (TxPowerRfPath::A, TxPowerRateFamily::Ofdm, _) => 0x1b,
+                (TxPowerRfPath::B, TxPowerRateFamily::Ofdm, _) => 0x1d,
+                (TxPowerRfPath::A, _, 1) => 0x17,
+                (TxPowerRfPath::B, _, 1) => 0x1c,
+                (TxPowerRfPath::A, _, 2) => 0x15,
+                (TxPowerRfPath::B, _, 2) => 0x1a,
+                _ => max_index,
+            }
+        }
+        TxPowerSafetyProfileArg::LinuxCh36Ht20 => max_index,
+    };
+    profile_max.min(max_index)
+}
+
+fn plan_efuse_tx_power(
+    tx_power_data: &[u8],
+    channel: Channel,
+    bandwidth: Bandwidth,
+    selected_path: TxPowerPathArg,
+    safety_profile: TxPowerSafetyProfileArg,
+    max_index: u8,
+) -> std::result::Result<TxPowerEfusePlanReport, DiagnosticErrorReport> {
+    if channel.band != Band::Ghz5 {
+        return Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_band_unsupported",
+            message:
+                "EFUSE-derived TX power currently supports RTL8812AU 5 GHz channel groups only"
+                    .to_string(),
+        });
+    }
+    let Some(group) = tx_power_5g_channel_group(channel.number) else {
+        return Err(DiagnosticErrorReport {
+            code: "tx_power_efuse_channel_group_unknown",
+            message: format!(
+                "no RTL8812AU 5 GHz TX-power group for channel {}",
+                channel.number
+            ),
+        });
+    };
+    let specs = tx_power_efuse_register_specs(selected_path);
+    let mut writes = Vec::new();
+    let mut programmed_paths = Vec::new();
+    for spec in specs {
+        if !programmed_paths.contains(&spec.path) {
+            programmed_paths.push(spec.path);
+        }
+        let path_offset = tx_power_5g_path_offset(spec.path);
+        let base_offset = path_offset + usize::from(group);
+        let Some(base_value) = tx_power_data.get(base_offset).copied() else {
+            return Err(DiagnosticErrorReport {
+                code: "tx_power_efuse_base_out_of_range",
+                message: format!(
+                    "EFUSE TX-power base offset {base_offset} is outside the TX-power region"
+                ),
+            });
+        };
+        if base_value > RTL8812AU_TX_POWER_INDEX_MAX {
+            return Err(DiagnosticErrorReport {
+                code: "tx_power_efuse_base_invalid",
+                message: format!(
+                    "EFUSE TX-power base {} at offset {} exceeds RTL8812AU max index {}",
+                    format_value(base_value, 2),
+                    RTL8812AU_EFUSE_TX_POWER_START + base_offset,
+                    format_value(RTL8812AU_TX_POWER_INDEX_MAX, 2)
+                ),
+            });
+        }
+        let mut value = 0u32;
+        let mut lanes = Vec::new();
+        for lane in spec.lanes {
+            let diff = tx_power_efuse_5g_diff(tx_power_data, spec.path, lane, bandwidth)?;
+            let unclamped =
+                i16::from(base_value) + i16::from(diff.value) + i16::from(lane.by_rate_offset);
+            let clamp_max = tx_power_safety_clamp(
+                safety_profile,
+                max_index,
+                channel,
+                bandwidth,
+                spec.path,
+                lane,
+            );
+            let clamp_min: u8 = if clamp_max == 0 { 0 } else { 1 };
+            let final_index = unclamped.clamp(i16::from(clamp_min), i16::from(clamp_max)) as u8;
+            value |= u32::from(final_index) << (u32::from(lane.lane) * 8);
+            lanes.push(TxPowerDerivedLaneReport {
+                lane: lane.lane,
+                rate: lane.rate,
+                rate_section: lane.rate_section,
+                tx_streams: lane.tx_streams,
+                efuse_base_offset: RTL8812AU_EFUSE_TX_POWER_START + base_offset,
+                efuse_base_value: base_value,
+                efuse_base_value_hex: format_value(base_value, 2),
+                efuse_diff_kind: diff.kind,
+                efuse_diff_offset: diff.offset,
+                efuse_diff_source_hex: diff.source_byte.map(|byte| format_value(byte, 2)),
+                efuse_diff_value: diff.value,
+                by_rate_offset: lane.by_rate_offset,
+                tracking_offset: 0,
+                unclamped_index: unclamped,
+                clamp_profile: safety_profile,
+                clamp_max_index: clamp_max,
+                clamp_max_index_hex: format_value(clamp_max, 2),
+                final_index,
+                final_index_hex: format_value(final_index, 2),
+                clamped: unclamped != i16::from(final_index),
+            });
+        }
+        writes.push(TxPowerDerivedWriteReport {
+            name: spec.name,
+            address: spec.address,
+            address_hex: format_address(spec.address),
+            path: spec.path,
+            value,
+            value_hex: format_value(value, 8),
+            lanes,
+        });
+    }
+    Ok(TxPowerEfusePlanReport {
+        algorithm: "rtl8812au_efuse_base_plus_diff_plus_phy_reg_pg_by_rate_with_explicit_safety_clamp",
+        upstream_basis: "hal_load_txpwr_info + PHY_GetTxPowerIndexBase + PHY_GetTxPowerByRate + PHY_SetTxPowerIndex_8812A",
+        channel: channel.number,
+        bandwidth_mhz: bandwidth.mhz(),
+        channel_group: TxPowerChannelGroupReport {
+            band: "5ghz",
+            group,
+            group_name: format!("5g_group_{group:02}"),
+        },
+        selected_path,
+        programmed_paths,
+        safety_profile,
+        max_index,
+        max_index_hex: format_value(max_index, 2),
+        writes,
+    })
+}
+
 fn apply_tx_power_control<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     args: &TxPowerControlArgs,
+    channel: Channel,
+    bandwidth: Bandwidth,
     counters: &mut DiagnosticCounters,
 ) -> std::result::Result<Option<TxPowerControlReport>, DiagnosticErrorReport>
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let Some(index) = args.tx_power_index else {
+    let Some(mode) = resolve_tx_power_control_mode(args)? else {
         return Ok(None);
     };
-    let value = tx_power_agc_value(index);
-    let mut writes = Vec::new();
-    for (name, address) in tx_power_agc_registers(args.tx_power_path) {
-        writes.push(bridge_tx_bench_write32_register(
-            registers, name, address, value, counters,
-        )?);
-    }
+    match mode {
+        TxPowerControlModeArg::ManualIndex => {
+            let Some(index) = args.tx_power_index else {
+                return Err(DiagnosticErrorReport {
+                    code: "tx_power_manual_index_missing",
+                    message: "--tx-power-mode manual-index requires --tx-power-index".to_string(),
+                });
+            };
+            let value = tx_power_agc_value(index);
+            let mut writes = Vec::new();
+            for (name, address) in tx_power_agc_registers(args.tx_power_path) {
+                writes.push(bridge_tx_bench_write32_register(
+                    registers, name, address, value, counters,
+                )?);
+            }
 
-    Ok(Some(TxPowerControlReport {
-        semantics: "explicit diagnostic TXAGC override; writes the selected index to every byte lane of each selected per-rate TX power register after init and before TX",
-        index,
-        index_hex: format_value(index, 2),
-        path: args.tx_power_path,
-        register_count: writes.len(),
-        value,
-        value_hex: format_value(value, 8),
-        writes,
-    }))
+            Ok(Some(TxPowerControlReport {
+                semantics: "explicit diagnostic TXAGC manual override; writes the selected index to every byte lane of each selected per-rate TX power register after init and before TX",
+                mode,
+                manual_index: Some(index),
+                manual_index_hex: Some(format_value(index, 2)),
+                path: args.tx_power_path,
+                register_count: writes.len(),
+                repeated_value: Some(value),
+                repeated_value_hex: Some(format_value(value, 8)),
+                efuse_source: None,
+                efuse_plan: None,
+                writes,
+            }))
+        }
+        TxPowerControlModeArg::EfuseDerived => {
+            let source = load_tx_power_efuse_source(args)?;
+            let plan = plan_efuse_tx_power(
+                &source.tx_power_data,
+                channel,
+                bandwidth,
+                args.tx_power_path,
+                args.tx_power_safety_profile,
+                args.tx_power_max_index,
+            )?;
+            let mut writes = Vec::new();
+            for write in &plan.writes {
+                writes.push(bridge_tx_bench_write32_register(
+                    registers,
+                    write.name,
+                    write.address,
+                    write.value,
+                    counters,
+                )?);
+            }
+            Ok(Some(TxPowerControlReport {
+                semantics: "explicit guarded EFUSE-derived TXAGC programming; computes per-path/per-rate indexes from the EFUSE TX-power region, default PHY_REG_PG by-rate offsets, and the selected safety clamp",
+                mode,
+                manual_index: None,
+                manual_index_hex: None,
+                path: args.tx_power_path,
+                register_count: writes.len(),
+                repeated_value: None,
+                repeated_value_hex: None,
+                efuse_source: Some(source.report),
+                efuse_plan: Some(plan),
+                writes,
+            }))
+        }
+    }
 }
 
 fn data_secondary_channel_setting(
@@ -17402,7 +18231,7 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         type_apa: args.type_apa,
         crystal_cap: args.crystal_cap,
         rfe_type: args.rfe_type,
-        tx_power: args.tx_power,
+        tx_power: args.tx_power.clone(),
         clear_txdma_status_before_tx: args.clear_txdma_status_before_tx,
         txdma_status_clear_value: args.txdma_status_clear_value,
         txdma_offset_check_value: None,
@@ -20429,10 +21258,16 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
-    if args.tx_power.tx_power_index.is_some() {
+    if tx_power_control_requested(&args.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
-        match apply_tx_power_control(&registers, &args.tx_power, &mut pre_tx_counters) {
+        match apply_tx_power_control(
+            &registers,
+            &args.tx_power,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
             }
@@ -20441,7 +21276,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 return bridge_tx_listen_failure(
                     report,
                     "tx_power_control",
-                    "bridge TX listener explicit TXAGC power-index override failed before the TX loop",
+                    "bridge TX listener TXAGC power control failed before the TX loop",
                     error,
                 );
             }
@@ -20734,7 +21569,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         phases.push(DiagnosticPhase {
             id: "tx_power_control",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit TXAGC power-index override before the TX loop",
+            detail: "applied explicit TXAGC power control before the TX loop",
         });
     }
     phases.push(DiagnosticPhase {
@@ -21312,10 +22147,16 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
-    if args.tx.tx_power.tx_power_index.is_some() {
+    if tx_power_control_requested(&args.tx.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
-        match apply_tx_power_control(&registers, &args.tx.tx_power, &mut pre_counters) {
+        match apply_tx_power_control(
+            &registers,
+            &args.tx.tx_power,
+            channel,
+            args.tx.bandwidth,
+            &mut pre_counters,
+        ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
             }
@@ -21324,7 +22165,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 return bridge_run_failure(
                     report,
                     "tx_power_control",
-                    "bridge run explicit TXAGC power-index override failed before RX/TX loops",
+                    "bridge run TXAGC power control failed before RX/TX loops",
                     error,
                 );
             }
@@ -21642,7 +22483,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         phases.push(DiagnosticPhase {
             id: "tx_power_control",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit TXAGC power-index override before RX/TX loops",
+            detail: "applied explicit TXAGC power control before RX/TX loops",
         });
     }
     phases.extend([
@@ -24538,10 +25379,16 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
-    if args.tx_power.tx_power_index.is_some() {
+    if tx_power_control_requested(&args.tx_power) {
         let registers = Rtl8812auRegisterAccess::new(&transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
-        match apply_tx_power_control(&registers, &args.tx_power, &mut pre_tx_counters) {
+        match apply_tx_power_control(
+            &registers,
+            &args.tx_power,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
             }
@@ -24550,7 +25397,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
                 return bridge_tx_bench_failure(
                     report,
                     "tx_power_control",
-                    "bridge TX benchmark explicit TXAGC power-index override failed before the TX loop",
+                    "bridge TX benchmark TXAGC power control failed before the TX loop",
                     error,
                 );
             }
@@ -24900,7 +25747,7 @@ fn bridge_tx_bench_pass_phases(
         phases.push(DiagnosticPhase {
             id: "tx_power_control",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit TXAGC power-index override before the TX loop",
+            detail: "applied explicit TXAGC power control before the TX loop",
         });
     }
     if fw_media_status {
@@ -29534,10 +30381,26 @@ fn print_bridge_tx_once_human(report: &BridgeTxOnceReport) {
 }
 
 fn print_tx_power_control_human(tx_power: &TxPowerControlReport) {
-    println!(
-        "TX power override: index={} path={:?} registers={} value={}",
-        tx_power.index_hex, tx_power.path, tx_power.register_count, tx_power.value_hex
-    );
+    match tx_power.mode {
+        TxPowerControlModeArg::ManualIndex => println!(
+            "TX power control: mode=manual-index index={} path={:?} registers={} value={}",
+            tx_power.manual_index_hex.as_deref().unwrap_or("-"),
+            tx_power.path,
+            tx_power.register_count,
+            tx_power.repeated_value_hex.as_deref().unwrap_or("-")
+        ),
+        TxPowerControlModeArg::EfuseDerived => {
+            let clamp = tx_power
+                .efuse_plan
+                .as_ref()
+                .map(|plan| format!("{:?}", plan.safety_profile))
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "TX power control: mode=efuse-derived path={:?} registers={} clamp={}",
+                tx_power.path, tx_power.register_count, clamp
+            );
+        }
+    }
 }
 
 fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
@@ -31827,6 +32690,188 @@ mod tests {
         assert!(path_b.contains(&("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR)));
         assert!(both.contains(&("rA_TxAGC_OFDM18_OFDM6", REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR)));
         assert!(both.contains(&("rB_TxAGC_OFDM18_OFDM6", REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR)));
+    }
+
+    fn awus036ach_ch36_tx_power_fixture() -> Vec<u8> {
+        parse_hex_bytes(include_str!(
+            "../../../fixtures/rf-quality/awus036ach-ch36-efuse-tx-power.hex"
+        ))
+        .expect("fixture parses")
+    }
+
+    fn tx_power_plan_value(plan: &TxPowerEfusePlanReport, address: u16) -> u32 {
+        plan.writes
+            .iter()
+            .find(|write| write.address == address)
+            .map(|write| write.value)
+            .unwrap_or_else(|| panic!("missing TXAGC plan write for {}", format_address(address)))
+    }
+
+    fn tx_power_plan_lane(
+        plan: &TxPowerEfusePlanReport,
+        address: u16,
+        lane: u8,
+    ) -> &TxPowerDerivedLaneReport {
+        plan.writes
+            .iter()
+            .find(|write| write.address == address)
+            .and_then(|write| write.lanes.iter().find(|entry| entry.lane == lane))
+            .unwrap_or_else(|| panic!("missing TXAGC lane {lane} for {}", format_address(address)))
+    }
+
+    #[test]
+    fn efuse_tx_power_plan_matches_linux_ch36_ht20_txagc() {
+        let plan = plan_efuse_tx_power(
+            &awus036ach_ch36_tx_power_fixture(),
+            Channel::from_number(36).expect("channel"),
+            Bandwidth::Mhz20,
+            TxPowerPathArg::Both,
+            TxPowerSafetyProfileArg::LinuxCh36Ht20,
+            RTL8812AU_TX_POWER_INDEX_MAX,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.channel_group.group, 0);
+        assert_eq!(
+            plan.programmed_paths,
+            vec![TxPowerRfPath::A, TxPowerRfPath::B]
+        );
+        assert_eq!(plan.writes.len(), 22);
+
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR),
+            0x1b1b_1b1b
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR),
+            0x1b1b_1b1b
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_MCS3_MCS0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_MCS7_MCS4_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR),
+            0x1515_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR),
+            0x1515_1515
+        );
+
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR),
+            0x1d1d_1d1d
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR),
+            0x1d1d_1d1d
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_MCS3_MCS0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_MCS7_MCS4_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR),
+            0x1a1a_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR),
+            0x1a1a_1a1a
+        );
+
+        let lane = tx_power_plan_lane(&plan, REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR, 0);
+        assert_eq!(lane.efuse_base_value, 0x29);
+        assert_eq!(lane.efuse_diff_value, -2);
+        assert_eq!(lane.by_rate_offset, 14);
+        assert_eq!(lane.unclamped_index, 0x35);
+        assert_eq!(lane.clamp_max_index, 0x1b);
+        assert_eq!(lane.final_index, 0x1b);
+        assert!(lane.clamped);
+    }
+
+    #[test]
+    fn efuse_tx_power_mode_rejects_manual_index_conflict() {
+        let mut args = TxPowerControlArgs::default();
+        args.tx_power_mode = Some(TxPowerControlModeArg::EfuseDerived);
+        args.tx_power_index = Some(0x1a);
+
+        let error = resolve_tx_power_control_mode(&args).expect_err("mode conflict");
+        assert_eq!(error.code, "tx_power_mode_conflict");
+    }
+
+    #[test]
+    fn tx_power_index_preserves_manual_mode_default() {
+        let mut args = TxPowerControlArgs::default();
+        args.tx_power_index = Some(0x1a);
+
+        assert_eq!(
+            resolve_tx_power_control_mode(&args).expect("mode"),
+            Some(TxPowerControlModeArg::ManualIndex)
+        );
+    }
+
+    #[test]
+    fn efuse_tx_power_plan_rejects_2ghz_until_ported() {
+        let error = plan_efuse_tx_power(
+            &awus036ach_ch36_tx_power_fixture(),
+            Channel::from_number(6).expect("channel"),
+            Bandwidth::Mhz20,
+            TxPowerPathArg::Both,
+            TxPowerSafetyProfileArg::LinuxCh36Ht20,
+            RTL8812AU_TX_POWER_INDEX_MAX,
+        )
+        .expect_err("2g is not implemented yet");
+
+        assert_eq!(error.code, "tx_power_efuse_band_unsupported");
     }
 
     #[test]

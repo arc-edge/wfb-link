@@ -67,6 +67,20 @@ The current close-range 20 MHz reference is the sustained 1,000-byte run from Ma
 
 The repo fixture `fixtures/rf-quality/current-close-range-20mhz-linux-baseline.json` stores these artifact paths and parameters in the format accepted by `rf-quality-report`.
 
+EFUSE-derived TXAGC testing is opt-in. For channel 36 HT20 comparisons against
+the current Linux baseline, run Mac TX commands with:
+
+```bash
+--tx-power-mode efuse-derived \
+--tx-power-efuse-report /tmp/wfb-live-efuse-dump.json \
+--tx-power-safety-profile linux-ch36-ht20
+```
+
+The mode computes per-path/per-rate TXAGC values from the decoded EFUSE
+TX-power region, applies the Linux channel-36 HT20 safety caps, writes the
+TXAGC registers before TX, and records the full lane-by-lane calculation in the
+Mac report. See `docs/rtl8812au-efuse-tx-power.md`.
+
 Build an RF-quality envelope from the current artifacts:
 
 ```sh
