@@ -270,9 +270,10 @@ receiver-backed WFB outcomes as the primary signal:
   relay/orchestration delay, and TX loop time. Until the timing window is
   aligned with the Linux baseline, `throughput_evaluated` remains false and the
   ratio is informational rather than a failing margin.
-- Receiver metadata: RSSI, noise, SNR, MCS, and bandwidth metadata are not yet
-  considered reliable across the current Linux artifacts, so the report marks
-  receiver metadata as `not_available` instead of inventing an RF score.
+- Receiver metadata: when the Linux receiver emits WFB-ng `RX_ANT` lines, the
+  runner preserves RSSI/SNR/MCS/bandwidth telemetry and the report marks
+  receiver metadata as `available`. This metadata is evidence for diagnosis and
+  field notes, not yet a scored pass/fail margin.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded

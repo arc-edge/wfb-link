@@ -129,6 +129,12 @@ under `macos.wfb_outcome` as:
 - `receiver_total_datagrams`
 - `receiver_evidence`
 
+When `wfb_rx` emits `RX_ANT` lines, the runner also parses them into
+`receiver_evidence.receiver_health.rx_antenna_reports` and
+`rx_antenna_summary`. Each report records frequency, MCS index, bandwidth,
+antenna id, packet count, RSSI min/avg/max, and SNR min/avg/max from the
+Linux receiver log.
+
 This matters because WFB can receive strong RF frames but recover zero payloads
 when the receiver misses the session frame. That condition now appears as
 `receiver_status = "missing_session"` instead of looking like a generic RF or

@@ -29113,10 +29113,12 @@ fn rf_quality_outcome_comparison(
         .throughput_mbps
         .zip(linux_side.as_ref().and_then(|side| side.throughput_mbps))
         .and_then(|(macos, linux)| (linux > 0.0).then_some(macos / linux));
+    let receiver_metadata_status = rf_quality_receiver_metadata_status(&macos.wfb_outcome);
     let acceptance_margin = rf_quality_outcome_acceptance_margin(
         &macos_side,
         linux_side.as_ref(),
         throughput_ratio_macos_to_linux,
+        receiver_metadata_status,
     );
 
     RfQualityOutcomeComparisonReport {
@@ -29132,6 +29134,7 @@ fn rf_quality_outcome_acceptance_margin(
     macos: &RfQualityOutcomeSideReport,
     linux_baseline: Option<&RfQualityOutcomeSideReport>,
     throughput_ratio_macos_to_linux: Option<f64>,
+    receiver_metadata_status: &'static str,
 ) -> RfQualityOutcomeAcceptanceMarginReport {
     let Some(linux_baseline) = linux_baseline else {
         return RfQualityOutcomeAcceptanceMarginReport {
@@ -29142,7 +29145,7 @@ fn rf_quality_outcome_acceptance_margin(
             min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
             throughput_ratio_macos_to_linux,
             throughput_evaluated: false,
-            receiver_metadata_status: "not_available",
+            receiver_metadata_status,
             failures: Vec::new(),
         };
     };
@@ -29157,7 +29160,7 @@ fn rf_quality_outcome_acceptance_margin(
             min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
             throughput_ratio_macos_to_linux,
             throughput_evaluated: false,
-            receiver_metadata_status: "not_available",
+            receiver_metadata_status,
             failures: Vec::new(),
         };
     };
@@ -29180,8 +29183,26 @@ fn rf_quality_outcome_acceptance_margin(
         min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
         throughput_ratio_macos_to_linux,
         throughput_evaluated: false,
-        receiver_metadata_status: "not_available",
+        receiver_metadata_status,
         failures,
+    }
+}
+
+fn rf_quality_receiver_metadata_status(wfb_outcome: &RfQualityWfbOutcomeReport) -> &'static str {
+    let Some(evidence) = wfb_outcome.receiver_evidence.as_ref() else {
+        return "not_available";
+    };
+    if rf_quality_json_u64(evidence, &["receiver_health", "rx_antenna_report_count"])
+        .is_some_and(|count| count > 0)
+        || rf_quality_json_array_nonempty(evidence, &["receiver_health", "rx_antenna_reports"])
+        || rf_quality_json_array_nonempty(
+            evidence,
+            &["receiver_health", "rx_antenna_summary", "latest_by_antenna"],
+        )
+    {
+        "available"
+    } else {
+        "not_available"
     }
 }
 
@@ -29771,6 +29792,12 @@ fn rf_quality_json_array_clone(
     rf_quality_json_get(value, path)?
         .as_array()
         .map(|values| values.to_vec())
+}
+
+fn rf_quality_json_array_nonempty(value: &serde_json::Value, path: &[&str]) -> bool {
+    rf_quality_json_get(value, path)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|values| !values.is_empty())
 }
 
 fn rf_quality_json_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {
@@ -38631,6 +38658,18 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
   "receiver_unable_decrypt_count": 0,
   "receiver_health": {
     "counter": {"total_datagrams": 100},
+    "rx_antenna_report_count": 1,
+    "rx_antenna_reports": [
+      {
+        "freq_mhz": 5180,
+        "mcs_index": 1,
+        "bandwidth_mhz": 20,
+        "antenna_id": 0,
+        "count_all": 100,
+        "rssi_avg_dbm": -42,
+        "snr_avg_db": 28
+      }
+    ],
     "session_observed": true,
     "status": "ok",
     "unable_decrypt_count": 0
@@ -38667,6 +38706,14 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             Some(0)
         );
         assert_eq!(report.macos.wfb_outcome.receiver_total_datagrams, Some(100));
+        assert_eq!(
+            report
+                .comparison
+                .outcome
+                .acceptance_margin
+                .receiver_metadata_status,
+            "available"
+        );
         assert!(
             report
                 .macos

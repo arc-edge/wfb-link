@@ -776,6 +776,74 @@ counter = {}
 if counter_path.exists():
     counter = json.loads(counter_path.read_text())
 
+def parse_int(value, base=10):
+    try:
+        return int(value, base)
+    except (TypeError, ValueError):
+        return None
+
+def parse_rx_antenna_reports(text):
+    reports = []
+    for line in text.splitlines():
+        if "\tRX_ANT\t" not in line:
+            continue
+        fields = line.split("\t")
+        if len(fields) < 5:
+            continue
+        channel = fields[2].split(":")
+        metrics = fields[4].split(":")
+        report = {
+            "raw_line": line,
+            "timestamp_ms": parse_int(fields[0]),
+            "antenna_id_hex": f"0x{fields[3]}",
+            "antenna_id": parse_int(fields[3], 16),
+        }
+        if len(channel) >= 3:
+            report.update({
+                "freq_mhz": parse_int(channel[0]),
+                "mcs_index": parse_int(channel[1]),
+                "bandwidth_mhz": parse_int(channel[2]),
+            })
+        if len(metrics) >= 7:
+            report.update({
+                "count_all": parse_int(metrics[0]),
+                "rssi_min_dbm": parse_int(metrics[1]),
+                "rssi_avg_dbm": parse_int(metrics[2]),
+                "rssi_max_dbm": parse_int(metrics[3]),
+                "snr_min_db": parse_int(metrics[4]),
+                "snr_avg_db": parse_int(metrics[5]),
+                "snr_max_db": parse_int(metrics[6]),
+            })
+        reports.append(report)
+    return reports
+
+def numeric_values(reports, key):
+    return [report[key] for report in reports if isinstance(report.get(key), (int, float))]
+
+def receiver_metadata_summary(reports):
+    latest_by_antenna = {}
+    for report in reports:
+        key = (
+            report.get("freq_mhz"),
+            report.get("mcs_index"),
+            report.get("bandwidth_mhz"),
+            report.get("antenna_id_hex"),
+        )
+        latest_by_antenna[key] = report
+    summary = {
+        "report_count": len(reports),
+        "latest_by_antenna": list(latest_by_antenna.values()),
+    }
+    for source_key, min_key, max_key in [
+        ("rssi_avg_dbm", "rssi_avg_dbm_min", "rssi_avg_dbm_max"),
+        ("snr_avg_db", "snr_avg_db_min", "snr_avg_db_max"),
+    ]:
+        values = numeric_values(reports, source_key)
+        if values:
+            summary[min_key] = min(values)
+            summary[max_key] = max(values)
+    return summary
+
 pkt_lines = [line for line in rx_text.splitlines() if "\tPKT\t" in line]
 nonzero_pkt_lines = []
 for line in pkt_lines:
@@ -789,6 +857,7 @@ for line in pkt_lines:
 recovered = int(counter.get("recovered_payloads") or 0)
 session_observed = "\tSESSION\t" in rx_text
 unable_decrypt_count = rx_text.count("Unable to decrypt packet")
+rx_antenna_reports = parse_rx_antenna_reports(rx_text)
 if recovered >= expected:
     status = "ok"
 elif not session_observed and unable_decrypt_count > 0:
@@ -805,7 +874,9 @@ report = {
     "status": status,
     "session_observed": session_observed,
     "unable_decrypt_count": unable_decrypt_count,
-    "rx_antenna_report_count": rx_text.count("\tRX_ANT\t"),
+    "rx_antenna_report_count": len(rx_antenna_reports),
+    "rx_antenna_reports": rx_antenna_reports,
+    "rx_antenna_summary": receiver_metadata_summary(rx_antenna_reports),
     "rx_pkt_line_count": len(pkt_lines),
     "rx_nonzero_pkt_line_count": len(nonzero_pkt_lines),
     "last_nonzero_pkt_line": nonzero_pkt_lines[-1] if nonzero_pkt_lines else None,
