@@ -32314,6 +32314,19 @@ fn rf_quality_profile_gate_report(
             "expected payload count mismatch changes loss and recovery comparison",
         );
     }
+    if let Some(risk) = rf_quality_json_string(
+        close_range_report,
+        &["macos", "calibration", "runtime_iqk_summary", "risk"],
+    ) {
+        if risk != "completed" {
+            mismatches.push(RfQualityProfileGateMismatchReport {
+                field: "runtime_iqk_summary.risk",
+                current_value: "completed".to_string(),
+                close_range_value: risk,
+                impact: "runtime IQK close-range gate must complete without cleanup failure or fallback before outdoor range promotion",
+            });
+        }
+    }
 
     let mismatch_count = mismatches.len();
     RfQualityProfileGateReport {
@@ -38900,6 +38913,63 @@ mod tests {
         );
         assert_eq!(report.profile_gate.mismatch_count, 1);
         assert_eq!(report.profile_gate.mismatches[0].field, "tx_power_mode");
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_rejects_runtime_iqk_fallback_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-runtime-iqk-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "runtime_approximation",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "macos": {
+    "calibration": {
+      "runtime_iqk_summary": {
+        "risk": "fallback_applied",
+        "completed": false,
+        "cleanup_restored": true,
+        "fallback_stage_count": 1
+      }
+    }
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write runtime IQK close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 1);
+        assert_eq!(
+            report.profile_gate.mismatches[0].field,
+            "runtime_iqk_summary.risk"
+        );
     }
 
     #[test]

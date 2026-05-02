@@ -312,6 +312,8 @@ Do not classify a run as range-ready when any of the following are true:
 - The report only proves USB bulk submission or descriptor construction.
 - The same channel/rate/bandwidth/power/calibration tuple does not have a
   passing close-range report.
+- The close-range gate report contains
+  `macos.calibration.runtime_iqk_summary.risk` and it is not `completed`.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
   link/radio port, FEC, payload length, antenna setup, or adapter class.
 - The run uses HT40/VHT80 without separate evidence that the actual transmitted
