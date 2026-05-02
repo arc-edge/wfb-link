@@ -192,6 +192,22 @@ AWUS036ACH. It does not validate long-distance RF quality; the run used a
 short 256-byte/100-payload smoke profile and is not comparable to the sustained
 1,000-byte Linux baseline.
 
+Live sustained close-range run after receiver-session hardening:
+
+- Artifact directory: `/tmp/wfb-rfq-rtl8812a-lck-sustained-hardened`.
+- macOS bridge result: `pass`; submitted `3000/3000` datagrams.
+- Linux WFB recovery: `1970/2000` marked source payloads.
+- Receiver health: `receiver_session_observed = true`,
+  `receiver_unable_decrypt_count = 0`, `receiver_status = "partial_payloads"`.
+- Linux-baseline comparison: `baseline_comparable`, `within_margin`.
+- Payload-loss delta versus the Linux baseline: `1.45` percentage points.
+- macOS/Linux throughput ratio: `0.854542432051679`.
+
+Interpretation: LCK does not regress the sustained close-range flow and remains
+usable as an opt-in runtime calibration profile. This run still does not prove
+distance quality; it only shows that the runtime LCK sequence can coexist with
+the WFB data path and receiver session flow.
+
 ## Read-Only IQK Probe Profile
 
 `bridge-tx-listen`, `bridge-run`, and `bridge-tx-bench` now expose:
@@ -233,6 +249,27 @@ Hardware validation after the receiver-session hardening:
   "rtl8812a_iqk_probe"` and `tx_calibration_profile.iqk.mode =
   "deferred_hardware_probe"` with no profile-time IQK register reads.
 
+Sustained close-range validation after the same hardening:
+
+- Current-default control:
+  `/tmp/wfb-rfq-rtl8812a-current-default-sustained-hardened`.
+  Submitted `3000/3000` bridge datagrams, recovered `1973/2000` marked
+  receiver payloads, observed the WFB session, saw zero decrypt failures, and
+  remained `baseline_comparable`/`within_margin` against the Linux baseline.
+  Payload-loss delta was `1.30` percentage points and the macOS/Linux
+  throughput ratio was `0.8543180614248586`.
+- IQK marker profile:
+  `/tmp/wfb-rfq-rtl8812a-iqk-marker-sustained-hardened`.
+  Submitted `3000/3000` bridge datagrams, recovered `1980/2000` marked
+  receiver payloads, observed the WFB session, saw zero decrypt failures, and
+  remained `baseline_comparable`/`within_margin`. Payload-loss delta was
+  `0.95` percentage points and the macOS/Linux throughput ratio was
+  `0.8567657134390011`.
+
+Interpretation: the read-only IQK marker is safe for sustained close-range
+testing and does not itself improve or replace IQK. It exists to label the
+current state honestly while the full runtime IQK port is still pending.
+
 ## IQK/LCK Porting Decision
 
 Decision as of May 2, 2026: keep the current captured/partial calibration path
@@ -264,6 +301,10 @@ Next action:
 - Add `--tx-calibration-profile rtl8812a-lck` to the same A/B matrix once the
   adapter and receiver geometry can show whether LCK improves stability,
   margin, or decode rate.
+- Use the sustained hardened close-range runs as the current software sanity
+  baseline before changing IQK/LCK/RFE code: current-default recovered
+  `1973/2000`, IQK marker recovered `1980/2000`, and LCK recovered `1970/2000`,
+  all with WFB session observed, zero decrypt errors, and Linux-margin pass.
 - Use `--tx-calibration-profile rtl8812a-iqk-probe` on close-range smokes to
   label staged IQK evidence while relying on `rf_calibration_pre_tx.iqk` for
   the safe final-state register readback.

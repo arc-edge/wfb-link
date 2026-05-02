@@ -189,3 +189,18 @@ cargo run -p wfb-radio-diag -- --json \
 ```
 
 The comparison is valid only when channel, bandwidth, TX rate/profile, WFB link/radio port, FEC settings, and payload length match. If any of those fields differ, the report still emits successfully but marks the comparison invalid or degraded.
+
+May 2, 2026 hardened close-range sustained reruns used the same Linux baseline
+and the updated receiver-session handling:
+
+- `current-default`: `/tmp/wfb-rfq-rtl8812a-current-default-sustained-hardened`,
+  `1973/2000` recovered, zero decrypt failures, `within_margin`.
+- `rtl8812a-iqk-probe`: `/tmp/wfb-rfq-rtl8812a-iqk-marker-sustained-hardened`,
+  `1980/2000` recovered, zero decrypt failures, `within_margin`.
+- `rtl8812a-lck`: `/tmp/wfb-rfq-rtl8812a-lck-sustained-hardened`,
+  `1970/2000` recovered, zero decrypt failures, `within_margin`.
+
+These are software sanity checks for the current bench geometry, not distance
+acceptance. They are useful before changing calibration code because all three
+profiles submitted `3000/3000` datagrams, observed the WFB session, and stayed
+inside the configured Linux payload-loss margin.
