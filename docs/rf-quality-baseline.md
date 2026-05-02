@@ -204,3 +204,12 @@ These are software sanity checks for the current bench geometry, not distance
 acceptance. They are useful before changing calibration code because all three
 profiles submitted `3000/3000` datagrams, observed the WFB session, and stayed
 inside the configured Linux payload-loss margin.
+
+Standalone IQK diagnostic artifacts from `rtl8812a-iqk-diagnostic` can be used
+as RF-quality review evidence, but they are not runtime calibration evidence.
+When attaching one to a range-readiness note, record the artifact path,
+`iqk.mode`, `iqk.cleanup_status`, MAC/BB and AFE backup counts, RF backup counts,
+page-C1 latch count, and whether all traffic flags are false. A run with only
+standalone IQK evidence must remain classified as stop-gap/captured until the
+full IQK calibration routine is ported and receiver-backed or spectrum-backed
+evidence shows parity.

@@ -270,6 +270,43 @@ Interpretation: the read-only IQK marker is safe for sustained close-range
 testing and does not itself improve or replace IQK. It exists to label the
 current state honestly while the full runtime IQK port is still pending.
 
+## Standalone IQK Diagnostic
+
+`wfb-radio-diag` also exposes a standalone deep IQK evidence command:
+
+```sh
+cargo run -p wfb-radio-diag -- --json \
+  --report /tmp/wfb-rtl8812a-iqk-diagnostic.json \
+  rtl8812a-iqk-diagnostic \
+  --macos-usbhost \
+  --channel 36 \
+  --bandwidth 20 \
+  --firmware /tmp/rtl8812aefw.bin \
+  --i-understand-this-writes-registers
+```
+
+This command runs full same-session RTL8812AU init and then collects IQK
+evidence without starting WFB TX, WFB RX, synthetic TX, or a bulk-IN RX loop.
+It deliberately lives outside the live pre-TX calibration profile because
+RF-serial and page-C1 probing previously perturbed WFB recovery when mixed into
+the TX path.
+
+The report records:
+
+- upstream MAC/BB backup registers from `_phy_iq_calibrate_8812a`;
+- upstream AFE backup registers;
+- RF backup offsets `0x65`, `0x8f`, and `0x00` for paths A and B;
+- page-C1 latch reads at `0x0cb8` and `0x0eb8`;
+- normal-page IQK result, tone, PI, AGC, and before/after power registers;
+- `rHSSIRead_Jaguar` and page-select restore readback;
+- traffic flags proving the diagnostic did not submit WFB or synthetic TX.
+
+The diagnostic sets `iqk.mode = "standalone_deep_evidence"`,
+`iqk.evidence_only = true`, and `iqk.cleanup_status = "restored"` when selector
+cleanup readback matches the saved state. It still does not run the IQK tone
+sweep, select IQK candidates, or write final IQC values, so it must not be
+treated as runtime IQK calibration or long-distance acceptance.
+
 ## IQK/LCK Porting Decision
 
 Decision as of May 2, 2026: keep the current captured/partial calibration path

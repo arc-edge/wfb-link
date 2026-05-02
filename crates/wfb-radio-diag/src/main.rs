@@ -115,6 +115,8 @@ enum Command {
     RfSmoke(RfSmokeArgs),
     /// Run integrated RTL8812AU live init diagnostics.
     Init(InitArgs),
+    /// Run standalone RTL8812AU IQK evidence collection without WFB or TX traffic.
+    Rtl8812aIqkDiagnostic(Rtl8812aIqkDiagnosticArgs),
     /// Run bounded live RX capture diagnostics.
     RxScan(RxScanArgs),
     /// Transmit one validated test frame over bulk OUT.
@@ -916,6 +918,103 @@ impl InitArgs {
             type_apa: self.type_apa,
         }
     }
+}
+
+#[derive(Debug, Parser, Clone)]
+struct Rtl8812aIqkDiagnosticArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Channel to configure before standalone IQK evidence collection.
+    #[arg(long, default_value_t = 36)]
+    channel: u8,
+
+    /// Requested bandwidth: 20, 40, or 80 MHz.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// RTL8812A firmware image path for same-session init.
+    #[arg(long)]
+    firmware: Option<PathBuf>,
+
+    /// Per-register read/write timeout in milliseconds.
+    #[arg(long, default_value_t = 500)]
+    timeout_ms: u64,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+
+    /// Realtek halhwimg8812a_mac.c source file for same-session init.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c"
+    )]
+    mac_source: PathBuf,
+
+    /// Realtek halhwimg8812a_bb.c source file for same-session init.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c"
+    )]
+    bb_source: PathBuf,
+
+    /// Realtek halhwimg8812a_rf.c source file for same-session init.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c"
+    )]
+    rf_source: PathBuf,
+
+    /// Realtek condition cut version. Zero maps to the driver's "don't care" A-cut value.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    cut_version: u8,
+
+    /// Realtek condition package type. Zero maps to the driver's "don't care" package value.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    package_type: u8,
+
+    /// Realtek condition support interface; RTL8812AU USB is 0x02.
+    #[arg(long, default_value = "0x02", value_parser = parse_u8)]
+    support_interface: u8,
+
+    /// Realtek condition support platform.
+    #[arg(long, default_value = "0x00", value_parser = parse_u8)]
+    support_platform: u8,
+
+    /// Realtek board type. Default enables AWUS036ACH-class board branches.
+    #[arg(long, default_value = "0xd8", value_parser = parse_u8)]
+    board_type: u8,
+
+    /// Realtek 2.4 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_glna: u16,
+
+    /// Realtek 2.4 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_gpa: u16,
+
+    /// Realtek 5 GHz LNA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_alna: u16,
+
+    /// Realtek 5 GHz PA type condition value.
+    #[arg(long, default_value = "0x0000", value_parser = parse_u16)]
+    type_apa: u16,
+
+    /// Crystal-cap value used by the RTL8812A BB config tail step.
+    #[arg(long, default_value = "0x20", value_parser = parse_u8)]
+    crystal_cap: u8,
+
+    /// RTL8812A RFE option used for band-switch pinmux programming.
+    #[arg(long, default_value_t = DEFAULT_RFE_TYPE, value_parser = parse_u8)]
+    rfe_type: u8,
+
+    /// Required acknowledgement that this diagnostic writes hardware registers.
+    #[arg(long)]
+    i_understand_this_writes_registers: bool,
 }
 
 enum InitUsbTransport {
@@ -2595,6 +2694,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::Rtl8812aIqkDiagnostic(args) => {
+            let report = rtl8812a_iqk_diagnostic_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_rtl8812a_iqk_diagnostic_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::RxScan(args) => {
             let report = rx_scan_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -3428,8 +3537,11 @@ struct TxIqkProbeReport {
     semantics: &'static str,
     upstream_basis: &'static str,
     mode: &'static str,
+    evidence_only: bool,
     read_only: bool,
     deep_probe_skipped_reason: Option<&'static str>,
+    cleanup_status: &'static str,
+    cleanup_failures: Vec<String>,
     macbb_backup: Vec<RfCalibrationRegisterReadReport>,
     afe_backup: Vec<RfCalibrationRegisterReadReport>,
     hssi_read_register: Option<RfCalibrationRegisterReadReport>,
@@ -3444,12 +3556,41 @@ struct TxIqkProbeReport {
 
 #[derive(Debug, Serialize)]
 struct TxIqkPageC1LatchReport {
-    page_select_register: RfCalibrationRegisterReadReport,
-    page_select_value: u32,
-    page_select_value_hex: String,
+    page_select_before: RfCalibrationRegisterReadReport,
+    page_select_after_select: RfCalibrationRegisterReadReport,
+    page_select_bit_mask_hex: String,
     latches: Vec<RfCalibrationRegisterReadReport>,
     restore_register: RfCalibrationRegisterReadReport,
     restored: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Rtl8812aIqkDiagnosticReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    init: Option<BridgeTxBenchSameSessionInitReport>,
+    iqk: Option<TxIqkProbeReport>,
+    traffic: Rtl8812aIqkDiagnosticTrafficReport,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    phases: Vec<DiagnosticPhase>,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rtl8812aIqkDiagnosticTrafficReport {
+    wfb_tx_started: bool,
+    wfb_rx_started: bool,
+    synthetic_tx_started: bool,
+    bulk_in_loop_started: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5201,12 +5342,10 @@ const REG_FC_AREA_JAGUAR: u16 = 0x0860;
 const REG_EDCCA_JAGUAR: u16 = 0x08a4;
 const REG_RF_MOD_JAGUAR: u16 = 0x08ac;
 const REG_ADC_BUF_CLK_JAGUAR: u16 = 0x08c4;
-#[cfg(test)]
 const REG_IQK_MACBB_0X0520: u16 = 0x0520;
 const REG_CCK_SYSTEM_JAGUAR: u16 = 0x0a00;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_CCA_JAGUAR: u16 = 0x0a08;
-#[cfg(test)]
 const REG_IQK_MACBB_0X090C: u16 = 0x090c;
 const REG_ANTSEL_SW_JAGUAR: u16 = 0x0900;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
@@ -5227,13 +5366,9 @@ const REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0c4c;
 const REG_TX_PWR_OFFSET_A_JAGUAR: u16 = 0x0c50;
 const REG_TX_PWR_TRAIN_A_JAGUAR: u16 = 0x0c54;
 const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
-#[cfg(test)]
 const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
-#[cfg(test)]
 const REG_IQK_AFE_A_C60: u16 = 0x0c60;
-#[cfg(test)]
 const REG_IQK_AFE_A_C64: u16 = 0x0c64;
-#[cfg(test)]
 const REG_IQK_AFE_A_C68: u16 = 0x0c68;
 const REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR: u16 = 0x0c24;
 const REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR: u16 = 0x0c28;
@@ -5272,13 +5407,9 @@ const REG_RX_IQK_TONE_B_JAGUAR: u16 = 0x0e54;
 const REG_TX_IQK_PI_B_JAGUAR: u16 = 0x0e58;
 const REG_RX_IQK_PI_B_JAGUAR: u16 = 0x0e5c;
 const REG_IQK_AGC_CONT_JAGUAR: u16 = 0x0e60;
-#[cfg(test)]
 const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
-#[cfg(test)]
 const REG_IQK_AFE_B_E60: u16 = 0x0e60;
-#[cfg(test)]
 const REG_IQK_AFE_B_E64: u16 = 0x0e64;
-#[cfg(test)]
 const REG_IQK_AFE_B_E68: u16 = 0x0e68;
 const REG_TX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0e94;
 const REG_TX_POWER_AFTER_IQK_A_JAGUAR: u16 = 0x0e9c;
@@ -13901,7 +14032,8 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("rRx_Power_After_IQK_B_2", REG_RX_POWER_AFTER_IQK_B_2_JAGUAR),
 ];
 
-#[cfg(test)]
+const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
+
 const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("R_0x520", REG_IQK_MACBB_0X0520),
     ("REG_BCN_CTRL", REG_BCN_CTRL),
@@ -13914,7 +14046,6 @@ const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("REG_AGC_TABLE_JAGUAR", REG_AGC_TABLE_JAGUAR),
 ];
 
-#[cfg(test)]
 const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("R_0xc5c", REG_IQK_AFE_A_C5C),
     ("R_0xc60", REG_IQK_AFE_A_C60),
@@ -13930,13 +14061,11 @@ const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR),
 ];
 
-#[cfg(test)]
 const RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
     ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
 ];
 
-#[cfg(test)]
 const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[0x65, 0x8f, 0x00];
 
 const RF_CALIBRATION_LCK_RELATED_REGISTERS: &[RfCalibrationRegisterSpec] = &[
@@ -15213,8 +15342,11 @@ where
         semantics: "non-perturbing RTL8812A IQK pre-TX marker; live hardware IQK probing is deferred because profile-time reads perturbed WFB recovery on hardware",
         upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a backup arrays plus Hal8812PhyReg IQK result registers",
         mode: "deferred_hardware_probe",
+        evidence_only: true,
         read_only: true,
         deep_probe_skipped_reason: Some("pre-TX profile performs no additional hardware reads; use rf_calibration_pre_tx.iqk for the existing safe final-state readback and add a standalone IQK diagnostic before porting the full Linux IQK sweep"),
+        cleanup_status: "not_applicable",
+        cleanup_failures: Vec::new(),
         macbb_backup: Vec::new(),
         afe_backup: Vec::new(),
         hssi_read_register: None,
@@ -15225,6 +15357,200 @@ where
         page_c1_latches: None,
         iqk_registers: Vec::new(),
         counters: DiagnosticCounters::default(),
+    })
+}
+
+fn run_rtl8812a_iqk_standalone_diagnostic<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<TxIqkProbeReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let before = *counters;
+    let hssi_before_value = read32_with_counter(registers, counters, REG_HSSI_READ_JAGUAR)
+        .map_err(|error| DiagnosticErrorReport {
+            code: "rtl8812a_iqk_diagnostic_failed",
+            message: format!("rHSSIRead_Jaguar pre-diagnostic read failed: {error}"),
+        })?;
+    let hssi_read_register = calibration_register_read_report(
+        "rHSSIRead_Jaguar",
+        REG_HSSI_READ_JAGUAR,
+        "u32",
+        hssi_before_value,
+        8,
+    );
+
+    let macbb_backup =
+        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_MACBB_BACKUP_REGISTERS)?;
+    let page_c1_latches = run_rtl8812a_iqk_page_c1_latch_probe(registers, counters)?;
+    let afe_backup =
+        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_AFE_BACKUP_REGISTERS)?;
+    let rf_backup_path_a =
+        run_rtl8812a_iqk_rf_backup_reads(registers, TxPowerPathArg::A, counters)?;
+    let rf_backup_path_b =
+        run_rtl8812a_iqk_rf_backup_reads(registers, TxPowerPathArg::B, counters)?;
+    let iqk_registers =
+        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)?;
+
+    let mut cleanup_failures = Vec::new();
+    if let Err(error) =
+        write32_with_counter(registers, counters, REG_HSSI_READ_JAGUAR, hssi_before_value)
+    {
+        cleanup_failures.push(format!(
+            "rHSSIRead_Jaguar restore to {} failed: {error}",
+            format_value(hssi_before_value, 8)
+        ));
+    }
+    let hssi_after_value =
+        read32_with_counter(registers, counters, REG_HSSI_READ_JAGUAR).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "rtl8812a_iqk_diagnostic_failed",
+                message: format!("rHSSIRead_Jaguar post-restore read failed: {error}"),
+            }
+        })?;
+    let hssi_read_restore = calibration_register_read_report(
+        "rHSSIRead_Jaguar",
+        REG_HSSI_READ_JAGUAR,
+        "u32",
+        hssi_after_value,
+        8,
+    );
+    let hssi_read_restored = hssi_after_value == hssi_before_value;
+    if !hssi_read_restored {
+        cleanup_failures.push(format!(
+            "rHSSIRead_Jaguar restored to {}, expected {}",
+            format_value(hssi_after_value, 8),
+            format_value(hssi_before_value, 8)
+        ));
+    }
+    if !page_c1_latches.restored {
+        cleanup_failures.push(
+            "REG_AGC_TABLE_JAGUAR page-C1 selector restore did not read back to the original value"
+                .to_string(),
+        );
+    }
+    let cleanup_status = if cleanup_failures.is_empty() {
+        "restored"
+    } else {
+        "restore_failed"
+    };
+
+    Ok(TxIqkProbeReport {
+        semantics: "standalone RTL8812A IQK evidence diagnostic; runs outside live WFB TX, reads upstream backup and latch surfaces, and does not execute the IQK calibration sweep",
+        upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a MAC/BB, AFE, RF backup arrays, page-C1 latch reads, and Hal8812PhyReg IQK result registers",
+        mode: "standalone_deep_evidence",
+        evidence_only: true,
+        read_only: false,
+        deep_probe_skipped_reason: None,
+        cleanup_status,
+        cleanup_failures,
+        macbb_backup,
+        afe_backup,
+        hssi_read_register: Some(hssi_read_register),
+        hssi_read_restore: Some(hssi_read_restore),
+        hssi_read_restored: Some(hssi_read_restored),
+        rf_backup_path_a,
+        rf_backup_path_b,
+        page_c1_latches: Some(page_c1_latches),
+        iqk_registers,
+        counters: diagnostic_counters_delta(before, *counters),
+    })
+}
+
+fn run_rtl8812a_iqk_rf_backup_reads<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    path: TxPowerPathArg,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<Vec<RfSerialReadReport>, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    RTL8812A_IQK_RF_BACKUP_OFFSETS
+        .iter()
+        .map(|offset| rf_serial_read_register(registers, path, *offset, counters))
+        .collect()
+}
+
+fn run_rtl8812a_iqk_page_c1_latch_probe<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut DiagnosticCounters,
+) -> std::result::Result<TxIqkPageC1LatchReport, DiagnosticErrorReport>
+where
+    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let page_select_before_value = read32_with_counter(registers, counters, REG_AGC_TABLE_JAGUAR)
+        .map_err(|error| DiagnosticErrorReport {
+        code: "rtl8812a_iqk_page_c1_probe_failed",
+        message: format!("REG_AGC_TABLE_JAGUAR read before page-C1 select failed: {error}"),
+    })?;
+    let page_select_before = calibration_register_read_report(
+        "REG_AGC_TABLE_JAGUAR",
+        REG_AGC_TABLE_JAGUAR,
+        "u32",
+        page_select_before_value,
+        8,
+    );
+
+    bb_set_bb_reg(
+        registers,
+        counters,
+        REG_AGC_TABLE_JAGUAR,
+        RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+        1,
+    )
+    .map_err(|error| DiagnosticErrorReport {
+        code: "rtl8812a_iqk_page_c1_probe_failed",
+        message: format!("REG_AGC_TABLE_JAGUAR page-C1 select failed: {error}"),
+    })?;
+    let page_select_after_value = read32_with_counter(registers, counters, REG_AGC_TABLE_JAGUAR)
+        .map_err(|error| DiagnosticErrorReport {
+            code: "rtl8812a_iqk_page_c1_probe_failed",
+            message: format!("REG_AGC_TABLE_JAGUAR read after page-C1 select failed: {error}"),
+        })?;
+    let page_select_after_select = calibration_register_read_report(
+        "REG_AGC_TABLE_JAGUAR",
+        REG_AGC_TABLE_JAGUAR,
+        "u32",
+        page_select_after_value,
+        8,
+    );
+
+    let latches =
+        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS)?;
+
+    write32_with_counter(
+        registers,
+        counters,
+        REG_AGC_TABLE_JAGUAR,
+        page_select_before_value,
+    )
+    .map_err(|error| DiagnosticErrorReport {
+        code: "rtl8812a_iqk_page_c1_probe_failed",
+        message: format!("REG_AGC_TABLE_JAGUAR page-C1 restore failed: {error}"),
+    })?;
+    let restore_value =
+        read32_with_counter(registers, counters, REG_AGC_TABLE_JAGUAR).map_err(|error| {
+            DiagnosticErrorReport {
+                code: "rtl8812a_iqk_page_c1_probe_failed",
+                message: format!("REG_AGC_TABLE_JAGUAR read after page-C1 restore failed: {error}"),
+            }
+        })?;
+    let restore_register = calibration_register_read_report(
+        "REG_AGC_TABLE_JAGUAR",
+        REG_AGC_TABLE_JAGUAR,
+        "u32",
+        restore_value,
+        8,
+    );
+
+    Ok(TxIqkPageC1LatchReport {
+        page_select_before,
+        page_select_after_select,
+        page_select_bit_mask_hex: format_value(RTL8812A_IQK_PAGE_C1_SELECT_BIT, 8),
+        latches,
+        restore_register,
+        restored: restore_value == page_select_before_value,
     })
 }
 
@@ -19367,6 +19693,86 @@ fn bridge_tx_listen_init_bridge_args(args: &BridgeTxListenArgs) -> BridgeTxBench
         pre_tx_write32: args.pre_tx_write32.clone(),
         pre_tx_rmw32: args.pre_tx_rmw32.clone(),
         pre_tx_rf_write: args.pre_tx_rf_write.clone(),
+        pre_tx_apply_registers_from: Vec::new(),
+        pre_tx_apply_register_sequence_from: Vec::new(),
+        pre_tx_apply_min_address: 0x0100,
+        pre_tx_apply_max_address: 0x0fff,
+        pre_tx_apply_min_event: None,
+        pre_tx_apply_max_event: None,
+        post_tx_write8: Vec::new(),
+        post_tx_write16: Vec::new(),
+        post_tx_write32: Vec::new(),
+        post_tx_set8: Vec::new(),
+        post_tx_set16: Vec::new(),
+        post_tx_set32: Vec::new(),
+        i_understand_this_transmits: true,
+        tx_status: TxStatusProbeArgs::default(),
+        macos_usbhost: args.macos_usbhost.clone(),
+    }
+}
+
+fn rtl8812a_iqk_diagnostic_init_bridge_args(args: &Rtl8812aIqkDiagnosticArgs) -> BridgeTxBenchArgs {
+    BridgeTxBenchArgs {
+        adapter: args.adapter.clone(),
+        channel: args.channel,
+        bandwidth: args.bandwidth,
+        count: 1,
+        payload_len: 0,
+        frame_kind: BridgeTxBenchFrameKind::WfbData,
+        payload_marker: None,
+        frame_hex: None,
+        packet_hex: None,
+        interval_us: 0,
+        link_id: 0x000001,
+        radio_port: 0x23,
+        fwmark: 0,
+        mcs: 0,
+        tx_rate: None,
+        tx_bandwidth: None,
+        tx_channel_bandwidth: None,
+        tx_queue: TxQueueArg::Auto,
+        mac_id: 0,
+        tx_rate_id: None,
+        tx_retries: 12,
+        tx_fallback_limit: 0x1f,
+        no_hw_seq: false,
+        no_first_seg: false,
+        enable_rate_fallback: false,
+        no_agg_break: false,
+        local_mac: None,
+        monitor_opmode_before_tx: false,
+        fw_media_status: false,
+        fw_media_status_role: 0x01,
+        init_before_tx: true,
+        linux_init_order: true,
+        firmware: args.firmware.clone(),
+        init_timeout_ms: args.timeout_ms,
+        mac_source: args.mac_source.clone(),
+        bb_source: args.bb_source.clone(),
+        rf_source: args.rf_source.clone(),
+        cut_version: args.cut_version,
+        package_type: args.package_type,
+        support_interface: args.support_interface,
+        support_platform: args.support_platform,
+        board_type: args.board_type,
+        type_glna: args.type_glna,
+        type_gpa: args.type_gpa,
+        type_alna: args.type_alna,
+        type_apa: args.type_apa,
+        crystal_cap: args.crystal_cap,
+        rfe_type: args.rfe_type,
+        tx_power: TxPowerControlArgs::default(),
+        tx_calibration: TxCalibrationProfileArgs::default(),
+        clear_txdma_status_before_tx: false,
+        txdma_status_clear_value: 0,
+        txdma_offset_check_value: None,
+        cr_value: None,
+        trxdma_ctrl_value: None,
+        pre_tx_write8: Vec::new(),
+        pre_tx_write16: Vec::new(),
+        pre_tx_write32: Vec::new(),
+        pre_tx_rmw32: Vec::new(),
+        pre_tx_rf_write: Vec::new(),
         pre_tx_apply_registers_from: Vec::new(),
         pre_tx_apply_register_sequence_from: Vec::new(),
         pre_tx_apply_min_address: 0x0100,
@@ -27477,6 +27883,245 @@ fn bridge_tx_bench_tx_options(args: &BridgeTxBenchArgs, mut options: TxOptions) 
     options
 }
 
+fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIqkDiagnosticReport {
+    let selector = args.adapter.selector();
+    let (channel, result, error) = resolve_report_channel(args.channel, args.bandwidth);
+    let mut report = rtl8812a_iqk_diagnostic_base_report(&args, selector, channel);
+    if let Some(error) = error {
+        report.result = result;
+        report.error = Some(error);
+        report.phases = vec![DiagnosticPhase {
+            id: "argument_validation",
+            status: DiagnosticPhaseStatus::Blocked,
+            detail: "standalone IQK diagnostic channel or bandwidth is invalid",
+        }];
+        return report;
+    }
+    let channel = channel.expect("channel resolved before standalone IQK diagnostic");
+
+    if !args.i_understand_this_writes_registers {
+        return rtl8812a_iqk_diagnostic_failure(
+            report,
+            "argument_validation",
+            "standalone IQK diagnostic requires explicit hardware-write authorization",
+            DiagnosticErrorReport {
+                code: "missing_write_authorization",
+                message: "rtl8812a-iqk-diagnostic writes init, page-select, and RF read-selector registers and requires --i-understand-this-writes-registers".to_string(),
+            },
+        );
+    }
+
+    let init_bridge_args = rtl8812a_iqk_diagnostic_init_bridge_args(&args);
+    let init_assets = match load_bridge_tx_bench_init_assets(&init_bridge_args) {
+        Ok(Some(init_assets)) => init_assets,
+        Ok(None) => {
+            return rtl8812a_iqk_diagnostic_failure(
+                report,
+                "argument_validation",
+                "standalone IQK diagnostic requires same-session init assets",
+                DiagnosticErrorReport {
+                    code: "missing_init_assets",
+                    message: "rtl8812a-iqk-diagnostic requires same-session init assets"
+                        .to_string(),
+                },
+            );
+        }
+        Err(error) => {
+            return rtl8812a_iqk_diagnostic_failure(
+                report,
+                "argument_validation",
+                "standalone IQK diagnostic init arguments did not pass local validation",
+                error,
+            );
+        }
+    };
+
+    let (transport, adapter, endpoints, mut counters, claim_detail) = if args.macos_usbhost.enabled
+    {
+        match open_macos_usbhost_transport(&args.macos_usbhost, report.selector) {
+            Ok(open) => (
+                open.transport,
+                open.adapter,
+                open.endpoints,
+                open.counters,
+                "opened retained macOS IOUSBHost session for standalone IQK diagnostic",
+            ),
+            Err(error) => {
+                return rtl8812a_iqk_diagnostic_failure(
+                    report,
+                    "usb_claim",
+                    "macOS IOUSBHost retained-session open failed",
+                    error,
+                );
+            }
+        }
+    } else {
+        let selected = match select_supported_adapter(report.selector) {
+            Ok(device) => device,
+            Err(error) => {
+                return rtl8812a_iqk_diagnostic_failure(
+                    report,
+                    "usb_claim",
+                    "no supported adapter matched the selector",
+                    error,
+                );
+            }
+        };
+        let claimed = match radio_core::usb::claim_usb_device(&selected) {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                report.adapter = Some(selected);
+                return rtl8812a_iqk_diagnostic_failure(
+                    report,
+                    "usb_claim",
+                    "USB interface claim failed",
+                    DiagnosticErrorReport {
+                        code: "usb_claim_failed",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        };
+        let adapter = claimed.info.clone();
+        let endpoints = claimed.endpoints.clone();
+        (
+            InitUsbTransport::Libusb(Box::new(claimed)),
+            adapter,
+            endpoints,
+            DiagnosticCounters::default(),
+            "claimed adapter for standalone IQK diagnostic",
+        )
+    };
+
+    report.adapter = Some(adapter);
+    report.endpoints = Some(endpoints);
+    report.phases.push(DiagnosticPhase {
+        id: "usb_claim",
+        status: DiagnosticPhaseStatus::Completed,
+        detail: claim_detail,
+    });
+
+    let registers = Rtl8812auRegisterAccess::new(&transport)
+        .with_timeout(Duration::from_millis(args.timeout_ms));
+    match run_bridge_tx_bench_same_session_init(
+        &registers,
+        &init_bridge_args,
+        channel,
+        report
+            .endpoints
+            .as_ref()
+            .expect("standalone IQK diagnostic endpoints are present after USB claim"),
+        &init_assets,
+        &mut counters,
+    ) {
+        Ok(init_report) => {
+            report.init = Some(init_report);
+            report.phases.push(DiagnosticPhase {
+                id: "init",
+                status: DiagnosticPhaseStatus::Completed,
+                detail: "completed full RTL8812AU init before standalone IQK evidence collection",
+            });
+        }
+        Err((init_report, error)) => {
+            report.init = Some(init_report);
+            report.counters = counters;
+            return rtl8812a_iqk_diagnostic_failure(
+                report,
+                "init",
+                "standalone IQK diagnostic same-session init failed",
+                error,
+            );
+        }
+    }
+
+    match run_rtl8812a_iqk_standalone_diagnostic(&registers, &mut counters) {
+        Ok(iqk) => {
+            let cleanup_ok = iqk.cleanup_status == "restored";
+            report.iqk = Some(iqk);
+            report.counters = counters;
+            if cleanup_ok {
+                report.result = DiagnosticResult::Pass;
+                report.phases.push(DiagnosticPhase {
+                    id: "iqk_evidence",
+                    status: DiagnosticPhaseStatus::Completed,
+                    detail: "collected standalone IQK evidence and restored selectors",
+                });
+                report.notes = vec![
+                    "standalone IQK diagnostic ran outside WFB TX/RX and submitted no frames",
+                    "output is evidence for the full IQK port and is not runtime IQK calibration",
+                ];
+                report
+            } else {
+                rtl8812a_iqk_diagnostic_failure(
+                    report,
+                    "iqk_cleanup",
+                    "standalone IQK diagnostic collected evidence but selector cleanup failed",
+                    DiagnosticErrorReport {
+                        code: "rtl8812a_iqk_cleanup_failed",
+                        message: "one or more IQK diagnostic cleanup readbacks did not match the saved state".to_string(),
+                    },
+                )
+            }
+        }
+        Err(error) => {
+            report.counters = counters;
+            rtl8812a_iqk_diagnostic_failure(
+                report,
+                "iqk_evidence",
+                "standalone IQK evidence collection failed",
+                error,
+            )
+        }
+    }
+}
+
+fn rtl8812a_iqk_diagnostic_base_report(
+    args: &Rtl8812aIqkDiagnosticArgs,
+    selector: DeviceSelector,
+    channel: Option<Channel>,
+) -> Rtl8812aIqkDiagnosticReport {
+    Rtl8812aIqkDiagnosticReport {
+        schema_version: 1,
+        command: "rtl8812a-iqk-diagnostic",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector,
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.bandwidth,
+        init: None,
+        iqk: None,
+        traffic: Rtl8812aIqkDiagnosticTrafficReport {
+            wfb_tx_started: false,
+            wfb_rx_started: false,
+            synthetic_tx_started: false,
+            bulk_in_loop_started: false,
+        },
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::NotImplemented,
+        phases: Vec::new(),
+        error: None,
+        notes: vec!["standalone IQK diagnostic stopped before evidence collection completed"],
+    }
+}
+
+fn rtl8812a_iqk_diagnostic_failure(
+    mut report: Rtl8812aIqkDiagnosticReport,
+    phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> Rtl8812aIqkDiagnosticReport {
+    report.result = DiagnosticResult::Fail;
+    report.phases.push(DiagnosticPhase {
+        id: phase_id,
+        status: DiagnosticPhaseStatus::Blocked,
+        detail: phase_detail,
+    });
+    report.error = Some(error);
+    report
+}
+
 fn bridge_tx_bench_base_report(
     args: &BridgeTxBenchArgs,
     selector: DeviceSelector,
@@ -32981,6 +33626,83 @@ fn print_tx_calibration_profile_human(profile: &TxCalibrationProfileReport) {
     }
 }
 
+fn print_rtl8812a_iqk_diagnostic_human(report: &Rtl8812aIqkDiagnosticReport) {
+    println!("RTL8812A IQK diagnostic: {:?}", report.result);
+    if let Some(adapter) = &report.adapter {
+        println!(
+            "Adapter: {}:{} {}",
+            adapter.vid_hex,
+            adapter.pid_hex,
+            adapter
+                .known_adapter
+                .as_ref()
+                .map(|known| known.name)
+                .unwrap_or("unknown")
+        );
+    }
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} ({} MHz), bandwidth={} MHz",
+            channel.number,
+            channel.frequency_mhz,
+            report.bandwidth.mhz()
+        );
+    }
+    if let Some(init) = report.init.as_ref() {
+        println!(
+            "Init: {:?}, phases={}, PHY writes={}, AGC writes={}, RF A/B writes={}/{}",
+            init.result,
+            init.phase_summaries.len(),
+            init.bb_phy_writes_applied,
+            init.bb_agc_writes_applied,
+            init.rf_radioa_writes_applied,
+            init.rf_radiob_writes_applied
+        );
+    }
+    if let Some(iqk) = report.iqk.as_ref() {
+        println!(
+            "IQK evidence: mode={} cleanup={} macbb={} afe={} rf_a={} rf_b={} latches={} iqk_regs={}",
+            iqk.mode,
+            iqk.cleanup_status,
+            iqk.macbb_backup.len(),
+            iqk.afe_backup.len(),
+            iqk.rf_backup_path_a.len(),
+            iqk.rf_backup_path_b.len(),
+            iqk.page_c1_latches
+                .as_ref()
+                .map(|page| page.latches.len())
+                .unwrap_or_default(),
+            iqk.iqk_registers.len()
+        );
+        for failure in &iqk.cleanup_failures {
+            println!("  cleanup: {failure}");
+        }
+    }
+    println!(
+        "Traffic: wfb_tx={} wfb_rx={} synthetic_tx={} bulk_in_loop={}",
+        report.traffic.wfb_tx_started,
+        report.traffic.wfb_rx_started,
+        report.traffic.synthetic_tx_started,
+        report.traffic.bulk_in_loop_started
+    );
+    println!(
+        "Counters: control_reads={} control_writes={} bulk_in={} bulk_out={}",
+        report.counters.usb_control_reads,
+        report.counters.usb_control_writes,
+        report.counters.usb_bulk_in_reads,
+        report.counters.usb_bulk_out_writes
+    );
+    for phase in &report.phases {
+        println!("Phase {}: {:?} - {}", phase.id, phase.status, phase.detail);
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
 fn print_pre_tx_rf_writes_human(writes: &[BridgeTxBenchRfSerialWriteReport]) {
     for write in writes {
         println!(
@@ -34848,6 +35570,38 @@ mod tests {
             i_understand_this_writes_registers: false,
             dry_run,
             trace_out,
+        }
+    }
+
+    fn rtl8812a_iqk_diagnostic_args(authorized: bool) -> Rtl8812aIqkDiagnosticArgs {
+        Rtl8812aIqkDiagnosticArgs {
+            adapter: adapter_args(),
+            channel: 36,
+            bandwidth: Bandwidth::Mhz20,
+            firmware: Some(PathBuf::from("/tmp/rtl8812a_fw.bin")),
+            timeout_ms: 500,
+            macos_usbhost: MacosUsbHostArgs::default(),
+            mac_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c",
+            ),
+            bb_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c",
+            ),
+            rf_source: PathBuf::from(
+                "/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c",
+            ),
+            cut_version: 0,
+            package_type: 0,
+            support_interface: 0x02,
+            support_platform: 0,
+            board_type: 0xd8,
+            type_glna: 0,
+            type_gpa: 0,
+            type_alna: 0,
+            type_apa: 0,
+            crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
+            i_understand_this_writes_registers: authorized,
         }
     }
 
@@ -36984,6 +37738,70 @@ mod tests {
     }
 
     #[test]
+    fn rtl8812a_iqk_diagnostic_cli_parses_guarded_command() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "rtl8812a-iqk-diagnostic",
+            "--channel",
+            "36",
+            "--bandwidth",
+            "20",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--i-understand-this-writes-registers",
+        ])
+        .expect("parse cli");
+
+        match cli.command {
+            Command::Rtl8812aIqkDiagnostic(args) => {
+                assert_eq!(args.channel, 36);
+                assert_eq!(args.bandwidth, Bandwidth::Mhz20);
+                assert!(args.i_understand_this_writes_registers);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rtl8812a_iqk_diagnostic_requires_authorization_before_usb_open() {
+        let report = rtl8812a_iqk_diagnostic_report(rtl8812a_iqk_diagnostic_args(false));
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().expect("error").code,
+            "missing_write_authorization"
+        );
+        assert!(report.adapter.is_none());
+        assert!(!report.traffic.wfb_tx_started);
+        assert!(!report.traffic.wfb_rx_started);
+        assert!(!report.traffic.synthetic_tx_started);
+        assert!(!report.traffic.bulk_in_loop_started);
+        assert_eq!(report.counters.usb_control_reads, 0);
+        assert_eq!(report.counters.usb_control_writes, 0);
+    }
+
+    #[test]
+    fn rtl8812a_iqk_diagnostic_init_args_do_not_enable_tx_paths() {
+        let args = rtl8812a_iqk_diagnostic_args(true);
+        let bridge_args = rtl8812a_iqk_diagnostic_init_bridge_args(&args);
+
+        assert!(bridge_args.init_before_tx);
+        assert!(bridge_args.linux_init_order);
+        assert_eq!(bridge_args.count, 1);
+        assert_eq!(bridge_args.payload_len, 0);
+        assert_eq!(
+            bridge_args.tx_calibration.tx_calibration_profile,
+            TxCalibrationProfileArg::CurrentDefault
+        );
+        assert!(!tx_calibration_profile_requested(
+            &bridge_args.tx_calibration
+        ));
+        assert!(!tx_power_control_requested(&bridge_args.tx_power));
+        assert!(bridge_args.pre_tx_rf_write.is_empty());
+        assert!(bridge_args.post_tx_write32.is_empty());
+    }
+
+    #[test]
     fn tx_rate_helper_handles_elapsed_time() {
         assert_eq!(rate_per_second(50, Some(100)), Some(500.0));
         assert_eq!(rate_per_second(50, Some(0)), None);
@@ -37751,6 +38569,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(RTL8812A_IQK_MACBB_BACKUP_REGISTERS.len(), 9);
         assert_eq!(RTL8812A_IQK_AFE_BACKUP_REGISTERS.len(), 12);
         assert_eq!(RTL8812A_IQK_RF_BACKUP_OFFSETS, &[0x65, 0x8f, 0x00]);
+        assert_eq!(RTL8812A_IQK_PAGE_C1_SELECT_BIT, 0x8000_0000);
         assert_eq!(
             RTL8812A_IQK_MACBB_BACKUP_REGISTERS
                 .iter()
