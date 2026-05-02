@@ -2051,6 +2051,10 @@ struct RfQualityReportArgs {
     #[arg(long, value_name = "PATH")]
     linux_baseline: Option<PathBuf>,
 
+    /// Passing close-range RF-quality JSON report required before outdoor range recording.
+    #[arg(long, value_name = "PATH")]
+    close_range_report: Option<PathBuf>,
+
     /// RF channel used by the macOS run.
     #[arg(long, default_value_t = 36)]
     channel: u8,
@@ -2106,6 +2110,38 @@ struct RfQualityReportArgs {
     /// Receiver-side artifact path associated with this run. Repeatable.
     #[arg(long = "receiver-artifact", value_name = "PATH")]
     receiver_artifacts: Vec<PathBuf>,
+
+    /// Field distance or geometry note for stepped/outdoor range reports.
+    #[arg(long, value_name = "TEXT")]
+    distance_or_geometry: Option<String>,
+
+    /// Antenna orientation and polarization note for range reports.
+    #[arg(long, value_name = "TEXT")]
+    antenna_orientation: Option<String>,
+
+    /// Adapter placement, cabling, shielding, or nearby interference note.
+    #[arg(long, value_name = "TEXT")]
+    adapter_placement: Option<String>,
+
+    /// Environment note such as weather, obstruction, or RF noise. Repeatable.
+    #[arg(long = "environment-note", value_name = "TEXT")]
+    environment_notes: Vec<String>,
+
+    /// Companion note or evidence artifact path. Repeatable.
+    #[arg(long = "companion-artifact", value_name = "PATH")]
+    companion_artifacts: Vec<PathBuf>,
+
+    /// Observed received frame/PPDU bandwidth when an evidence source reports it.
+    #[arg(long, value_parser = parse_bandwidth)]
+    observed_ppdu_bandwidth: Option<Bandwidth>,
+
+    /// Evidence source for --observed-ppdu-bandwidth.
+    #[arg(long, value_name = "TEXT")]
+    observed_ppdu_source: Option<String>,
+
+    /// Artifact that supports observed PPDU bandwidth evidence. Repeatable.
+    #[arg(long = "observed-ppdu-artifact", value_name = "PATH")]
+    observed_ppdu_artifacts: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -3608,9 +3644,12 @@ struct RfQualityReport {
     platform: PlatformInfo,
     selector: DeviceSelector,
     profile: RfQualityProfileReport,
+    bandwidth_evidence: RfQualityBandwidthEvidenceReport,
+    companion_notes: RfQualityCompanionNotesReport,
     macos: RfQualityMacosReport,
     linux_baseline: Option<RfQualityLinuxBaselineReport>,
     comparison: RfQualityComparisonReport,
+    profile_gate: RfQualityProfileGateReport,
     acceptance: RfQualityAcceptanceReport,
     result: DiagnosticResult,
     phases: Vec<DiagnosticPhase>,
@@ -3644,6 +3683,36 @@ struct RfQualityWfbSettingsReport {
     radio_port_hex: String,
     fec_k: u8,
     fec_n: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityBandwidthEvidenceReport {
+    channel_context_bandwidth: Bandwidth,
+    channel_context_bandwidth_mhz: u16,
+    observed_frame_bandwidth: Option<Bandwidth>,
+    observed_frame_bandwidth_mhz: Option<u16>,
+    status: RfQualityBandwidthEvidenceStatus,
+    source: Option<String>,
+    artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityBandwidthEvidenceStatus {
+    NotSupplied,
+    MatchesChannelContext,
+    ContextOnlyNarrowerObserved,
+    ObservedWiderThanContext,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityCompanionNotesReport {
+    distance_or_geometry: Option<String>,
+    antenna_orientation: Option<String>,
+    adapter_placement: Option<String>,
+    environment_notes: Vec<String>,
+    artifacts: Vec<PathBuf>,
+    complete_for_field_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -3741,6 +3810,35 @@ struct RfQualityComparisonReport {
     calibration: RfQualityCalibrationComparisonReport,
 }
 
+#[derive(Debug, Serialize)]
+struct RfQualityProfileGateReport {
+    required: bool,
+    status: RfQualityProfileGateStatus,
+    close_range_report: Option<PathBuf>,
+    mismatch_count: usize,
+    mismatches: Vec<RfQualityProfileGateMismatchReport>,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityProfileGateStatus {
+    NotRequired,
+    MissingCloseRangeReport,
+    InvalidCloseRangeReport,
+    CloseRangeNotPassed,
+    MismatchedProfile,
+    Passed,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityProfileGateMismatchReport {
+    field: &'static str,
+    current_value: String,
+    close_range_value: String,
+    impact: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct RfQualityCalibrationRegisterValueReport {
     register_name: Option<String>,
@@ -3785,6 +3883,7 @@ struct RfQualityOutcomeComparisonReport {
     linux_baseline: Option<RfQualityOutcomeSideReport>,
     recovered_payload_delta: Option<i64>,
     throughput_ratio_macos_to_linux: Option<f64>,
+    acceptance_margin: RfQualityOutcomeAcceptanceMarginReport,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -3795,6 +3894,28 @@ struct RfQualityOutcomeSideReport {
     loss_percent: Option<f64>,
     throughput_mbps: Option<f64>,
     receiver_artifacts: Vec<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityOutcomeAcceptanceMarginReport {
+    status: RfQualityOutcomeAcceptanceMarginStatus,
+    criteria_version: &'static str,
+    max_loss_delta_percent_points: f64,
+    loss_delta_percent_points: Option<f64>,
+    min_throughput_ratio: f64,
+    throughput_ratio_macos_to_linux: Option<f64>,
+    throughput_evaluated: bool,
+    receiver_metadata_status: &'static str,
+    failures: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityOutcomeAcceptanceMarginStatus {
+    NoBaseline,
+    MissingOutcomeData,
+    WithinMargin,
+    OutsideMargin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4798,6 +4919,8 @@ const RTL8812AU_EFUSE_MAX_SECTION: u8 = 64;
 const RTL8812AU_EFUSE_TX_POWER_START: usize = 0x10;
 const RTL8812AU_EFUSE_TX_POWER_LEN: usize = 84;
 const RTL8812AU_TX_POWER_INDEX_MAX: u8 = 0x3f;
+const RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS: f64 = 2.0;
+const RF_QUALITY_MIN_THROUGHPUT_RATIO: f64 = 0.85;
 
 const FEN_ELDR: u16 = 1 << 12;
 const ANA8M: u16 = 1 << 1;
@@ -26683,11 +26806,62 @@ fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
     };
 
     let profile = rf_quality_profile_report(&args, channel);
+    let close_range_report_json = match args.close_range_report.as_deref() {
+        Some(path) if result != DiagnosticResult::Fail => {
+            match rf_quality_load_json(
+                path,
+                "close_range_report_read_failed",
+                "close_range_report_parse_failed",
+            ) {
+                Ok(value) => {
+                    phases.push(DiagnosticPhase {
+                        id: "close_range_gate_artifact",
+                        status: DiagnosticPhaseStatus::Completed,
+                        detail: "loaded close-range RF-quality gate report",
+                    });
+                    Some(value)
+                }
+                Err(load_error) => {
+                    result = DiagnosticResult::Fail;
+                    error = Some(load_error);
+                    phases.push(DiagnosticPhase {
+                        id: "close_range_gate_artifact",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "failed to load close-range RF-quality gate report",
+                    });
+                    None
+                }
+            }
+        }
+        Some(_) => None,
+        None => None,
+    };
+    let profile_gate =
+        rf_quality_profile_gate_report(&args, &profile, close_range_report_json.as_ref());
+    if rf_quality_profile_gate_blocks(&profile_gate) {
+        result = DiagnosticResult::Fail;
+        error.get_or_insert_with(|| DiagnosticErrorReport {
+            code: "close_range_gate_failed",
+            message: profile_gate.reason.to_string(),
+        });
+        phases.push(DiagnosticPhase {
+            id: "close_range_gate",
+            status: DiagnosticPhaseStatus::Blocked,
+            detail: "outdoor long-distance profile is blocked by the close-range gate",
+        });
+    } else {
+        phases.push(DiagnosticPhase {
+            id: "close_range_gate",
+            status: DiagnosticPhaseStatus::Completed,
+            detail: "close-range gate validation completed",
+        });
+    }
+
     let macos =
         rf_quality_macos_report(&args, mac_report_json.as_ref(), efuse_report_json.as_ref());
     let comparison =
         rf_quality_compare_profile_to_baseline(&profile, &macos, linux_baseline.as_ref());
-    let acceptance = rf_quality_acceptance(result, &comparison);
+    let acceptance = rf_quality_acceptance(result, &comparison, &profile_gate);
 
     RfQualityReport {
         schema_version: 1,
@@ -26695,10 +26869,13 @@ fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
         started_at_unix_ms: started_at_unix_ms(),
         platform: platform_info(),
         selector,
+        bandwidth_evidence: rf_quality_bandwidth_evidence_report(&args),
+        companion_notes: rf_quality_companion_notes_report(&args),
         profile,
         macos,
         linux_baseline,
         comparison,
+        profile_gate,
         acceptance,
         result,
         phases,
@@ -26707,6 +26884,49 @@ fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
             "RF-quality reports are evidence envelopes; USB submission alone is not range acceptance",
             "this command does not initialize the adapter, transmit frames, or alter existing bridge defaults",
         ],
+    }
+}
+
+fn rf_quality_bandwidth_evidence_report(
+    args: &RfQualityReportArgs,
+) -> RfQualityBandwidthEvidenceReport {
+    let observed_frame_bandwidth_mhz = args
+        .observed_ppdu_bandwidth
+        .map(|bandwidth| bandwidth.mhz());
+    let status = match observed_frame_bandwidth_mhz {
+        None => RfQualityBandwidthEvidenceStatus::NotSupplied,
+        Some(observed) if observed == args.bandwidth.mhz() => {
+            RfQualityBandwidthEvidenceStatus::MatchesChannelContext
+        }
+        Some(observed) if observed < args.bandwidth.mhz() => {
+            RfQualityBandwidthEvidenceStatus::ContextOnlyNarrowerObserved
+        }
+        Some(_) => RfQualityBandwidthEvidenceStatus::ObservedWiderThanContext,
+    };
+    RfQualityBandwidthEvidenceReport {
+        channel_context_bandwidth: args.bandwidth,
+        channel_context_bandwidth_mhz: args.bandwidth.mhz(),
+        observed_frame_bandwidth: args.observed_ppdu_bandwidth,
+        observed_frame_bandwidth_mhz,
+        status,
+        source: args.observed_ppdu_source.clone(),
+        artifacts: args.observed_ppdu_artifacts.clone(),
+    }
+}
+
+fn rf_quality_companion_notes_report(args: &RfQualityReportArgs) -> RfQualityCompanionNotesReport {
+    let complete_for_field_run = args.distance_or_geometry.is_some()
+        && args.antenna_orientation.is_some()
+        && args.adapter_placement.is_some()
+        && !args.environment_notes.is_empty()
+        && !args.companion_artifacts.is_empty();
+    RfQualityCompanionNotesReport {
+        distance_or_geometry: args.distance_or_geometry.clone(),
+        antenna_orientation: args.antenna_orientation.clone(),
+        adapter_placement: args.adapter_placement.clone(),
+        environment_notes: args.environment_notes.clone(),
+        artifacts: args.companion_artifacts.clone(),
+        complete_for_field_run,
     }
 }
 
@@ -27154,12 +27374,75 @@ fn rf_quality_outcome_comparison(
         .throughput_mbps
         .zip(linux_side.as_ref().and_then(|side| side.throughput_mbps))
         .and_then(|(macos, linux)| (linux > 0.0).then_some(macos / linux));
+    let acceptance_margin = rf_quality_outcome_acceptance_margin(
+        &macos_side,
+        linux_side.as_ref(),
+        throughput_ratio_macos_to_linux,
+    );
 
     RfQualityOutcomeComparisonReport {
         macos: macos_side,
         linux_baseline: linux_side,
         recovered_payload_delta,
         throughput_ratio_macos_to_linux,
+        acceptance_margin,
+    }
+}
+
+fn rf_quality_outcome_acceptance_margin(
+    macos: &RfQualityOutcomeSideReport,
+    linux_baseline: Option<&RfQualityOutcomeSideReport>,
+    throughput_ratio_macos_to_linux: Option<f64>,
+) -> RfQualityOutcomeAcceptanceMarginReport {
+    let Some(linux_baseline) = linux_baseline else {
+        return RfQualityOutcomeAcceptanceMarginReport {
+            status: RfQualityOutcomeAcceptanceMarginStatus::NoBaseline,
+            criteria_version: "rf-quality-margin-v1",
+            max_loss_delta_percent_points: RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS,
+            loss_delta_percent_points: None,
+            min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
+            throughput_ratio_macos_to_linux,
+            throughput_evaluated: false,
+            receiver_metadata_status: "not_available",
+            failures: Vec::new(),
+        };
+    };
+
+    let (Some(macos_loss), Some(linux_loss)) = (macos.loss_percent, linux_baseline.loss_percent)
+    else {
+        return RfQualityOutcomeAcceptanceMarginReport {
+            status: RfQualityOutcomeAcceptanceMarginStatus::MissingOutcomeData,
+            criteria_version: "rf-quality-margin-v1",
+            max_loss_delta_percent_points: RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS,
+            loss_delta_percent_points: None,
+            min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
+            throughput_ratio_macos_to_linux,
+            throughput_evaluated: false,
+            receiver_metadata_status: "not_available",
+            failures: Vec::new(),
+        };
+    };
+
+    let loss_delta_percent_points = macos_loss - linux_loss;
+    let mut failures = Vec::new();
+    if loss_delta_percent_points > RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS {
+        failures.push("macOS payload loss exceeds Linux baseline by more than the allowed margin");
+    }
+
+    RfQualityOutcomeAcceptanceMarginReport {
+        status: if failures.is_empty() {
+            RfQualityOutcomeAcceptanceMarginStatus::WithinMargin
+        } else {
+            RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin
+        },
+        criteria_version: "rf-quality-margin-v1",
+        max_loss_delta_percent_points: RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS,
+        loss_delta_percent_points: Some(loss_delta_percent_points),
+        min_throughput_ratio: RF_QUALITY_MIN_THROUGHPUT_RATIO,
+        throughput_ratio_macos_to_linux,
+        throughput_evaluated: false,
+        receiver_metadata_status: "not_available",
+        failures,
     }
 }
 
@@ -27410,10 +27693,249 @@ fn rf_quality_compare_normalized_string(
     }
 }
 
+fn rf_quality_profile_gate_report(
+    args: &RfQualityReportArgs,
+    profile: &RfQualityProfileReport,
+    close_range_report: Option<&serde_json::Value>,
+) -> RfQualityProfileGateReport {
+    let required = matches!(profile.kind, RfQualityProfileKind::OutdoorLongDistance);
+    let close_range_report_path = args.close_range_report.clone();
+    if !required {
+        return RfQualityProfileGateReport {
+            required,
+            status: RfQualityProfileGateStatus::NotRequired,
+            close_range_report: close_range_report_path,
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+            reason: "close-range gate is required only for outdoor long-distance profiles",
+        };
+    }
+
+    let Some(close_range_report_path) = close_range_report_path else {
+        return RfQualityProfileGateReport {
+            required,
+            status: RfQualityProfileGateStatus::MissingCloseRangeReport,
+            close_range_report: None,
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+            reason:
+                "outdoor long-distance profiles require --close-range-report for the same RF-quality tuple",
+        };
+    };
+
+    let Some(close_range_report) = close_range_report else {
+        return RfQualityProfileGateReport {
+            required,
+            status: RfQualityProfileGateStatus::InvalidCloseRangeReport,
+            close_range_report: Some(close_range_report_path),
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+            reason: "close-range gate report could not be loaded or parsed",
+        };
+    };
+
+    let close_kind = rf_quality_json_string(close_range_report, &["profile", "kind"]);
+    let close_result = rf_quality_json_string(close_range_report, &["result"]);
+    let close_acceptance = rf_quality_json_string(close_range_report, &["acceptance", "status"]);
+    if close_kind.as_deref() != Some("close_range")
+        || close_result.as_deref() != Some("pass")
+        || close_acceptance.as_deref() != Some("baseline_comparable")
+    {
+        return RfQualityProfileGateReport {
+            required,
+            status: RfQualityProfileGateStatus::CloseRangeNotPassed,
+            close_range_report: Some(close_range_report_path),
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+            reason:
+                "close-range gate report must be a passing close_range report with baseline_comparable acceptance",
+        };
+    }
+
+    let mut mismatches = Vec::new();
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "channel",
+        u64::from(profile.channel),
+        rf_quality_json_u64(close_range_report, &["profile", "channel"]),
+        "channel mismatch means the outdoor run is not gated by the same RF profile",
+    );
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "bandwidth_mhz",
+        u64::from(profile.bandwidth_mhz),
+        rf_quality_json_u64(close_range_report, &["profile", "bandwidth_mhz"]),
+        "bandwidth mismatch changes RF behavior and range interpretation",
+    );
+    rf_quality_gate_compare_string(
+        &mut mismatches,
+        "tx_rate",
+        &profile.tx_rate,
+        rf_quality_json_string(close_range_report, &["profile", "tx_rate"]).as_deref(),
+        "fixed TX rate mismatch changes range and recovery behavior",
+    );
+    rf_quality_gate_compare_string(
+        &mut mismatches,
+        "tx_descriptor_profile",
+        bridge_tx_profile_label(profile.tx_descriptor_profile),
+        rf_quality_json_string(close_range_report, &["profile", "tx_descriptor_profile"])
+            .as_deref(),
+        "descriptor profile mismatch changes transmit behavior",
+    );
+    rf_quality_gate_compare_string(
+        &mut mismatches,
+        "tx_power_mode",
+        rf_quality_tx_power_mode_label(profile.tx_power_mode),
+        rf_quality_json_string(close_range_report, &["profile", "tx_power_mode"]).as_deref(),
+        "TX power mode mismatch invalidates the close-range gate",
+    );
+    rf_quality_gate_compare_string(
+        &mut mismatches,
+        "calibration_mode",
+        rf_quality_calibration_mode_label(profile.calibration_mode),
+        rf_quality_json_string(close_range_report, &["profile", "calibration_mode"]).as_deref(),
+        "calibration mode mismatch invalidates the close-range gate",
+    );
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "wfb.link_id",
+        u64::from(profile.wfb.link_id),
+        rf_quality_json_u64(close_range_report, &["profile", "wfb", "link_id"]),
+        "WFB link ID mismatch means the receiver may observe different traffic",
+    );
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "wfb.radio_port",
+        u64::from(profile.wfb.radio_port),
+        rf_quality_json_u64(close_range_report, &["profile", "wfb", "radio_port"]),
+        "WFB radio port mismatch means the receiver may observe different traffic",
+    );
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "wfb.fec_k",
+        u64::from(profile.wfb.fec_k),
+        rf_quality_json_u64(close_range_report, &["profile", "wfb", "fec_k"]),
+        "FEC source packet mismatch changes recovery behavior",
+    );
+    rf_quality_gate_compare_u64(
+        &mut mismatches,
+        "wfb.fec_n",
+        u64::from(profile.wfb.fec_n),
+        rf_quality_json_u64(close_range_report, &["profile", "wfb", "fec_n"]),
+        "FEC total packet mismatch changes recovery behavior",
+    );
+    if let Some(payload_len) = profile.payload_len {
+        rf_quality_gate_compare_u64(
+            &mut mismatches,
+            "payload_len",
+            payload_len as u64,
+            rf_quality_json_u64(close_range_report, &["profile", "payload_len"]),
+            "payload length mismatch changes airtime, FEC packing, and throughput",
+        );
+    }
+    if let Some(expected_payloads) = profile.expected_payloads {
+        rf_quality_gate_compare_u64(
+            &mut mismatches,
+            "expected_payloads",
+            expected_payloads,
+            rf_quality_json_u64(close_range_report, &["profile", "expected_payloads"]),
+            "expected payload count mismatch changes loss and recovery comparison",
+        );
+    }
+
+    let mismatch_count = mismatches.len();
+    RfQualityProfileGateReport {
+        required,
+        status: if mismatch_count == 0 {
+            RfQualityProfileGateStatus::Passed
+        } else {
+            RfQualityProfileGateStatus::MismatchedProfile
+        },
+        close_range_report: Some(close_range_report_path),
+        mismatch_count,
+        mismatches,
+        reason: if mismatch_count == 0 {
+            "outdoor long-distance profile has a passing close-range gate for the same RF-quality tuple"
+        } else {
+            "close-range gate report does not match the outdoor long-distance RF-quality tuple"
+        },
+    }
+}
+
+fn rf_quality_profile_gate_blocks(gate: &RfQualityProfileGateReport) -> bool {
+    matches!(
+        gate.status,
+        RfQualityProfileGateStatus::MissingCloseRangeReport
+            | RfQualityProfileGateStatus::InvalidCloseRangeReport
+            | RfQualityProfileGateStatus::CloseRangeNotPassed
+            | RfQualityProfileGateStatus::MismatchedProfile
+    )
+}
+
+fn rf_quality_gate_compare_u64(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    field: &'static str,
+    current_value: u64,
+    close_range_value: Option<u64>,
+    impact: &'static str,
+) {
+    match close_range_value {
+        Some(close_range_value) if close_range_value == current_value => {}
+        Some(close_range_value) => mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: close_range_value.to_string(),
+            impact,
+        }),
+        None => mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: "<missing>".to_string(),
+            impact,
+        }),
+    }
+}
+
+fn rf_quality_gate_compare_string(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    field: &'static str,
+    current_value: &str,
+    close_range_value: Option<&str>,
+    impact: &'static str,
+) {
+    match close_range_value {
+        Some(close_range_value)
+            if rf_quality_normalize_token(close_range_value)
+                == rf_quality_normalize_token(current_value) => {}
+        Some(close_range_value) => mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: close_range_value.to_string(),
+            impact,
+        }),
+        None => mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: "<missing>".to_string(),
+            impact,
+        }),
+    }
+}
+
 fn rf_quality_acceptance(
     result: DiagnosticResult,
     comparison: &RfQualityComparisonReport,
+    profile_gate: &RfQualityProfileGateReport,
 ) -> RfQualityAcceptanceReport {
+    if rf_quality_profile_gate_blocks(profile_gate) {
+        return RfQualityAcceptanceReport {
+            status: RfQualityAcceptanceStatus::InvalidComparison,
+            reason: "outdoor long-distance profile is blocked by the close-range gate",
+            criteria_version: "rf-quality-v1",
+            baseline_required_for_range_ready: true,
+        };
+    }
+
     if result == DiagnosticResult::Fail {
         return RfQualityAcceptanceReport {
             status: RfQualityAcceptanceStatus::ReportGenerationFailed,
@@ -27430,6 +27952,18 @@ fn rf_quality_acceptance(
             criteria_version: "rf-quality-v1",
             baseline_required_for_range_ready: true,
         },
+        RfQualityComparisonStatus::Matched
+            if comparison.outcome.acceptance_margin.status
+                == RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin =>
+        {
+            RfQualityAcceptanceReport {
+                status: RfQualityAcceptanceStatus::DegradedComparison,
+                reason:
+                    "receiver-backed WFB outcome is outside the Linux-baseline acceptance margin",
+                criteria_version: "rf-quality-v1",
+                baseline_required_for_range_ready: true,
+            }
+        }
         RfQualityComparisonStatus::Matched => RfQualityAcceptanceReport {
             status: RfQualityAcceptanceStatus::BaselineComparable,
             reason:
@@ -27632,6 +28166,25 @@ fn rf_quality_calibration_label(mode: RfQualityCalibrationMode) -> &'static str 
         RfQualityCalibrationMode::RuntimeApproximation => "runtime calibration approximation",
         RfQualityCalibrationMode::LinuxPorted => "ported Linux runtime calibration routine",
         RfQualityCalibrationMode::Unknown => "calibration state was not supplied",
+    }
+}
+
+fn rf_quality_tx_power_mode_label(mode: RfQualityTxPowerMode) -> &'static str {
+    match mode {
+        RfQualityTxPowerMode::CurrentDefault => "current_default",
+        RfQualityTxPowerMode::ManualIndex => "manual_index",
+        RfQualityTxPowerMode::EfuseDerived => "efuse_derived",
+        RfQualityTxPowerMode::LinuxCaptured => "linux_captured",
+    }
+}
+
+fn rf_quality_calibration_mode_label(mode: RfQualityCalibrationMode) -> &'static str {
+    match mode {
+        RfQualityCalibrationMode::StopGapCaptured => "stop_gap_captured",
+        RfQualityCalibrationMode::Static => "static",
+        RfQualityCalibrationMode::RuntimeApproximation => "runtime_approximation",
+        RfQualityCalibrationMode::LinuxPorted => "linux_ported",
+        RfQualityCalibrationMode::Unknown => "unknown",
     }
 }
 
@@ -31827,6 +32380,32 @@ fn print_rf_quality_report_human(report: &RfQualityReport) {
         report.profile.calibration_mode,
         report.macos.calibration.stop_gap
     );
+    println!(
+        "Close-range gate: {:?} required={} mismatches={}",
+        report.profile_gate.status,
+        report.profile_gate.required,
+        report.profile_gate.mismatch_count
+    );
+    println!(
+        "Bandwidth evidence: context={}MHz observed={} status={:?}",
+        report.bandwidth_evidence.channel_context_bandwidth_mhz,
+        report
+            .bandwidth_evidence
+            .observed_frame_bandwidth_mhz
+            .map(|value| format!("{value}MHz"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        report.bandwidth_evidence.status
+    );
+    if report.companion_notes.complete_for_field_run {
+        println!("Companion notes: complete for field run");
+    } else if report.companion_notes.distance_or_geometry.is_some()
+        || report.companion_notes.antenna_orientation.is_some()
+        || report.companion_notes.adapter_placement.is_some()
+        || !report.companion_notes.environment_notes.is_empty()
+        || !report.companion_notes.artifacts.is_empty()
+    {
+        println!("Companion notes: partial");
+    }
     if let Some(path) = &report.macos.source_report {
         println!("macOS artifact: {}", path.display());
     }
@@ -31920,6 +32499,39 @@ fn print_rf_quality_report_human(report: &RfQualityReport) {
             .throughput_ratio_macos_to_linux
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "n/a".to_string())
+    );
+    println!(
+        "Outcome margin: {:?} loss_delta={}pp max_delta={}pp throughput_ratio={} min_ratio={} receiver_metadata={}",
+        report.comparison.outcome.acceptance_margin.status,
+        report
+            .comparison
+            .outcome
+            .acceptance_margin
+            .loss_delta_percent_points
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .acceptance_margin
+            .max_loss_delta_percent_points,
+        report
+            .comparison
+            .outcome
+            .acceptance_margin
+            .throughput_ratio_macos_to_linux
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .acceptance_margin
+            .min_throughput_ratio,
+        report
+            .comparison
+            .outcome
+            .acceptance_margin
+            .receiver_metadata_status
     );
     for mismatch in &report.comparison.mismatches {
         println!(
@@ -33253,6 +33865,7 @@ mod tests {
             mac_report: None,
             efuse_report: None,
             linux_baseline: None,
+            close_range_report: None,
             channel: 36,
             bandwidth: Bandwidth::Mhz20,
             tx_rate: "mcs1".to_string(),
@@ -33267,6 +33880,14 @@ mod tests {
             expected_payloads: Some(30),
             recovered_payloads: None,
             receiver_artifacts: Vec::new(),
+            distance_or_geometry: None,
+            antenna_orientation: None,
+            adapter_placement: None,
+            environment_notes: Vec::new(),
+            companion_artifacts: Vec::new(),
+            observed_ppdu_bandwidth: None,
+            observed_ppdu_source: None,
+            observed_ppdu_artifacts: Vec::new(),
         }
     }
 
@@ -33417,6 +34038,205 @@ mod tests {
         );
         assert!(json.contains("\"command\":\"rf-quality-report\""));
         assert!(json.contains("\"baseline_required_for_range_ready\":true"));
+    }
+
+    #[test]
+    fn rf_quality_report_records_companion_notes() {
+        let mut args = rf_quality_report_args();
+        args.distance_or_geometry = Some("300 m line-of-sight between ridge and bench".to_string());
+        args.antenna_orientation = Some("both vertical, broadside to path".to_string());
+        args.adapter_placement =
+            Some("Mac adapter on 1 m USB extension, clear of battery".to_string());
+        args.environment_notes
+            .push("dry, light wind, no visible 5 GHz AP nearby".to_string());
+        args.companion_artifacts
+            .push(PathBuf::from("/tmp/field-300m-notes.md"));
+
+        let report = rf_quality_report(args);
+
+        assert!(report.companion_notes.complete_for_field_run);
+        assert_eq!(
+            report.companion_notes.distance_or_geometry.as_deref(),
+            Some("300 m line-of-sight between ridge and bench")
+        );
+        assert_eq!(
+            report.companion_notes.artifacts,
+            vec![PathBuf::from("/tmp/field-300m-notes.md")]
+        );
+    }
+
+    #[test]
+    fn rf_quality_report_distinguishes_context_from_observed_bandwidth() {
+        let mut args = rf_quality_report_args();
+        args.bandwidth = Bandwidth::Mhz40;
+        args.observed_ppdu_bandwidth = Some(Bandwidth::Mhz20);
+        args.observed_ppdu_source =
+            Some("linux monitor radiotap plus Mac RX descriptor JSONL".to_string());
+        args.observed_ppdu_artifacts
+            .push(PathBuf::from("/tmp/rxmeta40.jsonl"));
+
+        let report = rf_quality_report(args);
+
+        assert_eq!(report.profile.bandwidth_mhz, 40);
+        assert_eq!(
+            report.bandwidth_evidence.observed_frame_bandwidth_mhz,
+            Some(20)
+        );
+        assert_eq!(
+            report.bandwidth_evidence.status,
+            RfQualityBandwidthEvidenceStatus::ContextOnlyNarrowerObserved
+        );
+        assert_eq!(
+            report.bandwidth_evidence.artifacts,
+            vec![PathBuf::from("/tmp/rxmeta40.jsonl")]
+        );
+    }
+
+    #[test]
+    fn rf_quality_regression_fixtures_parse_expected_summaries() {
+        let close_range: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/rf-quality/rf-quality-close-range-accepted-summary.json"
+        ))
+        .expect("close-range summary fixture");
+        let ht40: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/rf-quality/rf-quality-ht40-context-evidence-summary.json"
+        ))
+        .expect("HT40 evidence summary fixture");
+
+        assert_eq!(
+            rf_quality_json_string(&close_range, &["acceptance", "status"]).as_deref(),
+            Some("baseline_comparable")
+        );
+        assert_eq!(
+            rf_quality_json_string(
+                &close_range,
+                &["comparison", "outcome", "acceptance_margin", "status"]
+            )
+            .as_deref(),
+            Some("within_margin")
+        );
+        assert_eq!(
+            rf_quality_json_string(&ht40, &["bandwidth_evidence", "status"]).as_deref(),
+            Some("context_only_narrower_observed")
+        );
+        assert_eq!(
+            rf_quality_json_u64(
+                &ht40,
+                &["bandwidth_evidence", "observed_frame_bandwidth_mhz"]
+            ),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_requires_close_range_gate() {
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+
+        let report = rf_quality_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MissingCloseRangeReport
+        );
+        assert_eq!(
+            report.acceptance.status,
+            RfQualityAcceptanceStatus::InvalidComparison
+        );
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("close_range_gate_failed")
+        );
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_accepts_matching_close_range_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-gate-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::Passed
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 0);
+        assert_eq!(
+            report.acceptance.status,
+            RfQualityAcceptanceStatus::NotEvaluated
+        );
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_rejects_mismatched_close_range_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-mismatch-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "manual_index",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 1);
+        assert_eq!(report.profile_gate.mismatches[0].field, "tx_power_mode");
     }
 
     #[test]
@@ -33660,6 +34480,64 @@ mod tests {
         assert_eq!(comparison.degraded_mismatch_count, 1);
         assert_eq!(comparison.outcome.recovered_payload_delta, Some(-1));
         assert_eq!(comparison.outcome.macos.loss_percent, Some(100.0 / 30.0));
+    }
+
+    #[test]
+    fn rf_quality_outcome_margin_flags_payload_loss_gap() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = Some(90);
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let macos = rf_quality_macos_report(&args, None, None);
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000001),
+                link_id_hex: Some("0x000001".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(3),
+            },
+            payload_len: Some(1024),
+            source_payloads: Some(100),
+            recovered_payloads: Some(100),
+            submitted_datagrams: Some(300),
+            throughput_mbps: None,
+            receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+        let acceptance = rf_quality_acceptance(
+            DiagnosticResult::Pass,
+            &comparison,
+            &rf_quality_profile_gate_report(&args, &profile, None),
+        );
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Matched);
+        assert_eq!(
+            comparison.outcome.acceptance_margin.status,
+            RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin
+        );
+        assert_eq!(
+            comparison
+                .outcome
+                .acceptance_margin
+                .loss_delta_percent_points,
+            Some(10.0)
+        );
+        assert_eq!(
+            acceptance.status,
+            RfQualityAcceptanceStatus::DegradedComparison
+        );
     }
 
     #[test]

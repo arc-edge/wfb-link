@@ -1,0 +1,20 @@
+{
+  "profile": {
+    "name": "ht40-context-observed-20mhz-20260502",
+    "kind": "wide_bandwidth_evidence",
+    "channel": 36,
+    "bandwidth_mhz": 40,
+    "tx_rate": "mcs1"
+  },
+  "bandwidth_evidence": {
+    "channel_context_bandwidth_mhz": 40,
+    "observed_frame_bandwidth_mhz": 20,
+    "status": "context_only_narrower_observed",
+    "source": "Linux monitor metadata and Mac RTL8812AU RX descriptor JSONL from controlled HT40 evidence run",
+    "artifacts": [
+      "/tmp/wfb-agent-rxmeta40a.json",
+      "/tmp/wfb-agent-rxmeta40a.jsonl"
+    ]
+  },
+  "result": "pass"
+}

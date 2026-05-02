@@ -32,23 +32,23 @@
 
 ## 5. Range Profiles and Acceptance Gates
 
-- [ ] 5.1 Define close-range sanity, stepped/attenuated, and outdoor/long-distance RF-quality profiles in documentation
-- [ ] 5.2 Add profile validation that requires a passing close-range run before recording a long-distance run for the same channel, bandwidth, rate, power mode, and payload settings
-- [ ] 5.3 Add companion-note fields or templates for distance, antenna orientation, adapter placement, environment notes, and artifact paths
-- [ ] 5.4 Define acceptance margins for macOS-vs-Linux comparison using WFB payload recovery, loss, throughput, and receiver metadata where reliable
-- [ ] 5.5 Run and document an accepted close-range 20 MHz profile with the selected power/calibration mode
+- [x] 5.1 Define close-range sanity, stepped/attenuated, and outdoor/long-distance RF-quality profiles in documentation
+- [x] 5.2 Add profile validation that requires a passing close-range run before recording a long-distance run for the same channel, bandwidth, rate, power mode, and payload settings
+- [x] 5.3 Add companion-note fields or templates for distance, antenna orientation, adapter placement, environment notes, and artifact paths
+- [x] 5.4 Define acceptance margins for macOS-vs-Linux comparison using WFB payload recovery, loss, throughput, and receiver metadata where reliable
+- [x] 5.5 Run and document an accepted close-range 20 MHz profile with the selected power/calibration mode
 - [ ] 5.6 Run and document a longer-distance 20 MHz profile against the Linux baseline
 
 ## 6. Wide-Bandwidth Evidence
 
-- [ ] 6.1 Keep HT40/VHT80 range profiles marked experimental until evidence proves actual wide-PPDU transmit/decode behavior
-- [ ] 6.2 Add report fields that distinguish channel-context bandwidth from observed frame/PPDU bandwidth
-- [ ] 6.3 Identify whether Linux receiver metadata, Mac RX descriptors, SDR/spectrum capture, or another tool will be the wide-PPDU evidence source
-- [ ] 6.4 Run a controlled HT40 evidence test and classify the result as channel-context flow or proven wide-PPDU operation
+- [x] 6.1 Keep HT40/VHT80 range profiles marked experimental until evidence proves actual wide-PPDU transmit/decode behavior
+- [x] 6.2 Add report fields that distinguish channel-context bandwidth from observed frame/PPDU bandwidth
+- [x] 6.3 Identify whether Linux receiver metadata, Mac RX descriptors, SDR/spectrum capture, or another tool will be the wide-PPDU evidence source
+- [x] 6.4 Run a controlled HT40 evidence test and classify the result as channel-context flow or proven wide-PPDU operation
 
 ## 7. Documentation and Regression
 
-- [ ] 7.1 Update RF-quality and range documentation with baseline setup, Mac commands, Linux commands, interpretation guidance, and rollback instructions
-- [ ] 7.2 Add regression fixtures for RF-quality report parsing and Linux-baseline comparison summaries
-- [ ] 7.3 Add a final checklist for field runs that includes service restore, artifact collection, and accepted operating profile recording
-- [ ] 7.4 Validate the change with `cargo fmt`, targeted tests, full workspace tests, and `openspec validate --strict`
+- [x] 7.1 Update RF-quality and range documentation with baseline setup, Mac commands, Linux commands, interpretation guidance, and rollback instructions
+- [x] 7.2 Add regression fixtures for RF-quality report parsing and Linux-baseline comparison summaries
+- [x] 7.3 Add a final checklist for field runs that includes service restore, artifact collection, and accepted operating profile recording
+- [x] 7.4 Validate the change with `cargo fmt`, targeted tests, full workspace tests, and `openspec validate --strict`
