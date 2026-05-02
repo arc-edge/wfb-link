@@ -128,6 +128,14 @@ now records final RX IQC latch readbacks. Do not promote this to a production
 or range-ready profile until path-A RX stability is resolved or deliberately
 accepted with stronger range evidence.
 
+After fixing IQK candidate selection to use signed 11-bit comparison like the
+Linux driver, `/tmp/wfb-rfq-runtime-iqk-signed-a1/rf-quality-report.json`
+completed both TX/RX IQK paths in the sustained receiver-backed flow, recovered
+`1964/2000` marked payloads, and remained
+`baseline_comparable`/`within_margin`. Keep the profile experimental for range
+work until it has stepped or outdoor evidence, but this run establishes the
+signed-selection path as close-range safe.
+
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
 `ceil(expected_payloads * fec_n / fec_k)` count while still recovering every
 source payload. The script now records this as

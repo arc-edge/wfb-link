@@ -135,22 +135,26 @@ Validated on May 2, 2026 with `scripts/run-rf-quality-close-range.sh`:
 
 Runtime IQK validation on May 2, 2026:
 
-- Local artifact directories: `/tmp/wfb-rfq-runtime-iqk-a2` and
-  `/tmp/wfb-rfq-runtime-iqk-a3`.
+- Local artifact directories: `/tmp/wfb-rfq-runtime-iqk-a2`,
+  `/tmp/wfb-rfq-runtime-iqk-a3`, and
+  `/tmp/wfb-rfq-runtime-iqk-signed-a1`.
 - RF-quality reports:
-  `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json` and
-  `/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`.
+  `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`,
+  `/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`, and
+  `/tmp/wfb-rfq-runtime-iqk-signed-a1/rf-quality-report.json`.
 - Mac bridge result: `pass`, `3000/3000` datagrams received and submitted.
-- Linux receiver counter: `1978/2000` and `1984/2000` marked `RFQCLSEF`
+- Linux receiver counter: `1978/2000`, `1984/2000`, and `1964/2000` marked
   payloads recovered with zero decrypt failures and six `RX_ANT` telemetry
   reports in each run.
 - Report result: `pass`, `acceptance.status=baseline_comparable`,
   `comparison.status=matched`, and
   `comparison.outcome.acceptance_margin.status=within_margin`.
 - Calibration note: `runtime_iqk.status=fallback_applied` because path-A RX IQK
-  fell back in both full receiver-backed runs. A one-frame smoke did complete
-  both RX paths, so the current gap is path-A RX one-shot stability, not cleanup
-  or transport safety.
+  fell back in the first two full receiver-backed runs. After signed 11-bit
+  candidate selection was matched to Linux, the signed-selection run reported
+  `runtime_iqk.status=completed` with both RX paths selected. Keep the profile
+  experimental until stepped or outdoor evidence shows whether runtime IQK
+  improves distance margin.
 
 ## Stepped Or Attenuated
 

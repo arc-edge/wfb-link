@@ -316,6 +316,8 @@ Hardware validation on May 2, 2026:
 - Baseline-compatible receiver-backed run:
   `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`; follow-up:
   `/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`.
+- Signed-selection receiver-backed run:
+  `/tmp/wfb-rfq-runtime-iqk-signed-a1/rf-quality-report.json`.
 - Attempt-evidence one-frame smoke:
   `/tmp/wfb-rtl8812a-runtime-iqk-attempts.json`.
 - The first close-range run submitted and observed `3000/3000` WFB datagrams,
@@ -325,6 +327,10 @@ Hardware validation on May 2, 2026:
   datagrams, recovered `1984/2000` marked payloads, matched the Linux baseline
   tuple, and stayed `within_margin` with a `0.75` percentage-point payload-loss
   delta.
+- The signed-selection close-range run submitted and observed `3000/3000` WFB
+  datagrams, recovered `1964/2000` marked payloads, matched the Linux baseline
+  tuple, and stayed `within_margin` with a `1.75` percentage-point payload-loss
+  delta and `0.8603379958870349` macOS/Linux throughput ratio.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
   paths A and B, RX IQK succeeded on path B, and RX IQK on path A remains
   intermittent: it fell back in the full close-range runs but completed in the
@@ -342,6 +348,10 @@ Hardware validation on May 2, 2026:
   also shows RX IQC fallback-shaped values at `0x0c10` and `0x0e10`, so this
   may be normal Linux-parity behavior for this adapter/channel rather than a
   ready-poll bug.
+- In the receiver-backed signed-selection run, both RX paths completed:
+  path A selected `0x1fc/0x006` after five retries and path B selected
+  `0x1fb/0x003` after one retry. This proves the signed candidate-selection fix
+  can carry through to final RX IQC fill in the sustained WFB flow.
 
 ## Standalone IQK Diagnostic
 
