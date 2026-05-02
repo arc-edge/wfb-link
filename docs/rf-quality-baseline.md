@@ -157,6 +157,19 @@ This does not make a failed bridge artifact disappear; it preserves the
 expected-versus-observed datagram evidence so the RF-quality envelope can still
 be interpreted when receiver recovery is complete.
 
+For session-acquisition debugging, the runner can send unmeasured source
+payloads before the marked payload sequence:
+
+```sh
+SOURCE_WARMUP_PAYLOADS=120
+```
+
+Warmup payloads use the same WFB TX path but do not carry `PAYLOAD_MARKER`, so
+the receiver counter does not count them as recovered test payloads. The runner
+raises `MAX_DATAGRAMS` by the warmup FEC estimate and records
+`source_warmup_payloads`, `theoretical_warmup_datagrams`, and
+`theoretical_total_datagrams` in `datagram-evidence.json`.
+
 The runner also records `${REMOTE_PREFIX}-receiver-health.json` and lifts the
 same health into `datagram-evidence.json`. `rf-quality-report` exposes this
 under `macos.wfb_outcome` as:

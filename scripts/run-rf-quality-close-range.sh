@@ -20,6 +20,7 @@ Configuration is via environment variables. Common overrides:
   FIRMWARE=/tmp/rtl8812aefw.bin
   EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json
   EXPECTED_PAYLOADS=2000 PAYLOAD_LEN=1000 CHANNEL=36 BANDWIDTH_MHZ=20
+  SOURCE_WARMUP_PAYLOADS=0
 
 Use --dry-run to print the remote command plan without claiming USB or
 transmitting RF.
@@ -103,8 +104,11 @@ BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
 FEC_K=${FEC_K:-8}
 FEC_N=${FEC_N:-12}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-2000}
+SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-0}
 THEORETICAL_MAX_DATAGRAMS=${THEORETICAL_MAX_DATAGRAMS:-$(((EXPECTED_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))}
-MAX_DATAGRAMS=${MAX_DATAGRAMS:-$THEORETICAL_MAX_DATAGRAMS}
+THEORETICAL_WARMUP_DATAGRAMS=$(((SOURCE_WARMUP_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))
+THEORETICAL_TOTAL_DATAGRAMS=${THEORETICAL_TOTAL_DATAGRAMS:-$((THEORETICAL_MAX_DATAGRAMS + THEORETICAL_WARMUP_DATAGRAMS))}
+MAX_DATAGRAMS=${MAX_DATAGRAMS:-$THEORETICAL_TOTAL_DATAGRAMS}
 DATAGRAM_SHORTFALL_TOLERANCE=${DATAGRAM_SHORTFALL_TOLERANCE:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_MARKER=${PAYLOAD_MARKER:-RFQCLSEF}
@@ -189,7 +193,7 @@ MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 
 export RUN_ID HW_MAC_HOST HW_REPO_PATH LINUX_HOST MAC_LAN_IP REMOTE_PREFIX
 export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
-export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS THEORETICAL_MAX_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
+export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
 export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
@@ -247,7 +251,8 @@ import sys
 keys = [
     "RUN_ID", "HW_MAC_HOST", "HW_REPO_PATH", "LINUX_HOST", "MAC_LAN_IP",
     "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
-    "EXPECTED_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
+    "EXPECTED_PAYLOADS", "SOURCE_WARMUP_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "THEORETICAL_WARMUP_DATAGRAMS", "THEORETICAL_TOTAL_DATAGRAMS",
+    "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
     "RX_STARTUP_SECONDS", "TX_STARTUP_SECONDS",
     "LINK_ID", "RADIO_PORT", "TX_RATE", "TX_PROFILE", "TX_POWER_MODE",
     "TX_POWER_SAFETY_PROFILE", "TX_CALIBRATION_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
@@ -285,7 +290,7 @@ Hardware Mac:
 
 Linux peer through hardware Mac:
   LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
-  ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $EXPECTED_PAYLOADS payloads>'
+  ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $SOURCE_WARMUP_PAYLOADS warmup payloads and $EXPECTED_PAYLOADS measured payloads>'
 
 Local collection:
   scp hardware Mac reports from $REMOTE_PREFIX-*
@@ -461,7 +466,7 @@ MAC_BRIDGE
 
 run_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
   log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
   STARTED_LINUX=1
   ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" <<'LINUX_RUN'
@@ -738,27 +743,36 @@ tx_pid=$!
 
 sleep "$TX_STARTUP_SECONDS"
 
-"$PYTHON3_BIN" - "$LINUX_SOURCE_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$PAYLOAD_MARKER" "$PAYLOAD_INTERVAL_SEC" <<'PY' > "${REMOTE_PREFIX}-source.log" 2>&1
+"$PYTHON3_BIN" - "$LINUX_SOURCE_PORT" "$EXPECTED_PAYLOADS" "$SOURCE_WARMUP_PAYLOADS" "$PAYLOAD_LEN" "$PAYLOAD_MARKER" "$PAYLOAD_INTERVAL_SEC" <<'PY' > "${REMOTE_PREFIX}-source.log" 2>&1
 import socket
 import sys
 import time
 
 port = int(sys.argv[1])
 count = int(sys.argv[2])
-payload_len = int(sys.argv[3])
-marker = sys.argv[4].encode("ascii")
-interval = float(sys.argv[5])
+warmup_count = int(sys.argv[3])
+payload_len = int(sys.argv[4])
+marker = sys.argv[5].encode("ascii")
+interval = float(sys.argv[6])
 prefix_len = len(marker) + 4
 if payload_len < prefix_len:
     raise SystemExit("payload too short")
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+warmup_prefix = b"WFBWARM"[:max(0, min(7, payload_len))]
+for i in range(warmup_count):
+    seq = i.to_bytes(4, "big")
+    fill_len = max(0, payload_len - len(warmup_prefix) - len(seq))
+    payload = warmup_prefix + seq + (b"W" * fill_len)
+    sock.sendto(payload, ("127.0.0.1", port))
+    if interval > 0:
+        time.sleep(interval)
 for i in range(count):
     fill = bytes([65 + (i % 26)]) * (payload_len - prefix_len)
     payload = marker + i.to_bytes(4, "big") + fill
     sock.sendto(payload, ("127.0.0.1", port))
     if interval > 0:
         time.sleep(interval)
-print(f"sent={count} payload_len={payload_len}")
+print(f"warmup_sent={warmup_count} sent={count} payload_len={payload_len}")
 PY
 
 wait "$tx_pid" || true
@@ -1077,11 +1091,14 @@ if observed is None:
     observed = submitted
 
 expected_payloads = env_int("EXPECTED_PAYLOADS")
+source_warmup_payloads = env_int("SOURCE_WARMUP_PAYLOADS") or 0
 recovered = counter_report.get("recovered_payloads")
 theoretical = env_int("THEORETICAL_MAX_DATAGRAMS")
+theoretical_warmup = env_int("THEORETICAL_WARMUP_DATAGRAMS") or 0
+theoretical_total = env_int("THEORETICAL_TOTAL_DATAGRAMS")
 bridge_max = env_int("MAX_DATAGRAMS")
 tolerance = env_int("DATAGRAM_SHORTFALL_TOLERANCE") or 0
-shortfall = theoretical - observed if theoretical is not None and observed is not None else None
+shortfall = theoretical_total - observed if theoretical_total is not None and observed is not None else None
 complete_payload_recovery = (
     expected_payloads is not None
     and recovered is not None
@@ -1096,6 +1113,9 @@ within_tolerance = (
 report = {
     "source": "scripts/run-rf-quality-close-range.sh",
     "theoretical_max_datagrams": theoretical,
+    "source_warmup_payloads": source_warmup_payloads,
+    "theoretical_warmup_datagrams": theoretical_warmup,
+    "theoretical_total_datagrams": theoretical_total,
     "bridge_max_datagrams": bridge_max,
     "observed_datagrams": observed,
     "submitted_datagrams": submitted,

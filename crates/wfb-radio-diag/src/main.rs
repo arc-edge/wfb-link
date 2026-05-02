@@ -31351,7 +31351,8 @@ fn rf_quality_calibration_report(
         })
     });
     let runtime_iqk = mac_report
-        .and_then(|value| rf_quality_json_clone(value, &["tx_calibration_profile", "runtime_iqk"]));
+        .and_then(|value| rf_quality_json_clone(value, &["tx_calibration_profile", "runtime_iqk"]))
+        .filter(|value| !value.is_null());
     let runtime_iqk_summary = rf_quality_runtime_iqk_summary(runtime_iqk.as_ref());
 
     RfQualityCalibrationReport {
@@ -31396,6 +31397,9 @@ fn rf_quality_runtime_iqk_summary(
     runtime_iqk: Option<&serde_json::Value>,
 ) -> Option<RfQualityRuntimeIqkSummaryReport> {
     let runtime_iqk = runtime_iqk?;
+    if !runtime_iqk.is_object() {
+        return None;
+    }
     let status = rf_quality_json_string(runtime_iqk, &["status"]);
     let cleanup_status = rf_quality_json_string(runtime_iqk, &["cleanup_status"]);
     let cleanup_restored = cleanup_status.as_deref() == Some("restored");
@@ -39236,6 +39240,24 @@ mod tests {
         assert!(!macos.calibration.stop_gap);
         assert!(macos.calibration.stop_gap_sources.is_empty());
         assert!(macos.calibration.probes.is_empty());
+    }
+
+    #[test]
+    fn rf_quality_runtime_iqk_summary_ignores_null_non_iqk_profiles() {
+        let mut args = rf_quality_report_args();
+        args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
+        let mac_report = serde_json::json!({
+            "tx_calibration_profile": {
+                "profile": "rtl8812a_lck",
+                "runtime_iqk": null,
+                "lck": {"status": "completed"}
+            }
+        });
+
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), None, None);
+
+        assert!(macos.calibration.runtime_iqk.is_none());
+        assert!(macos.calibration.runtime_iqk_summary.is_none());
     }
 
     #[test]

@@ -203,10 +203,26 @@ Live sustained close-range run after receiver-session hardening:
 - Payload-loss delta versus the Linux baseline: `1.45` percentage points.
 - macOS/Linux throughput ratio: `0.854542432051679`.
 
-Interpretation: LCK does not regress the sustained close-range flow and remains
-usable as an opt-in runtime calibration profile. This run still does not prove
-distance quality; it only shows that the runtime LCK sequence can coexist with
-the WFB data path and receiver session flow.
+Follow-up telemetry-gated close-range runs on May 2, 2026 reversed that
+interpretation for the current bench state:
+
+- No warmup: `/tmp/wfb-rfq-prod-lck-telemetry-gate/rf-quality-report.json`
+  submitted `3000/3000` datagrams, but Linux recovered only `392/2000` marked
+  payloads, logged `2151` decrypt failures, and reported
+  `acceptance.status = "degraded_comparison"`.
+- With `SOURCE_WARMUP_PAYLOADS=120`:
+  `/tmp/wfb-rfq-prod-lck-warmup-telemetry/rf-quality-report.json` submitted
+  `3180/3180` datagrams including the warmup FEC estimate, but Linux recovered
+  only `536/2000` marked payloads and still logged `2119` decrypt failures.
+- Both runs retained RX_ANT telemetry, so this was not a missing-metadata case.
+  Latest reported RSSI averages stayed near `-24 dBm` on antenna `0x1` and
+  `-16 dBm` on antenna `0x0`.
+
+Interpretation: LCK is not a production candidate right now. The failure looks
+like a receiver session/decrypt path problem under the LCK profile rather than
+a lack of RF visibility, and warmup did not resolve it. Keep LCK available for
+diagnostics, but do not promote it for range work until a repeatable root cause
+or a passing receiver-backed A/B run exists.
 
 ## Read-Only IQK Probe Profile
 

@@ -178,6 +178,20 @@ Telemetry-gated default rerun on May 2, 2026:
   payload recovery, Linux-margin comparison, and
   `macos.wfb_outcome.receiver_telemetry` are all present.
 
+Runtime LCK negative A/B on May 2, 2026:
+
+- No warmup:
+  `/tmp/wfb-rfq-prod-lck-telemetry-gate/rf-quality-report.json`.
+- With `SOURCE_WARMUP_PAYLOADS=120`:
+  `/tmp/wfb-rfq-prod-lck-warmup-telemetry/rf-quality-report.json`.
+- Both runs submitted all expected datagrams and carried RX_ANT telemetry, but
+  both were `degraded_comparison` / `outside_margin` because the Linux receiver
+  logged thousands of decrypt failures and recovered only `392/2000` and
+  `536/2000` marked payloads.
+- Do not use `TX_CALIBRATION_PROFILE=rtl8812a-lck` as a range candidate until
+  the session/decrypt regression is understood and a fresh close-range gate
+  passes.
+
 ## Stepped Or Attenuated
 
 Use this profile before outdoor work when an RF attenuator, repeatable
