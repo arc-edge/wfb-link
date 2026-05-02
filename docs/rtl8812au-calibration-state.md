@@ -334,6 +334,14 @@ Hardware validation on May 2, 2026:
   attempt, but alternated usable candidates with explicit hardware fail flags
   (`0x0000ee00`/`0x0000ef00`) before fallback. That points at IQK candidate
   quality or sequence sensitivity rather than a ready-poll timeout.
+- Candidate selection now compares IQK X/Y components as signed 11-bit values,
+  matching the Linux driver's left-shift/arithmetic-right-shift behavior before
+  tolerance checks. Follow-up one-frame smokes still often saw path-A RX
+  fallback because no two of the three path-A RX candidates were within the
+  upstream signed tolerance on both X and Y. The captured Linux final-state map
+  also shows RX IQC fallback-shaped values at `0x0c10` and `0x0e10`, so this
+  may be normal Linux-parity behavior for this adapter/channel rather than a
+  ready-poll bug.
 
 ## Standalone IQK Diagnostic
 

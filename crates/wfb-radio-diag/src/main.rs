@@ -16496,17 +16496,34 @@ fn runtime_iqk_iqc_value(x: u32, y: u32) -> TxRuntimeIqkIqcValue {
     }
 }
 
+fn rtl8812a_iqk_component_to_signed(value: u32) -> i32 {
+    let value = (value & 0x0000_07ff) as i32;
+    if value & 0x0000_0400 != 0 {
+        value - 0x0000_0800
+    } else {
+        value
+    }
+}
+
+fn rtl8812a_iqk_signed_to_component(value: i32) -> u32 {
+    (value & 0x0000_07ff) as u32
+}
+
 fn rtl8812a_iqk_select_candidate(
     candidates: &[TxRuntimeIqkIqcValue],
 ) -> Option<TxRuntimeIqkIqcValue> {
     for (index, left) in candidates.iter().enumerate() {
         for right in candidates.iter().skip(index + 1) {
-            let dx = left.x as i32 - right.x as i32;
-            let dy = left.y as i32 - right.y as i32;
+            let left_x = rtl8812a_iqk_component_to_signed(left.x);
+            let right_x = rtl8812a_iqk_component_to_signed(right.x);
+            let left_y = rtl8812a_iqk_component_to_signed(left.y);
+            let right_y = rtl8812a_iqk_component_to_signed(right.y);
+            let dx = left_x - right_x;
+            let dy = left_y - right_y;
             if dx.abs() < 4 && dy.abs() < 4 {
                 return Some(runtime_iqk_iqc_value(
-                    (left.x + right.x) / 2,
-                    (left.y + right.y) / 2,
+                    rtl8812a_iqk_signed_to_component((left_x + right_x) / 2),
+                    rtl8812a_iqk_signed_to_component((left_y + right_y) / 2),
                 ));
             }
         }
@@ -41393,6 +41410,15 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             runtime_iqk_iqc_value(0x124, 0x083),
         ])
         .is_none());
+
+        let signed_wrap_selected = rtl8812a_iqk_select_candidate(&[
+            runtime_iqk_iqc_value(0x1f7, 0x7ff),
+            runtime_iqk_iqc_value(0x1f5, 0x7ee),
+            runtime_iqk_iqc_value(0x1fa, 0x001),
+        ])
+        .expect("selected signed-wrap candidate");
+        assert_eq!(signed_wrap_selected.x, 0x1f8);
+        assert_eq!(signed_wrap_selected.y, 0x000);
     }
 
     #[test]
