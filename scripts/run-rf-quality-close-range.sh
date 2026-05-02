@@ -125,6 +125,8 @@ if [[ -z "${CALIBRATION_MODE+x}" ]]; then
     CALIBRATION_MODE=targeted-linux-parity
   elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-lck" ]]; then
     CALIBRATION_MODE=runtime-approximation
+  elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-runtime-iqk" ]]; then
+    CALIBRATION_MODE=runtime-approximation
   elif [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-iqk-probe" ]]; then
     CALIBRATION_MODE=stop-gap-captured
   else
@@ -427,6 +429,10 @@ if [[ "$SYNC_HW_REPO" == "1" ]]; then
   git -C "$repo" pull --ff-only
 fi
 cd "$repo"
+write_auth_args=()
+if [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-runtime-iqk" ]]; then
+  write_auth_args+=(--i-understand-this-writes-registers)
+fi
 nohup cargo run -p wfb-radio-diag -- --json \
   --report "${REMOTE_PREFIX}-listen.json" \
   bridge-tx-listen \
@@ -443,6 +449,7 @@ nohup cargo run -p wfb-radio-diag -- --json \
   --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE" \
   --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
   --i-understand-this-transmits \
+  "${write_auth_args[@]}" \
   > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
 pid=$!
 echo "$pid" > "${REMOTE_PREFIX}-bridge.pid"
