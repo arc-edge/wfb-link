@@ -28,7 +28,7 @@
 - [x] 4.3 Add readback probes for IQK/LCK-related BB/RF registers before and after channel setup and before TX
 - [x] 4.4 Compare macOS calibration state against a Linux baseline run on the same adapter and channel
 - [x] 4.5 Decide whether a partial IQK/LCK approximation is sufficient or whether to port the Linux runtime routines, based on measured RF outcome
-- [ ] 4.6 If justified, implement the smallest calibration routine subset that improves receiver-backed RF-quality metrics
+- [x] 4.6 If justified, implement the smallest calibration routine subset that improves receiver-backed RF-quality metrics (not justified by current receiver-backed close-range metrics; deferred until stepped/outdoor evidence shows a calibration-specific gap)
 
 ## 5. Range Profiles and Acceptance Gates
 

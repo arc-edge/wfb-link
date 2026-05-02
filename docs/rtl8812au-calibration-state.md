@@ -133,3 +133,10 @@ Next action:
 - Port full IQK/LCK only if the targeted subset does not close the measured
   RF-quality gap or if receiver/spectrum evidence specifically points to IQ/LO
   impairment.
+
+Follow-up after the accepted May 2, 2026 close-range profile: the channel 36
+HT20 EFUSE-derived run recovered `2000/2000` marked WFB source payloads and was
+inside the Linux payload-loss margin. That is enough to keep full IQK/LCK and
+smaller targeted calibration-subset work deferred. Calibration is still labeled
+as stop-gap and remains a stepped/outdoor range risk, but there is not yet a
+receiver-backed failure that justifies porting more runtime calibration code.
