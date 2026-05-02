@@ -193,8 +193,10 @@ Linux receiver log. `rf-quality-report` also exposes the compact copy at
 `macos.wfb_outcome.receiver_telemetry` so release tooling can read MCS/RSSI/SNR
 health without parsing the full receiver artifact.
 Outdoor profile gating now rejects a close-range gate that lacks this RX_ANT
-receiver telemetry, because long-distance promotion needs RF health evidence in
-addition to payload recovery.
+receiver telemetry or whose RX_ANT frequency/MCS/bandwidth tuple differs from
+the outdoor profile. Long-distance promotion needs RF health evidence in
+addition to payload recovery, and it has to prove that the receiver observed the
+same RF tuple being promoted.
 
 This matters because WFB can receive strong RF frames but recover zero payloads
 when the receiver misses the session frame. That condition now appears as

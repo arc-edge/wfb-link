@@ -32475,6 +32475,12 @@ fn rf_quality_profile_gate_report(
             close_range_value: "missing".to_string(),
             impact: "outdoor range promotion requires close-range RX_ANT receiver telemetry so MCS/RSSI/SNR health is part of the gate",
         });
+    } else {
+        rf_quality_close_range_gate_receiver_telemetry_matches(
+            &mut mismatches,
+            profile,
+            close_range_report,
+        );
     }
 
     let mismatch_count = mismatches.len();
@@ -32552,6 +32558,93 @@ fn rf_quality_close_range_gate_receiver_telemetry_available(
         )
 }
 
+fn rf_quality_close_range_gate_receiver_telemetry_matches(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    profile: &RfQualityProfileReport,
+    close_range_report: &serde_json::Value,
+) {
+    let samples = rf_quality_close_range_gate_receiver_telemetry_samples(close_range_report);
+    if let Some(freq_mhz) = profile.channel_frequency_mhz {
+        rf_quality_gate_compare_receiver_telemetry_u64(
+            mismatches,
+            "receiver_telemetry.freq_mhz",
+            u64::from(freq_mhz),
+            &samples,
+            &["freq_mhz", "frequency_mhz", "freq"],
+            "close-range RX_ANT frequency must match the outdoor profile channel before range promotion",
+        );
+    }
+    rf_quality_gate_compare_receiver_telemetry_u64(
+        mismatches,
+        "receiver_telemetry.bandwidth_mhz",
+        u64::from(profile.bandwidth_mhz),
+        &samples,
+        &["bandwidth_mhz", "bandwidth", "bw_mhz"],
+        "close-range RX_ANT bandwidth must match the outdoor profile bandwidth before range promotion",
+    );
+    if let Some(mcs_index) = rf_quality_tx_rate_expected_mcs(&profile.tx_rate) {
+        rf_quality_gate_compare_receiver_telemetry_u64(
+            mismatches,
+            "receiver_telemetry.mcs_index",
+            mcs_index,
+            &samples,
+            &["mcs_index", "mcs"],
+            "close-range RX_ANT MCS must match the fixed outdoor TX rate before range promotion",
+        );
+    }
+}
+
+fn rf_quality_close_range_gate_receiver_telemetry_samples(
+    close_range_report: &serde_json::Value,
+) -> Vec<&serde_json::Value> {
+    for path in [
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_telemetry",
+            "rx_antenna_summary",
+            "latest_by_antenna",
+        ][..],
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_evidence",
+            "receiver_health",
+            "rx_antenna_summary",
+            "latest_by_antenna",
+        ],
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_evidence",
+            "rx_antenna_summary",
+            "latest_by_antenna",
+        ],
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_evidence",
+            "receiver_health",
+            "rx_antenna_reports",
+        ],
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_evidence",
+            "rx_antenna_reports",
+        ],
+    ] {
+        if let Some(values) =
+            rf_quality_json_get(close_range_report, path).and_then(|value| value.as_array())
+        {
+            if !values.is_empty() {
+                return values.iter().collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
 fn rf_quality_profile_gate_blocks(gate: &RfQualityProfileGateReport) -> bool {
     matches!(
         gate.status,
@@ -32609,6 +32702,73 @@ fn rf_quality_gate_compare_string(
             close_range_value: "<missing>".to_string(),
             impact,
         }),
+    }
+}
+
+fn rf_quality_gate_compare_receiver_telemetry_u64(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    field: &'static str,
+    current_value: u64,
+    close_range_samples: &[&serde_json::Value],
+    close_range_keys: &[&str],
+    impact: &'static str,
+) {
+    if close_range_samples.is_empty() {
+        mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: "<missing>".to_string(),
+            impact,
+        });
+        return;
+    }
+
+    let mut close_range_values = Vec::with_capacity(close_range_samples.len());
+    let mut matches_all = true;
+    for (index, sample) in close_range_samples.iter().enumerate() {
+        let value = close_range_keys
+            .iter()
+            .find_map(|key| rf_quality_json_u64(sample, &[*key]));
+        if value != Some(current_value) {
+            matches_all = false;
+        }
+        close_range_values.push(rf_quality_receiver_telemetry_value_label(
+            sample, index, value,
+        ));
+    }
+
+    if !matches_all {
+        mismatches.push(RfQualityProfileGateMismatchReport {
+            field,
+            current_value: current_value.to_string(),
+            close_range_value: close_range_values.join(", "),
+            impact,
+        });
+    }
+}
+
+fn rf_quality_receiver_telemetry_value_label(
+    sample: &serde_json::Value,
+    index: usize,
+    value: Option<u64>,
+) -> String {
+    let source = rf_quality_json_string(sample, &["antenna_id"])
+        .map(|antenna| format!("ant{antenna}"))
+        .or_else(|| {
+            rf_quality_json_string(sample, &["antenna_id_hex"])
+                .map(|antenna| format!("ant{antenna}"))
+        })
+        .unwrap_or_else(|| format!("sample{index}"));
+    let value = value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "<missing>".to_string());
+    format!("{source}={value}")
+}
+
+fn rf_quality_tx_rate_expected_mcs(tx_rate: &str) -> Option<u64> {
+    match parse_tx_rate_arg(tx_rate).ok()? {
+        TxRate::Mcs(mcs) | TxRate::Vht { mcs, .. } => Some(u64::from(mcs)),
+        _ => None,
     }
 }
 
@@ -39059,7 +39219,7 @@ mod tests {
         "rx_antenna_report_count": 2,
         "rx_antenna_summary": {
           "latest_by_antenna": [
-            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
           ]
         }
       }
@@ -39117,7 +39277,7 @@ mod tests {
         "rx_antenna_report_count": 2,
         "rx_antenna_summary": {
           "latest_by_antenna": [
-            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
           ]
         }
       }
@@ -39142,6 +39302,73 @@ mod tests {
         );
         assert_eq!(report.profile_gate.mismatch_count, 1);
         assert_eq!(report.profile_gate.mismatches[0].field, "tx_power_mode");
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_rejects_receiver_telemetry_tuple_mismatch() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-rx-ant-mismatch-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "freq_mhz": 5200, "mcs_index": 0, "bandwidth_mhz": 40, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      }
+    }
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write receiver-telemetry mismatch close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 3);
+        assert_eq!(
+            report
+                .profile_gate
+                .mismatches
+                .iter()
+                .map(|mismatch| mismatch.field)
+                .collect::<Vec<_>>(),
+            vec![
+                "receiver_telemetry.freq_mhz",
+                "receiver_telemetry.bandwidth_mhz",
+                "receiver_telemetry.mcs_index"
+            ]
+        );
     }
 
     #[test]
@@ -39172,7 +39399,7 @@ mod tests {
         "rx_antenna_report_count": 2,
         "rx_antenna_summary": {
           "latest_by_antenna": [
-            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
           ]
         }
       }

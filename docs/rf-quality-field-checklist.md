@@ -8,7 +8,8 @@ Use this checklist before any stepped, attenuated, or outdoor run.
 - Confirm channel, bandwidth, TX rate/profile, TX power mode, calibration mode,
   WFB link ID, radio port, FEC, and payload length match the planned run.
 - Confirm the close-range gate includes `macos.wfb_outcome.receiver_telemetry`
-  or equivalent receiver metadata with RX_ANT MCS/RSSI/SNR evidence.
+  or equivalent receiver metadata with RX_ANT frequency, MCS, bandwidth,
+  RSSI, and SNR evidence for the same tuple.
 - Stop or isolate normal Linux WFB services.
 - Pin Linux `wfb0` to the planned channel/bandwidth.
 - Start receiver logs and RF capture.
@@ -34,6 +35,6 @@ Use this checklist before any stepped, attenuated, or outdoor run.
   photos, or maps as companion artifacts.
 - Check `comparison.status`, `comparison.outcome.acceptance_margin.status`,
   `profile_gate.status`, and `bandwidth_evidence.status`.
-- Do not call a run range-ready if the close-range gate failed, the tuple
-  mismatched, receiver telemetry is missing, payload loss is outside margin, or
-  wide-mode proof is missing.
+- Do not call a run range-ready if the close-range gate failed, the profile or
+  RX_ANT tuple mismatched, receiver telemetry is missing, payload loss is
+  outside margin, or wide-mode proof is missing.

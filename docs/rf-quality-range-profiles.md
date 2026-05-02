@@ -86,7 +86,9 @@ baseline. It does not promote the profile to long-distance accepted.
 For outdoor promotion, the close-range gate must also carry receiver telemetry
 from Linux `wfb_rx` RX_ANT lines so the range report can compare payload
 recovery with MCS/RSSI/SNR health, not just USB submission and decoded payload
-counts.
+counts. The gate checks the RX_ANT frequency, MCS index, and bandwidth against
+the outdoor profile tuple, so a passing bench artifact cannot promote a field
+run on a different channel, rate, or bandwidth.
 
 ### Accepted Close-Range 20 MHz Run
 
@@ -274,7 +276,9 @@ enforces this with `--close-range-report`: an `outdoor-long-distance` report
 fails if that file is missing, is not a passing `close-range` report with
 `baseline_comparable` acceptance, or differs in channel, bandwidth, fixed rate,
 TX profile, TX power mode, calibration mode, WFB tuple, payload length, or
-expected payload count.
+expected payload count. It also fails when the close-range receiver telemetry is
+missing or the RX_ANT frequency/MCS/bandwidth tuple does not match the outdoor
+profile.
 
 Required settings:
 
@@ -348,8 +352,10 @@ receiver-backed WFB outcomes as the primary signal:
   ratio is informational rather than a failing margin.
 - Receiver metadata: when the Linux receiver emits WFB-ng `RX_ANT` lines, the
   runner preserves RSSI/SNR/MCS/bandwidth telemetry and the report marks
-  receiver metadata as `available`. This metadata is evidence for diagnosis and
-  field notes, not yet a scored pass/fail margin.
+  receiver metadata as `available`. Outdoor promotion now requires the
+  close-range RX_ANT frequency/MCS/bandwidth tuple to match the profile. RSSI
+  and SNR remain diagnostic evidence and field-note inputs rather than scored
+  pass/fail margins.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded
@@ -365,6 +371,8 @@ Do not classify a run as range-ready when any of the following are true:
   passing close-range report.
 - The close-range gate report contains
   `macos.calibration.runtime_iqk_summary.risk` and it is not `completed`.
+- The close-range gate lacks RX_ANT receiver telemetry, or the RX_ANT
+  frequency, MCS index, or bandwidth differs from the outdoor profile.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
   link/radio port, FEC, payload length, antenna setup, or adapter class.
 - The run uses HT40/VHT80 without separate evidence that the actual transmitted
