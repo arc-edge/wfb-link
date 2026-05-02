@@ -118,12 +118,15 @@ command because it runs the TX/RX IQK one-shot sequence and writes final IQC
 values before restoring saved RF/BB state.
 
 May 2, 2026 hardware evidence for `TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk`
-lives at `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`. It is
+lives at `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json` and
+`/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`. Both are
 baseline-comparable and within margin at close range, but the calibration
-report still says `runtime_iqk.status=fallback_applied` because path-A RX IQK
-uses fallback IQC. Do not promote it to a production or range-ready profile
-until that per-path fallback is resolved or deliberately accepted with stronger
-range evidence.
+reports still say `runtime_iqk.status=fallback_applied` because path-A RX IQK
+uses fallback IQC in the full receiver-backed runs. A one-frame smoke at
+`/tmp/wfb-rtl8812a-runtime-iqk-iqc-readback.json` did complete both RX paths and
+now records final RX IQC latch readbacks. Do not promote this to a production
+or range-ready profile until path-A RX stability is resolved or deliberately
+accepted with stronger range evidence.
 
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical
 `ceil(expected_payloads * fec_n / fec_k)` count while still recovering every

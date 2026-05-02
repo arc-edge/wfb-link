@@ -14165,8 +14165,10 @@ const RF_CALIBRATION_RFE_TIMING_REGISTERS: &[RfCalibrationRegisterSpec] = &[
 const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1),
     ("rA_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 4),
+    ("rA_RX_IQC_Latch_Jaguar", REG_IQK_RX_IQC_A_JAGUAR),
     ("rB_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x200),
     ("rB_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x204),
+    ("rB_RX_IQC_Latch_Jaguar", REG_IQK_RX_IQC_B_JAGUAR),
     ("rFPGA0_IQK", REG_FPGA0_IQK_JAGUAR),
     ("rTx_IQK_Tone_A", REG_TX_IQK_TONE_A_JAGUAR),
     ("rRx_IQK_Tone_A", REG_RX_IQK_TONE_A_JAGUAR),
@@ -41388,6 +41390,12 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert!(RF_CALIBRATION_IQK_REGISTERS
             .iter()
             .any(|(_, address)| *address == REG_TX_IQK_PI_B_JAGUAR));
+        assert!(RF_CALIBRATION_IQK_REGISTERS
+            .iter()
+            .any(|(_, address)| *address == REG_IQK_RX_IQC_A_JAGUAR));
+        assert!(RF_CALIBRATION_IQK_REGISTERS
+            .iter()
+            .any(|(_, address)| *address == REG_IQK_RX_IQC_B_JAGUAR));
         assert_eq!(
             RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS,
             &[

@@ -294,7 +294,8 @@ Reports label this under `tx_calibration_profile.runtime_iqk` with:
 - `backup` and `cleanup` evidence, including restore counts and
   `cleanup_status`;
 - `before_iqk_registers`, `after_iqk_registers`, and final affected IQK
-  register readback;
+  register readback, including the path-A/path-B RX IQC latches at `0x0c10`
+  and `0x0e10`;
 - USB counter deltas for the calibration sequence.
 
 This is now a real runtime IQK implementation, but it remains experimental for
@@ -309,15 +310,23 @@ Hardware validation on May 2, 2026:
   `/tmp/wfb-rtl8812a-runtime-iqk-smoke.json`,
   `/tmp/wfb-rtl8812a-runtime-iqk-smoke-2.json`, and
   `/tmp/wfb-rtl8812a-runtime-iqk-smoke-3.json`.
+- Follow-up IQC-readback smoke:
+  `/tmp/wfb-rtl8812a-runtime-iqk-iqc-readback.json`.
 - Baseline-compatible receiver-backed run:
-  `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`.
-- The close-range run submitted and observed `3000/3000` WFB datagrams,
+  `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json`; follow-up:
+  `/tmp/wfb-rfq-runtime-iqk-a3/rf-quality-report.json`.
+- The first close-range run submitted and observed `3000/3000` WFB datagrams,
   recovered `1978/2000` marked payloads, matched the Linux baseline tuple, and
   stayed `within_margin` with a `1.05` percentage-point payload-loss delta.
+- The follow-up close-range run also submitted and observed `3000/3000` WFB
+  datagrams, recovered `1984/2000` marked payloads, matched the Linux baseline
+  tuple, and stayed `within_margin` with a `0.75` percentage-point payload-loss
+  delta.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
-  paths A and B, RX IQK succeeded on path B, and RX IQK consistently fell back
-  on path A after candidate selection failed. Keep this profile experimental
-  until the path-A RX one-shot sequence matches Linux behavior without fallback.
+  paths A and B, RX IQK succeeded on path B, and RX IQK on path A remains
+  intermittent: it fell back in the full close-range runs but completed in the
+  one-frame IQC-readback smoke. Keep this profile experimental until path-A RX
+  one-shot stability is understood at distance.
 
 ## Standalone IQK Diagnostic
 
