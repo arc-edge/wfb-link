@@ -32347,6 +32347,14 @@ fn rf_quality_profile_gate_report(
             });
         }
     }
+    if !rf_quality_close_range_gate_receiver_telemetry_available(close_range_report) {
+        mismatches.push(RfQualityProfileGateMismatchReport {
+            field: "receiver_telemetry",
+            current_value: "available".to_string(),
+            close_range_value: "missing".to_string(),
+            impact: "outdoor range promotion requires close-range RX_ANT receiver telemetry so MCS/RSSI/SNR health is part of the gate",
+        });
+    }
 
     let mismatch_count = mismatches.len();
     RfQualityProfileGateReport {
@@ -32365,6 +32373,62 @@ fn rf_quality_profile_gate_report(
             "close-range gate report does not match the outdoor long-distance RF-quality tuple"
         },
     }
+}
+
+fn rf_quality_close_range_gate_receiver_telemetry_available(
+    close_range_report: &serde_json::Value,
+) -> bool {
+    rf_quality_json_string(
+        close_range_report,
+        &[
+            "comparison",
+            "outcome",
+            "acceptance_margin",
+            "receiver_metadata_status",
+        ],
+    )
+    .is_some_and(|status| status == "available")
+        || rf_quality_json_u64(
+            close_range_report,
+            &[
+                "macos",
+                "wfb_outcome",
+                "receiver_telemetry",
+                "rx_antenna_report_count",
+            ],
+        )
+        .is_some_and(|count| count > 0)
+        || rf_quality_json_array_nonempty(
+            close_range_report,
+            &[
+                "macos",
+                "wfb_outcome",
+                "receiver_telemetry",
+                "rx_antenna_summary",
+                "latest_by_antenna",
+            ],
+        )
+        || rf_quality_json_u64(
+            close_range_report,
+            &[
+                "macos",
+                "wfb_outcome",
+                "receiver_evidence",
+                "receiver_health",
+                "rx_antenna_report_count",
+            ],
+        )
+        .is_some_and(|count| count > 0)
+        || rf_quality_json_array_nonempty(
+            close_range_report,
+            &[
+                "macos",
+                "wfb_outcome",
+                "receiver_evidence",
+                "receiver_health",
+                "rx_antenna_reports",
+            ],
+        )
 }
 
 fn rf_quality_profile_gate_blocks(gate: &RfQualityProfileGateReport) -> bool {
@@ -38868,6 +38932,18 @@ mod tests {
     "payload_len": 1024,
     "expected_payloads": 30
   },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      }
+    }
+  },
   "acceptance": {"status": "baseline_comparable"},
   "result": "pass"
 }"#,
@@ -38914,6 +38990,18 @@ mod tests {
     "payload_len": 1024,
     "expected_payloads": 30
   },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      }
+    }
+  },
   "acceptance": {"status": "baseline_comparable"},
   "result": "pass"
 }"#,
@@ -38958,6 +39046,16 @@ mod tests {
     "expected_payloads": 30
   },
   "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      }
+    },
     "calibration": {
       "runtime_iqk_summary": {
         "risk": "fallback_applied",
@@ -38989,6 +39087,52 @@ mod tests {
         assert_eq!(
             report.profile_gate.mismatches[0].field,
             "runtime_iqk_summary.risk"
+        );
+    }
+
+    #[test]
+    fn rf_quality_outdoor_profile_rejects_gate_without_receiver_telemetry() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-no-rx-ant-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write no-telemetry close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 1);
+        assert_eq!(
+            report.profile_gate.mismatches[0].field,
+            "receiver_telemetry"
         );
     }
 

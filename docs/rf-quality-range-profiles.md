@@ -19,7 +19,7 @@ treated as valid.
 | --- | --- | --- | --- |
 | Close-range sanity | `close-range` | Prove the selected Mac TX power and calibration mode still recovers WFB payloads on the bench. | Must pass before any stepped or outdoor run is accepted for the same channel, bandwidth, rate, power mode, calibration mode, FEC, and payload length. |
 | Stepped or attenuated | `stepped-attenuated` | Measure margin changes under repeatable loss, separation, or attenuator steps before field range work. | Must stay within the documented Mac-vs-Linux acceptance margin or identify the calibration/power gap being tested. |
-| Outdoor long-distance | `outdoor-long-distance` | Validate the operating profile in the actual field geometry. | Requires a passing close-range run and companion notes with distance/geometry, antenna orientation, adapter placement, environment, and artifacts. |
+| Outdoor long-distance | `outdoor-long-distance` | Validate the operating profile in the actual field geometry. | Requires a passing close-range run with receiver RX_ANT MCS/RSSI/SNR telemetry, plus companion notes with distance/geometry, antenna orientation, adapter placement, environment, and artifacts. |
 
 ## Close-Range Sanity
 
@@ -83,6 +83,10 @@ cargo run -p wfb-radio-diag -- --json \
 Acceptance meaning: a passing close-range profile only proves that the selected
 Mac settings are bench-functional and comparable to the close-range Linux
 baseline. It does not promote the profile to long-distance accepted.
+For outdoor promotion, the close-range gate must also carry receiver telemetry
+from Linux `wfb_rx` RX_ANT lines so the range report can compare payload
+recovery with MCS/RSSI/SNR health, not just USB submission and decoded payload
+counts.
 
 ### Accepted Close-Range 20 MHz Run
 

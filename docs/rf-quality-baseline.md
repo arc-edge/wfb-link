@@ -174,6 +174,9 @@ antenna id, packet count, RSSI min/avg/max, and SNR min/avg/max from the
 Linux receiver log. `rf-quality-report` also exposes the compact copy at
 `macos.wfb_outcome.receiver_telemetry` so release tooling can read MCS/RSSI/SNR
 health without parsing the full receiver artifact.
+Outdoor profile gating now rejects a close-range gate that lacks this RX_ANT
+receiver telemetry, because long-distance promotion needs RF health evidence in
+addition to payload recovery.
 
 This matters because WFB can receive strong RF frames but recover zero payloads
 when the receiver misses the session frame. That condition now appears as
