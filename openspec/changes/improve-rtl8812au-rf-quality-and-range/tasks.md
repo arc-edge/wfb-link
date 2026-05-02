@@ -7,10 +7,10 @@
 
 ## 2. Linux Baseline Capture
 
-- [ ] 2.1 Document the required Linux baseline commands for fixed-rate 20 MHz WFB TX/RX using the same adapter class, antennas, key, radio port, FEC, and payload size
-- [ ] 2.2 Add scripts or runbook snippets that collect Linux receiver logs, tcpdump/pcap artifacts, WFB payload counters, adapter identity, channel state, and command parameters
-- [ ] 2.3 Capture a close-range Linux 20 MHz baseline for the current bench and store artifact paths in the RF-quality report format
-- [ ] 2.4 Add a comparison summary that reports macOS payload recovery, loss, throughput, and receiver metadata against the Linux baseline
+- [x] 2.1 Document the required Linux baseline commands for fixed-rate 20 MHz WFB TX/RX using the same adapter class, antennas, key, radio port, FEC, and payload size
+- [x] 2.2 Add scripts or runbook snippets that collect Linux receiver logs, tcpdump/pcap artifacts, WFB payload counters, adapter identity, channel state, and command parameters
+- [x] 2.3 Capture a close-range Linux 20 MHz baseline for the current bench and store artifact paths in the RF-quality report format
+- [x] 2.4 Add a comparison summary that reports macOS payload recovery, loss, throughput, and receiver metadata against the Linux baseline
 
 ## 3. EFUSE-Derived TX Power
 

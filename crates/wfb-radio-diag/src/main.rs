@@ -2047,6 +2047,14 @@ struct RfQualityReportArgs {
     #[arg(long)]
     payload_len: Option<usize>,
 
+    /// Expected decoded source payload count for loss/recovery summaries.
+    #[arg(long)]
+    expected_payloads: Option<u64>,
+
+    /// Decoded source payloads recovered by the receiver for this macOS run.
+    #[arg(long)]
+    recovered_payloads: Option<u64>,
+
     /// Receiver-side artifact path associated with this run. Repeatable.
     #[arg(long = "receiver-artifact", value_name = "PATH")]
     receiver_artifacts: Vec<PathBuf>,
@@ -3446,6 +3454,7 @@ struct RfQualityProfileReport {
     calibration_mode: RfQualityCalibrationMode,
     wfb: RfQualityWfbSettingsReport,
     payload_len: Option<usize>,
+    expected_payloads: Option<u64>,
     receiver_artifacts: Vec<PathBuf>,
 }
 
@@ -3520,6 +3529,7 @@ struct RfQualityLinuxBaselineReport {
     tx_descriptor_profile: Option<String>,
     wfb: RfQualityBaselineWfbReport,
     payload_len: Option<usize>,
+    source_payloads: Option<u64>,
     recovered_payloads: Option<u64>,
     submitted_datagrams: Option<u64>,
     throughput_mbps: Option<f64>,
@@ -3543,6 +3553,25 @@ struct RfQualityComparisonReport {
     invalidating_mismatch_count: usize,
     degraded_mismatch_count: usize,
     mismatches: Vec<RfQualityMismatchReport>,
+    outcome: RfQualityOutcomeComparisonReport,
+}
+
+#[derive(Debug, Serialize)]
+struct RfQualityOutcomeComparisonReport {
+    macos: RfQualityOutcomeSideReport,
+    linux_baseline: Option<RfQualityOutcomeSideReport>,
+    recovered_payload_delta: Option<i64>,
+    throughput_ratio_macos_to_linux: Option<f64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RfQualityOutcomeSideReport {
+    submitted_datagrams: Option<u64>,
+    source_payloads: Option<u64>,
+    recovered_payloads: Option<u64>,
+    loss_percent: Option<f64>,
+    throughput_mbps: Option<f64>,
+    receiver_artifacts: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25222,7 +25251,8 @@ fn rf_quality_report(args: RfQualityReportArgs) -> RfQualityReport {
     let profile = rf_quality_profile_report(&args, channel);
     let macos =
         rf_quality_macos_report(&args, mac_report_json.as_ref(), efuse_report_json.as_ref());
-    let comparison = rf_quality_compare_profile_to_baseline(&profile, linux_baseline.as_ref());
+    let comparison =
+        rf_quality_compare_profile_to_baseline(&profile, &macos, linux_baseline.as_ref());
     let acceptance = rf_quality_acceptance(result, &comparison);
 
     RfQualityReport {
@@ -25270,6 +25300,7 @@ fn rf_quality_profile_report(
             fec_n: args.fec_n,
         },
         payload_len: args.payload_len,
+        expected_payloads: args.expected_payloads,
         receiver_artifacts: args.receiver_artifacts.clone(),
     }
 }
@@ -25362,26 +25393,31 @@ fn rf_quality_macos_report(
             lck: mac_report.and_then(|value| rf_quality_json_clone(value, &["lck"])),
             thermal: mac_report.and_then(|value| rf_quality_json_clone(value, &["thermal"])),
         },
-        wfb_outcome: rf_quality_wfb_outcome(mac_report),
+        wfb_outcome: rf_quality_wfb_outcome(args, mac_report),
         receiver_artifacts,
     }
 }
 
-fn rf_quality_wfb_outcome(mac_report: Option<&serde_json::Value>) -> RfQualityWfbOutcomeReport {
+fn rf_quality_wfb_outcome(
+    args: &RfQualityReportArgs,
+    mac_report: Option<&serde_json::Value>,
+) -> RfQualityWfbOutcomeReport {
     let Some(value) = mac_report else {
-        return RfQualityWfbOutcomeReport::default();
+        return RfQualityWfbOutcomeReport {
+            recovered_payloads: args.recovered_payloads,
+            ..RfQualityWfbOutcomeReport::default()
+        };
     };
     RfQualityWfbOutcomeReport {
         submitted_datagrams: rf_quality_json_u64(value, &["submit_counters", "submitted"])
             .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"])),
-        recovered_payloads: rf_quality_json_u64(
-            value,
-            &["rx", "wfb_forward", "counters", "forwarded"],
-        )
-        .or_else(|| {
-            rf_quality_json_u64(value, &["rx", "wfb_forwards", "0", "counters", "forwarded"])
-        })
-        .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
+        recovered_payloads: args
+            .recovered_payloads
+            .or_else(|| rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "forwarded"]))
+            .or_else(|| {
+                rf_quality_json_u64(value, &["rx", "wfb_forwards", "0", "counters", "forwarded"])
+            })
+            .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
         dropped_datagrams: rf_quality_json_u64(value, &["bridge_counters", "dropped"])
             .or_else(|| rf_quality_json_u64(value, &["rx", "dropped_packets"])),
         malformed_datagrams: rf_quality_json_u64(value, &["bridge_counters", "malformed"]).or_else(
@@ -25441,6 +25477,10 @@ fn rf_quality_linux_baseline_report(
         },
         payload_len: rf_quality_json_usize(value, &["profile", "payload_len"])
             .or_else(|| rf_quality_json_usize(value, &["payload_len"])),
+        source_payloads: rf_quality_json_u64(value, &["profile", "expected_payloads"])
+            .or_else(|| rf_quality_json_u64(value, &["profile", "source_payloads"]))
+            .or_else(|| rf_quality_json_u64(value, &["metrics", "source_payloads"]))
+            .or_else(|| rf_quality_json_u64(value, &["source_payloads"])),
         recovered_payloads: rf_quality_json_u64(value, &["metrics", "recovered_payloads"])
             .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
         submitted_datagrams: rf_quality_json_u64(value, &["metrics", "submitted_datagrams"])
@@ -25457,6 +25497,7 @@ fn rf_quality_linux_baseline_report(
 
 fn rf_quality_compare_profile_to_baseline(
     profile: &RfQualityProfileReport,
+    macos: &RfQualityMacosReport,
     baseline: Option<&RfQualityLinuxBaselineReport>,
 ) -> RfQualityComparisonReport {
     let Some(baseline) = baseline else {
@@ -25466,6 +25507,7 @@ fn rf_quality_compare_profile_to_baseline(
             invalidating_mismatch_count: 0,
             degraded_mismatch_count: 0,
             mismatches: Vec::new(),
+            outcome: rf_quality_outcome_comparison(profile, macos, None),
         };
     };
 
@@ -25560,7 +25602,76 @@ fn rf_quality_compare_profile_to_baseline(
         invalidating_mismatch_count,
         degraded_mismatch_count,
         mismatches,
+        outcome: rf_quality_outcome_comparison(profile, macos, Some(baseline)),
     }
+}
+
+fn rf_quality_outcome_comparison(
+    profile: &RfQualityProfileReport,
+    macos: &RfQualityMacosReport,
+    baseline: Option<&RfQualityLinuxBaselineReport>,
+) -> RfQualityOutcomeComparisonReport {
+    let macos_side = RfQualityOutcomeSideReport {
+        submitted_datagrams: macos.wfb_outcome.submitted_datagrams,
+        source_payloads: profile.expected_payloads,
+        recovered_payloads: macos.wfb_outcome.recovered_payloads,
+        loss_percent: rf_quality_loss_percent(
+            profile.expected_payloads,
+            macos.wfb_outcome.recovered_payloads,
+        ),
+        throughput_mbps: macos
+            .wfb_outcome
+            .throughput
+            .as_ref()
+            .and_then(rf_quality_throughput_mbps_from_json),
+        receiver_artifacts: macos.receiver_artifacts.clone(),
+    };
+    let linux_side = baseline.map(|baseline| RfQualityOutcomeSideReport {
+        submitted_datagrams: baseline.submitted_datagrams,
+        source_payloads: baseline.source_payloads,
+        recovered_payloads: baseline.recovered_payloads,
+        loss_percent: rf_quality_loss_percent(
+            baseline.source_payloads,
+            baseline.recovered_payloads,
+        ),
+        throughput_mbps: baseline.throughput_mbps,
+        receiver_artifacts: baseline.receiver_artifacts.clone(),
+    });
+    let recovered_payload_delta = macos_side
+        .recovered_payloads
+        .zip(linux_side.as_ref().and_then(|side| side.recovered_payloads))
+        .map(|(macos, linux)| macos as i64 - linux as i64);
+    let throughput_ratio_macos_to_linux = macos_side
+        .throughput_mbps
+        .zip(linux_side.as_ref().and_then(|side| side.throughput_mbps))
+        .and_then(|(macos, linux)| (linux > 0.0).then_some(macos / linux));
+
+    RfQualityOutcomeComparisonReport {
+        macos: macos_side,
+        linux_baseline: linux_side,
+        recovered_payload_delta,
+        throughput_ratio_macos_to_linux,
+    }
+}
+
+fn rf_quality_loss_percent(
+    source_payloads: Option<u64>,
+    recovered_payloads: Option<u64>,
+) -> Option<f64> {
+    let source_payloads = source_payloads?;
+    let recovered_payloads = recovered_payloads?;
+    if source_payloads == 0 {
+        return None;
+    }
+    let recovered_payloads = recovered_payloads.min(source_payloads);
+    Some((source_payloads - recovered_payloads) as f64 * 100.0 / source_payloads as f64)
+}
+
+fn rf_quality_throughput_mbps_from_json(value: &serde_json::Value) -> Option<f64> {
+    let bytes_per_second = rf_quality_json_f64(value, &["datagram_bytes_per_second"])
+        .or_else(|| rf_quality_json_f64(value, &["payload_bytes_per_second"]))
+        .or_else(|| rf_quality_json_f64(value, &["usb_bytes_per_second"]))?;
+    Some(bytes_per_second * 8.0 / 1_000_000.0)
 }
 
 fn rf_quality_compare_u64(
@@ -30033,6 +30144,42 @@ fn print_rf_quality_report_human(report: &RfQualityReport) {
         report.comparison.invalidating_mismatch_count,
         report.comparison.degraded_mismatch_count
     );
+    println!(
+        "Outcome comparison: macOS recovered={} loss={} throughput_mbps={} delta_recovered={} throughput_ratio={}",
+        report
+            .comparison
+            .outcome
+            .macos
+            .recovered_payloads
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .macos
+            .loss_percent
+            .map(|value| format!("{value:.2}%"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .macos
+            .throughput_mbps
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .recovered_payload_delta
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        report
+            .comparison
+            .outcome
+            .throughput_ratio_macos_to_linux
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "n/a".to_string())
+    );
     for mismatch in &report.comparison.mismatches {
         println!(
             "  {}: macOS={} Linux={} {:?} - {}",
@@ -31376,6 +31523,8 @@ mod tests {
             fec_k: 1,
             fec_n: 3,
             payload_len: Some(1024),
+            expected_payloads: Some(30),
+            recovered_payloads: None,
             receiver_artifacts: Vec::new(),
         }
     }
@@ -31551,13 +31700,53 @@ mod tests {
                 fec_n: Some(4),
             },
             payload_len: Some(2048),
+            source_payloads: Some(30),
             recovered_payloads: Some(30),
             submitted_datagrams: Some(90),
             throughput_mbps: Some(1.2),
             receiver_artifacts: Vec::new(),
         };
 
-        let comparison = rf_quality_compare_profile_to_baseline(&profile, Some(&baseline));
+        let macos = RfQualityMacosReport {
+            source_report: None,
+            efuse_report: None,
+            command: None,
+            result: None,
+            adapter: None,
+            endpoints: None,
+            efuse_summary: None,
+            rfe_type: None,
+            rfe_type_hex: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            tx_descriptor_hex: None,
+            tx_options: None,
+            tx_power: RfQualityTxPowerReport {
+                mode: RfQualityTxPowerMode::CurrentDefault,
+                control_report: None,
+                register_evidence: Vec::new(),
+            },
+            calibration: RfQualityCalibrationReport {
+                mode: RfQualityCalibrationMode::StopGapCaptured,
+                stop_gap: true,
+                label: rf_quality_calibration_label(RfQualityCalibrationMode::StopGapCaptured),
+                rfe_pinmux: None,
+                iqk: None,
+                lck: None,
+                thermal: None,
+            },
+            wfb_outcome: RfQualityWfbOutcomeReport {
+                submitted_datagrams: Some(90),
+                recovered_payloads: Some(29),
+                dropped_datagrams: None,
+                malformed_datagrams: None,
+                throughput: None,
+                cpu: None,
+            },
+            receiver_artifacts: Vec::new(),
+        };
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
         let fields = comparison
             .mismatches
             .iter()
@@ -31572,6 +31761,8 @@ mod tests {
         assert!(fields.contains(&"payload_len"));
         assert!(comparison.invalidating_mismatch_count >= 4);
         assert_eq!(comparison.degraded_mismatch_count, 1);
+        assert_eq!(comparison.outcome.recovered_payload_delta, Some(-1));
+        assert_eq!(comparison.outcome.macos.loss_percent, Some(100.0 / 30.0));
     }
 
     #[test]
@@ -31593,7 +31784,7 @@ mod tests {
     "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
     "payload_len": 1024
   },
-  "metrics": {"submitted_datagrams": 90, "recovered_payloads": 30, "throughput_mbps": 1.25},
+  "metrics": {"submitted_datagrams": 90, "source_payloads": 30, "recovered_payloads": 30, "throughput_mbps": 1.25},
   "receiver_artifacts": ["/tmp/linux-rx.log"]
 }"#,
         )

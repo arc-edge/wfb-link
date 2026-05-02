@@ -43,6 +43,7 @@ Useful entry points:
 - `docs/rx-scan.md`: bounded live bulk-IN RX diagnostic and latest hardware result
 - `docs/tx-once.md`: guarded live single-frame bulk-OUT TX diagnostic and latest hardware result
 - `docs/tx-repeat.md`: guarded live repeated bulk-OUT TX diagnostic and latest hardware result
+- `docs/rf-quality-baseline.md`: Linux receiver-backed RF-quality baseline procedure, capture helper, and current close-range 20 MHz baseline fixture
 - `docs/init-dry-run.md`: hardware-free init transfer planning scaffold and limitations
 - `docs/rtl8812au-init-audit.md`: source audit reference points behind the dry-run init skeleton
 
@@ -110,6 +111,7 @@ Initial implementation has started. The current code can:
 - Listen for bounded UDP WFB distributor-style datagrams and submit them through live radio TX with `bridge-tx-listen`.
 - Run bounded RX forwarding and TX injection in one retained radio session with `bridge-run`.
 - Receive stock WFB-ng distributor traffic from Linux `wfb_tx -d`, inject it over the Mac-controlled AWUS036ACH, and deliver low-rate payloads to Linux `wfb_rx`.
+- Build structured RF-quality envelopes with `rf-quality-report`, including macOS bridge artifacts, EFUSE context, Linux baseline parameters, parameter mismatches, recovery/loss/throughput summaries, and receiver artifact paths.
 - List verification stages with `wfb-radio-diag stages`.
 - Emit JSON diagnostics for current commands, including live `init`, `efuse-dump`, `rx-scan`, `tx-once`, `tx-repeat`, `bridge-tx-once`, `bridge-tx-listen`, and `bridge-run` reports; `tx-once --dry-run` also builds descriptor-prefixed bytes without touching USB.
 

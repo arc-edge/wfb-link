@@ -1,0 +1,43 @@
+{
+  "command": "linux-wfb-baseline",
+  "profile": {
+    "name": "current-close-range-20mhz-sust1000",
+    "channel": 36,
+    "bandwidth": "20MHz",
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux-monitor",
+    "wfb": {
+      "link_id": "0x000001",
+      "radio_port": "0x00",
+      "fec_k": 8,
+      "fec_n": 12
+    },
+    "payload_len": 1000,
+    "source_payloads": 2000
+  },
+  "commands": {
+    "linux_service_observed": [
+      "wfb_tx -K /var/lib/arc/wfb/drone.key -p 0 -B 20 -k 8 -n 12 -u 5600 wfb0",
+      "wfb_rx -K /var/lib/arc/wfb/drone.key -p 4 -c 127.0.0.1 -u 5701 wfb0"
+    ],
+    "macos_bridge": "bridge-tx-listen --macos-usbhost --init-before-tx --channel 36 --bandwidth 20 --bind 0.0.0.0:5611 --max-datagrams 3000"
+  },
+  "adapter": {
+    "linux_host": "drone-2f389.local",
+    "interface": "wfb0",
+    "adapter_class": "RTL8812AU/AWUS036ACH-class",
+    "key_path": "/var/lib/arc/wfb/drone.key"
+  },
+  "metrics": {
+    "submitted_datagrams": 3000,
+    "source_payloads": 2000,
+    "recovered_payloads": 1999,
+    "throughput_mbps": 0.787644
+  },
+  "receiver_artifacts": [
+    "/tmp/wfb-agent-sust1000-listen.json",
+    "/tmp/mac-sust1000-rf.pcap",
+    "/tmp/mac-sust1000-rx-lo.pcap",
+    "drone-2f389.local:/tmp/wfb-tx-sust1000.log"
+  ]
+}
