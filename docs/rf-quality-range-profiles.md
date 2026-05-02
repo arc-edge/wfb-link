@@ -217,6 +217,10 @@ close-range gate passes, the Linux comparison tuple is valid, the receiver
 payload result is inside the accepted margin, and the field notes explain the
 test geometry well enough to repeat the run.
 
+The first longer-distance 20 MHz acceptance run is deferred until the radios can
+be placed in a real outdoor, separated, or attenuated geometry. The current
+accepted result is close-range only and must not be described as a range result.
+
 Use `docs/rf-quality-field-notes-template.md` for the companion note artifact.
 The structured fields in the report are the summary; the companion artifact is
 where longer notes, maps, photos, service-restore output, and spectrum evidence

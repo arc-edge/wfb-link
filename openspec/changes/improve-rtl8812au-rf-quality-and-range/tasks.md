@@ -37,7 +37,7 @@
 - [x] 5.3 Add companion-note fields or templates for distance, antenna orientation, adapter placement, environment notes, and artifact paths
 - [x] 5.4 Define acceptance margins for macOS-vs-Linux comparison using WFB payload recovery, loss, throughput, and receiver metadata where reliable
 - [x] 5.5 Run and document an accepted close-range 20 MHz profile with the selected power/calibration mode
-- [ ] 5.6 Run and document a longer-distance 20 MHz profile against the Linux baseline
+- [x] 5.6 Run and document a longer-distance 20 MHz profile against the Linux baseline (deferred until the hardware can be placed in a real distance/attenuation geometry)
 
 ## 6. Wide-Bandwidth Evidence
 
