@@ -7,9 +7,10 @@
 use std::{error::Error, fmt, time::Duration};
 
 use radio_core::{
-    list_usb_devices, rtl8812au::Rtl8812auUsbTransport, ClaimedUsbDevice, DeviceSelector,
-    EndpointInfo, InterfaceInfo, Rtl8812auRegisterAccess, Rtl8812auRegisterError, UsbBulkTransfer,
-    UsbDeviceInfo, UsbEndpoints, UsbError,
+    list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame, Channel,
+    ClaimedUsbDevice, DeviceSelector, EndpointInfo, InterfaceInfo, ParsedRxPacket,
+    Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError, RxParseOutcome,
+    TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 
@@ -288,6 +289,7 @@ impl RuntimeRadioCounters {
 pub struct RuntimeRadioError {
     pub code: &'static str,
     pub message: String,
+    pub timeout: bool,
 }
 
 impl RuntimeRadioError {
@@ -295,6 +297,15 @@ impl RuntimeRadioError {
         Self {
             code,
             message: message.into(),
+            timeout: false,
+        }
+    }
+
+    fn new_timeout(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            timeout: true,
         }
     }
 
@@ -328,6 +339,14 @@ impl fmt::Display for RuntimeRadioError {
 }
 
 impl Error for RuntimeRadioError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRxRead {
+    pub endpoint: u8,
+    pub bytes_read: usize,
+    pub packets: Vec<ParsedRxPacket>,
+    pub counters: RuntimeRadioCounters,
+}
 
 pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
     pub transport: T,
@@ -389,6 +408,121 @@ impl<T> RuntimeRadioSession<T> {
             .counters
             .dropped_frames
             .saturating_add(delta.dropped_frames);
+    }
+
+    pub fn submit_80211_frame(
+        &mut self,
+        frame: &[u8],
+        channel: Channel,
+        options: TxOptions,
+        tx_counters: &mut TxSubmitCounters,
+    ) -> Result<usize, RuntimeRadioError>
+    where
+        T: UsbBulkTransfer,
+    {
+        let bulk_out = self.selected_bulk_out_endpoint().ok_or_else(|| {
+            RuntimeRadioError::new(
+                "missing_bulk_out_endpoint",
+                "runtime radio session has no selected bulk OUT endpoint",
+            )
+        })?;
+        let before = tx_counters.clone();
+        let result = submit_tx_frame(
+            &mut self.transport,
+            bulk_out,
+            frame,
+            channel,
+            options,
+            tx_counters,
+        );
+        self.apply_tx_submit_counter_delta(&before, tx_counters);
+        result.map_err(runtime_tx_submit_error)
+    }
+
+    pub fn read_rx_packets(
+        &mut self,
+        channel: Channel,
+        buffer: &mut [u8],
+        timeout: Duration,
+    ) -> Result<RuntimeRxRead, RuntimeRadioError>
+    where
+        T: UsbBulkTransfer,
+    {
+        let bulk_in = self.selected_bulk_in_endpoint().ok_or_else(|| {
+            RuntimeRadioError::new(
+                "missing_bulk_in_endpoint",
+                "runtime radio session has no selected bulk IN endpoint",
+            )
+        })?;
+        let before = self.counters;
+        let bytes_read = self
+            .transport
+            .read_bulk_transfer(bulk_in, buffer, timeout)
+            .map_err(|error| runtime_bulk_in_error(bulk_in, error))?;
+        self.counters.usb_bulk_in_reads = self.counters.usb_bulk_in_reads.saturating_add(1);
+
+        let mut packets = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes_read {
+            let parsed = parse_rx_packet(&buffer[offset..bytes_read], channel);
+            match parsed.outcome {
+                RxParseOutcome::Frame => {
+                    self.counters.rx_frames = self.counters.rx_frames.saturating_add(1);
+                }
+                RxParseOutcome::Drop => {
+                    self.counters.dropped_frames = self.counters.dropped_frames.saturating_add(1);
+                }
+                RxParseOutcome::NeedMoreData => {
+                    break;
+                }
+            }
+
+            let consumed = parsed.consumed;
+            packets.push(parsed);
+            if consumed == 0 {
+                break;
+            }
+            offset = offset.saturating_add(consumed);
+        }
+
+        Ok(RuntimeRxRead {
+            endpoint: bulk_in,
+            bytes_read,
+            packets,
+            counters: self.counters.saturating_sub(before),
+        })
+    }
+
+    fn apply_tx_submit_counter_delta(
+        &mut self,
+        before: &TxSubmitCounters,
+        after: &TxSubmitCounters,
+    ) {
+        let submitted = after.submitted.saturating_sub(before.submitted);
+        let failed = after.failed.saturating_sub(before.failed);
+        let rejected = after.rejected.saturating_sub(before.rejected);
+        self.counters.usb_bulk_out_writes = self
+            .counters
+            .usb_bulk_out_writes
+            .saturating_add(submitted.saturating_add(failed));
+        self.counters.tx_frames = self.counters.tx_frames.saturating_add(submitted);
+        self.counters.dropped_frames = self
+            .counters
+            .dropped_frames
+            .saturating_add(rejected.saturating_add(failed));
+    }
+}
+
+fn runtime_tx_submit_error(error: Rtl8812auTxSubmitError) -> RuntimeRadioError {
+    RuntimeRadioError::new("tx_submit_failed", error.to_string())
+}
+
+fn runtime_bulk_in_error(endpoint: u8, error: UsbError) -> RuntimeRadioError {
+    let message = format!("bulk IN read from endpoint 0x{endpoint:02x} failed: {error}");
+    if error.is_timeout() {
+        RuntimeRadioError::new_timeout("bulk_in_read_timeout", message)
+    } else {
+        RuntimeRadioError::new("bulk_in_read_failed", message)
     }
 }
 
@@ -1590,7 +1724,10 @@ pub enum TxCalibrationClass {
 mod tests {
     use std::{cell::RefCell, collections::BTreeMap, time::Duration};
 
-    use radio_core::{rtl8812au::Rtl8812auUsbTransport, Rtl8812auRegisterAccess, UsbError};
+    use radio_core::{
+        rtl8812au::Rtl8812auUsbTransport, Channel, Rtl8812auRegisterAccess, TxOptions,
+        TxSubmitCounters, UsbBulkTransfer, UsbError,
+    };
 
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
@@ -1603,6 +1740,8 @@ mod tests {
         registers: RefCell<BTreeMap<u16, Vec<u8>>>,
         efuse: RefCell<Option<Vec<u8>>>,
         writes: RefCell<Vec<(u16, Vec<u8>)>>,
+        bulk_reads: Vec<Vec<u8>>,
+        bulk_writes: Vec<(u8, Vec<u8>)>,
     }
 
     impl MockTransport {
@@ -1629,6 +1768,13 @@ mod tests {
         fn with_efuse(raw: Vec<u8>) -> Self {
             Self {
                 efuse: RefCell::new(Some(raw)),
+                ..Self::default()
+            }
+        }
+
+        fn with_bulk_read(data: Vec<u8>) -> Self {
+            Self {
+                bulk_reads: vec![data],
                 ..Self::default()
             }
         }
@@ -1696,6 +1842,33 @@ mod tests {
         ) -> std::result::Result<usize, UsbError> {
             self.registers.borrow_mut().insert(value, data.to_vec());
             self.writes.borrow_mut().push((value, data.to_vec()));
+            Ok(data.len())
+        }
+    }
+
+    impl UsbBulkTransfer for MockTransport {
+        fn read_bulk_transfer(
+            &mut self,
+            _endpoint: u8,
+            data: &mut [u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            if self.bulk_reads.is_empty() {
+                return Ok(0);
+            }
+            let read = self.bulk_reads.remove(0);
+            let len = read.len().min(data.len());
+            data[..len].copy_from_slice(&read[..len]);
+            Ok(len)
+        }
+
+        fn write_bulk_transfer(
+            &mut self,
+            endpoint: u8,
+            data: &[u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            self.bulk_writes.push((endpoint, data.to_vec()));
             Ok(data.len())
         }
     }
@@ -1833,6 +2006,71 @@ mod tests {
 
         let registers = session.register_access();
         assert_eq!(registers.read8(0x1234).expect("mock register read"), 0);
+    }
+
+    #[test]
+    fn runtime_radio_session_submits_tx_and_updates_runtime_counters() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let mut submit_counters = TxSubmitCounters::default();
+        let channel = Channel::from_number(36).expect("channel 36");
+        let frame = [0x08, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+
+        let written = session
+            .submit_80211_frame(&frame, channel, TxOptions::default(), &mut submit_counters)
+            .expect("tx submit");
+
+        assert!(written > frame.len());
+        assert_eq!(session.transport.bulk_writes.len(), 1);
+        assert_eq!(session.transport.bulk_writes[0].0, 0x02);
+        assert_eq!(submit_counters.attempted, 1);
+        assert_eq!(submit_counters.submitted, 1);
+        assert_eq!(session.counters.usb_bulk_out_writes, 1);
+        assert_eq!(session.counters.tx_frames, 1);
+        assert_eq!(session.counters.dropped_frames, 0);
+    }
+
+    #[test]
+    fn runtime_radio_session_reads_and_parses_rx_packets() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut rx_buffer = vec![0u8; 24 + 10 + 4];
+        rx_buffer[0..4].copy_from_slice(&(14u32).to_le_bytes());
+        rx_buffer[12] = 0x04;
+        rx_buffer[24..34].copy_from_slice(&[0x08, 0, 0, 0, 1, 2, 3, 4, 5, 6]);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::with_bulk_read(rx_buffer),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let mut read_buffer = vec![0u8; 2048];
+        let channel = Channel::from_number(36).expect("channel 36");
+
+        let read = session
+            .read_rx_packets(channel, &mut read_buffer, Duration::from_millis(10))
+            .expect("rx read");
+
+        assert_eq!(read.endpoint, 0x81);
+        assert_eq!(read.bytes_read, 38);
+        assert_eq!(read.packets.len(), 1);
+        assert_eq!(
+            read.packets[0].frame.as_ref().expect("frame").data.len(),
+            10
+        );
+        assert_eq!(read.counters.usb_bulk_in_reads, 1);
+        assert_eq!(read.counters.rx_frames, 1);
+        assert_eq!(session.counters.usb_bulk_in_reads, 1);
+        assert_eq!(session.counters.rx_frames, 1);
+        assert_eq!(session.counters.dropped_frames, 0);
     }
 
     #[test]
