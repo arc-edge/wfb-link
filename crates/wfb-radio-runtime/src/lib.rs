@@ -249,6 +249,100 @@ pub fn open_runtime_usb_transport(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rtl8812auInitOrder {
+    Default,
+    Linux,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rtl8812auInitPhase {
+    PowerOn,
+    Firmware,
+    Llt,
+    MacTable,
+    QueueDma,
+    Mac,
+    MacAddr,
+    Bb,
+    Rf,
+    RfCalibrationBeforeChannel,
+    Channel,
+    RfCalibrationAfterChannel,
+    TxSchedulerTail,
+    RfCalibrationBeforeTx,
+}
+
+impl Rtl8812auInitPhase {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::PowerOn => "power_on",
+            Self::Firmware => "firmware",
+            Self::Llt => "llt",
+            Self::MacTable => "mac_table",
+            Self::QueueDma => "queue_dma",
+            Self::Mac => "mac",
+            Self::MacAddr => "mac_addr",
+            Self::Bb => "bb",
+            Self::Rf => "rf",
+            Self::RfCalibrationBeforeChannel => "rf_calibration_before_channel",
+            Self::Channel => "channel",
+            Self::RfCalibrationAfterChannel => "rf_calibration_after_channel",
+            Self::TxSchedulerTail => "tx_scheduler_tail",
+            Self::RfCalibrationBeforeTx => "rf_calibration_before_tx",
+        }
+    }
+}
+
+const RTL8812AU_DEFAULT_SAME_SESSION_INIT_SEQUENCE: &[Rtl8812auInitPhase] = &[
+    Rtl8812auInitPhase::PowerOn,
+    Rtl8812auInitPhase::Firmware,
+    Rtl8812auInitPhase::Llt,
+    Rtl8812auInitPhase::MacTable,
+    Rtl8812auInitPhase::QueueDma,
+    Rtl8812auInitPhase::Mac,
+    Rtl8812auInitPhase::MacAddr,
+    Rtl8812auInitPhase::Bb,
+    Rtl8812auInitPhase::Rf,
+    Rtl8812auInitPhase::RfCalibrationBeforeChannel,
+    Rtl8812auInitPhase::Channel,
+    Rtl8812auInitPhase::RfCalibrationAfterChannel,
+    Rtl8812auInitPhase::TxSchedulerTail,
+    Rtl8812auInitPhase::RfCalibrationBeforeTx,
+];
+
+const RTL8812AU_LINUX_SAME_SESSION_INIT_SEQUENCE: &[Rtl8812auInitPhase] = &[
+    Rtl8812auInitPhase::PowerOn,
+    Rtl8812auInitPhase::Llt,
+    Rtl8812auInitPhase::Firmware,
+    Rtl8812auInitPhase::MacTable,
+    Rtl8812auInitPhase::QueueDma,
+    Rtl8812auInitPhase::Mac,
+    Rtl8812auInitPhase::MacAddr,
+    Rtl8812auInitPhase::Bb,
+    Rtl8812auInitPhase::Rf,
+    Rtl8812auInitPhase::RfCalibrationBeforeChannel,
+    Rtl8812auInitPhase::Channel,
+    Rtl8812auInitPhase::RfCalibrationAfterChannel,
+    Rtl8812auInitPhase::TxSchedulerTail,
+    Rtl8812auInitPhase::RfCalibrationBeforeTx,
+];
+
+pub fn rtl8812au_same_session_init_sequence(
+    order: Rtl8812auInitOrder,
+) -> &'static [Rtl8812auInitPhase] {
+    match order {
+        Rtl8812auInitOrder::Default => RTL8812AU_DEFAULT_SAME_SESSION_INIT_SEQUENCE,
+        Rtl8812auInitOrder::Linux => RTL8812AU_LINUX_SAME_SESSION_INIT_SEQUENCE,
+    }
+}
+
+pub fn rtl8812au_llt_firmware_sequence(order: Rtl8812auInitOrder) -> &'static [Rtl8812auInitPhase] {
+    &rtl8812au_same_session_init_sequence(order)[1..=2]
+}
+
 pub fn macos_usbhost_bulk_out_endpoints(
     bulk_out_endpoint_count: usize,
 ) -> Result<Vec<u8>, RuntimeTransportError> {
@@ -482,7 +576,7 @@ pub enum TxCalibrationClass {
 mod tests {
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        TxCalibrationClass, TxCalibrationProfile,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, TxCalibrationClass, TxCalibrationProfile,
     };
 
     #[test]
@@ -582,6 +676,40 @@ mod tests {
                 .expect_err("OUT not in layout")
                 .code,
             "macos_bulk_out_endpoint_not_in_layout"
+        );
+    }
+
+    #[test]
+    fn rtl8812au_default_init_sequence_runs_firmware_before_llt() {
+        let sequence = super::rtl8812au_same_session_init_sequence(Rtl8812auInitOrder::Default);
+
+        assert_eq!(sequence[0], Rtl8812auInitPhase::PowerOn);
+        assert_eq!(
+            super::rtl8812au_llt_firmware_sequence(Rtl8812auInitOrder::Default),
+            &[Rtl8812auInitPhase::Firmware, Rtl8812auInitPhase::Llt]
+        );
+        assert_eq!(
+            sequence.last(),
+            Some(&Rtl8812auInitPhase::RfCalibrationBeforeTx)
+        );
+        assert_eq!(
+            Rtl8812auInitPhase::TxSchedulerTail.id(),
+            "tx_scheduler_tail"
+        );
+    }
+
+    #[test]
+    fn rtl8812au_linux_init_sequence_runs_llt_before_firmware() {
+        let sequence = super::rtl8812au_same_session_init_sequence(Rtl8812auInitOrder::Linux);
+
+        assert_eq!(sequence[0], Rtl8812auInitPhase::PowerOn);
+        assert_eq!(
+            super::rtl8812au_llt_firmware_sequence(Rtl8812auInitOrder::Linux),
+            &[Rtl8812auInitPhase::Llt, Rtl8812auInitPhase::Firmware]
+        );
+        assert_eq!(
+            sequence.last(),
+            Some(&Rtl8812auInitPhase::RfCalibrationBeforeTx)
         );
     }
 }

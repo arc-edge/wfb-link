@@ -12,10 +12,11 @@
 - macOS USBHost endpoint validation, synthetic adapter metadata, and retained-session open policy.
 - Runtime libusb adapter selection/claim policy for bridge, init, TX, RX, and IQK runtime transport paths.
 - macOS RTL8812AU register and bulk-transfer trait implementations.
+- RTL8812AU same-session init phase identities and default/Linux-order phase sequencing policy.
 
 ## Still Diagnostic-Owned
 
-- RTL8812AU init sequencing and table loading.
+- RTL8812AU init phase execution, table loading, and diagnostic phase reporting.
 - Runtime IQK/LCK register execution.
 - WFB TX/RX traffic loops and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports.
@@ -25,7 +26,7 @@
 
 1. Keep moving stable policy and configuration into `wfb-radio-runtime`.
 2. Move libusb transport open policy and adapter/session configuration once its runtime error model is settled.
-3. Move RTL8812AU init sequencing behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
+3. Move RTL8812AU init phase execution behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
 4. Move TX/RX loop orchestration behind runtime APIs.
 5. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
 6. Expose production telemetry types for RSSI/SNR/MCS, calibration state, USB transfer counters, queue state, and WFB flow counters.

@@ -37,8 +37,8 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, RuntimeTransportError, RuntimeUsbOpenConfig, RuntimeUsbTransport,
-    TxCalibrationClass as RuntimeTxCalibrationClass,
+    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeTransportError,
+    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -26767,90 +26767,30 @@ where
         *counters,
     );
 
-    if args.linux_init_order {
-        if let Err(error) = run_bridge_tx_bench_llt_phase(
-            registers,
-            &llt_args,
-            counters,
-            &mut phase_summaries,
-            &mut llt_stats,
-        ) {
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-        if let Err(error) = run_bridge_tx_bench_firmware_phase(
-            registers,
-            &firmware_args,
-            firmware_payload,
-            counters,
-            &mut phase_summaries,
-        ) {
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
+    let init_order = if args.linux_init_order {
+        Rtl8812auInitOrder::Linux
     } else {
-        if let Err(error) = run_bridge_tx_bench_firmware_phase(
-            registers,
-            &firmware_args,
-            firmware_payload,
-            counters,
-            &mut phase_summaries,
-        ) {
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-        if let Err(error) = run_bridge_tx_bench_llt_phase(
-            registers,
-            &llt_args,
-            counters,
-            &mut phase_summaries,
-            &mut llt_stats,
-        ) {
+        Rtl8812auInitOrder::Default
+    };
+    for phase in wfb_radio_runtime::rtl8812au_llt_firmware_sequence(init_order) {
+        let result = match phase {
+            Rtl8812auInitPhase::Firmware => run_bridge_tx_bench_firmware_phase(
+                registers,
+                &firmware_args,
+                firmware_payload,
+                counters,
+                &mut phase_summaries,
+            ),
+            Rtl8812auInitPhase::Llt => run_bridge_tx_bench_llt_phase(
+                registers,
+                &llt_args,
+                counters,
+                &mut phase_summaries,
+                &mut llt_stats,
+            ),
+            other => unreachable!("unexpected early init phase {}", other.id()),
+        };
+        if let Err(error) = result {
             return Err((
                 bridge_tx_bench_same_session_init_report(
                     args,
