@@ -25797,51 +25797,54 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     };
 
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.tx.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.tx.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.tx.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.tx.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for bridge run",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_run_failure(
-                        report,
-                        "usb_claim",
-                        "macOS IOUSBHost retained-session open failed",
-                        error,
-                    );
-                }
+                "opened retained macOS IOUSBHost session for bridge run",
+            ),
+            Err(error) => {
+                return bridge_run_failure(
+                    report,
+                    "usb_claim",
+                    "macOS IOUSBHost retained-session open failed",
+                    error,
+                );
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed adapter for bridge run",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_run_failure(
-                        report,
-                        "usb_claim",
-                        "runtime USB transport open failed",
-                        error,
-                    );
-                }
+                "claimed adapter for bridge run",
+            ),
+            Err(error) => {
+                return bridge_run_failure(
+                    report,
+                    "usb_claim",
+                    "runtime USB transport open failed",
+                    error,
+                );
             }
-        };
+        }
+    };
 
-    let bulk_in = match endpoints.bulk_in {
+    let bulk_in = match session.selected_bulk_in_endpoint() {
         Some(endpoint) => endpoint,
         None => {
-            report.adapter = Some(adapter);
-            report.endpoints = Some(endpoints);
-            report.counters = claim_counters;
+            report.adapter = Some(session.adapter.clone());
+            report.endpoints = Some(session.endpoints.clone());
+            report.counters = diagnostic_counters_from_runtime(session.counters);
             return bridge_run_failure(
                 report,
                 "bulk_in",
@@ -25853,12 +25856,12 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
-    let bulk_out = match endpoints.bulk_out {
+    let bulk_out = match session.selected_bulk_out_endpoint() {
         Some(endpoint) => endpoint,
         None => {
-            report.adapter = Some(adapter);
-            report.endpoints = Some(endpoints);
-            report.counters = claim_counters;
+            report.adapter = Some(session.adapter.clone());
+            report.endpoints = Some(session.endpoints.clone());
+            report.counters = diagnostic_counters_from_runtime(session.counters);
             return bridge_run_failure(
                 report,
                 "bulk_out",
@@ -25870,15 +25873,15 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
-    report.adapter = Some(adapter);
-    report.endpoints = Some(endpoints);
+    report.adapter = Some(session.adapter.clone());
+    report.endpoints = Some(session.endpoints.clone());
     report.bulk_in_endpoint = Some(bulk_in);
     report.bulk_in_endpoint_hex = Some(format_value(bulk_in, 2));
     report.bulk_out_endpoint = Some(bulk_out);
     report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
-    let mut pre_counters = claim_counters;
+    let mut pre_counters = diagnostic_counters_from_runtime(session.counters);
 
-    let registers = Rtl8812auRegisterAccess::new(&transport)
+    let registers = Rtl8812auRegisterAccess::new(&session.transport)
         .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
     match run_bridge_tx_bench_same_session_init(
         &registers,
@@ -25907,7 +25910,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
 
     {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match bridge_tx_bench_set_monitor_receive_filter(&registers, &mut pre_counters) {
             Ok(monitor_report) => {
@@ -25926,7 +25929,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
 
     if args.tx.clear_txdma_status_before_tx {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match bridge_tx_bench_clear_txdma_status(
             &registers,
@@ -25949,7 +25952,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
 
     if tx_calibration_profile_requested(&args.tx.tx_calibration) {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match apply_tx_calibration_profile(
             &registers,
@@ -25975,7 +25978,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
 
     if tx_power_control_requested(&args.tx.tx_power) {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match apply_tx_power_control(
             &registers,
@@ -26000,7 +26003,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
 
     {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match tx_pre_calibration_probe(
             &registers,
@@ -26058,7 +26061,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let mut submit_counters = TxSubmitCounters::default();
     let mut tx_status = tx_status_probe_report(&args.tx.tx_status);
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
     let cpu_started = process_cpu_usage();
@@ -26149,35 +26152,18 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 tx_options,
             });
             let submit_result = {
-                let mut radio = BridgeTxRadio {
-                    transport: &mut transport,
-                    bulk_out,
+                let mut radio = BridgeTxSessionRadio {
+                    session: &mut session,
                     channel,
                     channel_bandwidth: args.tx.bandwidth,
-                    tx_rate: args.tx.tx_overrides.tx_rate,
-                    tx_bandwidth: args.tx.tx_overrides.tx_bandwidth,
-                    tx_channel_bandwidth: args.tx.tx_overrides.tx_channel_bandwidth,
-                    tx_profile: args.tx.tx_overrides.tx_profile,
-                    tx_queue: args.tx.tx_overrides.tx_queue.into(),
-                    tx_mac_id: args.tx.tx_overrides.mac_id,
-                    tx_rate_id: args.tx.tx_overrides.tx_rate_id,
-                    tx_retries: args.tx.tx_overrides.tx_retries,
-                    tx_fallback_limit: args.tx.tx_overrides.tx_fallback_limit,
-                    hardware_sequence: None,
-                    first_segment: None,
-                    disable_rate_fallback: args
-                        .tx
-                        .tx_overrides
-                        .enable_rate_fallback
-                        .then_some(false),
-                    aggregate_break: args.tx.tx_overrides.no_agg_break.then_some(false),
+                    overrides: &args.tx.tx_overrides,
                     submit_counters: &mut submit_counters,
                 };
                 submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
             };
             if let Err(error) = submit_result {
                 if tx_status.is_some() {
-                    let registers = Rtl8812auRegisterAccess::new(&transport);
+                    let registers = Rtl8812auRegisterAccess::new(&session.transport);
                     tx_status_probe_post(&registers, &mut tx_status);
                     tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
                     report.tx_status = tx_status;
@@ -26217,7 +26203,10 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             }
             None => Duration::from_millis(args.rx_timeout_ms),
         };
-        match transport.read_bulk_transfer(bulk_in, &mut rx_buf, timeout) {
+        match session
+            .transport
+            .read_bulk_transfer(bulk_in, &mut rx_buf, timeout)
+        {
             Ok(0) => {
                 report.rx.buffers_read += 1;
             }
@@ -26288,7 +26277,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
     set_rx_wfb_forward_reports(&mut report.rx, wfb_forwards);
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_post(&registers, &mut tx_status);
         tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
         report.tx_status = tx_status;
