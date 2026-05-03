@@ -62,6 +62,7 @@ preflight before RF transmission and collects:
 - `${REMOTE_PREFIX}-bridge-ready.json`
 - `${REMOTE_PREFIX}-preflight.json`
 - `${REMOTE_PREFIX}-preflight.log`
+- `${REMOTE_PREFIX}-channel-state.json`
 - `${REMOTE_PREFIX}-setup.log`
 - `${REMOTE_PREFIX}-restore.json`
 - `${REMOTE_PREFIX}-restore.log`
@@ -92,6 +93,19 @@ TX-power/calibration setup, and the pre-TX calibration probe, immediately
 before the receive loop. The runner waits up to `BRIDGE_READY_WAIT_SECONDS`
 for that marker before starting Linux traffic, which avoids classifying bridge
 startup races as RF loss.
+The Linux peer also writes `${REMOTE_PREFIX}-channel-state.json` after the
+controlled channel-set step. It records whether `iw` and sudo were available,
+the requested channel/bandwidth, the observed `iw dev IFACE info` channel and
+width when available, and `verify_status` (`verified`, `mismatch`,
+`set_unverified`, `set_failed`, or `skipped`). The same object is embedded in
+`datagram-evidence.json` and `${REMOTE_PREFIX}-summary.json` so missing `iw` or
+channel drift is visible without scraping `setup.log`.
+Validation smoke:
+`/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report.json` recovered
+`80/80`, submitted `120/120`, collected an empty `missing-artifacts.txt`, and
+recorded `channel_state.verify_status=verified` for channel 36 / 20 MHz. The
+restore evidence also captured post-restore `iw` state showing the normal Linux
+service moved `wfb0` back to channel 161 / 20 MHz.
 
 The current hardened automation evidence is
 `/tmp/wfb-rfq-prod-ready-marker-default-a1/rf-quality-report.json` from May 2,

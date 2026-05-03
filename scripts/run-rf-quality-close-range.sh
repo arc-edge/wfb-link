@@ -513,6 +513,7 @@ receiver_health_json="${REMOTE_PREFIX}-receiver-health.json"
 restore_json="${REMOTE_PREFIX}-restore.json"
 preflight_json="${REMOTE_PREFIX}-preflight.json"
 preflight_log="${REMOTE_PREFIX}-preflight.log"
+channel_state_json="${REMOTE_PREFIX}-channel-state.json"
 
 resolve_cmd() {
   local name=$1
@@ -710,6 +711,7 @@ cleanup_linux() {
   local restore_service_action=skipped
   local restore_service_state=unknown
   local restore_process_matches=""
+  local restore_channel_iw_info=""
   if [[ -n "$SUDO_BIN" && -n "$PKILL_BIN" ]]; then
     "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
     "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
@@ -737,9 +739,13 @@ cleanup_linux() {
       restore_process_matches=$("$PS_BIN" -eo pid,user,comm,args | "$GREP_BIN" -Ei 'arc-wfb|wfb' | "$GREP_BIN" -v grep || true)
       printf '%s\n' "$restore_process_matches"
     fi
+    if [[ -n "$IW_BIN" ]]; then
+      restore_channel_iw_info=$("$IW_BIN" dev "$IFACE" info 2>&1 || true)
+      printf '%s\n' "$restore_channel_iw_info"
+    fi
   } > "$restore_log" 2>&1
   if [[ -n "$PYTHON3_BIN" ]]; then
-    export restore_status restore_service_action restore_service_state restore_process_matches
+    export restore_status restore_service_action restore_service_state restore_process_matches restore_channel_iw_info
     export WFB_SERVICE IFACE REMOTE_PREFIX
     "$PYTHON3_BIN" - "$restore_json" <<'PY' || true
 import json
@@ -759,6 +765,9 @@ report = {
     "service_state": os.environ.get("restore_service_state", "unknown"),
     "process_match_count": len(process_matches),
     "process_matches": process_matches,
+    "post_restore_iw_info": [
+        line for line in os.environ.get("restore_channel_iw_info", "").splitlines() if line.strip()
+    ],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2, sort_keys=True)
@@ -770,9 +779,11 @@ PY
 trap cleanup_linux EXIT INT TERM
 
 rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.log \
-  "${REMOTE_PREFIX}"-{summary,counter,receiver-health,restore}.json \
+  "${REMOTE_PREFIX}"-{summary,counter,receiver-health,restore,channel-state}.json \
   "${REMOTE_PREFIX}-rf.pcap"
 
+channel_set_status=skipped
+channel_iw_info=""
 {
   if [[ -n "$DATE_BIN" ]]; then "$DATE_BIN"; else date; fi
   cat "$preflight_log"
@@ -789,9 +800,15 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
     echo "sudo or pkill unavailable; skipped stale test process cleanup"
   fi
   if [[ -n "$SUDO_BIN" && -n "$IW_BIN" ]]; then
-    "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"
-    "$IW_BIN" dev "$IFACE" info || true
+    if "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"; then
+      channel_set_status=ok
+    else
+      channel_set_status=failed
+    fi
+    channel_iw_info=$("$IW_BIN" dev "$IFACE" info 2>&1 || true)
+    printf '%s\n' "$channel_iw_info"
   else
+    channel_set_status=skipped_iw_or_sudo_missing
     echo "iw or sudo unavailable; skipped channel set and channel-state evidence"
   fi
   if [[ -n "$IP_BIN" ]]; then
@@ -800,6 +817,58 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
     echo "ip unavailable; skipped interface address evidence"
   fi
 } > "$setup_log" 2>&1
+
+if [[ -n "$PYTHON3_BIN" ]]; then
+  export channel_set_status channel_iw_info CHANNEL BANDWIDTH_MHZ IFACE IW_BIN SUDO_BIN
+  "$PYTHON3_BIN" - "$channel_state_json" <<'PY'
+import json
+import os
+import re
+import sys
+
+requested_channel = int(os.environ.get("CHANNEL", "0"), 0)
+requested_bandwidth_mhz = int(os.environ.get("BANDWIDTH_MHZ", "0"), 0)
+iw_info = os.environ.get("channel_iw_info", "")
+observed_channel = None
+observed_frequency_mhz = None
+observed_width_mhz = None
+match = re.search(r"channel\s+(\d+)\s+\((\d+)\s+MHz\),\s+width:\s*(\d+)\s+MHz", iw_info)
+if match:
+    observed_channel = int(match.group(1))
+    observed_frequency_mhz = int(match.group(2))
+    observed_width_mhz = int(match.group(3))
+
+set_status = os.environ.get("channel_set_status", "unknown")
+if set_status.startswith("skipped"):
+    verify_status = "skipped"
+elif set_status != "ok":
+    verify_status = "set_failed"
+elif observed_channel is None or observed_width_mhz is None:
+    verify_status = "set_unverified"
+elif observed_channel == requested_channel and observed_width_mhz == requested_bandwidth_mhz:
+    verify_status = "verified"
+else:
+    verify_status = "mismatch"
+
+report = {
+    "source": "scripts/run-rf-quality-close-range.sh",
+    "interface": os.environ.get("IFACE", ""),
+    "requested_channel": requested_channel,
+    "requested_bandwidth_mhz": requested_bandwidth_mhz,
+    "set_status": set_status,
+    "verify_status": verify_status,
+    "observed_channel": observed_channel,
+    "observed_frequency_mhz": observed_frequency_mhz,
+    "observed_width_mhz": observed_width_mhz,
+    "iw_available": bool(os.environ.get("IW_BIN")),
+    "sudo_available": bool(os.environ.get("SUDO_BIN")),
+    "iw_info": iw_info.splitlines(),
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(report, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+fi
 
 "$PYTHON3_BIN" - "$counter_json" "$LINUX_RX_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_MARKER" "$COUNTER_SECONDS" <<'PY' &
 import json
@@ -1038,7 +1107,7 @@ PY
 
 cleanup_linux
 
-"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" "$receiver_health_json" "$restore_json" <<'PY'
+"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" "$receiver_health_json" "$restore_json" "$channel_state_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1060,15 +1129,21 @@ linux_restore = {}
 restore_path = Path(sys.argv[7])
 if restore_path.exists():
     linux_restore = json.loads(restore_path.read_text())
+channel_state = {}
+channel_state_path = Path(sys.argv[8])
+if channel_state_path.exists():
+    channel_state = json.loads(channel_state_path.read_text())
 summary = {
     "preflight": preflight,
     "counter": counter,
     "receiver_health": receiver_health,
     "linux_restore": linux_restore,
+    "channel_state": channel_state,
     "artifacts": {
         "counter": str(counter_path),
         "receiver_health": sys.argv[6],
         "linux_restore": sys.argv[7],
+        "channel_state": sys.argv[8],
         "setup_log": sys.argv[3],
         "restore_log": sys.argv[4],
         "preflight": sys.argv[5],
@@ -1145,6 +1220,7 @@ collect_artifacts() {
   copy_linux_artifact "${REMOTE_PREFIX}-setup.log"
   copy_linux_artifact "${REMOTE_PREFIX}-preflight.json"
   copy_linux_artifact "${REMOTE_PREFIX}-preflight.log"
+  copy_linux_artifact "${REMOTE_PREFIX}-channel-state.json"
   copy_linux_artifact "${REMOTE_PREFIX}-restore.json"
   copy_linux_artifact "${REMOTE_PREFIX}-restore.log"
   copy_linux_artifact "${REMOTE_PREFIX}-summary.json"
@@ -1176,6 +1252,7 @@ generate_report() {
   local efuse_report
   local receiver_health_report
   local restore_state_report
+  local channel_state_report
   local recovered
   local datagram_evidence
   local receiver_args=()
@@ -1184,6 +1261,7 @@ generate_report() {
   counter_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-counter.json")"
   receiver_health_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-receiver-health.json")"
   restore_state_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-restore.json")"
+  channel_state_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-channel-state.json")"
   efuse_report="$OUT_DIR/$(basename "$EFUSE_REPORT")"
 
   if [[ ! -f "$mac_report" || ! -f "$counter_report" || ! -f "$efuse_report" ]]; then
@@ -1201,7 +1279,7 @@ generate_report() {
   [[ -n "$recovered" ]] || die "counter report did not include recovered_payloads"
 
   datagram_evidence="$OUT_DIR/datagram-evidence.json"
-  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" "$restore_state_report" <<'PY'
+  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" "$restore_state_report" "$channel_state_report" <<'PY'
 import json
 import os
 import sys
@@ -1218,6 +1296,10 @@ restore_state_path = Path(sys.argv[5])
 linux_restore = {}
 if restore_state_path.exists():
     linux_restore = json.loads(restore_state_path.read_text())
+channel_state_path = Path(sys.argv[6])
+channel_state = {}
+if channel_state_path.exists():
+    channel_state = json.loads(channel_state_path.read_text())
 
 def env_int(name):
     value = os.environ.get(name)
@@ -1273,6 +1355,7 @@ report = {
     "receiver_session_observed": receiver_health.get("session_observed"),
     "receiver_status": receiver_health.get("status"),
     "receiver_unable_decrypt_count": receiver_health.get("unable_decrypt_count"),
+    "channel_state": channel_state,
     "linux_restore": linux_restore,
     "note": "short smoke runs can emit one fewer WFB datagram than the FEC ceiling while still recovering every source payload",
 }
@@ -1285,6 +1368,7 @@ PY
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-tx.log")" \
     "$datagram_evidence" \
     "$receiver_health_report" \
+    "$channel_state_report" \
     "$restore_state_report" \
     "$counter_report"; do
     [[ -f "$artifact" ]] && receiver_args+=(--receiver-artifact "$artifact")
