@@ -24,7 +24,7 @@ The system SHALL emit structured RF-quality reports for macOS WFB runs that capt
 
 #### Scenario: WFB outcome is reportable
 - **WHEN** a macOS RF-quality run forwards or injects WFB traffic
-- **THEN** the report MUST include submitted datagrams, recovered payloads when available, malformed/dropped counters, FEC/source payload settings, throughput, CPU usage, receiver artifact paths, expected-versus-observed datagram evidence for short FEC runs, and receiver session/decrypt health when supplied by the run automation
+- **THEN** the report MUST include submitted datagrams, recovered payloads when available, malformed/dropped counters, FEC/source payload settings, throughput, CPU usage, receiver artifact paths, expected-versus-observed datagram evidence for short FEC runs, receiver session/decrypt health when supplied by the run automation, and receiver SNR confidence that distinguishes nonzero telemetry from zero-only placeholders
 
 ### Requirement: EFUSE-Derived TX Power Programming
 The system SHALL provide an explicit TX power mode that computes RTL8812AU per-path/per-rate TXAGC register values from decoded EFUSE power data and records the calculation inputs and writes.

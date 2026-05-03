@@ -3284,6 +3284,7 @@ struct RxFrameJsonRecord {
     rssi_dbm_source: radio_core::RxRssiSource,
     noise_dbm: Option<i8>,
     snr_db: Option<i8>,
+    snr_db_source: Option<radio_core::RxSnrSource>,
     channel: Channel,
     frequency_mhz: u16,
     band: Band,
@@ -4420,6 +4421,8 @@ struct RfQualityReceiverSignalReport {
     snr_avg_db_max: Option<i64>,
     snr_avg_spread_db: Option<i64>,
     snr_status: RfQualityReceiverSignalSnrStatus,
+    snr_confidence: RfQualityReceiverSignalSnrConfidence,
+    snr_usable: bool,
     snr_avg_sample_count: usize,
     snr_avg_nonzero_count: usize,
 }
@@ -4437,6 +4440,14 @@ enum RfQualityReceiverSignalStatus {
 enum RfQualityReceiverSignalSnrStatus {
     Available,
     AllZero,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityReceiverSignalSnrConfidence {
+    ReceiverReportedNonzero,
+    ReceiverReportedZeroOnly,
     Missing,
 }
 
@@ -23288,6 +23299,7 @@ fn write_rx_frame_record(
         rssi_dbm_source: frame.rssi_dbm_source,
         noise_dbm: frame.noise_dbm,
         snr_db: frame.snr_db,
+        snr_db_source: frame.snr_db_source,
         channel,
         frequency_mhz: channel.frequency_mhz,
         band: channel.band,
@@ -31210,6 +31222,16 @@ fn rf_quality_receiver_signal(
         snr_avg_values.len(),
         snr_avg_nonzero_count,
     );
+    let snr_confidence = match snr_status {
+        RfQualityReceiverSignalSnrStatus::Available => {
+            RfQualityReceiverSignalSnrConfidence::ReceiverReportedNonzero
+        }
+        RfQualityReceiverSignalSnrStatus::AllZero => {
+            RfQualityReceiverSignalSnrConfidence::ReceiverReportedZeroOnly
+        }
+        RfQualityReceiverSignalSnrStatus::Missing => RfQualityReceiverSignalSnrConfidence::Missing,
+    };
+    let snr_usable = snr_status == RfQualityReceiverSignalSnrStatus::Available;
     let report_count = rf_quality_json_u64(summary, &["report_count"])
         .or_else(|| {
             rf_quality_json_u64(
@@ -31274,6 +31296,8 @@ fn rf_quality_receiver_signal(
             .zip(snr_avg_db_max)
             .map(|(min, max)| max - min),
         snr_status,
+        snr_confidence,
+        snr_usable,
         snr_avg_sample_count: snr_avg_values.len(),
         snr_avg_nonzero_count,
     })
@@ -42725,6 +42749,11 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             receiver_signal.snr_status,
             RfQualityReceiverSignalSnrStatus::Available
         );
+        assert_eq!(
+            receiver_signal.snr_confidence,
+            RfQualityReceiverSignalSnrConfidence::ReceiverReportedNonzero
+        );
+        assert!(receiver_signal.snr_usable);
         assert_eq!(receiver_signal.snr_avg_sample_count, 1);
         assert_eq!(receiver_signal.snr_avg_nonzero_count, 1);
         assert_eq!(
@@ -42814,6 +42843,11 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             receiver_signal.snr_status,
             RfQualityReceiverSignalSnrStatus::AllZero
         );
+        assert_eq!(
+            receiver_signal.snr_confidence,
+            RfQualityReceiverSignalSnrConfidence::ReceiverReportedZeroOnly
+        );
+        assert!(!receiver_signal.snr_usable);
         assert_eq!(receiver_signal.issue_count, 1);
         assert_eq!(receiver_signal.issues, vec!["snr_all_zero"]);
         assert_eq!(receiver_signal.antenna_count, 2);

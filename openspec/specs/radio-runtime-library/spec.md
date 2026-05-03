@@ -139,3 +139,14 @@ The runtime library SHALL provide production-facing calibration selection for RT
 #### Scenario: Experimental calibration selected
 - **WHEN** a caller selects targeted parity, captured IQK/LCK, or runtime IQK calibration
 - **THEN** the runtime library classifies the profile as experimental, records the evidence source, and reports whether receiver-backed validation is still required
+
+### Requirement: Runtime RX Metadata
+The runtime library SHALL expose parsed RTL8812AU RX descriptor metadata needed by production bridge and RF-quality callers.
+
+#### Scenario: RTL8812AU PHY status parsed
+- **WHEN** a runtime RX packet includes RTL8812AU OFDM/HT/VHT PHY status bytes
+- **THEN** the parsed frame includes best-path RSSI, SNR, SNR source, and a derived noise estimate from the documented PHYDM 1st-type layout
+
+#### Scenario: PHY status lacks SNR
+- **WHEN** a runtime RX packet has no PHY status or only a short/non-OFDM PHY status block
+- **THEN** the parsed frame preserves fallback RSSI behavior and leaves SNR/noise metadata absent rather than fabricating values

@@ -51,9 +51,10 @@ pub fn build_rx_forward_datagram(
     };
 
     counters.matched += 1;
-    let header = WfbForwardHeader::single_antenna(
+    let header = WfbForwardHeader::single_antenna_with_noise(
         config.wlan_idx,
         frame.rssi_dbm,
+        frame.noise_dbm,
         frame.channel.frequency_mhz,
         rx_forward_mcs_index(frame).unwrap_or(config.mcs_index),
         frame
@@ -115,6 +116,7 @@ mod tests {
             rssi_dbm_source: radio_core::RxRssiSource::PhyStatusFirstByte,
             noise_dbm: None,
             snr_db: None,
+            snr_db_source: None,
             channel: Channel::from_number(149).expect("channel"),
             phy_status: true,
             driver_info_size: 8,
@@ -137,9 +139,11 @@ mod tests {
         let mut frame = build_wfb_data_header(channel_id, 0).to_vec();
         frame.extend_from_slice(b"payload");
         let mut counters = RxCounters::default();
+        let mut rx = rx_frame(frame);
+        rx.noise_dbm = Some(-68);
 
         let packet = build_rx_forward_datagram(
-            &rx_frame(frame),
+            &rx,
             RxForwardConfig {
                 channel_id,
                 wlan_idx: 1,
@@ -153,6 +157,7 @@ mod tests {
         assert_eq!(&packet[WFB_FORWARD_HEADER_LEN..], b"payload");
         assert_eq!(packet[15], 1);
         assert_eq!(packet[16], 20);
+        assert_eq!(packet[9], (-68i8) as u8);
         assert_eq!(counters.received, 1);
         assert_eq!(counters.matched, 1);
         assert_eq!(counters.filtered, 0);

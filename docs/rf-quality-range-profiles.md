@@ -424,9 +424,11 @@ receiver-backed WFB outcomes as the primary signal:
   and SNR are surfaced in `macos.wfb_outcome.receiver_signal`. The signal
   summary is `complete` when tuple/RSSI/nonzero-SNR evidence is present,
   `usable` when tuple/RSSI are present but SNR is all-zero or missing, and
-  `degraded` when tuple or RSSI evidence is malformed. Outdoor promotion
-  rejects `degraded`; RSSI/SNR values remain diagnostic field-note inputs
-  rather than scored pass/fail margins.
+  `degraded` when tuple or RSSI evidence is malformed. Zero-only SNR is also
+  labeled with `snr_confidence=receiver_reported_zero_only` and
+  `snr_usable=false`, so release checks can avoid treating it as a real 0 dB
+  measurement. Outdoor promotion rejects `degraded`; RSSI/SNR values remain
+  diagnostic field-note inputs rather than scored pass/fail margins.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded

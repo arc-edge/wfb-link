@@ -86,8 +86,11 @@ When frames are parsed, each JSONL record includes:
 - frame length and raw 802.11 frame hex
 - RSSI dBm plus `rssi_dbm_valid` and `rssi_dbm_source`; fallback RSSI remains
   present for compatibility but is marked invalid when PHY status was absent
-- nullable `noise_dbm` and `snr_db` fields, currently `null` until the
-  RTL8812AU PHY-status noise/EVM mapping is promoted
+- nullable `noise_dbm`, `snr_db`, and `snr_db_source` fields. For
+  RTL8812AU OFDM/HT/VHT PHY-status records, the parser uses the PHYDM 1st-type
+  layout to select the strongest path, expose signed SNR, and derive a noise
+  estimate from RSSI minus SNR. Short, CCK, or no-PHY-status records leave these
+  fields null.
 - channel number, frequency, and band
 - PHY-status evidence: `phy_status`, `driver_info_size`, `rx_shift`,
   `raw_phy_status_len`, and bounded `raw_phy_status_hex`
@@ -104,6 +107,23 @@ A later May 1, 2026 remote macOS 26 run used the RX descriptor metadata to cross
 - Report/artifacts: `/tmp/wfb-agent-rxmeta40a.json`, `/tmp/wfb-agent-rxmeta40a.jsonl`, `/tmp/wfb-agent-rxmeta40a.log`.
 
 This independently confirms that the current HT40+ WFB flow is operating on an HT40-tuned channel but the received WFB data frames are still reported by the RTL8812AU RX descriptor as 20 MHz PPDUs.
+
+A May 3, 2026 remote macOS 26 RX metadata smoke verified adapter-side SNR/noise
+extraction from live RTL8812AU PHY status:
+
+- Mac capture: `rx-scan --macos-usbhost --init-before-rx
+  --monitor-opmode-before-rx --channel 36 --bandwidth 20 --frame-jsonl
+  /tmp/wfb-snr-rx.jsonl`.
+- Parsed frames: 486 records, 398 bulk-IN buffers, 211,482 bulk bytes, and 2
+  read timeouts.
+- SNR/noise metadata: 400 records reported
+  `snr_db_source=rtl8812_phy_status_best_path` with non-null `snr_db` and
+  `noise_dbm`; 86 records had no usable PHY-status SNR and kept those fields
+  null.
+- Example decoded records included OFDM6/OFDM12 frames with RSSI/SNR/noise such
+  as `-70 dBm / 9 dB / -79 dBm` and `-26 dBm / 25 dB / -51 dBm`.
+- Report/artifacts: `/tmp/wfb-snr-rx.json`, `/tmp/wfb-snr-rx.jsonl`, and
+  `/tmp/wfb-snr-rx.log` on the hardware Mac.
 
 ## Boundaries
 

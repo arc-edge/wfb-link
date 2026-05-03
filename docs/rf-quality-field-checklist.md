@@ -41,7 +41,9 @@ Use this checklist before any stepped, attenuated, or outdoor run.
   `profile_gate.status`, `bandwidth_evidence.status`, and
   `macos.wfb_outcome.receiver_signal.status`. Treat `complete` as full
   tuple/RSSI/SNR evidence, `usable` as acceptable when SNR is all-zero but RSSI
-  and tuple evidence are valid, and `degraded` as a blocker.
+  and tuple evidence are valid, and `degraded` as a blocker. If SNR is zero-only,
+  verify `macos.wfb_outcome.receiver_signal.snr_usable=false` so field notes do
+  not read the placeholder as a measured 0 dB link margin.
 - Do not call a run range-ready if the close-range gate failed, the profile or
   RX_ANT tuple mismatched, receiver telemetry is missing, payload loss is
   outside margin, or wide-mode proof is missing.

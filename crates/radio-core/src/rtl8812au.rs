@@ -16,6 +16,7 @@ pub const TX_DESC_SIZE: usize = 40;
 pub const RX_DESC_SIZE: usize = 24;
 const USB2_BULK_PACKET_SIZE: usize = 512;
 const RX_AGGREGATION_ALIGNMENT: usize = 128;
+const RTL8812_PHY_STATUS_1ST_TYPE_MIN_LEN: usize = 17;
 
 const QSLT_BE: u8 = 0x00;
 const QSLT_BK: u8 = 0x02;
@@ -168,8 +169,15 @@ impl Default for TxOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RxRssiSource {
+    Rtl8812PhyStatusBestPath,
     PhyStatusFirstByte,
     FallbackNoPhyStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RxSnrSource {
+    Rtl8812PhyStatusBestPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +188,7 @@ pub struct RxFrame {
     pub rssi_dbm_source: RxRssiSource,
     pub noise_dbm: Option<i8>,
     pub snr_db: Option<i8>,
+    pub snr_db_source: Option<RxSnrSource>,
     pub channel: Channel,
     pub phy_status: bool,
     pub driver_info_size: usize,
@@ -485,7 +494,14 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
     } else {
         Vec::new()
     };
-    let (rssi_dbm, rssi_dbm_valid, rssi_dbm_source) = if let Some(raw) = raw_phy_status.first() {
+    let phy_metrics = rtl8812_phy_status_metrics(&raw_phy_status, rx_rate_raw);
+    let (rssi_dbm, rssi_dbm_valid, rssi_dbm_source) = if let Some(metrics) = phy_metrics {
+        (
+            metrics.rssi_dbm,
+            true,
+            RxRssiSource::Rtl8812PhyStatusBestPath,
+        )
+    } else if let Some(raw) = raw_phy_status.first() {
         (
             ((*raw as i16) - 110).clamp(-127, 0) as i8,
             true,
@@ -493,6 +509,15 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
         )
     } else {
         (-80, false, RxRssiSource::FallbackNoPhyStatus)
+    };
+    let (noise_dbm, snr_db, snr_db_source) = if let Some(metrics) = phy_metrics {
+        (
+            Some(metrics.noise_dbm),
+            Some(metrics.snr_db),
+            Some(RxSnrSource::Rtl8812PhyStatusBestPath),
+        )
+    } else {
+        (None, None, None)
     };
 
     ParsedRxPacket {
@@ -503,8 +528,9 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
             rssi_dbm,
             rssi_dbm_valid,
             rssi_dbm_source,
-            noise_dbm: None,
-            snr_db: None,
+            noise_dbm,
+            snr_db,
+            snr_db_source,
             channel,
             phy_status,
             driver_info_size: drvinfo_size,
@@ -519,6 +545,41 @@ pub fn parse_rx_packet(buf: &[u8], channel: Channel) -> ParsedRxPacket {
             stbc: ((dw4 >> 2) & 1) != 0,
             crc_error,
         }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rtl8812PhyStatusMetrics {
+    rssi_dbm: i8,
+    snr_db: i8,
+    noise_dbm: i8,
+}
+
+fn rtl8812_phy_status_metrics(raw: &[u8], rx_rate_raw: u8) -> Option<Rtl8812PhyStatusMetrics> {
+    if raw.len() < RTL8812_PHY_STATUS_1ST_TYPE_MIN_LEN || rx_rate_raw <= 0x03 {
+        return None;
+    }
+
+    // RTL8812AU uses PHYDM's 1st-type 11ac PHY status layout. For OFDM/HT/VHT
+    // packets, bytes 0/1 are {TRSW,gain[6:0]} for paths A/B and bytes 15/16
+    // are signed S(8,1) RX SNR for paths A/B.
+    let path_a = rtl8812_phy_status_path(raw[0], raw[15]);
+    let path_b = rtl8812_phy_status_path(raw[1], raw[16]);
+    Some(if path_b.rssi_dbm > path_a.rssi_dbm {
+        path_b
+    } else {
+        path_a
+    })
+}
+
+fn rtl8812_phy_status_path(gain_trsw: u8, raw_snr: u8) -> Rtl8812PhyStatusMetrics {
+    let rssi_dbm = (((gain_trsw & 0x7f) as i16) - 110).clamp(-127, 0) as i8;
+    let snr_db = (raw_snr as i8) >> 1;
+    let noise_dbm = ((rssi_dbm as i16) - (snr_db as i16)).clamp(-127, 0) as i8;
+    Rtl8812PhyStatusMetrics {
+        rssi_dbm,
+        snr_db,
+        noise_dbm,
     }
 }
 
@@ -1283,6 +1344,9 @@ mod tests {
         assert_eq!(rx.rssi_dbm, -80);
         assert!(!rx.rssi_dbm_valid);
         assert_eq!(rx.rssi_dbm_source, RxRssiSource::FallbackNoPhyStatus);
+        assert_eq!(rx.noise_dbm, None);
+        assert_eq!(rx.snr_db, None);
+        assert_eq!(rx.snr_db_source, None);
         assert!(!rx.phy_status);
         assert_eq!(rx.driver_info_size, 0);
         assert_eq!(rx.rx_shift, 0);
@@ -1318,9 +1382,49 @@ mod tests {
         assert_eq!(rx.rssi_dbm, -38);
         assert!(rx.rssi_dbm_valid);
         assert_eq!(rx.rssi_dbm_source, RxRssiSource::PhyStatusFirstByte);
+        assert_eq!(rx.noise_dbm, None);
+        assert_eq!(rx.snr_db, None);
+        assert_eq!(rx.snr_db_source, None);
         assert!(rx.phy_status);
         assert_eq!(rx.driver_info_size, drvinfo_size);
         assert_eq!(rx.raw_phy_status, vec![72, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rx_parser_extracts_rtl8812_ofdm_phy_status_snr() {
+        let channel = Channel::from_number(36).expect("channel 36");
+        let frame = sample_data_frame();
+        let mut payload = frame.clone();
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let drvinfo_size = 24usize;
+        let mut bulk = vec![0u8; RX_DESC_SIZE + drvinfo_size + payload.len()];
+        let dw0 = (payload.len() as u32) | (3 << 16) | (1 << 26);
+        let dw3 = 0x0d_u32;
+        bulk[0..4].copy_from_slice(&dw0.to_le_bytes());
+        bulk[12..16].copy_from_slice(&dw3.to_le_bytes());
+        bulk[RX_DESC_SIZE] = 74;
+        bulk[RX_DESC_SIZE + 1] = 70;
+        bulk[RX_DESC_SIZE + 15] = 44;
+        bulk[RX_DESC_SIZE + 16] = 36;
+        bulk[RX_DESC_SIZE + drvinfo_size..RX_DESC_SIZE + drvinfo_size + payload.len()]
+            .copy_from_slice(&payload);
+
+        let parsed = parse_rx_packet(&bulk, channel);
+
+        assert_eq!(parsed.outcome, RxParseOutcome::Frame);
+        let rx = parsed.frame.expect("frame");
+        assert_eq!(rx.rssi_dbm, -36);
+        assert!(rx.rssi_dbm_valid);
+        assert_eq!(rx.rssi_dbm_source, RxRssiSource::Rtl8812PhyStatusBestPath);
+        assert_eq!(rx.snr_db, Some(22));
+        assert_eq!(
+            rx.snr_db_source,
+            Some(RxSnrSource::Rtl8812PhyStatusBestPath)
+        );
+        assert_eq!(rx.noise_dbm, Some(-58));
+        assert_eq!(rx.rx_rate, Some(TxRate::Mcs(1)));
+        assert_eq!(rx.driver_info_size, drvinfo_size);
+        assert_eq!(rx.raw_phy_status.len(), drvinfo_size);
     }
 
     #[test]

@@ -17,7 +17,8 @@
 - Runtime radio session metadata, endpoint selection, counters, and error classification.
 - Runtime 802.11 TX submission through descriptor construction and bulk OUT.
 - Runtime descriptor-prefixed raw TX packet replay for trace-parity and benchmark paths.
-- Runtime RX bulk-IN reads with RTL8812AU RX descriptor parsing and parser outcome counters.
+- Runtime RX bulk-IN reads with RTL8812AU RX descriptor parsing, parser outcome
+  counters, and RTL8812AU OFDM PHY-status RSSI/SNR/noise extraction.
 - Runtime-owned full-flow RX/TX telemetry structs used by the production-shaped
   `runtime-flow` report.
 
@@ -35,7 +36,10 @@
 1. Move full RTL8812AU init phase execution behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
 2. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
 3. Define a smaller production bridge binary or API surface that wraps the runtime session without diagnostic-only report machinery.
-4. Continue moving production telemetry types for RSSI/SNR/MCS, calibration state, USB transfer counters, queue state, and WFB flow counters into `wfb-radio-runtime`; RX/TX flow counters are runtime-owned now.
+4. Continue moving production telemetry types for calibration state, USB
+   transfer counters, queue state, and WFB flow counters into
+   `wfb-radio-runtime`; RX/TX flow counters and adapter-side RSSI/SNR/noise
+   frame metadata are runtime-owned now.
 5. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
 
 The diagnostic binary should continue to be able to run every bring-up probe. Production behavior should live in runtime APIs first, then in a thinner runtime-oriented command surface.

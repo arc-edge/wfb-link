@@ -22,11 +22,32 @@ impl WfbForwardHeader {
         mcs_index: u8,
         bandwidth_mhz: u8,
     ) -> Self {
+        Self::single_antenna_with_noise(
+            wlan_idx,
+            rssi_dbm,
+            None,
+            freq_mhz,
+            mcs_index,
+            bandwidth_mhz,
+        )
+    }
+
+    pub fn single_antenna_with_noise(
+        wlan_idx: u8,
+        rssi_dbm: i8,
+        noise_dbm: Option<i8>,
+        freq_mhz: u16,
+        mcs_index: u8,
+        bandwidth_mhz: u8,
+    ) -> Self {
         let mut antenna = [0xff; RX_ANT_MAX];
         let mut rssi = [i8::MIN; RX_ANT_MAX];
-        let noise = [i8::MAX; RX_ANT_MAX];
+        let mut noise = [i8::MAX; RX_ANT_MAX];
         antenna[0] = 0;
         rssi[0] = rssi_dbm;
+        if let Some(noise_dbm) = noise_dbm {
+            noise[0] = noise_dbm;
+        }
         Self {
             wlan_idx,
             antenna,
@@ -75,9 +96,19 @@ mod tests {
         assert_eq!(bytes[0], 2);
         assert_eq!(&bytes[1..5], &[0, 0xff, 0xff, 0xff]);
         assert_eq!(bytes[5], (-42i8) as u8);
+        assert_eq!(bytes[9], i8::MAX as u8);
         assert_eq!(&bytes[13..15], &5745u16.to_be_bytes());
         assert_eq!(bytes[15], 4);
         assert_eq!(bytes[16], 20);
+    }
+
+    #[test]
+    fn serializes_forward_header_with_noise_when_available() {
+        let header = WfbForwardHeader::single_antenna_with_noise(2, -42, Some(-68), 5745, 4, 20);
+        let bytes = header.to_bytes();
+
+        assert_eq!(bytes[5], (-42i8) as u8);
+        assert_eq!(bytes[9], (-68i8) as u8);
     }
 
     #[test]

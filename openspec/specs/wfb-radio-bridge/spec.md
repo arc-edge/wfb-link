@@ -53,7 +53,7 @@ The system SHALL forward received WFB payloads to a stock WFB-ng aggregator usin
 
 #### Scenario: Payload forwarded
 - **WHEN** a matching WFB payload is received from the radio
-- **THEN** the bridge sends a datagram containing `wrxfwd_t` metadata followed by the WFB payload to the configured aggregator address
+- **THEN** the bridge sends a datagram containing `wrxfwd_t` metadata followed by the WFB payload to the configured aggregator address, including parsed RSSI/MCS/bandwidth and real noise metadata when runtime RX parsing provides it
 
 #### Scenario: Aggregator socket unavailable
 - **WHEN** the bridge cannot send to the configured aggregator address

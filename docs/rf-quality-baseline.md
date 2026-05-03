@@ -258,11 +258,13 @@ Linux receiver log. `rf-quality-report` also exposes the compact copy at
 health without parsing the full receiver artifact. It also publishes
 `macos.wfb_outcome.receiver_signal`, a typed summary with antenna count, unique
 RX_ANT tuple count, tuple consistency, RSSI average min/max/spread, SNR average
-sample/nonzero counts, `status`, `issues[]`, and `snr_status` for automated
-range-readiness checks. `status=complete` means tuple, RSSI, and nonzero SNR
-evidence are present; `status=usable` means tuple and RSSI are usable but the
-receiver only reported zero or missing SNR; `status=degraded` means the tuple
-or RSSI evidence is not trustworthy enough for outdoor promotion.
+sample/nonzero counts, `status`, `issues[]`, `snr_status`, `snr_confidence`,
+and `snr_usable` for automated range-readiness checks. `status=complete` means
+tuple, RSSI, and nonzero SNR evidence are present; `status=usable` means tuple
+and RSSI are usable but the receiver only reported zero or missing SNR. In that
+case `snr_usable=false` keeps the zero-only SNR from being treated as a measured
+0 dB margin. `status=degraded` means the tuple or RSSI evidence is not
+trustworthy enough for outdoor promotion.
 Outdoor profile gating now rejects a close-range gate that lacks this RX_ANT
 receiver telemetry or whose RX_ANT frequency/MCS/bandwidth tuple differs from
 the outdoor profile. If a new-format gate includes
