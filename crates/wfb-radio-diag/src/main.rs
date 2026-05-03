@@ -4271,6 +4271,9 @@ struct RfQualityWfbOutcomeReport {
 #[derive(Debug, Serialize)]
 struct RfQualityReceiverSignalReport {
     source: &'static str,
+    status: RfQualityReceiverSignalStatus,
+    issue_count: usize,
+    issues: Vec<&'static str>,
     report_count: Option<u64>,
     antenna_count: usize,
     tuple_count: usize,
@@ -4282,8 +4285,25 @@ struct RfQualityReceiverSignalReport {
     snr_avg_db_min: Option<i64>,
     snr_avg_db_max: Option<i64>,
     snr_avg_spread_db: Option<i64>,
+    snr_status: RfQualityReceiverSignalSnrStatus,
     snr_avg_sample_count: usize,
     snr_avg_nonzero_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityReceiverSignalStatus {
+    Complete,
+    Usable,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RfQualityReceiverSignalSnrStatus {
+    Available,
+    AllZero,
+    Missing,
 }
 
 #[derive(Debug, Serialize)]
@@ -31872,20 +31892,65 @@ fn rf_quality_receiver_signal(
         "snr_avg_db",
     );
     let snr_avg_values = rf_quality_receiver_signal_i64_values(&all_samples, "snr_avg_db");
+    let snr_avg_nonzero_count = snr_avg_values.iter().filter(|value| **value != 0).count();
+    let snr_status = rf_quality_receiver_signal_snr_status(
+        snr_avg_db_min,
+        snr_avg_db_max,
+        snr_avg_values.len(),
+        snr_avg_nonzero_count,
+    );
+    let report_count = rf_quality_json_u64(summary, &["report_count"])
+        .or_else(|| {
+            rf_quality_json_u64(
+                receiver_evidence,
+                &["receiver_health", "rx_antenna_report_count"],
+            )
+        })
+        .or_else(|| rf_quality_json_u64(receiver_evidence, &["rx_antenna_report_count"]));
+    let antenna_count = antenna_ids.len();
+    let tuple_count = tuples.len();
+    let tuple_consistent = (!tuples.is_empty()).then_some(tuples.len() == 1);
+    let rssi_present = rssi_avg_dbm_min.is_some() && rssi_avg_dbm_max.is_some();
+    let mut issues = Vec::new();
+    if report_count.is_some_and(|count| count == 0) {
+        issues.push("zero_rx_antenna_reports");
+    }
+    if antenna_count == 0 {
+        issues.push("missing_antenna_id");
+    }
+    if tuple_count == 0 {
+        issues.push("missing_rx_tuple");
+    } else if tuple_consistent == Some(false) {
+        issues.push("inconsistent_rx_tuple");
+    }
+    if !rssi_present {
+        issues.push("missing_rssi_avg");
+    }
+    match snr_status {
+        RfQualityReceiverSignalSnrStatus::Available => {}
+        RfQualityReceiverSignalSnrStatus::AllZero => issues.push("snr_all_zero"),
+        RfQualityReceiverSignalSnrStatus::Missing => issues.push("missing_snr_avg"),
+    }
+    let degraded =
+        antenna_count == 0 || tuple_count != 1 || tuple_consistent != Some(true) || !rssi_present;
+    let status = if degraded {
+        RfQualityReceiverSignalStatus::Degraded
+    } else if snr_status == RfQualityReceiverSignalSnrStatus::Available {
+        RfQualityReceiverSignalStatus::Complete
+    } else {
+        RfQualityReceiverSignalStatus::Usable
+    };
+    let issue_count = issues.len();
 
     Some(RfQualityReceiverSignalReport {
         source: "linux_wfb_rx_rx_ant",
-        report_count: rf_quality_json_u64(summary, &["report_count"])
-            .or_else(|| {
-                rf_quality_json_u64(
-                    receiver_evidence,
-                    &["receiver_health", "rx_antenna_report_count"],
-                )
-            })
-            .or_else(|| rf_quality_json_u64(receiver_evidence, &["rx_antenna_report_count"])),
-        antenna_count: antenna_ids.len(),
-        tuple_count: tuples.len(),
-        tuple_consistent: (!tuples.is_empty()).then_some(tuples.len() == 1),
+        status,
+        issue_count,
+        issues,
+        report_count,
+        antenna_count,
+        tuple_count,
+        tuple_consistent,
         tuples,
         rssi_avg_dbm_min,
         rssi_avg_dbm_max,
@@ -31897,9 +31962,29 @@ fn rf_quality_receiver_signal(
         snr_avg_spread_db: snr_avg_db_min
             .zip(snr_avg_db_max)
             .map(|(min, max)| max - min),
+        snr_status,
         snr_avg_sample_count: snr_avg_values.len(),
-        snr_avg_nonzero_count: snr_avg_values.iter().filter(|value| **value != 0).count(),
+        snr_avg_nonzero_count,
     })
+}
+
+fn rf_quality_receiver_signal_snr_status(
+    snr_avg_db_min: Option<i64>,
+    snr_avg_db_max: Option<i64>,
+    snr_avg_sample_count: usize,
+    snr_avg_nonzero_count: usize,
+) -> RfQualityReceiverSignalSnrStatus {
+    if snr_avg_nonzero_count > 0 {
+        return RfQualityReceiverSignalSnrStatus::Available;
+    }
+    if snr_avg_sample_count > 0 {
+        return RfQualityReceiverSignalSnrStatus::AllZero;
+    }
+    match snr_avg_db_min.zip(snr_avg_db_max) {
+        Some((0, 0)) => RfQualityReceiverSignalSnrStatus::AllZero,
+        Some(_) => RfQualityReceiverSignalSnrStatus::Available,
+        None => RfQualityReceiverSignalSnrStatus::Missing,
+    }
 }
 
 fn rf_quality_receiver_signal_samples(
@@ -32714,6 +32799,10 @@ fn rf_quality_profile_gate_report(
             profile,
             close_range_report,
         );
+        rf_quality_close_range_gate_receiver_signal_status_matches(
+            &mut mismatches,
+            close_range_report,
+        );
     }
 
     let mismatch_count = mismatches.len();
@@ -32824,6 +32913,26 @@ fn rf_quality_close_range_gate_receiver_telemetry_matches(
             &["mcs_index", "mcs"],
             "close-range RX_ANT MCS must match the fixed outdoor TX rate before range promotion",
         );
+    }
+}
+
+fn rf_quality_close_range_gate_receiver_signal_status_matches(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    close_range_report: &serde_json::Value,
+) {
+    let Some(status) = rf_quality_json_string(
+        close_range_report,
+        &["macos", "wfb_outcome", "receiver_signal", "status"],
+    ) else {
+        return;
+    };
+    if status != "complete" && status != "usable" {
+        mismatches.push(RfQualityProfileGateMismatchReport {
+            field: "receiver_signal.status",
+            current_value: "complete_or_usable".to_string(),
+            close_range_value: status,
+            impact: "outdoor range promotion requires close-range RX_ANT signal evidence with a consistent tuple and RSSI averages",
+        });
     }
 }
 
@@ -39615,6 +39724,68 @@ mod tests {
     }
 
     #[test]
+    fn rf_quality_outdoor_profile_rejects_degraded_receiver_signal_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-signal-degraded-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      },
+      "receiver_signal": {
+        "status": "degraded",
+        "issues": ["missing_rssi_avg"]
+      }
+    }
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write degraded signal close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 1);
+        assert_eq!(
+            report.profile_gate.mismatches[0].field,
+            "receiver_signal.status"
+        );
+    }
+
+    #[test]
     fn rf_quality_outdoor_profile_rejects_runtime_iqk_fallback_gate() {
         let stamp = started_at_unix_ms();
         let gate_path = std::env::temp_dir().join(format!(
@@ -42742,6 +42913,12 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             .receiver_signal
             .as_ref()
             .expect("receiver signal report");
+        assert_eq!(
+            receiver_signal.status,
+            RfQualityReceiverSignalStatus::Complete
+        );
+        assert_eq!(receiver_signal.issue_count, 0);
+        assert!(receiver_signal.issues.is_empty());
         assert_eq!(receiver_signal.report_count, Some(1));
         assert_eq!(receiver_signal.antenna_count, 1);
         assert_eq!(receiver_signal.tuple_count, 1);
@@ -42754,6 +42931,10 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(receiver_signal.rssi_avg_spread_db, Some(0));
         assert_eq!(receiver_signal.snr_avg_db_min, Some(28));
         assert_eq!(receiver_signal.snr_avg_db_max, Some(28));
+        assert_eq!(
+            receiver_signal.snr_status,
+            RfQualityReceiverSignalSnrStatus::Available
+        );
         assert_eq!(receiver_signal.snr_avg_sample_count, 1);
         assert_eq!(receiver_signal.snr_avg_nonzero_count, 1);
         assert_eq!(
@@ -42770,6 +42951,74 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 .wfb_outcome
                 .short_run_datagram_tolerance_applied
         );
+    }
+
+    #[test]
+    fn rf_quality_receiver_signal_marks_zero_snr_as_usable() {
+        let receiver_evidence = serde_json::json!({
+            "receiver_health": {
+                "rx_antenna_report_count": 2,
+                "rx_antenna_reports": [
+                    {
+                        "freq_mhz": 5180,
+                        "mcs_index": 1,
+                        "bandwidth_mhz": 20,
+                        "antenna_id": 0,
+                        "rssi_avg_dbm": -24,
+                        "snr_avg_db": 0
+                    },
+                    {
+                        "freq_mhz": 5180,
+                        "mcs_index": 1,
+                        "bandwidth_mhz": 20,
+                        "antenna_id": 1,
+                        "rssi_avg_dbm": -16,
+                        "snr_avg_db": 0
+                    }
+                ],
+                "rx_antenna_summary": {
+                    "report_count": 2,
+                    "rssi_avg_dbm_min": -24,
+                    "rssi_avg_dbm_max": -16,
+                    "snr_avg_db_min": 0,
+                    "snr_avg_db_max": 0,
+                    "latest_by_antenna": [
+                        {
+                            "freq_mhz": 5180,
+                            "mcs_index": 1,
+                            "bandwidth_mhz": 20,
+                            "antenna_id": 0,
+                            "rssi_avg_dbm": -24,
+                            "snr_avg_db": 0
+                        },
+                        {
+                            "freq_mhz": 5180,
+                            "mcs_index": 1,
+                            "bandwidth_mhz": 20,
+                            "antenna_id": 1,
+                            "rssi_avg_dbm": -16,
+                            "snr_avg_db": 0
+                        }
+                    ]
+                }
+            }
+        });
+        let receiver_signal =
+            rf_quality_receiver_signal(Some(&receiver_evidence)).expect("receiver signal");
+
+        assert_eq!(
+            receiver_signal.status,
+            RfQualityReceiverSignalStatus::Usable
+        );
+        assert_eq!(
+            receiver_signal.snr_status,
+            RfQualityReceiverSignalSnrStatus::AllZero
+        );
+        assert_eq!(receiver_signal.issue_count, 1);
+        assert_eq!(receiver_signal.issues, vec!["snr_all_zero"]);
+        assert_eq!(receiver_signal.antenna_count, 2);
+        assert_eq!(receiver_signal.tuple_consistent, Some(true));
+        assert_eq!(receiver_signal.rssi_avg_spread_db, Some(8));
     }
 
     #[test]

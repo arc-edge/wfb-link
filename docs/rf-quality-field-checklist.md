@@ -39,7 +39,9 @@ Use this checklist before any stepped, attenuated, or outdoor run.
   photos, or maps as companion artifacts.
 - Check `comparison.status`, `comparison.outcome.acceptance_margin.status`,
   `profile_gate.status`, `bandwidth_evidence.status`, and
-  `macos.wfb_outcome.receiver_signal`.
+  `macos.wfb_outcome.receiver_signal.status`. Treat `complete` as full
+  tuple/RSSI/SNR evidence, `usable` as acceptable when SNR is all-zero but RSSI
+  and tuple evidence are valid, and `degraded` as a blocker.
 - Do not call a run range-ready if the close-range gate failed, the profile or
   RX_ANT tuple mismatched, receiver telemetry is missing, payload loss is
   outside margin, or wide-mode proof is missing.

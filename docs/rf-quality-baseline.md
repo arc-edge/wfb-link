@@ -100,6 +100,10 @@ The current hardened automation evidence is
 zero decrypt failures, tuple-consistent `RX_ANT` telemetry at `5180/MCS1/20`,
 bridge-ready evidence before RF traffic, restore JSON, and an empty
 `missing-artifacts.txt`.
+New-format reports classify all-zero WFB-ng SNR as `receiver_signal.status=usable`
+rather than `complete` when the RX_ANT tuple and RSSI evidence are otherwise
+valid; `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report-signal-health.json`
+is the current example.
 
 The automation also accepts the targeted calibration profile:
 
@@ -222,13 +226,19 @@ Linux receiver log. `rf-quality-report` also exposes the compact copy at
 `macos.wfb_outcome.receiver_telemetry` so release tooling can read MCS/RSSI/SNR
 health without parsing the full receiver artifact. It also publishes
 `macos.wfb_outcome.receiver_signal`, a typed summary with antenna count, unique
-RX_ANT tuple count, tuple consistency, RSSI average min/max/spread, and SNR
-average sample/nonzero counts for automated range-readiness checks.
+RX_ANT tuple count, tuple consistency, RSSI average min/max/spread, SNR average
+sample/nonzero counts, `status`, `issues[]`, and `snr_status` for automated
+range-readiness checks. `status=complete` means tuple, RSSI, and nonzero SNR
+evidence are present; `status=usable` means tuple and RSSI are usable but the
+receiver only reported zero or missing SNR; `status=degraded` means the tuple
+or RSSI evidence is not trustworthy enough for outdoor promotion.
 Outdoor profile gating now rejects a close-range gate that lacks this RX_ANT
 receiver telemetry or whose RX_ANT frequency/MCS/bandwidth tuple differs from
-the outdoor profile. Long-distance promotion needs RF health evidence in
-addition to payload recovery, and it has to prove that the receiver observed the
-same RF tuple being promoted.
+the outdoor profile. If a new-format gate includes
+`receiver_signal.status=degraded`, outdoor promotion is rejected even when raw
+RX_ANT rows exist. Long-distance promotion needs RF health evidence in addition
+to payload recovery, and it has to prove that the receiver observed the same RF
+tuple being promoted.
 
 This matters because WFB can receive strong RF frames but recover zero payloads
 when the receiver misses the session frame. That condition now appears as

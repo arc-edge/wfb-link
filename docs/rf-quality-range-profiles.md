@@ -90,8 +90,11 @@ counts. The gate checks the RX_ANT frequency, MCS index, and bandwidth against
 the outdoor profile tuple, so a passing bench artifact cannot promote a field
 run on a different channel, rate, or bandwidth. The report also emits
 `macos.wfb_outcome.receiver_signal` with antenna count, tuple consistency, RSSI
-spread, and SNR sample/nonzero counts so field tooling has stable RF-health
-fields without parsing raw receiver logs.
+spread, SNR sample/nonzero counts, `status`, `issues[]`, and `snr_status` so
+field tooling has stable RF-health fields without parsing raw receiver logs.
+`status=usable` is accepted for current WFB-ng receiver logs that report valid
+RSSI and tuple data but all-zero SNR; `status=degraded` blocks outdoor
+promotion.
 
 ### Accepted Close-Range 20 MHz Run
 
@@ -189,7 +192,11 @@ Runtime IQK validation on May 2, 2026:
   smoke at `/tmp/wfb-rfq-runtime-iqk-peer-trigger-smoke-a1` produced the same
   completed-risk shape. This is the current runtime-IQK close-range reference;
   stepped or outdoor evidence is still required before making runtime IQK the
-  long-distance accepted calibration mode.
+  long-distance accepted calibration mode. A regenerated report with signal
+  health fields,
+  `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report-signal-health.json`,
+  reports `receiver_signal.status=usable` with `issues=["snr_all_zero"]`, two
+  antennas, tuple-consistent `5180/MCS1/20`, and RSSI averages `-34..-15 dBm`.
 
 Telemetry-gated default rerun on May 2, 2026:
 
@@ -394,9 +401,12 @@ receiver-backed WFB outcomes as the primary signal:
   runner preserves RSSI/SNR/MCS/bandwidth telemetry and the report marks
   receiver metadata as `available`. Outdoor promotion now requires the
   close-range RX_ANT frequency/MCS/bandwidth tuple to match the profile. RSSI
-  and SNR are surfaced in `macos.wfb_outcome.receiver_signal` and remain
-  diagnostic evidence and field-note inputs rather than scored pass/fail
-  margins.
+  and SNR are surfaced in `macos.wfb_outcome.receiver_signal`. The signal
+  summary is `complete` when tuple/RSSI/nonzero-SNR evidence is present,
+  `usable` when tuple/RSSI are present but SNR is all-zero or missing, and
+  `degraded` when tuple or RSSI evidence is malformed. Outdoor promotion
+  rejects `degraded`; RSSI/SNR values remain diagnostic field-note inputs
+  rather than scored pass/fail margins.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded
@@ -414,6 +424,8 @@ Do not classify a run as range-ready when any of the following are true:
   `macos.calibration.runtime_iqk_summary.risk` and it is not `completed`.
 - The close-range gate lacks RX_ANT receiver telemetry, or the RX_ANT
   frequency, MCS index, or bandwidth differs from the outdoor profile.
+- The close-range gate includes `macos.wfb_outcome.receiver_signal.status` and
+  it is `degraded`.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
   link/radio port, FEC, payload length, antenna setup, or adapter class.
 - The run uses HT40/VHT80 without separate evidence that the actual transmitted
