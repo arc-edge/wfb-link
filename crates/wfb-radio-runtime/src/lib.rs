@@ -473,6 +473,7 @@ impl<T> RuntimeRadioSession<T> {
                     self.counters.dropped_frames = self.counters.dropped_frames.saturating_add(1);
                 }
                 RxParseOutcome::NeedMoreData => {
+                    packets.push(parsed);
                     break;
                 }
             }
@@ -1725,8 +1726,8 @@ mod tests {
     use std::{cell::RefCell, collections::BTreeMap, time::Duration};
 
     use radio_core::{
-        rtl8812au::Rtl8812auUsbTransport, Channel, Rtl8812auRegisterAccess, TxOptions,
-        TxSubmitCounters, UsbBulkTransfer, UsbError,
+        rtl8812au::Rtl8812auUsbTransport, Channel, Rtl8812auRegisterAccess, RxParseOutcome,
+        TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbError,
     };
 
     use super::{
@@ -2071,6 +2072,32 @@ mod tests {
         assert_eq!(session.counters.usb_bulk_in_reads, 1);
         assert_eq!(session.counters.rx_frames, 1);
         assert_eq!(session.counters.dropped_frames, 0);
+    }
+
+    #[test]
+    fn runtime_radio_session_preserves_need_more_data_rx_outcome() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::with_bulk_read(vec![0u8; 8]),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let mut read_buffer = vec![0u8; 2048];
+        let channel = Channel::from_number(36).expect("channel 36");
+
+        let read = session
+            .read_rx_packets(channel, &mut read_buffer, Duration::from_millis(10))
+            .expect("rx read");
+
+        assert_eq!(read.bytes_read, 8);
+        assert_eq!(read.packets.len(), 1);
+        assert_eq!(read.packets[0].outcome, RxParseOutcome::NeedMoreData);
+        assert_eq!(read.counters.usb_bulk_in_reads, 1);
+        assert_eq!(read.counters.rx_frames, 0);
+        assert_eq!(read.counters.dropped_frames, 0);
     }
 
     #[test]

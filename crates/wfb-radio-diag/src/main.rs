@@ -22863,6 +22863,46 @@ fn process_rx_buffer(
     Ok(())
 }
 
+fn process_rx_packet_outcomes(
+    report: &mut RxFixtureReport,
+    pcap: &mut Option<PcapWriter<File>>,
+    frame_jsonl: &mut Option<File>,
+    wfb_forwards: &mut [RxWfbForwardRuntime],
+    channel: Channel,
+    packets: &[radio_core::ParsedRxPacket],
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    for parsed in packets {
+        match parsed.outcome {
+            RxParseOutcome::Frame => {
+                let frame = parsed.frame.as_ref().expect("frame outcome includes frame");
+                report.parsed_frames += 1;
+                count_rx_frame_type(report, &frame.data);
+                process_wfb_rx_forwards(wfb_forwards, frame)?;
+                if let Some(writer) = pcap.as_mut() {
+                    writer
+                        .write_frame(SystemTime::now(), &frame.data)
+                        .map_err(|error| DiagnosticErrorReport {
+                            code: "pcap_packet_write_failed",
+                            message: format!("failed to write PCAP packet: {error}"),
+                        })?;
+                    report.pcap_frames_written += 1;
+                }
+                if let Some(writer) = frame_jsonl.as_mut() {
+                    write_rx_frame_record(writer, channel, frame)?;
+                    report.frame_records_written += 1;
+                }
+            }
+            RxParseOutcome::Drop => {
+                report.dropped_packets += 1;
+            }
+            RxParseOutcome::NeedMoreData => {
+                report.need_more_data += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn process_wfb_rx_forwards(
     wfb_forwards: &mut [RxWfbForwardRuntime],
     frame: &radio_core::RxFrame,
@@ -26203,23 +26243,21 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             }
             None => Duration::from_millis(args.rx_timeout_ms),
         };
-        match session
-            .transport
-            .read_bulk_transfer(bulk_in, &mut rx_buf, timeout)
-        {
-            Ok(0) => {
+        match session.read_rx_packets(channel, &mut rx_buf, timeout) {
+            Ok(read) if read.bytes_read == 0 => {
                 report.rx.buffers_read += 1;
             }
-            Ok(len) => {
+            Ok(read) => {
                 report.rx.buffers_read += 1;
-                report.rx.bulk_bytes += len as u64;
-                if let Err(error) = process_rx_buffer(
+                report.rx.bulk_bytes += read.bytes_read as u64;
+                debug_assert_eq!(read.endpoint, bulk_in);
+                if let Err(error) = process_rx_packet_outcomes(
                     &mut report.rx,
                     &mut pcap,
                     &mut frame_jsonl,
                     &mut wfb_forwards,
                     channel,
-                    &rx_buf[..len],
+                    &read.packets,
                 ) {
                     bridge_run_update_counters(
                         &mut report,
@@ -26235,7 +26273,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     );
                 }
             }
-            Err(error) if error.is_timeout() => {
+            Err(error) if error.timeout => {
                 report.rx.read_timeouts += 1;
             }
             Err(error) => {
