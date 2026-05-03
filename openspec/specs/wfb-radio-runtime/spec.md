@@ -3,9 +3,7 @@
 ## Purpose
 
 Define runtime-owned live radio behavior that standalone diagnostics and future production commands share.
-
 ## Requirements
-
 ### Requirement: Standalone Runtime RX Capture
 The system SHALL capture standalone live RX traffic through the userspace USB radio runtime.
 
@@ -27,3 +25,18 @@ The system SHALL submit standalone live TX diagnostics through the userspace USB
 #### Scenario: Repeated TX uses runtime session
 - **WHEN** `tx-repeat` receives a valid IEEE 802.11 frame, repeat count, interval, and explicit transmit authorization
 - **THEN** it submits each frame through the runtime radio session and records throughput and submit counters
+
+### Requirement: Production Runtime Full Flow
+The system SHALL provide a production-facing WFB runtime flow that opens, initializes, receives, and transmits through runtime APIs.
+
+#### Scenario: Production flow starts
+- **WHEN** a caller starts the production runtime flow with a supported adapter selector, channel, bandwidth, WFB UDP settings, calibration profile, and required authorization
+- **THEN** the command opens the adapter through runtime open policy, initializes it through runtime same-session init, and performs RX/TX through `RuntimeRadioSession`
+
+#### Scenario: Production flow rejects diagnostic-only dependencies
+- **WHEN** the production runtime flow is built
+- **THEN** it MUST NOT depend on diagnostic command argument structs or diagnostic report structs for radio initialization, RX, or TX execution
+
+#### Scenario: Production flow reports readiness
+- **WHEN** initialization completes
+- **THEN** the production runtime flow reports adapter identity, channel, bandwidth, calibration class, init phase status, RX counters, TX counters, and last error state through production-facing telemetry

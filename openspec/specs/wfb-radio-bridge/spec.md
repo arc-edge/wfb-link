@@ -71,19 +71,19 @@ The system SHALL allow operators to configure adapter selection, channel, link I
 - **THEN** the bridge exits before radio initialization and reports the missing field
 
 ### Requirement: Combined WFB Bridge Runtime
-The system SHALL run a combined WFB RX/TX bridge loop over the userspace USB radio without requiring a Linux monitor interface.
+The system SHALL run combined WFB bridge RX/TX traffic through the userspace USB radio runtime session and runtime same-session init execution.
 
-#### Scenario: Bridge-run frame injection succeeds
-- **WHEN** `bridge-run` receives a valid WFB 802.11 frame from a configured UDP TX listener
-- **THEN** it submits the frame through the runtime radio session and increments the injected-packet and injected-byte counters
+#### Scenario: Bridge run transmits UDP datagrams
+- **WHEN** `bridge-run` receives WFB UDP datagrams and explicit transmit authorization
+- **THEN** it initializes through the runtime same-session init API, submits outgoing IEEE 802.11 frames through the runtime radio session, and records TX counters
 
-#### Scenario: Bridge-run RX forwarding remains available
-- **WHEN** the runtime radio session returns a bulk-IN read with supported receive metadata and an IEEE 802.11 payload
-- **THEN** `bridge-run` processes the runtime-parsed packet and forwards matching WFB payloads to the configured UDP peers
+#### Scenario: Bridge run receives WFB frames
+- **WHEN** `bridge-run` receives runtime-parsed bulk-IN packets that match the configured WFB channel filter
+- **THEN** it forwards payloads to the configured UDP aggregator and records RX and forwarding counters
 
-#### Scenario: Bridge-run RX incomplete tail remains visible
-- **WHEN** the runtime radio session returns a bulk-IN read whose trailing bytes do not contain a complete RX packet
-- **THEN** `bridge-run` increments the RX need-more-data counter without treating the read as a fatal bridge error
+#### Scenario: Bridge run shares one initialized session
+- **WHEN** `bridge-run` enables both RX and TX
+- **THEN** both directions share one runtime-owned initialized USB radio session rather than opening or initializing the adapter separately per direction
 
 ### Requirement: WFB TX Benchmark Runtime
 The system SHALL submit bounded WFB TX benchmark traffic through the userspace USB radio runtime without requiring a Linux monitor interface.

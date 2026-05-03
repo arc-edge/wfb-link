@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Calibration Profile Comparison
 The system SHALL support repeatable RF-quality comparisons across default, targeted parity, captured IQK/LCK, and runtime IQK calibration profiles without treating unvalidated experimental profiles as long-distance-ready.

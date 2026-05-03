@@ -42,7 +42,7 @@ The system SHALL provide a macOS-only direct-control diagnostic and runtime tran
 - **THEN** the IOUSBHost wrapper, retained session, bulk/register trait implementations, endpoint validation, and retained-session opening are provided by the runtime library
 
 ### Requirement: RTL8812AU Initialization
-The system SHALL initialize RTL8812AU hardware into a monitor-capable state using userspace USB control and bulk transfers, with stable runtime-facing policy, live USB transport, and initialization phase sequencing exposed from a reusable runtime library rather than only from diagnostic commands.
+The system SHALL initialize RTL8812AU hardware into a monitor-capable state using userspace USB control and bulk transfers, with stable runtime-facing policy, live USB transport, calibration selection, and initialization phase execution exposed from a reusable runtime library rather than only from diagnostic commands.
 
 #### Scenario: Initialization completes
 - **WHEN** the system opens a supported RTL8812AU adapter
@@ -54,11 +54,15 @@ The system SHALL initialize RTL8812AU hardware into a monitor-capable state usin
 
 #### Scenario: Runtime policy available without diagnostic CLI
 - **WHEN** a production runtime caller configures RTL8812AU initialization
-- **THEN** it can use the runtime library to evaluate stable calibration policy and initialization phase ordering without depending on diagnostic CLI parsing
+- **THEN** it can use the runtime library to evaluate stable calibration policy, initialization phase ordering, and same-session init execution without depending on diagnostic CLI parsing or diagnostic report structures
 
 #### Scenario: Runtime transport available without diagnostic enum
 - **WHEN** a production runtime caller owns a libusb claim or macOS USBHost retained session
 - **THEN** it can represent that live hardware session with the runtime USB transport type
+
+#### Scenario: Runtime init preserves calibration guardrails
+- **WHEN** initialization requests an experimental TX calibration profile
+- **THEN** the runtime init path MUST require the profile's authorization and report the calibration class before RF TX is enabled
 
 ### Requirement: Channel Control
 The system SHALL tune the radio to an explicitly selected 2.4 GHz or 5 GHz Wi-Fi channel before RX or TX operation.
