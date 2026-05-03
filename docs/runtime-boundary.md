@@ -44,3 +44,13 @@
 5. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
 
 The diagnostic binary should continue to be able to run every bring-up probe. Production behavior should live in runtime APIs first, then in a thinner runtime-oriented command surface.
+
+## Latest Runtime-Flow Smoke
+
+On May 3, 2026, a short hardware-Mac `runtime-flow --macos-usbhost` smoke on
+channel 36/20 MHz verified that production-shaped RX telemetry carries the new
+metadata coverage counters. The run completed with
+`stop_reason=duration_elapsed`, read 124 RX buffers, parsed 144 frames, and
+reported 124 frames each for PHY status, valid RSSI, SNR, and derived noise.
+Artifact: `/tmp/wfb-runtime-flow-rxmeta.json` on the hardware Mac deploy
+checkout.
