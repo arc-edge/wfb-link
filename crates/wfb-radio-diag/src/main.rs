@@ -21609,8 +21609,8 @@ fn init_live_report(
         error: None,
         notes: vec![
             "live init completed power, firmware, LLT, queue/DMA, MAC, EFUSE MACID, BB, RF, and selected channel setup",
-            "TX power tables, IQK, bulk IN loop, and TX frame submission remain separate tasks",
-            "no bulk IN loop, bulk OUT frame submission, or TX operation was issued",
+            "TX power control, RF calibration profiles, RX capture, and TX submission are available through the retained-session RX/TX commands",
+            "init itself does not issue bulk IN reads, bulk OUT frame submissions, or TX traffic",
         ],
     })
 }

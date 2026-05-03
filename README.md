@@ -69,6 +69,7 @@ The bridge replaces Linux `PF_PACKET`/`pcap` radio I/O. It does not attempt to c
 Initial implementation has started. The current code can:
 
 - Build a Rust workspace with `radio-core`, `wfb-bridge`, and `wfb-radio-diag`.
+- Use `wfb-radio-runtime` for live USB session ownership, endpoint selection, TX submission, raw packet replay, RX packet reads, and shared runtime counters across bridge and standalone RX/TX commands.
 - Discover supported RTL8812AU-class USB adapters by VID/PID.
 - Walk USB descriptors and endpoint layouts.
 - Claim and release interface 0 for a supported adapter.
@@ -92,7 +93,7 @@ Initial implementation has started. The current code can:
 - Build RTL8812AU 40-byte TX descriptors for validated IEEE 802.11 frames.
 - Encode OFDM, HT MCS, and VHT NSS/MCS rate IDs in RTL8812AU TX descriptors.
 - Select explicit diagnostic TX rates with `--tx-rate`, including legacy rates, `mcsN`, and `vhtNss-mcsM`.
-- Submit descriptor-prefixed frames to a USB bulk OUT transport with TX counters.
+- Submit descriptor-prefixed frames through runtime-owned USB bulk OUT transport with TX counters.
 - Run guarded live `tx-once` single-frame TX against an already-initialized adapter.
 - Run guarded live `tx-repeat` bounded repeated TX with explicit count, interval, frame, and authorization.
 - Drive the confirmed visible blue LED during live `tx-once` and `tx-repeat` software TX submissions with `--tx-led`.
@@ -100,7 +101,7 @@ Initial implementation has started. The current code can:
 - Expose optional TX descriptor flags for SGI, LDPC, and STBC through visible CLI flags.
 - Parse synthetic RTL8812AU RX descriptor buffers into raw frame records.
 - Write captured raw IEEE 802.11 frames to classic PCAP files for offline inspection.
-- Run live bounded `rx-scan` bulk-IN reads against an already-initialized adapter and write optional PCAP output plus JSONL raw-frame records with RX metadata.
+- Run live bounded `rx-scan` runtime bulk-IN reads against an already-initialized adapter and write optional PCAP output plus JSONL raw-frame records with RX metadata.
 - Compare normalized USB transfer traces for future Linux baseline regression checks.
 - Build a hardware-free, source-audited init transfer skeleton from an RTL8812A firmware image and write it as normalized USB trace JSON.
 - Match WFB-ng link/radio-port headers and serialize `wrxfwd_t` forwarding headers.
@@ -110,7 +111,7 @@ Initial implementation has started. The current code can:
 - Submit stripped TX frames to a trait-backed radio sink with TX bridge counters.
 - Submit one WFB distributor-style datagram through the live radio backend with `bridge-tx-once`.
 - Listen for bounded UDP WFB distributor-style datagrams and submit them through live radio TX with `bridge-tx-listen`.
-- Run bounded RX forwarding and TX injection in one retained radio session with `bridge-run`.
+- Run bounded RX forwarding and TX injection in one retained runtime radio session with `bridge-run`.
 - Receive stock WFB-ng distributor traffic from Linux `wfb_tx -d`, inject it over the Mac-controlled AWUS036ACH, and deliver low-rate payloads to Linux `wfb_rx`.
 - Build structured RF-quality envelopes with `rf-quality-report`, including macOS bridge artifacts, EFUSE context, Linux baseline parameters, parameter mismatches, recovery/loss/throughput summaries, and receiver artifact paths.
 - List verification stages with `wfb-radio-diag stages`.
