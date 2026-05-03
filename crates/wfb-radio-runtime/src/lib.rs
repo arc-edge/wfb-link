@@ -8,7 +8,8 @@ use std::{error::Error, fmt, time::Duration};
 
 use radio_core::{
     list_usb_devices, rtl8812au::Rtl8812auUsbTransport, ClaimedUsbDevice, DeviceSelector,
-    EndpointInfo, InterfaceInfo, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
+    EndpointInfo, InterfaceInfo, Rtl8812auRegisterAccess, Rtl8812auRegisterError, UsbBulkTransfer,
+    UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 
@@ -249,6 +250,85 @@ pub fn open_runtime_usb_transport(
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeRadioCounters {
+    pub usb_control_reads: u64,
+    pub usb_control_writes: u64,
+    pub usb_bulk_in_reads: u64,
+    pub usb_bulk_out_writes: u64,
+    pub rx_frames: u64,
+    pub tx_frames: u64,
+    pub dropped_frames: u64,
+}
+
+impl RuntimeRadioCounters {
+    pub fn saturating_sub(self, before: Self) -> Self {
+        Self {
+            usb_control_reads: self
+                .usb_control_reads
+                .saturating_sub(before.usb_control_reads),
+            usb_control_writes: self
+                .usb_control_writes
+                .saturating_sub(before.usb_control_writes),
+            usb_bulk_in_reads: self
+                .usb_bulk_in_reads
+                .saturating_sub(before.usb_bulk_in_reads),
+            usb_bulk_out_writes: self
+                .usb_bulk_out_writes
+                .saturating_sub(before.usb_bulk_out_writes),
+            rx_frames: self.rx_frames.saturating_sub(before.rx_frames),
+            tx_frames: self.tx_frames.saturating_sub(before.tx_frames),
+            dropped_frames: self.dropped_frames.saturating_sub(before.dropped_frames),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRadioError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl RuntimeRadioError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn register_read(
+        register_name: &'static str,
+        phase: &'static str,
+        error: Rtl8812auRegisterError,
+    ) -> Self {
+        Self::new(
+            "register_read_failed",
+            format!("{register_name} {phase} read failed: {error}"),
+        )
+    }
+
+    fn register_write(
+        register_name: &'static str,
+        phase: &'static str,
+        error: Rtl8812auRegisterError,
+    ) -> Self {
+        Self::new(
+            "register_write_failed",
+            format!("{register_name} {phase} write failed: {error}"),
+        )
+    }
+}
+
+impl fmt::Display for RuntimeRadioError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl Error for RuntimeRadioError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rtl8812auInitOrder {
@@ -341,6 +421,371 @@ pub fn rtl8812au_same_session_init_sequence(
 
 pub fn rtl8812au_llt_firmware_sequence(order: Rtl8812auInitOrder) -> &'static [Rtl8812auInitPhase] {
     &rtl8812au_same_session_init_sequence(order)[1..=2]
+}
+
+const REG_ACLK_MON: u16 = 0x003e;
+const REG_SDIO_CTRL_8812: u16 = 0x0070;
+const REG_CR: u16 = 0x0100;
+const REG_MSR: u16 = REG_CR + 2;
+const REG_EARLY_MODE_CONTROL_8812: u16 = 0x02bc;
+const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
+const REG_QUEUE_CTRL: u16 = 0x04c6;
+const REG_TX_RPT_TIME: u16 = 0x04f0;
+const REG_RCR: u16 = 0x0608;
+const REG_NAV_UPPER: u16 = 0x0652;
+const REG_RXFLTMAP2: u16 = 0x06a4;
+const REG_USB_HRPWM: u16 = 0xfe58;
+
+const BIT3: u8 = 1 << 3;
+const MSR_PORT0_NETTYPE_MASK: u8 = 0x03;
+const RCR_APM: u32 = 1 << 1;
+const RCR_AM: u32 = 1 << 2;
+const RCR_AB: u32 = 1 << 3;
+const RCR_AAP: u32 = 1 << 0;
+const RCR_APWRMGT: u32 = 1 << 5;
+const RCR_ADF: u32 = 1 << 11;
+const RCR_ACF: u32 = 1 << 12;
+const RCR_AMF: u32 = 1 << 13;
+const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
+const RCR_APPFCS: u32 = 1 << 31;
+const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
+    | RCR_APM
+    | RCR_AM
+    | RCR_AB
+    | RCR_APWRMGT
+    | RCR_ADF
+    | RCR_ACF
+    | RCR_AMF
+    | RCR_APP_PHYST_RXFF
+    | RCR_APPFCS;
+
+const RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES: &[(u16, u8, &str)] = &[
+    (REG_FWHW_TXQ_CTRL + 1, 0x0f, "REG_FWHW_TXQ_CTRL+1"),
+    (
+        REG_EARLY_MODE_CONTROL_8812 + 3,
+        0x01,
+        "REG_EARLY_MODE_CONTROL_8812+3",
+    ),
+    (REG_SDIO_CTRL_8812, 0x00, "REG_SDIO_CTRL_8812"),
+    (REG_ACLK_MON, 0x00, "REG_ACLK_MON"),
+    (REG_USB_HRPWM, 0x00, "REG_USB_HRPWM"),
+    (REG_NAV_UPPER, 0x00, "REG_NAV_UPPER"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimePhaseExecution {
+    pub phase: Rtl8812auInitPhase,
+    pub register_writes: usize,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeMonitorOpmodeExecution {
+    pub msr_before: u8,
+    pub msr_written: u8,
+    pub msr_after: u8,
+    pub rcr_written: u32,
+    pub rcr_after: u32,
+    pub rxfltmap2_written: u16,
+    pub rxfltmap2_after: u16,
+    pub register_writes: usize,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorReceiveFilterExecution {
+    rcr_written: u32,
+    rcr_after: u32,
+    rxfltmap2_written: u16,
+    rxfltmap2_after: u16,
+    register_writes: usize,
+}
+
+fn read8_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<u8, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let value = registers
+        .read8(address)
+        .map_err(|error| RuntimeRadioError::register_read(register_name, phase, error))?;
+    counters.usb_control_reads += 1;
+    Ok(value)
+}
+
+fn read16_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<u16, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let value = registers
+        .read16(address)
+        .map_err(|error| RuntimeRadioError::register_read(register_name, phase, error))?;
+    counters.usb_control_reads += 1;
+    Ok(value)
+}
+
+fn read32_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<u32, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let value = registers
+        .read32(address)
+        .map_err(|error| RuntimeRadioError::register_read(register_name, phase, error))?;
+    counters.usb_control_reads += 1;
+    Ok(value)
+}
+
+fn write8_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    value: u8,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    registers
+        .write8(address, value)
+        .map_err(|error| RuntimeRadioError::register_write(register_name, phase, error))?;
+    counters.usb_control_writes += 1;
+    Ok(())
+}
+
+fn write16_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    value: u16,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    registers
+        .write16(address, value)
+        .map_err(|error| RuntimeRadioError::register_write(register_name, phase, error))?;
+    counters.usb_control_writes += 1;
+    Ok(())
+}
+
+fn write32_with_counter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    value: u32,
+    register_name: &'static str,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    registers
+        .write32(address, value)
+        .map_err(|error| RuntimeRadioError::register_write(register_name, phase, error))?;
+    counters.usb_control_writes += 1;
+    Ok(())
+}
+
+pub fn rtl8812au_tx_scheduler_tail_expected_writes() -> usize {
+    1 + RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES.len() + 1
+}
+
+pub fn rtl8812au_monitor_receive_config() -> u32 {
+    MONITOR_RECEIVE_CONFIG
+}
+
+pub fn run_rtl8812au_tx_scheduler_tail<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<RuntimePhaseExecution, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let mut register_writes = 0usize;
+    let queue_ctrl = read8_with_counter(
+        registers,
+        counters,
+        REG_QUEUE_CTRL,
+        "REG_QUEUE_CTRL",
+        "pre-tail",
+    )?;
+    write8_with_counter(
+        registers,
+        counters,
+        REG_QUEUE_CTRL,
+        queue_ctrl & !BIT3,
+        "REG_QUEUE_CTRL",
+        "late TX scheduler",
+    )?;
+    register_writes += 1;
+
+    for (address, value, name) in RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES {
+        write8_with_counter(
+            registers,
+            counters,
+            *address,
+            *value,
+            name,
+            "late TX scheduler",
+        )?;
+        register_writes += 1;
+    }
+
+    write16_with_counter(
+        registers,
+        counters,
+        REG_TX_RPT_TIME,
+        0x3df0,
+        "REG_TX_RPT_TIME",
+        "late TX scheduler",
+    )?;
+    register_writes += 1;
+
+    Ok(RuntimePhaseExecution {
+        phase: Rtl8812auInitPhase::TxSchedulerTail,
+        register_writes,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
+pub fn run_rtl8812au_monitor_opmode<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<RuntimeMonitorOpmodeExecution, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let msr_before = read8_with_counter(
+        registers,
+        counters,
+        REG_MSR,
+        "REG_MSR",
+        "pre-monitor-opmode",
+    )?;
+    let msr_written = msr_before & !MSR_PORT0_NETTYPE_MASK;
+    write8_with_counter(
+        registers,
+        counters,
+        REG_MSR,
+        msr_written,
+        "REG_MSR",
+        "monitor/no-link",
+    )?;
+    let msr_after = read8_with_counter(
+        registers,
+        counters,
+        REG_MSR,
+        "REG_MSR",
+        "post-monitor-opmode",
+    )?;
+
+    let monitor_filter =
+        run_monitor_receive_filter_registers(registers, counters, "post-monitor-opmode")?;
+
+    Ok(RuntimeMonitorOpmodeExecution {
+        msr_before,
+        msr_written,
+        msr_after,
+        rcr_written: monitor_filter.rcr_written,
+        rcr_after: monitor_filter.rcr_after,
+        rxfltmap2_written: monitor_filter.rxfltmap2_written,
+        rxfltmap2_after: monitor_filter.rxfltmap2_after,
+        register_writes: 1 + monitor_filter.register_writes,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
+pub fn run_rtl8812au_monitor_receive_filter<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<RuntimeMonitorOpmodeExecution, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let msr_before = read8_with_counter(
+        registers,
+        counters,
+        REG_MSR,
+        "REG_MSR",
+        "pre-monitor-filter",
+    )?;
+    let monitor_filter =
+        run_monitor_receive_filter_registers(registers, counters, "post-monitor-filter")?;
+
+    Ok(RuntimeMonitorOpmodeExecution {
+        msr_before,
+        msr_written: msr_before,
+        msr_after: msr_before,
+        rcr_written: monitor_filter.rcr_written,
+        rcr_after: monitor_filter.rcr_after,
+        rxfltmap2_written: monitor_filter.rxfltmap2_written,
+        rxfltmap2_after: monitor_filter.rxfltmap2_after,
+        register_writes: monitor_filter.register_writes,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
+fn run_monitor_receive_filter_registers<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    phase: &'static str,
+) -> Result<MonitorReceiveFilterExecution, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write32_with_counter(
+        registers,
+        counters,
+        REG_RCR,
+        MONITOR_RECEIVE_CONFIG,
+        "REG_RCR",
+        "monitor receive config",
+    )?;
+    let rcr_after = read32_with_counter(registers, counters, REG_RCR, "REG_RCR", phase)?;
+
+    write16_with_counter(
+        registers,
+        counters,
+        REG_RXFLTMAP2,
+        u16::MAX,
+        "REG_RXFLTMAP2",
+        "monitor receive map",
+    )?;
+    let rxfltmap2_after =
+        read16_with_counter(registers, counters, REG_RXFLTMAP2, "REG_RXFLTMAP2", phase)?;
+
+    Ok(MonitorReceiveFilterExecution {
+        rcr_written: MONITOR_RECEIVE_CONFIG,
+        rcr_after,
+        rxfltmap2_written: u16::MAX,
+        rxfltmap2_after,
+        register_writes: 2,
+    })
 }
 
 pub fn macos_usbhost_bulk_out_endpoints(
@@ -574,10 +1019,69 @@ pub enum TxCalibrationClass {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, collections::BTreeMap, time::Duration};
+
+    use radio_core::{rtl8812au::Rtl8812auUsbTransport, Rtl8812auRegisterAccess, UsbError};
+
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, TxCalibrationClass, TxCalibrationProfile,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, TxCalibrationClass,
+        TxCalibrationProfile,
     };
+
+    #[derive(Debug, Default)]
+    struct MockTransport {
+        registers: RefCell<BTreeMap<u16, Vec<u8>>>,
+        writes: RefCell<Vec<(u16, Vec<u8>)>>,
+    }
+
+    impl MockTransport {
+        fn with_u8(address: u16, value: u8) -> Self {
+            let transport = Self::default();
+            transport
+                .registers
+                .borrow_mut()
+                .insert(address, vec![value]);
+            transport
+        }
+
+        fn writes(&self) -> Vec<(u16, Vec<u8>)> {
+            self.writes.borrow().clone()
+        }
+
+        fn register_bytes(&self, address: u16) -> Option<Vec<u8>> {
+            self.registers.borrow().get(&address).cloned()
+        }
+    }
+
+    impl Rtl8812auUsbTransport for &MockTransport {
+        fn read_vendor(
+            &self,
+            value: u16,
+            _index: u16,
+            data: &mut [u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            data.fill(0);
+            if let Some(stored) = self.registers.borrow().get(&value) {
+                let len = data.len().min(stored.len());
+                data[..len].copy_from_slice(&stored[..len]);
+            }
+            Ok(data.len())
+        }
+
+        fn write_vendor(
+            &self,
+            value: u16,
+            _index: u16,
+            data: &[u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            self.registers.borrow_mut().insert(value, data.to_vec());
+            self.writes.borrow_mut().push((value, data.to_vec()));
+            Ok(data.len())
+        }
+    }
 
     #[test]
     fn runtime_iqk_requires_live_register_write_authorization() {
@@ -710,6 +1214,127 @@ mod tests {
         assert_eq!(
             sequence.last(),
             Some(&Rtl8812auInitPhase::RfCalibrationBeforeTx)
+        );
+    }
+
+    #[test]
+    fn tx_scheduler_tail_writes_linux_tail_registers() {
+        let transport = MockTransport::with_u8(super::REG_QUEUE_CTRL, 0xff);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let execution =
+            super::run_rtl8812au_tx_scheduler_tail(&registers, &mut counters).expect("tail");
+
+        assert_eq!(execution.phase, Rtl8812auInitPhase::TxSchedulerTail);
+        assert_eq!(
+            execution.register_writes,
+            super::rtl8812au_tx_scheduler_tail_expected_writes()
+        );
+        assert_eq!(execution.counters.usb_control_reads, 1);
+        assert_eq!(execution.counters.usb_control_writes, 8);
+        assert_eq!(counters.usb_control_reads, 1);
+        assert_eq!(counters.usb_control_writes, 8);
+
+        assert_eq!(
+            transport.register_bytes(super::REG_QUEUE_CTRL),
+            Some(vec![0xf7])
+        );
+        assert_eq!(
+            transport.writes(),
+            vec![
+                (super::REG_QUEUE_CTRL, vec![0xf7]),
+                (super::REG_FWHW_TXQ_CTRL + 1, vec![0x0f]),
+                (super::REG_EARLY_MODE_CONTROL_8812 + 3, vec![0x01]),
+                (super::REG_SDIO_CTRL_8812, vec![0x00]),
+                (super::REG_ACLK_MON, vec![0x00]),
+                (super::REG_USB_HRPWM, vec![0x00]),
+                (super::REG_NAV_UPPER, vec![0x00]),
+                (super::REG_TX_RPT_TIME, vec![0xf0, 0x3d]),
+            ]
+        );
+    }
+
+    #[test]
+    fn monitor_receive_filter_programs_rcr_without_changing_msr() {
+        let transport = MockTransport::with_u8(super::REG_MSR, 0x02);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let execution = super::run_rtl8812au_monitor_receive_filter(&registers, &mut counters)
+            .expect("monitor filter");
+
+        assert_eq!(execution.msr_before, 0x02);
+        assert_eq!(execution.msr_written, 0x02);
+        assert_eq!(execution.msr_after, 0x02);
+        assert_eq!(
+            execution.rcr_written,
+            super::rtl8812au_monitor_receive_config()
+        );
+        assert_eq!(
+            execution.rcr_after,
+            super::rtl8812au_monitor_receive_config()
+        );
+        assert_eq!(execution.rxfltmap2_written, u16::MAX);
+        assert_eq!(execution.rxfltmap2_after, u16::MAX);
+        assert_eq!(execution.register_writes, 2);
+        assert_eq!(execution.counters.usb_control_reads, 3);
+        assert_eq!(execution.counters.usb_control_writes, 2);
+        assert_eq!(counters.usb_control_reads, 3);
+        assert_eq!(counters.usb_control_writes, 2);
+        assert_eq!(
+            transport.writes(),
+            vec![
+                (
+                    super::REG_RCR,
+                    super::rtl8812au_monitor_receive_config()
+                        .to_le_bytes()
+                        .to_vec(),
+                ),
+                (super::REG_RXFLTMAP2, u16::MAX.to_le_bytes().to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn monitor_opmode_clears_msr_link_type_and_programs_receive_filter() {
+        let transport = MockTransport::with_u8(super::REG_MSR, 0x03);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let execution =
+            super::run_rtl8812au_monitor_opmode(&registers, &mut counters).expect("opmode");
+
+        assert_eq!(execution.msr_before, 0x03);
+        assert_eq!(execution.msr_written, 0x00);
+        assert_eq!(execution.msr_after, 0x00);
+        assert_eq!(
+            execution.rcr_written,
+            super::rtl8812au_monitor_receive_config()
+        );
+        assert_eq!(
+            execution.rcr_after,
+            super::rtl8812au_monitor_receive_config()
+        );
+        assert_eq!(execution.rxfltmap2_written, u16::MAX);
+        assert_eq!(execution.rxfltmap2_after, u16::MAX);
+        assert_eq!(execution.register_writes, 3);
+        assert_eq!(execution.counters.usb_control_reads, 4);
+        assert_eq!(execution.counters.usb_control_writes, 3);
+        assert_eq!(counters.usb_control_reads, 4);
+        assert_eq!(counters.usb_control_writes, 3);
+        assert_eq!(
+            transport.writes(),
+            vec![
+                (super::REG_MSR, vec![0x00]),
+                (
+                    super::REG_RCR,
+                    super::rtl8812au_monitor_receive_config()
+                        .to_le_bytes()
+                        .to_vec(),
+                ),
+                (super::REG_RXFLTMAP2, u16::MAX.to_le_bytes().to_vec()),
+            ]
         );
     }
 }

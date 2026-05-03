@@ -37,8 +37,9 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeTransportError,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMonitorOpmodeExecution,
+    RuntimeRadioCounters, RuntimeRadioError, RuntimeTransportError, RuntimeUsbOpenConfig,
+    RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -2866,6 +2867,37 @@ struct DiagnosticErrorReport {
     message: String,
 }
 
+fn runtime_radio_counters_from_diagnostic(counters: DiagnosticCounters) -> RuntimeRadioCounters {
+    RuntimeRadioCounters {
+        usb_control_reads: counters.usb_control_reads,
+        usb_control_writes: counters.usb_control_writes,
+        usb_bulk_in_reads: counters.usb_bulk_in_reads,
+        usb_bulk_out_writes: counters.usb_bulk_out_writes,
+        rx_frames: counters.rx_frames,
+        tx_frames: counters.tx_frames,
+        dropped_frames: counters.dropped_frames,
+    }
+}
+
+fn diagnostic_counters_from_runtime(counters: RuntimeRadioCounters) -> DiagnosticCounters {
+    DiagnosticCounters {
+        usb_control_reads: counters.usb_control_reads,
+        usb_control_writes: counters.usb_control_writes,
+        usb_bulk_in_reads: counters.usb_bulk_in_reads,
+        usb_bulk_out_writes: counters.usb_bulk_out_writes,
+        rx_frames: counters.rx_frames,
+        tx_frames: counters.tx_frames,
+        dropped_frames: counters.dropped_frames,
+    }
+}
+
+fn runtime_radio_error(error: RuntimeRadioError) -> DiagnosticErrorReport {
+    DiagnosticErrorReport {
+        code: error.code,
+        message: error.message,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct FirmwareReport {
     source: PathBuf,
@@ -5400,9 +5432,7 @@ const REG_RSV_CTRL: u16 = 0x001c;
 const REG_AFE_XTAL_CTRL: u16 = 0x0024;
 const REG_AFE_PLL_CTRL: u16 = 0x0028;
 const REG_EFUSE_CTRL: u16 = 0x0030;
-const REG_ACLK_MON: u16 = 0x003e;
 const REG_RF_CTRL: u16 = 0x001f;
-const REG_SDIO_CTRL_8812: u16 = 0x0070;
 const REG_RF_B_CTRL_8812: u16 = 0x0076;
 const REG_MAC_PHY_CTRL: u16 = 0x002c;
 const REG_LEDCFG0: u16 = 0x004c;
@@ -5705,22 +5735,16 @@ const FEN_USBA: u8 = BIT2;
 const MASK_NETTYPE: u32 = 0x0003_0000;
 const NT_LINK_AP: u32 = 0x3;
 const NETTYPE_LINK_AP: u32 = NT_LINK_AP << 16;
-const MSR_PORT0_NETTYPE_MASK: u8 = 0x03;
 const RCR_APM: u32 = 1 << 1;
 const RCR_AM: u32 = 1 << 2;
 const RCR_AB: u32 = 1 << 3;
-const RCR_AAP: u32 = 1 << 0;
-const RCR_APWRMGT: u32 = 1 << 5;
 const RCR_CBSSID_DATA: u32 = 1 << 6;
 const RCR_CBSSID_BCN: u32 = 1 << 7;
-const RCR_ADF: u32 = 1 << 11;
-const RCR_ACF: u32 = 1 << 12;
 const RCR_AMF: u32 = 1 << 13;
 const RCR_HTC_LOC_CTRL: u32 = 1 << 14;
 const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
 const RCR_APP_ICV: u32 = 1 << 29;
 const RCR_APP_MIC: u32 = 1 << 30;
-const RCR_APPFCS: u32 = 1 << 31;
 const RCR_FORCEACK: u32 = 1 << 26;
 const MAC_RECEIVE_CONFIG: u32 = RCR_APM
     | RCR_AM
@@ -5733,16 +5757,6 @@ const MAC_RECEIVE_CONFIG: u32 = RCR_APM
     | RCR_APP_ICV
     | RCR_APP_MIC
     | RCR_FORCEACK;
-const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
-    | RCR_APM
-    | RCR_AM
-    | RCR_AB
-    | RCR_APWRMGT
-    | RCR_ADF
-    | RCR_ACF
-    | RCR_AMF
-    | RCR_APP_PHYST_RXFF
-    | RCR_APPFCS;
 const RATE_BITMAP_ALL: u32 = 0x000f_ffff;
 const RATE_RRSR_CCK_ONLY_1M: u32 = 0x000f_fff1;
 const RL_VAL_STA: u16 = 0x30;
@@ -27392,51 +27406,13 @@ fn run_tx_scheduler_tail_sequence<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let mut writes = 0usize;
-    let queue_ctrl = read8_with_counter(registers, counters, REG_QUEUE_CTRL).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_QUEUE_CTRL pre-tail read failed: {error}"),
-        }
-    })?;
-    write8_with_counter(registers, counters, REG_QUEUE_CTRL, queue_ctrl & !BIT3).map_err(
-        |error| DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_QUEUE_CTRL late TX scheduler write failed: {error}"),
-        },
-    )?;
-    writes += 1;
-
-    for (address, value, name) in [
-        (REG_FWHW_TXQ_CTRL + 1, 0x0f, "REG_FWHW_TXQ_CTRL+1"),
-        (
-            REG_EARLY_MODE_CONTROL_8812 + 3,
-            0x01,
-            "REG_EARLY_MODE_CONTROL_8812+3",
-        ),
-        (REG_SDIO_CTRL_8812, 0x00, "REG_SDIO_CTRL_8812"),
-        (REG_ACLK_MON, 0x00, "REG_ACLK_MON"),
-        (REG_USB_HRPWM, 0x00, "REG_USB_HRPWM"),
-        (REG_NAV_UPPER, 0x00, "REG_NAV_UPPER"),
-    ] {
-        write8_with_counter(registers, counters, address, value).map_err(|error| {
-            DiagnosticErrorReport {
-                code: "register_write_failed",
-                message: format!("{name} late TX scheduler write failed: {error}"),
-            }
-        })?;
-        writes += 1;
-    }
-
-    write16_with_counter(registers, counters, REG_TX_RPT_TIME, 0x3df0).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_TX_RPT_TIME late TX scheduler write failed: {error}"),
-        }
-    })?;
-    writes += 1;
-
-    Ok(writes)
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result =
+        wfb_radio_runtime::run_rtl8812au_tx_scheduler_tail(registers, &mut runtime_counters);
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result
+        .map(|execution| execution.register_writes)
+        .map_err(runtime_radio_error)
 }
 
 fn bridge_tx_bench_program_local_mac<T>(
@@ -27519,6 +27495,28 @@ where
     Ok(mac)
 }
 
+fn bridge_tx_bench_monitor_opmode_report_from_runtime(
+    execution: RuntimeMonitorOpmodeExecution,
+) -> BridgeTxBenchMonitorOpmodeReport {
+    BridgeTxBenchMonitorOpmodeReport {
+        msr_before: execution.msr_before,
+        msr_before_hex: format_value(execution.msr_before, 2),
+        msr_written: execution.msr_written,
+        msr_written_hex: format_value(execution.msr_written, 2),
+        msr_after: execution.msr_after,
+        msr_after_hex: format_value(execution.msr_after, 2),
+        rcr_written: execution.rcr_written,
+        rcr_written_hex: format_value(execution.rcr_written, 8),
+        rcr_after: execution.rcr_after,
+        rcr_after_hex: format_value(execution.rcr_after, 8),
+        rxfltmap2_written: execution.rxfltmap2_written,
+        rxfltmap2_written_hex: format_value(execution.rxfltmap2_written, 4),
+        rxfltmap2_after: execution.rxfltmap2_after,
+        rxfltmap2_after_hex: format_value(execution.rxfltmap2_after, 4),
+        counters: diagnostic_counters_from_runtime(execution.counters),
+    }
+}
+
 fn bridge_tx_bench_set_monitor_opmode<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
@@ -27526,79 +27524,12 @@ fn bridge_tx_bench_set_monitor_opmode<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let before_counters = *counters;
-    let msr_before = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_MSR pre-monitor-opmode read failed: {error}"),
-        }
-    })?;
-    let msr_written = msr_before & !MSR_PORT0_NETTYPE_MASK;
-    write8_with_counter(registers, counters, REG_MSR, msr_written).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_MSR monitor/no-link write failed: {error}"),
-        }
-    })?;
-    let msr_after = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_MSR post-monitor-opmode read failed: {error}"),
-        }
-    })?;
-
-    write32_with_counter(registers, counters, REG_RCR, MONITOR_RECEIVE_CONFIG).map_err(
-        |error| DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_RCR monitor receive config write failed: {error}"),
-        },
-    )?;
-    let rcr_after = read32_with_counter(registers, counters, REG_RCR).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_RCR post-monitor-opmode read failed: {error}"),
-        }
-    })?;
-
-    write16_with_counter(registers, counters, REG_RXFLTMAP2, u16::MAX).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_RXFLTMAP2 monitor receive map write failed: {error}"),
-        }
-    })?;
-    let rxfltmap2_after =
-        read16_with_counter(registers, counters, REG_RXFLTMAP2).map_err(|error| {
-            DiagnosticErrorReport {
-                code: "register_read_failed",
-                message: format!("REG_RXFLTMAP2 post-monitor-opmode read failed: {error}"),
-            }
-        })?;
-
-    Ok(BridgeTxBenchMonitorOpmodeReport {
-        msr_before,
-        msr_before_hex: format_value(msr_before, 2),
-        msr_written,
-        msr_written_hex: format_value(msr_written, 2),
-        msr_after,
-        msr_after_hex: format_value(msr_after, 2),
-        rcr_written: MONITOR_RECEIVE_CONFIG,
-        rcr_written_hex: format_value(MONITOR_RECEIVE_CONFIG, 8),
-        rcr_after,
-        rcr_after_hex: format_value(rcr_after, 8),
-        rxfltmap2_written: u16::MAX,
-        rxfltmap2_written_hex: format_value(u16::MAX, 4),
-        rxfltmap2_after,
-        rxfltmap2_after_hex: format_value(rxfltmap2_after, 4),
-        counters: DiagnosticCounters {
-            usb_control_reads: counters
-                .usb_control_reads
-                .saturating_sub(before_counters.usb_control_reads),
-            usb_control_writes: counters
-                .usb_control_writes
-                .saturating_sub(before_counters.usb_control_writes),
-            ..DiagnosticCounters::default()
-        },
-    })
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result = wfb_radio_runtime::run_rtl8812au_monitor_opmode(registers, &mut runtime_counters);
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result
+        .map(bridge_tx_bench_monitor_opmode_report_from_runtime)
+        .map_err(runtime_radio_error)
 }
 
 fn bridge_tx_bench_set_monitor_receive_filter<T>(
@@ -27608,65 +27539,13 @@ fn bridge_tx_bench_set_monitor_receive_filter<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let before_counters = *counters;
-    let msr_before = read8_with_counter(registers, counters, REG_MSR).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_MSR pre-monitor-filter read failed: {error}"),
-        }
-    })?;
-    write32_with_counter(registers, counters, REG_RCR, MONITOR_RECEIVE_CONFIG).map_err(
-        |error| DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_RCR monitor receive config write failed: {error}"),
-        },
-    )?;
-    let rcr_after = read32_with_counter(registers, counters, REG_RCR).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_read_failed",
-            message: format!("REG_RCR post-monitor-filter read failed: {error}"),
-        }
-    })?;
-
-    write16_with_counter(registers, counters, REG_RXFLTMAP2, u16::MAX).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "register_write_failed",
-            message: format!("REG_RXFLTMAP2 monitor receive map write failed: {error}"),
-        }
-    })?;
-    let rxfltmap2_after =
-        read16_with_counter(registers, counters, REG_RXFLTMAP2).map_err(|error| {
-            DiagnosticErrorReport {
-                code: "register_read_failed",
-                message: format!("REG_RXFLTMAP2 post-monitor-filter read failed: {error}"),
-            }
-        })?;
-
-    Ok(BridgeTxBenchMonitorOpmodeReport {
-        msr_before,
-        msr_before_hex: format_value(msr_before, 2),
-        msr_written: msr_before,
-        msr_written_hex: format_value(msr_before, 2),
-        msr_after: msr_before,
-        msr_after_hex: format_value(msr_before, 2),
-        rcr_written: MONITOR_RECEIVE_CONFIG,
-        rcr_written_hex: format_value(MONITOR_RECEIVE_CONFIG, 8),
-        rcr_after,
-        rcr_after_hex: format_value(rcr_after, 8),
-        rxfltmap2_written: u16::MAX,
-        rxfltmap2_written_hex: format_value(u16::MAX, 4),
-        rxfltmap2_after,
-        rxfltmap2_after_hex: format_value(rxfltmap2_after, 4),
-        counters: DiagnosticCounters {
-            usb_control_reads: counters
-                .usb_control_reads
-                .saturating_sub(before_counters.usb_control_reads),
-            usb_control_writes: counters
-                .usb_control_writes
-                .saturating_sub(before_counters.usb_control_writes),
-            ..DiagnosticCounters::default()
-        },
-    })
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result =
+        wfb_radio_runtime::run_rtl8812au_monitor_receive_filter(registers, &mut runtime_counters);
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result
+        .map(bridge_tx_bench_monitor_opmode_report_from_runtime)
+        .map_err(runtime_radio_error)
 }
 
 fn bridge_tx_bench_send_media_status_h2c<T>(
