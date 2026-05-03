@@ -100,6 +100,10 @@ width when available, and `verify_status` (`verified`, `mismatch`,
 `set_unverified`, `set_failed`, or `skipped`). The same object is embedded in
 `datagram-evidence.json` and `${REMOTE_PREFIX}-summary.json` so missing `iw` or
 channel drift is visible without scraping `setup.log`.
+`rf-quality-report` lifts that object to `macos.wfb_outcome.channel_state`.
+New-format outdoor gates reject a close-range report when
+`channel_state.verify_status` is present and not `verified`, or when observed
+frequency/width differs from the promoted profile.
 Validation smoke:
 `/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report.json` recovered
 `80/80`, submitted `120/120`, collected an empty `missing-artifacts.txt`, and
@@ -109,7 +113,7 @@ service moved `wfb0` back to channel 161 / 20 MHz. Because this was an
 80-payload smoke against the 2,000-payload Linux reference, it is orchestration
 evidence only; regenerated reports classify that payload-count mismatch as an
 invalid baseline comparison
-(`/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report-payload-guard.json`).
+(`/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report-channel-state-top.json`).
 
 The current hardened automation evidence is
 `/tmp/wfb-rfq-prod-ready-marker-default-a1/rf-quality-report.json` from May 2,

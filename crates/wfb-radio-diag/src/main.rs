@@ -4264,6 +4264,7 @@ struct RfQualityWfbOutcomeReport {
     receiver_evidence: Option<serde_json::Value>,
     receiver_telemetry: Option<serde_json::Value>,
     receiver_signal: Option<RfQualityReceiverSignalReport>,
+    channel_state: Option<serde_json::Value>,
     throughput: Option<serde_json::Value>,
     cpu: Option<serde_json::Value>,
 }
@@ -31735,6 +31736,7 @@ fn rf_quality_wfb_outcome(
             receiver_evidence: receiver_evidence.cloned(),
             receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
             receiver_signal: rf_quality_receiver_signal(receiver_evidence),
+            channel_state: rf_quality_channel_state(receiver_evidence),
             recovered_payloads: args.recovered_payloads,
             ..RfQualityWfbOutcomeReport::default()
         };
@@ -31802,9 +31804,16 @@ fn rf_quality_wfb_outcome(
         receiver_evidence: receiver_evidence.cloned(),
         receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
         receiver_signal: rf_quality_receiver_signal(receiver_evidence),
+        channel_state: rf_quality_channel_state(receiver_evidence),
         throughput: rf_quality_json_clone(value, &["throughput"]),
         cpu: rf_quality_json_clone(value, &["cpu"]),
     }
+}
+
+fn rf_quality_channel_state(
+    receiver_evidence: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    receiver_evidence.and_then(|value| rf_quality_json_clone(value, &["channel_state"]))
 }
 
 fn rf_quality_receiver_telemetry(
@@ -32813,6 +32822,11 @@ fn rf_quality_profile_gate_report(
             &mut mismatches,
             close_range_report,
         );
+        rf_quality_close_range_gate_channel_state_matches(
+            &mut mismatches,
+            profile,
+            close_range_report,
+        );
     }
 
     let mismatch_count = mismatches.len();
@@ -32944,6 +32958,51 @@ fn rf_quality_close_range_gate_receiver_signal_status_matches(
             impact: "outdoor range promotion requires close-range RX_ANT signal evidence with a consistent tuple and RSSI averages",
         });
     }
+}
+
+fn rf_quality_close_range_gate_channel_state_matches(
+    mismatches: &mut Vec<RfQualityProfileGateMismatchReport>,
+    profile: &RfQualityProfileReport,
+    close_range_report: &serde_json::Value,
+) {
+    let Some(channel_state) = rf_quality_json_get(
+        close_range_report,
+        &["macos", "wfb_outcome", "channel_state"],
+    )
+    .or_else(|| {
+        rf_quality_json_get(
+            close_range_report,
+            &["macos", "wfb_outcome", "receiver_evidence", "channel_state"],
+        )
+    }) else {
+        return;
+    };
+    if let Some(status) = rf_quality_json_string(channel_state, &["verify_status"]) {
+        if status != "verified" {
+            mismatches.push(RfQualityProfileGateMismatchReport {
+                field: "channel_state.verify_status",
+                current_value: "verified".to_string(),
+                close_range_value: status,
+                impact: "outdoor range promotion requires close-range Linux peer channel verification to pass when channel-state evidence is present",
+            });
+        }
+    }
+    if let Some(freq_mhz) = profile.channel_frequency_mhz {
+        rf_quality_gate_compare_u64(
+            mismatches,
+            "channel_state.observed_frequency_mhz",
+            u64::from(freq_mhz),
+            rf_quality_json_u64(channel_state, &["observed_frequency_mhz"]),
+            "close-range Linux peer observed channel frequency must match the outdoor profile",
+        );
+    }
+    rf_quality_gate_compare_u64(
+        mismatches,
+        "channel_state.observed_width_mhz",
+        u64::from(profile.bandwidth_mhz),
+        rf_quality_json_u64(channel_state, &["observed_width_mhz"]),
+        "close-range Linux peer observed channel width must match the outdoor profile",
+    );
 }
 
 fn rf_quality_close_range_gate_receiver_telemetry_samples(
@@ -39796,6 +39855,77 @@ mod tests {
     }
 
     #[test]
+    fn rf_quality_outdoor_profile_rejects_channel_state_mismatch_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-channel-state-mismatch-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      },
+      "channel_state": {
+        "verify_status": "mismatch",
+        "observed_frequency_mhz": 5805,
+        "observed_width_mhz": 20
+      }
+    }
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write channel-state mismatch close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 2);
+        assert_eq!(
+            report
+                .profile_gate
+                .mismatches
+                .iter()
+                .map(|mismatch| mismatch.field)
+                .collect::<Vec<_>>(),
+            vec![
+                "channel_state.verify_status",
+                "channel_state.observed_frequency_mhz"
+            ]
+        );
+    }
+
+    #[test]
     fn rf_quality_outdoor_profile_rejects_runtime_iqk_fallback_gate() {
         let stamp = started_at_unix_ms();
         let gate_path = std::env::temp_dir().join(format!(
@@ -40219,6 +40349,7 @@ mod tests {
                 receiver_evidence: None,
                 receiver_telemetry: None,
                 receiver_signal: None,
+                channel_state: None,
                 throughput: None,
                 cpu: None,
             },
@@ -42875,6 +43006,11 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
   "receiver_status": "ok",
   "receiver_session_observed": true,
   "receiver_unable_decrypt_count": 0,
+  "channel_state": {
+    "verify_status": "verified",
+    "observed_frequency_mhz": 5180,
+    "observed_width_mhz": 20
+  },
   "receiver_health": {
     "counter": {"total_datagrams": 100},
     "rx_antenna_report_count": 1,
@@ -42996,6 +43132,16 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         );
         assert_eq!(receiver_signal.snr_avg_sample_count, 1);
         assert_eq!(receiver_signal.snr_avg_nonzero_count, 1);
+        assert_eq!(
+            report
+                .macos
+                .wfb_outcome
+                .channel_state
+                .as_ref()
+                .and_then(|value| rf_quality_json_string(value, &["verify_status"]))
+                .as_deref(),
+            Some("verified")
+        );
         assert_eq!(
             report
                 .comparison

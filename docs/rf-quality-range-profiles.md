@@ -98,6 +98,9 @@ field tooling has stable RF-health fields without parsing raw receiver logs.
 `status=usable` is accepted for current WFB-ng receiver logs that report valid
 RSSI and tuple data but all-zero SNR; `status=degraded` blocks outdoor
 promotion.
+When present, `macos.wfb_outcome.channel_state` is also part of the gate:
+`verify_status` must be `verified`, and observed frequency/width must match the
+profile.
 
 ### Accepted Close-Range 20 MHz Run
 
@@ -432,6 +435,8 @@ Do not classify a run as range-ready when any of the following are true:
   frequency, MCS index, or bandwidth differs from the outdoor profile.
 - The close-range gate includes `macos.wfb_outcome.receiver_signal.status` and
   it is `degraded`.
+- The close-range gate includes `macos.wfb_outcome.channel_state` and its
+  verification failed or observed frequency/width differs from the profile.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
   link/radio port, FEC, payload length, expected source payload count, antenna
   setup, or adapter class.
