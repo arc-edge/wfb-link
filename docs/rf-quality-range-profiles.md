@@ -203,6 +203,17 @@ Runtime IQK validation on May 2, 2026:
   `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report-signal-health.json`,
   reports `receiver_signal.status=usable` with `issues=["snr_all_zero"]`, two
   antennas, tuple-consistent `5180/MCS1/20`, and RSSI averages `-34..-15 dBm`.
+- Latest-format production gate:
+  `/tmp/wfb-rfq-runtime-iqk-prod-gate-a1/rf-quality-report.json` recovered
+  `1978/2000`, submitted `3000/3000`, logged zero decrypt failures, and stayed
+  `baseline_comparable` / `within_margin` with a `1.05` percentage-point loss
+  delta versus Linux. Runtime IQK completed in sweep 3 with cleanup restored
+  and `runtime_iqk_summary.risk=completed`. The report includes
+  `receiver_signal.status=usable` with `issues=["snr_all_zero"]`,
+  tuple-consistent `5180/MCS1/20`, RSSI averages `-24..-15 dBm`, and
+  `channel_state.verify_status=verified` for channel 36 / 20 MHz. This is the
+  current latest-schema close-range gate for runtime IQK; it is still not a
+  stepped or outdoor distance result.
 
 Telemetry-gated default rerun on May 2, 2026:
 

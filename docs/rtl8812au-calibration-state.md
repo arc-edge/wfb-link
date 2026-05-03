@@ -379,11 +379,18 @@ Hardware validation on May 2, 2026:
   and `runtime_iqk_summary.risk=completed`. This resolves the path-A RX
   fallback seen in `/tmp/wfb-rfq-prod-runtime-iqk-multisweep-a1` for
   close-range gates.
+- Latest-format close-range evidence at
+  `/tmp/wfb-rfq-runtime-iqk-prod-gate-a1/rf-quality-report.json` completed
+  runtime IQK in sweep 3, restored cleanup state, recovered `1978/2000`, logged
+  zero decrypt failures, and remained `within_margin`. This artifact includes
+  first-class `channel_state.verify_status=verified` and
+  `receiver_signal.status=usable`, so it is the current production-gate shape
+  for runtime IQK close-range validation.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
   paths A and B, RX IQK succeeded on path B, and the latest RX-trigger parity
-  run completed RX IQK on path A in the receiver-backed flow. Keep this profile
-  experimental for default long-distance use until stepped or outdoor evidence
-  shows whether runtime IQK improves distance margin.
+  runs completed RX IQK on path A in the receiver-backed flow. Keep this
+  profile experimental for default long-distance use until stepped or outdoor
+  evidence shows whether runtime IQK improves distance margin.
 - The attempt-evidence smoke showed path-A RX was ready immediately on every
   attempt, but alternated usable candidates with explicit hardware fail flags
   (`0x0000ee00`/`0x0000ef00`) before fallback. That points at IQK candidate

@@ -124,8 +124,12 @@ bridge-ready evidence before RF traffic, restore JSON, and an empty
 `missing-artifacts.txt`.
 New-format reports classify all-zero WFB-ng SNR as `receiver_signal.status=usable`
 rather than `complete` when the RX_ANT tuple and RSSI evidence are otherwise
-valid; `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report-signal-health.json`
-is the current example.
+valid. The current latest-schema runtime-IQK reference is
+`/tmp/wfb-rfq-runtime-iqk-prod-gate-a1/rf-quality-report.json`: it passed as
+`baseline_comparable` / `matched` / `within_margin`, recovered `1978/2000`,
+submitted `3000/3000`, completed runtime IQK by sweep 3 with cleanup restored,
+recorded `channel_state.verify_status=verified`, and restored the Linux service
+after the run.
 
 The automation also accepts the targeted calibration profile:
 
@@ -195,6 +199,11 @@ completed runtime IQK by sweep 2, restored cleanup state, recovered
 supersedes the earlier fallback-applied runtime-IQK artifacts for close-range
 gating; stepped or outdoor distance evidence is still required before making
 runtime IQK the default long-distance profile.
+The latest-schema rerun at
+`/tmp/wfb-rfq-runtime-iqk-prod-gate-a1/rf-quality-report.json` completed by
+sweep 3, recovered `1978/2000`, and adds first-class channel-state evidence.
+It replaces the older runtime-IQK artifacts as the best close-range gate shape,
+while preserving the same distance-evidence requirement.
 
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
