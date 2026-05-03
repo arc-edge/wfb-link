@@ -83,6 +83,9 @@ cargo run -p wfb-radio-diag -- --json \
 Acceptance meaning: a passing close-range profile only proves that the selected
 Mac settings are bench-functional and comparable to the close-range Linux
 baseline. It does not promote the profile to long-distance accepted.
+Quick smoke runs with fewer source payloads are useful for validating
+orchestration, but they are not baseline-comparable reference runs unless the
+Linux baseline has the same expected source payload count.
 For outdoor promotion, the close-range gate must also carry receiver telemetry
 from Linux `wfb_rx` RX_ANT lines so the range report can compare payload
 recovery with MCS/RSSI/SNR health, not just USB submission and decoded payload
@@ -392,6 +395,9 @@ receiver-backed WFB outcomes as the primary signal:
 
 - Payload loss delta: macOS loss may exceed the Linux baseline by at most `2.0`
   percentage points for the same profile tuple.
+- Expected source payloads: macOS and Linux baseline expected payload counts
+  must match before the report is `baseline_comparable`; short smokes are
+  `invalid_comparison` against the 2,000-payload reference baseline.
 - Throughput ratio: the report records macOS-vs-Linux throughput ratio and the
   target floor is `0.85`, but the current bridge timing includes init,
   relay/orchestration delay, and TX loop time. Until the timing window is
@@ -427,7 +433,8 @@ Do not classify a run as range-ready when any of the following are true:
 - The close-range gate includes `macos.wfb_outcome.receiver_signal.status` and
   it is `degraded`.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
-  link/radio port, FEC, payload length, antenna setup, or adapter class.
+  link/radio port, FEC, payload length, expected source payload count, antenna
+  setup, or adapter class.
 - The run uses HT40/VHT80 without separate evidence that the actual transmitted
   and decoded PPDU is wider than 20 MHz.
 - Stop-gap calibration is still active and the stepped or outdoor result falls

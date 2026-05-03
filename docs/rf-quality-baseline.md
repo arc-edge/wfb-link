@@ -105,7 +105,11 @@ Validation smoke:
 `80/80`, submitted `120/120`, collected an empty `missing-artifacts.txt`, and
 recorded `channel_state.verify_status=verified` for channel 36 / 20 MHz. The
 restore evidence also captured post-restore `iw` state showing the normal Linux
-service moved `wfb0` back to channel 161 / 20 MHz.
+service moved `wfb0` back to channel 161 / 20 MHz. Because this was an
+80-payload smoke against the 2,000-payload Linux reference, it is orchestration
+evidence only; regenerated reports classify that payload-count mismatch as an
+invalid baseline comparison
+(`/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report-payload-guard.json`).
 
 The current hardened automation evidence is
 `/tmp/wfb-rfq-prod-ready-marker-default-a1/rf-quality-report.json` from May 2,

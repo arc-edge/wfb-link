@@ -32224,6 +32224,16 @@ fn rf_quality_compare_profile_to_baseline(
             "payload size mismatch changes airtime, FEC packing, and throughput comparison",
         );
     }
+    if let Some(expected_payloads) = profile.expected_payloads {
+        rf_quality_compare_u64(
+            &mut mismatches,
+            "expected_payloads",
+            expected_payloads,
+            baseline.source_payloads,
+            RfQualityMismatchSeverity::InvalidComparison,
+            "expected source payload count mismatch changes loss and recovery comparison",
+        );
+    }
 
     let invalidating_mismatch_count = mismatches
         .iter()
@@ -40288,6 +40298,55 @@ mod tests {
         assert_eq!(
             acceptance.status,
             RfQualityAcceptanceStatus::DegradedComparison
+        );
+    }
+
+    #[test]
+    fn rf_quality_comparison_rejects_expected_payload_count_mismatch() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(80);
+        args.recovered_payloads = Some(80);
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let macos = rf_quality_macos_report(&args, None, None, None);
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000001),
+                link_id_hex: Some("0x000001".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(3),
+            },
+            payload_len: Some(1024),
+            source_payloads: Some(2000),
+            recovered_payloads: Some(1999),
+            submitted_datagrams: Some(3000),
+            throughput_mbps: None,
+            receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+        let acceptance = rf_quality_acceptance(
+            DiagnosticResult::Pass,
+            &comparison,
+            &rf_quality_profile_gate_report(&args, &profile, None),
+        );
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Mismatched);
+        assert_eq!(comparison.invalidating_mismatch_count, 1);
+        assert_eq!(comparison.mismatches[0].field, "expected_payloads");
+        assert_eq!(
+            acceptance.status,
+            RfQualityAcceptanceStatus::InvalidComparison
         );
     }
 
