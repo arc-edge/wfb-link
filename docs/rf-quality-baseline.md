@@ -59,6 +59,7 @@ The helper writes `linux-baseline.json` plus command, process, link, and optiona
 peer for the accepted close-range workflow. The Linux side now performs a
 preflight before RF transmission and collects:
 
+- `${REMOTE_PREFIX}-bridge-ready.json`
 - `${REMOTE_PREFIX}-preflight.json`
 - `${REMOTE_PREFIX}-preflight.log`
 - `${REMOTE_PREFIX}-setup.log`
@@ -86,6 +87,11 @@ runs can distinguish missing peer prerequisites from RF loss.
 The restore JSON records the post-run service action, service state, and WFB
 process matches after the controlled sender/receiver processes are stopped, so
 cleanup failures are visible in machine-readable run evidence.
+The bridge ready marker is written by `bridge-tx-listen` after adapter init,
+TX-power/calibration setup, and the pre-TX calibration probe, immediately
+before the receive loop. The runner waits up to `BRIDGE_READY_WAIT_SECONDS`
+for that marker before starting Linux traffic, which avoids classifying bridge
+startup races as RF loss.
 
 The automation also accepts the targeted calibration profile:
 

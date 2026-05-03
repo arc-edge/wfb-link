@@ -144,6 +144,7 @@ RELAY_BIND_IP=${RELAY_BIND_IP:-$MAC_LAN_IP}
 RELAY_PORT=${RELAY_PORT:-5610}
 BRIDGE_BIND_HOST=${BRIDGE_BIND_HOST:-127.0.0.1}
 BRIDGE_BIND_PORT=${BRIDGE_BIND_PORT:-5611}
+BRIDGE_READY_WAIT_SECONDS=${BRIDGE_READY_WAIT_SECONDS:-90}
 BRIDGE_START_DELAY=${BRIDGE_START_DELAY:-20}
 BRIDGE_IDLE_TIMEOUT_MS=${BRIDGE_IDLE_TIMEOUT_MS:-60000}
 BRIDGE_WAIT_SECONDS=${BRIDGE_WAIT_SECONDS:-140}
@@ -196,7 +197,7 @@ export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
-export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
+export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_READY_WAIT_SECONDS BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
 export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO HW_DEPLOY HW_DEPLOY_PATH ALLOW_DEPLOY_OVER_WORKTREE
 
@@ -257,7 +258,8 @@ keys = [
     "LINK_ID", "RADIO_PORT", "TX_RATE", "TX_PROFILE", "TX_POWER_MODE",
     "TX_POWER_SAFETY_PROFILE", "TX_CALIBRATION_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
-    "BRIDGE_BIND_PORT", "IFACE", "WFB_SERVICE", "WFB_KEY",
+    "BRIDGE_BIND_PORT", "BRIDGE_READY_WAIT_SECONDS", "BRIDGE_START_DELAY",
+    "BRIDGE_IDLE_TIMEOUT_MS", "BRIDGE_WAIT_SECONDS", "IFACE", "WFB_SERVICE", "WFB_KEY",
     "LINUX_SOURCE_PORT", "LINUX_RX_PORT", "FIRMWARE", "EFUSE_REPORT",
     "LINUX_BASELINE", "SYNC_HW_REPO", "HW_DEPLOY", "HW_DEPLOY_PATH",
     "ALLOW_DEPLOY_OVER_WORKTREE",
@@ -287,6 +289,7 @@ Hardware Mac:
   $(if [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   ssh $(quote "$HW_MAC_HOST") '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
   ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... bridge-tx-listen --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
+  ssh $(quote "$HW_MAC_HOST") '<wait up to ${BRIDGE_READY_WAIT_SECONDS}s for ${REMOTE_PREFIX}-bridge-ready.json before Linux traffic>'
 
 Linux peer through hardware Mac:
   LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
@@ -447,6 +450,7 @@ nohup cargo run -p wfb-radio-diag -- --json \
   --firmware "$FIRMWARE" \
   --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
   --bind "${BRIDGE_BIND_HOST}:${BRIDGE_BIND_PORT}" \
+  --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
   --max-datagrams "$MAX_DATAGRAMS" \
   --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
   --tx-power-mode "$TX_POWER_MODE" \
@@ -462,6 +466,34 @@ sleep 2
 kill -0 "$pid"
 MAC_BRIDGE
   STARTED_BRIDGE=1
+}
+
+wait_for_bridge_ready() {
+  local remote_cmd
+  remote_cmd="$(env_assignments REMOTE_PREFIX BRIDGE_READY_WAIT_SECONDS) bash -s"
+  log "waiting for bridge ready marker"
+  ssh "$HW_MAC_HOST" "$remote_cmd" >"$OUT_DIR/bridge-ready-wait.log" 2>&1 <<'MAC_WAIT_READY'
+set -euo pipefail
+ready_file="${REMOTE_PREFIX}-bridge-ready.json"
+pid_file="${REMOTE_PREFIX}-bridge.pid"
+for ((i = 0; i < BRIDGE_READY_WAIT_SECONDS; i++)); do
+  if [[ -f "$ready_file" ]]; then
+    echo "bridge ready marker observed after ${i}s"
+    cat "$ready_file"
+    exit 0
+  fi
+  if [[ -f "$pid_file" ]]; then
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    if [[ -n "$pid" ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
+      echo "bridge exited before writing ready marker"
+      exit 2
+    fi
+  fi
+  sleep 1
+done
+echo "timed out waiting for bridge ready marker: $ready_file"
+exit 124
+MAC_WAIT_READY
 }
 
 run_linux_peer() {
@@ -1099,6 +1131,7 @@ copy_linux_artifact() {
 collect_artifacts() {
   log "collecting artifacts"
   copy_hw_artifact "${REMOTE_PREFIX}-listen.json"
+  copy_hw_artifact "${REMOTE_PREFIX}-bridge-ready.json"
   copy_hw_artifact "${REMOTE_PREFIX}-bridge.log"
   copy_hw_artifact "${REMOTE_PREFIX}-relay.log"
   copy_hw_artifact "$EFUSE_REPORT" "$(basename "$EFUSE_REPORT")"
@@ -1282,6 +1315,7 @@ PY
 
 start_relay
 start_bridge
+wait_for_bridge_ready
 log "waiting ${BRIDGE_START_DELAY}s before Linux traffic"
 sleep "$BRIDGE_START_DELAY"
 run_linux_peer

@@ -1409,6 +1409,10 @@ struct BridgeTxListenArgs {
     #[arg(long, default_value = "127.0.0.1:5600")]
     bind: SocketAddr,
 
+    /// Write this JSON marker after init/calibration and immediately before receiving datagrams.
+    #[arg(long, value_name = "PATH")]
+    ready_file: Option<PathBuf>,
+
     /// Maximum datagrams to receive before exiting.
     #[arg(long, default_value = "1")]
     max_datagrams: u32,
@@ -3269,6 +3273,7 @@ struct BridgeTxListenReport {
     channel: Option<Channel>,
     bandwidth: Bandwidth,
     bind_addr: String,
+    ready_file: Option<PathBuf>,
     max_datagrams: u32,
     idle_timeout_ms: u64,
     datagrams_received: u64,
@@ -25638,6 +25643,15 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         let registers = Rtl8812auRegisterAccess::new(&transport);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
+    if let Err(error) = bridge_tx_listen_write_ready_file(&args, &report) {
+        report.counters = pre_tx_counters;
+        return bridge_tx_listen_failure(
+            report,
+            "bridge_ready",
+            "bridge TX listener failed to write the ready marker before the TX loop",
+            error,
+        );
+    }
     let cpu_started = process_cpu_usage();
     let started = Instant::now();
     let mut datagram_bytes = 0u64;
@@ -25970,6 +25984,7 @@ fn bridge_tx_listen_base_report(
         channel,
         bandwidth: args.bandwidth,
         bind_addr: args.bind.to_string(),
+        ready_file: args.ready_file.clone(),
         max_datagrams: args.max_datagrams,
         idle_timeout_ms: args.idle_timeout_ms,
         datagrams_received: 0,
@@ -25996,6 +26011,38 @@ fn bridge_tx_listen_base_report(
         error: None,
         notes: vec!["live bridge TX listener stopped before completing bounded submission"],
     }
+}
+
+fn bridge_tx_listen_write_ready_file(
+    args: &BridgeTxListenArgs,
+    report: &BridgeTxListenReport,
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    let Some(path) = args.ready_file.as_ref() else {
+        return Ok(());
+    };
+    let marker = serde_json::json!({
+        "source": "bridge-tx-listen",
+        "ready_at_unix_ms": started_at_unix_ms(),
+        "bind_addr": report.bind_addr,
+        "channel": report.channel.as_ref().map(|channel| channel.number),
+        "channel_frequency_mhz": report.channel.as_ref().map(|channel| channel.frequency_mhz),
+        "bandwidth_mhz": args.bandwidth.mhz(),
+        "max_datagrams": args.max_datagrams,
+        "idle_timeout_ms": args.idle_timeout_ms,
+        "init_before_tx": args.init_before_tx,
+        "same_session_init_result": report.same_session_init.as_ref().map(|init| init.result.as_str()),
+        "tx_power_control_applied": report.tx_power_control.is_some(),
+        "tx_calibration_profile_applied": report.tx_calibration_profile.is_some(),
+    });
+    let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| DiagnosticErrorReport {
+        code: "bridge_ready_marker_serialize_failed",
+        message: error.to_string(),
+    })?;
+    bytes.push(b'\n');
+    fs::write(path, bytes).map_err(|error| DiagnosticErrorReport {
+        code: "bridge_ready_marker_write_failed",
+        message: format!("{}: {error}", path.display()),
+    })
 }
 
 fn bridge_tx_listen_set_runtime_metrics(
@@ -38948,6 +38995,7 @@ mod tests {
             channel: 36,
             bandwidth: Bandwidth::Mhz20,
             bind: "127.0.0.1:0".parse().expect("socket addr"),
+            ready_file: None,
             max_datagrams: 1,
             idle_timeout_ms: 1,
             i_understand_this_transmits: authorized,
@@ -41204,6 +41252,44 @@ mod tests {
         assert_eq!(report.datagrams_received, 0);
         assert!(report.adapter.is_none());
         assert_eq!(report.submit_counters.attempted, 0);
+    }
+
+    #[test]
+    fn bridge_tx_listen_ready_file_records_pre_receive_marker() {
+        let stamp = started_at_unix_ms();
+        let ready_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-bridge-ready-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let mut args = bridge_tx_listen_args(true);
+        args.ready_file = Some(ready_path.clone());
+        let channel = Channel::from_number(36).expect("channel 36");
+        let report = bridge_tx_listen_base_report(&args, args.adapter.selector(), Some(channel));
+
+        bridge_tx_listen_write_ready_file(&args, &report).expect("write ready marker");
+        let marker: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ready_path).expect("ready marker"))
+                .expect("ready marker json");
+        let _ = fs::remove_file(ready_path);
+
+        assert_eq!(
+            rf_quality_json_string(&marker, &["source"]).as_deref(),
+            Some("bridge-tx-listen")
+        );
+        assert_eq!(
+            rf_quality_json_string(&marker, &["bind_addr"]).as_deref(),
+            Some("127.0.0.1:0")
+        );
+        assert_eq!(rf_quality_json_u64(&marker, &["channel"]), Some(36));
+        assert_eq!(
+            rf_quality_json_u64(&marker, &["channel_frequency_mhz"]),
+            Some(5180)
+        );
+        assert_eq!(rf_quality_json_u64(&marker, &["bandwidth_mhz"]), Some(20));
+        assert_eq!(
+            rf_quality_json_bool(&marker, &["init_before_tx"]),
+            Some(false)
+        );
     }
 
     #[test]

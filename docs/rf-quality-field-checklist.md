@@ -15,6 +15,8 @@ Use this checklist before any stepped, attenuated, or outdoor run.
 - Start receiver logs and RF capture.
 - Start Mac bridge or bridge-run command with `--report`.
 - Start any UDP relay required by the bench network path.
+- When using the close-range runner, confirm the bridge ready marker is present
+  before Linux traffic starts.
 - Fill in `docs/rf-quality-field-notes-template.md`.
 
 ## During The Run
