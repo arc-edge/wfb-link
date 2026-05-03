@@ -37,9 +37,9 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMonitorOpmodeExecution,
-    RuntimeRadioCounters, RuntimeRadioError, RuntimeTransportError, RuntimeUsbOpenConfig,
-    RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMacAddressExecution,
+    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeTransportError,
+    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -6916,15 +6916,11 @@ fn read_efuse_mac_address<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let raw = read_efuse_physical(
-        registers,
-        counters,
-        RTL8812AU_EFUSE_REAL_CONTENT_LEN,
-        1000,
-        Duration::from_micros(1000),
-    )?;
-    let decoded = decode_efuse_logical_map(&raw);
-    Ok(efuse_logical_mac_address(&decoded.logical_map))
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result =
+        wfb_radio_runtime::read_rtl8812au_efuse_mac_address(registers, &mut runtime_counters);
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result.map_err(runtime_radio_error)
 }
 
 fn led_smoke_report(args: LedSmokeArgs) -> LedSmokeReport {
@@ -27423,38 +27419,27 @@ fn bridge_tx_bench_program_local_mac<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let before_counters = *counters;
-    let before = read_mac_register(registers, counters, REG_MACID, "pre-local-MAC")?;
-    for (offset, value) in local_mac.iter().copied().enumerate() {
-        write8_with_counter(registers, counters, REG_MACID + offset as u16, value).map_err(
-            |error| DiagnosticErrorReport {
-                code: "register_write_failed",
-                message: format!(
-                    "REG_MACID local MAC byte write failed at {}: {error}",
-                    format_address(REG_MACID + offset as u16)
-                ),
-            },
-        )?;
-    }
-    let after = read_mac_register(registers, counters, REG_MACID, "post-local-MAC")?;
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result =
+        wfb_radio_runtime::program_rtl8812au_local_mac(registers, local_mac, &mut runtime_counters);
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result
+        .map(bridge_tx_bench_local_mac_report_from_runtime)
+        .map_err(runtime_radio_error)
+}
 
-    Ok(BridgeTxBenchLocalMacReport {
+fn bridge_tx_bench_local_mac_report_from_runtime(
+    execution: RuntimeMacAddressExecution,
+) -> BridgeTxBenchLocalMacReport {
+    BridgeTxBenchLocalMacReport {
         register_name: "REG_MACID",
         address: REG_MACID,
         address_hex: format_address(REG_MACID),
-        before: format_mac_address(before),
-        written: format_mac_address(local_mac),
-        after: format_mac_address(after),
-        counters: DiagnosticCounters {
-            usb_control_reads: counters
-                .usb_control_reads
-                .saturating_sub(before_counters.usb_control_reads),
-            usb_control_writes: counters
-                .usb_control_writes
-                .saturating_sub(before_counters.usb_control_writes),
-            ..DiagnosticCounters::default()
-        },
-    })
+        before: format_mac_address(execution.before),
+        written: format_mac_address(execution.written),
+        after: format_mac_address(execution.after),
+        counters: diagnostic_counters_from_runtime(execution.counters),
+    }
 }
 
 fn program_efuse_macid<T>(
@@ -27468,31 +27453,6 @@ where
         Some(mac) => bridge_tx_bench_program_local_mac(registers, mac, counters).map(Some),
         None => Ok(None),
     }
-}
-
-fn read_mac_register<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    address: u16,
-    phase: &'static str,
-) -> std::result::Result<[u8; 6], DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut mac = [0u8; 6];
-    for (offset, value) in mac.iter_mut().enumerate() {
-        *value =
-            read8_with_counter(registers, counters, address + offset as u16).map_err(|error| {
-                DiagnosticErrorReport {
-                    code: "register_read_failed",
-                    message: format!(
-                        "REG_MACID {phase} byte read failed at {}: {error}",
-                        format_address(address + offset as u16)
-                    ),
-                }
-            })?;
-    }
-    Ok(mac)
 }
 
 fn bridge_tx_bench_monitor_opmode_report_from_runtime(

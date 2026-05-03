@@ -424,7 +424,12 @@ pub fn rtl8812au_llt_firmware_sequence(order: Rtl8812auInitOrder) -> &'static [R
 }
 
 const REG_ACLK_MON: u16 = 0x003e;
+const REG_EFUSE_CTRL: u16 = 0x0030;
+const REG_EFUSE_BURN_GNT_8812: u16 = 0x00cf;
 const REG_SDIO_CTRL_8812: u16 = 0x0070;
+const REG_SYS_ISO_CTRL: u16 = 0x0000;
+const REG_SYS_FUNC_EN: u16 = 0x0002;
+const REG_SYS_CLKR: u16 = 0x0008;
 const REG_CR: u16 = 0x0100;
 const REG_MSR: u16 = REG_CR + 2;
 const REG_EARLY_MODE_CONTROL_8812: u16 = 0x02bc;
@@ -432,11 +437,22 @@ const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
 const REG_QUEUE_CTRL: u16 = 0x04c6;
 const REG_TX_RPT_TIME: u16 = 0x04f0;
 const REG_RCR: u16 = 0x0608;
+const REG_MACID: u16 = 0x0610;
 const REG_NAV_UPPER: u16 = 0x0652;
 const REG_RXFLTMAP2: u16 = 0x06a4;
 const REG_USB_HRPWM: u16 = 0xfe58;
 
+const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
+const RTL8812AU_EFUSE_LOGICAL_MAP_LEN: usize = 512;
+const RTL8812AU_EFUSE_MAX_SECTION: u8 = 64;
+const RTL8812AU_EFUSE_MAC_OFFSET: usize = 0x0d7;
+const EFUSE_ACCESS_ON_JAGUAR: u8 = 0x69;
+const EFUSE_ACCESS_OFF_JAGUAR: u8 = 0x00;
+
 const BIT3: u8 = 1 << 3;
+const FEN_ELDR: u16 = 1 << 12;
+const ANA8M: u16 = 1 << 1;
+const LOADER_CLK_EN: u16 = 1 << 5;
 const MSR_PORT0_NETTYPE_MASK: u8 = 0x03;
 const RCR_APM: u32 = 1 << 1;
 const RCR_AM: u32 = 1 << 2;
@@ -490,6 +506,33 @@ pub struct RuntimeMonitorOpmodeExecution {
     pub rcr_after: u32,
     pub rxfltmap2_written: u16,
     pub rxfltmap2_after: u16,
+    pub register_writes: usize,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeEfuseReadConfig {
+    pub length: usize,
+    pub poll_attempts: u32,
+    pub poll_delay: Duration,
+}
+
+impl Default for RuntimeEfuseReadConfig {
+    fn default() -> Self {
+        Self {
+            length: RTL8812AU_EFUSE_REAL_CONTENT_LEN,
+            poll_attempts: 1000,
+            poll_delay: Duration::from_micros(1000),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeMacAddressExecution {
+    pub before: [u8; 6],
+    pub written: [u8; 6],
+    pub after: [u8; 6],
     pub register_writes: usize,
     pub counters: RuntimeRadioCounters,
 }
@@ -606,6 +649,72 @@ where
         .map_err(|error| RuntimeRadioError::register_write(register_name, phase, error))?;
     counters.usb_control_writes += 1;
     Ok(())
+}
+
+fn read8_with_custom_error<T, F>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    error: F,
+) -> Result<u8, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+    F: FnOnce(Rtl8812auRegisterError) -> RuntimeRadioError,
+{
+    let value = registers.read8(address).map_err(error)?;
+    counters.usb_control_reads += 1;
+    Ok(value)
+}
+
+fn read16_with_custom_error<T, F>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    error: F,
+) -> Result<u16, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+    F: FnOnce(Rtl8812auRegisterError) -> RuntimeRadioError,
+{
+    let value = registers.read16(address).map_err(error)?;
+    counters.usb_control_reads += 1;
+    Ok(value)
+}
+
+fn write8_with_custom_error<T, F>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    value: u8,
+    error: F,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+    F: FnOnce(Rtl8812auRegisterError) -> RuntimeRadioError,
+{
+    registers.write8(address, value).map_err(error)?;
+    counters.usb_control_writes += 1;
+    Ok(())
+}
+
+fn write16_with_custom_error<T, F>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    value: u16,
+    error: F,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+    F: FnOnce(Rtl8812auRegisterError) -> RuntimeRadioError,
+{
+    registers.write16(address, value).map_err(error)?;
+    counters.usb_control_writes += 1;
+    Ok(())
+}
+
+fn format_register_address(address: u16) -> String {
+    format!("0x{address:04x}")
 }
 
 pub fn rtl8812au_tx_scheduler_tail_expected_writes() -> usize {
@@ -785,6 +894,385 @@ where
         rxfltmap2_written: u16::MAX,
         rxfltmap2_after,
         register_writes: 2,
+    })
+}
+
+pub fn rtl8812au_efuse_logical_mac_address(logical_map: &[u8]) -> Option<[u8; 6]> {
+    let mac = logical_map.get(RTL8812AU_EFUSE_MAC_OFFSET..RTL8812AU_EFUSE_MAC_OFFSET + 6)?;
+    if mac.iter().all(|byte| *byte == 0xff) || mac.iter().all(|byte| *byte == 0x00) {
+        None
+    } else {
+        Some([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]])
+    }
+}
+
+pub fn rtl8812au_decode_efuse_logical_map(raw: &[u8]) -> Vec<u8> {
+    let mut logical_map = vec![0xff; RTL8812AU_EFUSE_LOGICAL_MAP_LEN];
+    let mut raw_offset = 0usize;
+
+    while raw_offset < raw.len() {
+        let header = raw[raw_offset];
+        raw_offset += 1;
+        if header == 0xff {
+            break;
+        }
+
+        let (section, word_enable) = if efuse_is_extended_header(header) {
+            let offset_low = (header & 0xe0) >> 5;
+            if raw_offset >= raw.len() {
+                break;
+            }
+            let ext = raw[raw_offset];
+            raw_offset += 1;
+            if efuse_all_words_disabled(ext) {
+                continue;
+            }
+            (offset_low | ((ext & 0xf0) >> 1), ext & 0x0f)
+        } else {
+            ((header >> 4) & 0x0f, header & 0x0f)
+        };
+
+        let data_len = efuse_word_count(word_enable) * 2;
+        if section < RTL8812AU_EFUSE_MAX_SECTION {
+            let mut target = usize::from(section) * 8;
+            for word in 0..4 {
+                if word_enable & (1 << word) == 0 {
+                    if raw_offset + 1 >= raw.len() || target + 1 >= logical_map.len() {
+                        raw_offset = raw.len();
+                        break;
+                    }
+                    logical_map[target] = raw[raw_offset];
+                    logical_map[target + 1] = raw[raw_offset + 1];
+                    raw_offset += 2;
+                }
+                target += 2;
+            }
+        } else {
+            raw_offset = raw_offset.saturating_add(data_len).min(raw.len());
+        }
+    }
+
+    logical_map
+}
+
+fn efuse_is_extended_header(header: u8) -> bool {
+    header & 0x1f == 0x0f
+}
+
+fn efuse_all_words_disabled(word_enable: u8) -> bool {
+    word_enable & 0x0f == 0x0f
+}
+
+fn efuse_word_count(word_enable: u8) -> usize {
+    (0..4).filter(|word| word_enable & (1 << word) == 0).count()
+}
+
+pub fn read_rtl8812au_efuse_mac_address<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Option<[u8; 6]>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    read_rtl8812au_efuse_mac_address_with_config(
+        registers,
+        counters,
+        RuntimeEfuseReadConfig::default(),
+    )
+}
+
+pub fn read_rtl8812au_efuse_mac_address_with_config<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    config: RuntimeEfuseReadConfig,
+) -> Result<Option<[u8; 6]>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let raw = read_rtl8812au_efuse_physical_with_config(registers, counters, config)?;
+    let logical_map = rtl8812au_decode_efuse_logical_map(&raw);
+    Ok(rtl8812au_efuse_logical_mac_address(&logical_map))
+}
+
+pub fn read_rtl8812au_efuse_physical_with_config<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    config: RuntimeEfuseReadConfig,
+) -> Result<Vec<u8>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    if config.length > RTL8812AU_EFUSE_REAL_CONTENT_LEN {
+        return Err(RuntimeRadioError::new(
+            "efuse_read_invalid_length",
+            format!(
+                "EFUSE read length must be in 0..={RTL8812AU_EFUSE_REAL_CONTENT_LEN}; got {}",
+                config.length
+            ),
+        ));
+    }
+
+    efuse_power_switch_read(registers, counters, true)?;
+    let mut raw = Vec::with_capacity(config.length);
+    let mut read_error = None;
+    for address in 0..config.length {
+        match efuse_read_byte(
+            registers,
+            counters,
+            address as u16,
+            config.poll_attempts,
+            config.poll_delay,
+        ) {
+            Ok(byte) => raw.push(byte),
+            Err(error) => {
+                read_error = Some(error);
+                break;
+            }
+        }
+    }
+    let power_off = efuse_power_switch_read(registers, counters, false);
+    if let Some(error) = read_error {
+        let _ = power_off;
+        Err(error)
+    } else {
+        power_off?;
+        Ok(raw)
+    }
+}
+
+fn efuse_power_switch_read<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    enabled: bool,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let grant = if enabled {
+        EFUSE_ACCESS_ON_JAGUAR
+    } else {
+        EFUSE_ACCESS_OFF_JAGUAR
+    };
+    write8_with_custom_error(
+        registers,
+        counters,
+        REG_EFUSE_BURN_GNT_8812,
+        grant,
+        |error| {
+            RuntimeRadioError::new(
+                "efuse_power_switch_failed",
+                format!("write REG_EFUSE_BURN_GNT_8812=0x{grant:02x} failed: {error}",),
+            )
+        },
+    )?;
+
+    if enabled {
+        let _sys_iso = read16_with_custom_error(registers, counters, REG_SYS_ISO_CTRL, |error| {
+            RuntimeRadioError::new(
+                "efuse_power_switch_failed",
+                format!("read REG_SYS_ISO_CTRL failed: {error}"),
+            )
+        })?;
+
+        let sys_func = read16_with_custom_error(registers, counters, REG_SYS_FUNC_EN, |error| {
+            RuntimeRadioError::new(
+                "efuse_power_switch_failed",
+                format!("read REG_SYS_FUNC_EN failed: {error}"),
+            )
+        })?;
+        if sys_func & FEN_ELDR == 0 {
+            write16_with_custom_error(
+                registers,
+                counters,
+                REG_SYS_FUNC_EN,
+                sys_func | FEN_ELDR,
+                |error| {
+                    RuntimeRadioError::new(
+                        "efuse_power_switch_failed",
+                        format!("enable FEN_ELDR failed: {error}"),
+                    )
+                },
+            )?;
+        }
+
+        let sys_clkr = read16_with_custom_error(registers, counters, REG_SYS_CLKR, |error| {
+            RuntimeRadioError::new(
+                "efuse_power_switch_failed",
+                format!("read REG_SYS_CLKR failed: {error}"),
+            )
+        })?;
+        let required = LOADER_CLK_EN | ANA8M;
+        if sys_clkr & required != required {
+            write16_with_custom_error(
+                registers,
+                counters,
+                REG_SYS_CLKR,
+                sys_clkr | required,
+                |error| {
+                    RuntimeRadioError::new(
+                        "efuse_power_switch_failed",
+                        format!("enable EFUSE loader clock failed: {error}"),
+                    )
+                },
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn efuse_read_byte<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    poll_attempts: u32,
+    poll_delay: Duration,
+) -> Result<u8, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write8_with_custom_error(
+        registers,
+        counters,
+        REG_EFUSE_CTRL + 1,
+        (address & 0x00ff) as u8,
+        |error| {
+            RuntimeRadioError::new(
+                "efuse_read_failed",
+                format!("write EFUSE address low byte for {address:#05x} failed: {error}"),
+            )
+        },
+    )?;
+    let high = read8_with_custom_error(registers, counters, REG_EFUSE_CTRL + 2, |error| {
+        RuntimeRadioError::new(
+            "efuse_read_failed",
+            format!("read EFUSE address high latch for {address:#05x} failed: {error}"),
+        )
+    })?;
+    write8_with_custom_error(
+        registers,
+        counters,
+        REG_EFUSE_CTRL + 2,
+        (((address >> 8) & 0x03) as u8) | (high & 0xfc),
+        |error| {
+            RuntimeRadioError::new(
+                "efuse_read_failed",
+                format!("write EFUSE address high byte for {address:#05x} failed: {error}"),
+            )
+        },
+    )?;
+
+    let command = read8_with_custom_error(registers, counters, REG_EFUSE_CTRL + 3, |error| {
+        RuntimeRadioError::new(
+            "efuse_read_failed",
+            format!("read EFUSE command latch for {address:#05x} failed: {error}"),
+        )
+    })?;
+    write8_with_custom_error(
+        registers,
+        counters,
+        REG_EFUSE_CTRL + 3,
+        command & 0x7f,
+        |error| {
+            RuntimeRadioError::new(
+                "efuse_read_failed",
+                format!("start EFUSE read for {address:#05x} failed: {error}"),
+            )
+        },
+    )?;
+
+    for attempt in 1..=poll_attempts {
+        let status = read8_with_custom_error(registers, counters, REG_EFUSE_CTRL + 3, |error| {
+            RuntimeRadioError::new(
+                "efuse_read_failed",
+                format!("poll EFUSE ready for {address:#05x} failed: {error}"),
+            )
+        })?;
+        if status & 0x80 != 0 {
+            return read8_with_custom_error(registers, counters, REG_EFUSE_CTRL, |error| {
+                RuntimeRadioError::new(
+                    "efuse_read_failed",
+                    format!("read EFUSE data byte for {address:#05x} failed: {error}"),
+                )
+            });
+        }
+        if attempt < poll_attempts {
+            std::thread::sleep(poll_delay);
+        }
+    }
+
+    let status = read8_with_counter(
+        registers,
+        counters,
+        REG_EFUSE_CTRL + 3,
+        "REG_EFUSE_CTRL+3",
+        "timeout-status",
+    )
+    .unwrap_or_default();
+    Err(RuntimeRadioError::new(
+        "efuse_read_timeout",
+        format!(
+            "EFUSE byte {address:#05x} did not become ready after {poll_attempts} polls; REG_EFUSE_CTRL+3=0x{status:02x}",
+        ),
+    ))
+}
+
+pub fn read_rtl8812au_macid<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    phase: &'static str,
+) -> Result<[u8; 6], RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut mac = [0u8; 6];
+    for (offset, value) in mac.iter_mut().enumerate() {
+        let address = REG_MACID + offset as u16;
+        *value = read8_with_custom_error(registers, counters, address, |error| {
+            RuntimeRadioError::new(
+                "register_read_failed",
+                format!(
+                    "REG_MACID {phase} byte read failed at {}: {error}",
+                    format_register_address(address)
+                ),
+            )
+        })?;
+    }
+    Ok(mac)
+}
+
+pub fn program_rtl8812au_local_mac<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    local_mac: [u8; 6],
+    counters: &mut RuntimeRadioCounters,
+) -> Result<RuntimeMacAddressExecution, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let before = read_rtl8812au_macid(registers, counters, "pre-local-MAC")?;
+    let mut register_writes = 0usize;
+    for (offset, value) in local_mac.iter().copied().enumerate() {
+        let address = REG_MACID + offset as u16;
+        write8_with_custom_error(registers, counters, address, value, |error| {
+            RuntimeRadioError::new(
+                "register_write_failed",
+                format!(
+                    "REG_MACID local MAC byte write failed at {}: {error}",
+                    format_register_address(address)
+                ),
+            )
+        })?;
+        register_writes += 1;
+    }
+    let after = read_rtl8812au_macid(registers, counters, "post-local-MAC")?;
+
+    Ok(RuntimeMacAddressExecution {
+        before,
+        written: local_mac,
+        after,
+        register_writes,
+        counters: counters.saturating_sub(before_counters),
     })
 }
 
@@ -1032,6 +1520,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct MockTransport {
         registers: RefCell<BTreeMap<u16, Vec<u8>>>,
+        efuse: RefCell<Option<Vec<u8>>>,
         writes: RefCell<Vec<(u16, Vec<u8>)>>,
     }
 
@@ -1043,6 +1532,24 @@ mod tests {
                 .borrow_mut()
                 .insert(address, vec![value]);
             transport
+        }
+
+        fn with_macid(mac: [u8; 6]) -> Self {
+            let transport = Self::default();
+            for (offset, value) in mac.into_iter().enumerate() {
+                transport
+                    .registers
+                    .borrow_mut()
+                    .insert(super::REG_MACID + offset as u16, vec![value]);
+            }
+            transport
+        }
+
+        fn with_efuse(raw: Vec<u8>) -> Self {
+            Self {
+                efuse: RefCell::new(Some(raw)),
+                ..Self::default()
+            }
         }
 
         fn writes(&self) -> Vec<(u16, Vec<u8>)> {
@@ -1063,6 +1570,35 @@ mod tests {
             _timeout: Duration,
         ) -> std::result::Result<usize, UsbError> {
             data.fill(0);
+            if self.efuse.borrow().is_some() && data.len() == 1 {
+                if value == super::REG_EFUSE_CTRL + 3 {
+                    data[0] = 0x80;
+                    return Ok(data.len());
+                }
+                if value == super::REG_EFUSE_CTRL {
+                    let low = self
+                        .registers
+                        .borrow()
+                        .get(&(super::REG_EFUSE_CTRL + 1))
+                        .and_then(|bytes| bytes.first().copied())
+                        .unwrap_or(0);
+                    let high = self
+                        .registers
+                        .borrow()
+                        .get(&(super::REG_EFUSE_CTRL + 2))
+                        .and_then(|bytes| bytes.first().copied())
+                        .unwrap_or(0)
+                        & 0x03;
+                    let address = (usize::from(high) << 8) | usize::from(low);
+                    data[0] = self
+                        .efuse
+                        .borrow()
+                        .as_ref()
+                        .and_then(|raw| raw.get(address).copied())
+                        .unwrap_or(0xff);
+                    return Ok(data.len());
+                }
+            }
             if let Some(stored) = self.registers.borrow().get(&value) {
                 let len = data.len().min(stored.len());
                 data[..len].copy_from_slice(&stored[..len]);
@@ -1334,6 +1870,105 @@ mod tests {
                         .to_vec(),
                 ),
                 (super::REG_RXFLTMAP2, u16::MAX.to_le_bytes().to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn efuse_logical_mac_address_filters_blank_values() {
+        let mut logical = vec![0xff; super::RTL8812AU_EFUSE_LOGICAL_MAP_LEN];
+        assert_eq!(super::rtl8812au_efuse_logical_mac_address(&logical), None);
+
+        logical[super::RTL8812AU_EFUSE_MAC_OFFSET..super::RTL8812AU_EFUSE_MAC_OFFSET + 6]
+            .copy_from_slice(&[0, 0, 0, 0, 0, 0]);
+        assert_eq!(super::rtl8812au_efuse_logical_mac_address(&logical), None);
+
+        logical[super::RTL8812AU_EFUSE_MAC_OFFSET..super::RTL8812AU_EFUSE_MAC_OFFSET + 6]
+            .copy_from_slice(&[0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(
+            super::rtl8812au_efuse_logical_mac_address(&logical),
+            Some([0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc])
+        );
+    }
+
+    #[test]
+    fn efuse_logical_decoder_extracts_extended_header_mac() {
+        let raw = vec![
+            0x4f, 0x37, 0xff, 0x04, 0x6f, 0x38, 0x31, 0x5d, 0xaa, 0xbb, 0xcc, 0xff, 0xff,
+        ];
+
+        let logical = super::rtl8812au_decode_efuse_logical_map(&raw);
+
+        assert_eq!(
+            super::rtl8812au_efuse_logical_mac_address(&logical),
+            Some([0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc])
+        );
+    }
+
+    #[test]
+    fn read_efuse_mac_address_uses_control_sequence_and_decodes_mac() {
+        let raw = vec![
+            0x4f, 0x37, 0xff, 0x04, 0x6f, 0x38, 0x31, 0x5d, 0xaa, 0xbb, 0xcc, 0xff, 0xff,
+        ];
+        let transport = MockTransport::with_efuse(raw);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let mac = super::read_rtl8812au_efuse_mac_address_with_config(
+            &registers,
+            &mut counters,
+            super::RuntimeEfuseReadConfig {
+                length: 13,
+                poll_attempts: 1,
+                poll_delay: Duration::from_micros(0),
+            },
+        )
+        .expect("efuse mac");
+
+        assert_eq!(mac, Some([0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc]));
+        assert!(counters.usb_control_reads > 0);
+        assert!(counters.usb_control_writes > 0);
+        let writes = transport.writes();
+        assert_eq!(
+            writes.first(),
+            Some(&(super::REG_EFUSE_BURN_GNT_8812, vec![0x69]))
+        );
+        assert_eq!(
+            writes.last(),
+            Some(&(super::REG_EFUSE_BURN_GNT_8812, vec![0x00]))
+        );
+    }
+
+    #[test]
+    fn program_local_mac_writes_reg_macid_bytes() {
+        let transport = MockTransport::with_macid([0, 1, 2, 3, 4, 5]);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let execution = super::program_rtl8812au_local_mac(
+            &registers,
+            [0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc],
+            &mut counters,
+        )
+        .expect("program mac");
+
+        assert_eq!(execution.before, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(execution.written, [0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(execution.after, [0x04, 0x31, 0x5d, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(execution.register_writes, 6);
+        assert_eq!(execution.counters.usb_control_reads, 12);
+        assert_eq!(execution.counters.usb_control_writes, 6);
+        assert_eq!(counters.usb_control_reads, 12);
+        assert_eq!(counters.usb_control_writes, 6);
+        assert_eq!(
+            transport.writes(),
+            vec![
+                (super::REG_MACID, vec![0x04]),
+                (super::REG_MACID + 1, vec![0x31]),
+                (super::REG_MACID + 2, vec![0x5d]),
+                (super::REG_MACID + 3, vec![0xaa]),
+                (super::REG_MACID + 4, vec![0xbb]),
+                (super::REG_MACID + 5, vec![0xcc]),
             ]
         );
     }
