@@ -38,8 +38,9 @@ use wfb_bridge::{
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMacAddressExecution,
-    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeTransportError,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+    RuntimeTransportError, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -10705,17 +10706,13 @@ struct LiveUsbTransportOpen {
 fn open_runtime_transport(
     config: RuntimeUsbOpenConfig,
 ) -> std::result::Result<LiveUsbTransportOpen, DiagnosticErrorReport> {
-    let open =
-        wfb_radio_runtime::open_runtime_usb_transport(config).map_err(runtime_transport_error)?;
-    let counters = DiagnosticCounters {
-        usb_control_writes: open.initial_usb_control_writes,
-        ..DiagnosticCounters::default()
-    };
+    let session = RuntimeRadioSession::open(config).map_err(runtime_transport_error)?;
+    let counters = diagnostic_counters_from_runtime(session.counters);
 
     Ok(LiveUsbTransportOpen {
-        transport: open.transport,
-        adapter: open.adapter,
-        endpoints: open.endpoints,
+        transport: session.transport,
+        adapter: session.adapter,
+        endpoints: session.endpoints,
         counters,
     })
 }

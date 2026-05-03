@@ -329,6 +329,87 @@ impl fmt::Display for RuntimeRadioError {
 
 impl Error for RuntimeRadioError {}
 
+pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
+    pub transport: T,
+    pub adapter: UsbDeviceInfo,
+    pub endpoints: UsbEndpoints,
+    pub counters: RuntimeRadioCounters,
+}
+
+impl<T> RuntimeRadioSession<T> {
+    pub fn new(
+        transport: T,
+        adapter: UsbDeviceInfo,
+        endpoints: UsbEndpoints,
+        counters: RuntimeRadioCounters,
+    ) -> Self {
+        Self {
+            transport,
+            adapter,
+            endpoints,
+            counters,
+        }
+    }
+
+    pub fn register_access(&self) -> Rtl8812auRegisterAccess<&T>
+    where
+        for<'a> &'a T: Rtl8812auUsbTransport,
+    {
+        Rtl8812auRegisterAccess::new(&self.transport)
+    }
+
+    pub fn selected_bulk_in_endpoint(&self) -> Option<u8> {
+        self.endpoints.bulk_in
+    }
+
+    pub fn selected_bulk_out_endpoint(&self) -> Option<u8> {
+        self.endpoints.bulk_out
+    }
+
+    pub fn add_counters(&mut self, delta: RuntimeRadioCounters) {
+        self.counters.usb_control_reads = self
+            .counters
+            .usb_control_reads
+            .saturating_add(delta.usb_control_reads);
+        self.counters.usb_control_writes = self
+            .counters
+            .usb_control_writes
+            .saturating_add(delta.usb_control_writes);
+        self.counters.usb_bulk_in_reads = self
+            .counters
+            .usb_bulk_in_reads
+            .saturating_add(delta.usb_bulk_in_reads);
+        self.counters.usb_bulk_out_writes = self
+            .counters
+            .usb_bulk_out_writes
+            .saturating_add(delta.usb_bulk_out_writes);
+        self.counters.rx_frames = self.counters.rx_frames.saturating_add(delta.rx_frames);
+        self.counters.tx_frames = self.counters.tx_frames.saturating_add(delta.tx_frames);
+        self.counters.dropped_frames = self
+            .counters
+            .dropped_frames
+            .saturating_add(delta.dropped_frames);
+    }
+}
+
+impl RuntimeRadioSession<RuntimeUsbTransport> {
+    pub fn from_open(open: RuntimeUsbTransportOpen) -> Self {
+        Self::new(
+            open.transport,
+            open.adapter,
+            open.endpoints,
+            RuntimeRadioCounters {
+                usb_control_writes: open.initial_usb_control_writes,
+                ..RuntimeRadioCounters::default()
+            },
+        )
+    }
+
+    pub fn open(config: RuntimeUsbOpenConfig) -> Result<Self, RuntimeTransportError> {
+        open_runtime_usb_transport(config).map(Self::from_open)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rtl8812auInitOrder {
@@ -1513,8 +1594,8 @@ mod tests {
 
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, TxCalibrationClass,
-        TxCalibrationProfile,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, RuntimeRadioSession,
+        TxCalibrationClass, TxCalibrationProfile,
     };
 
     #[derive(Debug, Default)]
@@ -1717,6 +1798,41 @@ mod tests {
                 .code,
             "macos_bulk_out_endpoint_not_in_layout"
         );
+    }
+
+    #[test]
+    fn runtime_radio_session_carries_metadata_endpoints_and_counters() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters {
+                usb_control_writes: 3,
+                ..RuntimeRadioCounters::default()
+            },
+        );
+
+        assert_eq!(session.adapter.vid_hex, "0x0bda");
+        assert_eq!(session.selected_bulk_in_endpoint(), Some(0x81));
+        assert_eq!(session.selected_bulk_out_endpoint(), Some(0x02));
+        assert_eq!(session.counters.usb_control_writes, 3);
+
+        session.add_counters(RuntimeRadioCounters {
+            usb_control_reads: 2,
+            usb_bulk_out_writes: 4,
+            tx_frames: 5,
+            ..RuntimeRadioCounters::default()
+        });
+        assert_eq!(session.counters.usb_control_reads, 2);
+        assert_eq!(session.counters.usb_control_writes, 3);
+        assert_eq!(session.counters.usb_bulk_out_writes, 4);
+        assert_eq!(session.counters.tx_frames, 5);
+
+        let registers = session.register_access();
+        assert_eq!(registers.read8(0x1234).expect("mock register read"), 0);
     }
 
     #[test]
