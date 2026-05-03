@@ -1,13 +1,120 @@
 //! Runtime-facing policy for the native WFB radio backend.
 //!
-//! This crate is intentionally small at the first extraction point. It owns
-//! stable decisions that a production runtime, diagnostic harness, or future
-//! daemon must agree on without depending on `wfb-radio-diag`.
+//! This crate owns stable decisions and live transport abstractions that a
+//! production runtime, diagnostic harness, or future daemon must agree on
+//! without depending on `wfb-radio-diag`.
 
+use std::time::Duration;
+
+use radio_core::{rtl8812au::Rtl8812auUsbTransport, ClaimedUsbDevice, UsbBulkTransfer, UsbError};
 use serde::Serialize;
 
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
+
+pub enum RuntimeUsbTransport {
+    Libusb(Box<ClaimedUsbDevice>),
+    #[cfg(target_os = "macos")]
+    Macos(macos_usbhost::MacosUsbHostSession),
+}
+
+impl Rtl8812auUsbTransport for RuntimeUsbTransport {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        match self {
+            RuntimeUsbTransport::Libusb(claimed) => {
+                claimed.as_ref().read_vendor(value, index, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            RuntimeUsbTransport::Macos(session) => session.read_vendor(value, index, data, timeout),
+        }
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        match self {
+            RuntimeUsbTransport::Libusb(claimed) => {
+                claimed.as_ref().write_vendor(value, index, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            RuntimeUsbTransport::Macos(session) => {
+                session.write_vendor(value, index, data, timeout)
+            }
+        }
+    }
+}
+
+impl Rtl8812auUsbTransport for &RuntimeUsbTransport {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        <RuntimeUsbTransport as Rtl8812auUsbTransport>::read_vendor(
+            *self, value, index, data, timeout,
+        )
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        <RuntimeUsbTransport as Rtl8812auUsbTransport>::write_vendor(
+            *self, value, index, data, timeout,
+        )
+    }
+}
+
+impl UsbBulkTransfer for RuntimeUsbTransport {
+    fn read_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        match self {
+            RuntimeUsbTransport::Libusb(claimed) => {
+                claimed.as_mut().read_bulk_transfer(endpoint, data, timeout)
+            }
+            #[cfg(target_os = "macos")]
+            RuntimeUsbTransport::Macos(session) => {
+                session.read_bulk_transfer(endpoint, data, timeout)
+            }
+        }
+    }
+
+    fn write_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &[u8],
+        timeout: Duration,
+    ) -> std::result::Result<usize, UsbError> {
+        match self {
+            RuntimeUsbTransport::Libusb(claimed) => claimed
+                .as_mut()
+                .write_bulk_transfer(endpoint, data, timeout),
+            #[cfg(target_os = "macos")]
+            RuntimeUsbTransport::Macos(session) => {
+                session.write_bulk_transfer(endpoint, data, timeout)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]

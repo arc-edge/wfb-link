@@ -18,16 +18,16 @@ use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use radio_core::rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE};
+use radio_core::rtl8812au::{TxQueue, TX_DESC_SIZE};
 use radio_core::{
     build_tx_packet, compare_usb_traces, frame_type, import_usbmon_text, parse_realtek_u32_array,
     parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, submit_tx_frame,
-    validate_ieee80211_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector,
-    EndpointInfo, FirmwareImage, FirmwarePayload, FrameType, InitDryRunPlan, InitPhaseCount,
-    InterfaceInfo, PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind,
-    RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate,
-    TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison,
-    UsbTraceEvent, UsbTraceImport,
+    validate_ieee80211_frame, Band, Bandwidth, Channel, DeviceSelector, EndpointInfo,
+    FirmwareImage, FirmwarePayload, FrameType, InitDryRunPlan, InitPhaseCount, InterfaceInfo,
+    PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind, RealtekTableKind,
+    RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
+    UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison, UsbTraceEvent,
+    UsbTraceImport,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -38,7 +38,7 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    TxCalibrationClass as RuntimeTxCalibrationClass,
+    RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -1018,104 +1018,6 @@ struct Rtl8812aIqkDiagnosticArgs {
     /// Required acknowledgement that this diagnostic writes hardware registers.
     #[arg(long)]
     i_understand_this_writes_registers: bool,
-}
-
-enum InitUsbTransport {
-    Libusb(Box<ClaimedUsbDevice>),
-    #[cfg(target_os = "macos")]
-    Macos(macos_usbhost::MacosUsbHostSession),
-}
-
-impl Rtl8812auUsbTransport for InitUsbTransport {
-    fn read_vendor(
-        &self,
-        value: u16,
-        index: u16,
-        data: &mut [u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        match self {
-            InitUsbTransport::Libusb(claimed) => {
-                claimed.as_ref().read_vendor(value, index, data, timeout)
-            }
-            #[cfg(target_os = "macos")]
-            InitUsbTransport::Macos(session) => session.read_vendor(value, index, data, timeout),
-        }
-    }
-
-    fn write_vendor(
-        &self,
-        value: u16,
-        index: u16,
-        data: &[u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        match self {
-            InitUsbTransport::Libusb(claimed) => {
-                claimed.as_ref().write_vendor(value, index, data, timeout)
-            }
-            #[cfg(target_os = "macos")]
-            InitUsbTransport::Macos(session) => session.write_vendor(value, index, data, timeout),
-        }
-    }
-}
-
-impl Rtl8812auUsbTransport for &InitUsbTransport {
-    fn read_vendor(
-        &self,
-        value: u16,
-        index: u16,
-        data: &mut [u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        <InitUsbTransport as Rtl8812auUsbTransport>::read_vendor(*self, value, index, data, timeout)
-    }
-
-    fn write_vendor(
-        &self,
-        value: u16,
-        index: u16,
-        data: &[u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        <InitUsbTransport as Rtl8812auUsbTransport>::write_vendor(
-            *self, value, index, data, timeout,
-        )
-    }
-}
-
-impl UsbBulkTransfer for InitUsbTransport {
-    fn read_bulk_transfer(
-        &mut self,
-        endpoint: u8,
-        data: &mut [u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        match self {
-            InitUsbTransport::Libusb(claimed) => {
-                claimed.as_mut().read_bulk_transfer(endpoint, data, timeout)
-            }
-            #[cfg(target_os = "macos")]
-            InitUsbTransport::Macos(session) => session.read_bulk_transfer(endpoint, data, timeout),
-        }
-    }
-
-    fn write_bulk_transfer(
-        &mut self,
-        endpoint: u8,
-        data: &[u8],
-        timeout: Duration,
-    ) -> std::result::Result<usize, radio_core::UsbError> {
-        match self {
-            InitUsbTransport::Libusb(claimed) => claimed
-                .as_mut()
-                .write_bulk_transfer(endpoint, data, timeout),
-            #[cfg(target_os = "macos")]
-            InitUsbTransport::Macos(session) => {
-                session.write_bulk_transfer(endpoint, data, timeout)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -10882,7 +10784,7 @@ fn macos_init_adapter_info(vid: u16, pid: u16, endpoints: &UsbEndpoints) -> UsbD
 }
 
 struct LiveUsbTransportOpen {
-    transport: InitUsbTransport,
+    transport: RuntimeUsbTransport,
     adapter: UsbDeviceInfo,
     endpoints: UsbEndpoints,
     counters: DiagnosticCounters,
@@ -10954,7 +10856,7 @@ fn open_macos_usbhost_transport(
         };
         let adapter = macos_init_adapter_info(vid, pid, &endpoints);
         Ok(LiveUsbTransportOpen {
-            transport: InitUsbTransport::Macos(session),
+            transport: RuntimeUsbTransport::Macos(session),
             adapter,
             endpoints,
             counters,
@@ -21450,7 +21352,7 @@ fn init_live_report(
                 before,
                 counters,
             );
-            InitUsbTransport::Macos(session)
+            RuntimeUsbTransport::Macos(session)
         }
     } else {
         let selected = match select_supported_adapter(selector) {
@@ -21534,7 +21436,7 @@ fn init_live_report(
             before,
             counters,
         );
-        InitUsbTransport::Libusb(Box::new(claimed))
+        RuntimeUsbTransport::Libusb(Box::new(claimed))
     };
 
     let registers = Rtl8812auRegisterAccess::new(transport)
@@ -22924,7 +22826,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -23950,7 +23852,7 @@ fn tx_once_live_report(
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -24466,7 +24368,7 @@ fn tx_repeat_live_report(
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -24892,7 +24794,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -25003,7 +24905,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
 }
 
 struct BridgeTxRadio<'a> {
-    transport: &'a mut InitUsbTransport,
+    transport: &'a mut RuntimeUsbTransport,
     bulk_out: u8,
     channel: Channel,
     channel_bandwidth: Bandwidth,
@@ -25385,7 +25287,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -26472,7 +26374,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -29905,7 +29807,7 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
             let adapter = claimed.info.clone();
             let endpoints = claimed.endpoints.clone();
             (
-                InitUsbTransport::Libusb(Box::new(claimed)),
+                RuntimeUsbTransport::Libusb(Box::new(claimed)),
                 adapter,
                 endpoints,
                 DiagnosticCounters::default(),
@@ -30536,7 +30438,7 @@ fn parse_bridge_tx_bench_packet_override(
 }
 
 fn bridge_tx_bench_submit_raw_packet(
-    transport: &mut InitUsbTransport,
+    transport: &mut RuntimeUsbTransport,
     bulk_out: u8,
     packet: &[u8],
     counters: &mut TxSubmitCounters,
@@ -30839,7 +30741,7 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
         let adapter = claimed.info.clone();
         let endpoints = claimed.endpoints.clone();
         (
-            InitUsbTransport::Libusb(Box::new(claimed)),
+            RuntimeUsbTransport::Libusb(Box::new(claimed)),
             adapter,
             endpoints,
             DiagnosticCounters::default(),

@@ -7,6 +7,7 @@
 - TX calibration profile identity.
 - Calibration profile safety policy, including whether a profile requires live register write authorization.
 - Calibration class policy used by RF-quality reports and future runtime state.
+- Unified runtime USB transport over libusb claims and macOS USBHost retained sessions.
 - macOS IOUSBHost direct-control and retained-session transport wrappers.
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 
@@ -20,7 +21,7 @@
 ## Migration Order
 
 1. Keep moving stable policy and configuration into `wfb-radio-runtime`.
-2. Move a reusable adapter/session abstraction once the libusb fallback API shape is settled.
+2. Move transport open policy and adapter/session configuration once the libusb fallback API shape is settled.
 3. Move RTL8812AU init sequencing behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
 4. Move TX/RX loop orchestration behind runtime APIs.
 5. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
