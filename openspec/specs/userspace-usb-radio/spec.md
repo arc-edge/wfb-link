@@ -126,6 +126,10 @@ The system SHALL expose RX metadata with enough source and confidence informatio
 - **WHEN** an RX descriptor does not include usable PHY status bytes
 - **THEN** the emitted frame metadata MUST preserve a fallback RSSI for compatibility but MUST mark it as fallback/invalid for RF-quality decisions
 
+#### Scenario: PHY status supplies SNR evidence
+- **WHEN** an RTL8812AU OFDM/HT/VHT RX descriptor includes a known PHY-status layout
+- **THEN** the emitted frame metadata MUST include SNR source and derived noise fields and MUST count those frames separately in RX telemetry
+
 ### Requirement: RTL8812AU RF Readback
 The system SHALL support RTL8812AU RF serial readback for RF path A and RF path B using the Linux 8812A `phy_RFSerialRead` register sequence.
 

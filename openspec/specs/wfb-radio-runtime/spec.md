@@ -43,4 +43,4 @@ The system SHALL provide a production-facing WFB runtime flow that opens, initia
 
 #### Scenario: Production flow reports readiness
 - **WHEN** initialization completes
-- **THEN** the production runtime flow reports adapter identity, channel, bandwidth, calibration class, init phase status, runtime-owned RX/TX flow counters, USB counters, and last error state through production-facing telemetry
+- **THEN** the production runtime flow reports adapter identity, channel, bandwidth, calibration class, init phase status, runtime-owned RX/TX flow counters, RX metadata coverage counters, USB counters, and last error state through production-facing telemetry

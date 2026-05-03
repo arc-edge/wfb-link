@@ -3237,6 +3237,10 @@ struct RxFixtureReport {
     read_timeouts: u64,
     bulk_bytes: u64,
     parsed_frames: u64,
+    phy_status_frames: u64,
+    rssi_valid_frames: u64,
+    snr_frames: u64,
+    noise_frames: u64,
     dropped_packets: u64,
     need_more_data: u64,
     bytes_consumed: u64,
@@ -23156,6 +23160,7 @@ fn process_rx_buffer(
             RxParseOutcome::Frame => {
                 let frame = parsed.frame.expect("frame outcome includes frame");
                 report.parsed_frames += 1;
+                count_rx_metadata(report, &frame);
                 count_rx_frame_type(report, &frame.data);
                 process_wfb_rx_forwards(wfb_forwards, &frame)?;
                 if let Some(writer) = pcap.as_mut() {
@@ -23199,6 +23204,7 @@ fn process_rx_packet_outcomes(
             RxParseOutcome::Frame => {
                 let frame = parsed.frame.as_ref().expect("frame outcome includes frame");
                 report.parsed_frames += 1;
+                count_rx_metadata(report, frame);
                 count_rx_frame_type(report, &frame.data);
                 process_wfb_rx_forwards(wfb_forwards, frame)?;
                 if let Some(writer) = pcap.as_mut() {
@@ -23224,6 +23230,21 @@ fn process_rx_packet_outcomes(
         }
     }
     Ok(())
+}
+
+fn count_rx_metadata(report: &mut RxFixtureReport, frame: &radio_core::RxFrame) {
+    if frame.phy_status {
+        report.phy_status_frames += 1;
+    }
+    if frame.rssi_dbm_valid {
+        report.rssi_valid_frames += 1;
+    }
+    if frame.snr_db.is_some() {
+        report.snr_frames += 1;
+    }
+    if frame.noise_dbm.is_some() {
+        report.noise_frames += 1;
+    }
 }
 
 fn process_wfb_rx_forwards(
@@ -26058,6 +26079,10 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             buffers_read: bridge.rx.buffers_read,
             read_timeouts: bridge.rx.read_timeouts,
             parsed_frames: bridge.rx.parsed_frames,
+            phy_status_frames: bridge.rx.phy_status_frames,
+            rssi_valid_frames: bridge.rx.rssi_valid_frames,
+            snr_frames: bridge.rx.snr_frames,
+            noise_frames: bridge.rx.noise_frames,
             forwarded_payloads,
             dropped_packets: bridge.rx.dropped_packets,
         },
@@ -36263,11 +36288,15 @@ fn print_pending_human(report: &PendingDiagnosticReport) {
     }
     if let Some(rx_fixture) = &report.rx_fixture {
         println!(
-            "RX capture: buffers={} timeouts={} bytes={} frames={} drops={} need_more={}",
+            "RX capture: buffers={} timeouts={} bytes={} frames={} phy_status={} rssi_valid={} snr={} noise={} drops={} need_more={}",
             rx_fixture.buffers_read,
             rx_fixture.read_timeouts,
             rx_fixture.bulk_bytes,
             rx_fixture.parsed_frames,
+            rx_fixture.phy_status_frames,
+            rx_fixture.rssi_valid_frames,
+            rx_fixture.snr_frames,
+            rx_fixture.noise_frames,
             rx_fixture.dropped_packets,
             rx_fixture.need_more_data
         );
@@ -36781,7 +36810,7 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         );
     }
     println!(
-        "Bridge run: duration_ms={} stop_reason={} tx_binds={} tx_datagrams={} max_datagrams={} tx_burst_limit={} rx_buffers={} rx_frames={}",
+        "Bridge run: duration_ms={} stop_reason={} tx_binds={} tx_datagrams={} max_datagrams={} tx_burst_limit={} rx_buffers={} rx_frames={} rx_snr={}",
         report.duration_ms,
         report.stop_reason,
         report.bind_addrs.join(","),
@@ -36789,7 +36818,8 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         report.max_datagrams,
         report.tx_burst_limit,
         report.rx.buffers_read,
-        report.rx.parsed_frames
+        report.rx.parsed_frames,
+        report.rx.snr_frames
     );
     if let Some(path) = &report.ready_file {
         println!("Ready file: {}", path.display());
@@ -36904,10 +36934,14 @@ fn print_runtime_flow_human(report: &RuntimeFlowReport) {
         report.receiver_backed_validation_required
     );
     println!(
-        "RX: buffers={} timeouts={} frames={} forwarded={} dropped={}",
+        "RX: buffers={} timeouts={} frames={} phy_status={} rssi_valid={} snr={} noise={} forwarded={} dropped={}",
         report.rx.buffers_read,
         report.rx.read_timeouts,
         report.rx.parsed_frames,
+        report.rx.phy_status_frames,
+        report.rx.rssi_valid_frames,
+        report.rx.snr_frames,
+        report.rx.noise_frames,
         report.rx.forwarded_payloads,
         report.rx.dropped_packets
     );
@@ -41484,6 +41518,10 @@ u8 array_mp_8812a_fw_nic[] = {
         let rx = report.rx_fixture.expect("rx fixture");
         assert_eq!(rx.buffers_read, 1);
         assert_eq!(rx.parsed_frames, 1);
+        assert_eq!(rx.phy_status_frames, 0);
+        assert_eq!(rx.rssi_valid_frames, 0);
+        assert_eq!(rx.snr_frames, 0);
+        assert_eq!(rx.noise_frames, 0);
         assert_eq!(rx.data_frames, 1);
         assert_eq!(rx.pcap_frames_written, 1);
         assert_eq!(rx.frame_records_written, 1);
@@ -41494,6 +41532,40 @@ u8 array_mp_8812a_fw_nic[] = {
         assert!(frame_jsonl.contains("\"rx_rate\":{\"mcs\":1}"));
         assert!(frame_jsonl.contains("\"rx_bandwidth_mhz\":40"));
         assert!(frame_jsonl.contains("\"short_gi\":true"));
+    }
+
+    #[test]
+    fn rx_metadata_counters_track_snr_and_noise() {
+        let mut report = RxFixtureReport::default();
+        let frame = radio_core::RxFrame {
+            data: sample_data_frame(),
+            rssi_dbm: -44,
+            rssi_dbm_valid: true,
+            rssi_dbm_source: radio_core::RxRssiSource::Rtl8812PhyStatusBestPath,
+            noise_dbm: Some(-68),
+            snr_db: Some(24),
+            snr_db_source: Some(radio_core::RxSnrSource::Rtl8812PhyStatusBestPath),
+            channel: Channel::from_number(36).expect("channel"),
+            phy_status: true,
+            driver_info_size: 24,
+            rx_shift: 0,
+            raw_phy_status: vec![0; 24],
+            rx_rate_raw: 0x0d,
+            rx_rate: Some(TxRate::Mcs(1)),
+            rx_bandwidth_raw: 0,
+            rx_bandwidth: Some(Bandwidth::Mhz20),
+            short_gi: false,
+            ldpc: false,
+            stbc: false,
+            crc_error: false,
+        };
+
+        count_rx_metadata(&mut report, &frame);
+
+        assert_eq!(report.phy_status_frames, 1);
+        assert_eq!(report.rssi_valid_frames, 1);
+        assert_eq!(report.snr_frames, 1);
+        assert_eq!(report.noise_frames, 1);
     }
 
     #[test]

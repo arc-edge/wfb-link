@@ -20,7 +20,8 @@
 - Runtime RX bulk-IN reads with RTL8812AU RX descriptor parsing, parser outcome
   counters, and RTL8812AU OFDM PHY-status RSSI/SNR/noise extraction.
 - Runtime-owned full-flow RX/TX telemetry structs used by the production-shaped
-  `runtime-flow` report.
+  `runtime-flow` report, including RX metadata coverage counters for PHY status,
+  valid RSSI, SNR, and derived noise.
 
 ## Still Diagnostic-Owned
 

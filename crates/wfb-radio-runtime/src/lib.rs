@@ -355,6 +355,10 @@ pub struct RuntimeFlowRxTelemetry {
     pub buffers_read: u64,
     pub read_timeouts: u64,
     pub parsed_frames: u64,
+    pub phy_status_frames: u64,
+    pub rssi_valid_frames: u64,
+    pub snr_frames: u64,
+    pub noise_frames: u64,
     pub forwarded_payloads: u64,
     pub dropped_packets: u64,
 }
@@ -2342,6 +2346,10 @@ mod tests {
             buffers_read: 2,
             read_timeouts: 1,
             parsed_frames: 7,
+            phy_status_frames: 6,
+            rssi_valid_frames: 6,
+            snr_frames: 5,
+            noise_frames: 5,
             forwarded_payloads: 3,
             dropped_packets: 4,
         };
@@ -2354,8 +2362,11 @@ mod tests {
         };
 
         assert_eq!(rx.forwarded_payloads, 3);
+        assert_eq!(rx.snr_frames, 5);
+        assert_eq!(rx.noise_frames, 5);
         assert_eq!(tx.bytes_written, 4096);
         assert_eq!(RuntimeFlowRxTelemetry::default().buffers_read, 0);
+        assert_eq!(RuntimeFlowRxTelemetry::default().snr_frames, 0);
         assert_eq!(RuntimeFlowTxTelemetry::default().submitted_frames, 0);
     }
 
