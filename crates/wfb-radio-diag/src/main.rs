@@ -21,12 +21,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use radio_core::rtl8812au::{TxQueue, TX_DESC_SIZE};
 use radio_core::{
     build_tx_packet, compare_usb_traces, frame_type, import_usbmon_text, parse_realtek_u32_array,
-    parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, submit_tx_frame,
-    validate_ieee80211_frame, Band, Bandwidth, Channel, DeviceSelector, FirmwareImage,
-    FirmwarePayload, FrameType, InitDryRunPlan, InitPhaseCount, PcapWriter, PlannedInitTransfer,
-    RealtekConditionEnv, RealtekTableActionKind, RealtekTableKind, RealtekTablePlan,
-    Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbDeviceInfo,
-    UsbEndpoints, UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
+    parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, validate_ieee80211_frame,
+    Band, Bandwidth, Channel, DeviceSelector, FirmwareImage, FirmwarePayload, FrameType,
+    InitDryRunPlan, InitPhaseCount, PcapWriter, PlannedInitTransfer, RealtekConditionEnv,
+    RealtekTableActionKind, RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess,
+    RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbDeviceInfo, UsbEndpoints,
+    UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -23396,70 +23396,73 @@ fn tx_once_live_report(
         }
     };
 
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for live TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return tx_once_live_failure(TxOnceLiveFailureInput {
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "macOS IOUSBHost retained-session open failed",
-                        error,
-                    });
-                }
+                "opened retained macOS IOUSBHost session for live TX",
+            ),
+            Err(error) => {
+                return tx_once_live_failure(TxOnceLiveFailureInput {
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth,
+                    tx_frame_len,
+                    tx_frame_source,
+                    counters: DiagnosticCounters::default(),
+                    phase_id: "usb_claim",
+                    phase_detail: "macOS IOUSBHost retained-session open failed",
+                    error,
+                });
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed initialized adapter for live TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return tx_once_live_failure(TxOnceLiveFailureInput {
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "runtime USB transport open failed",
-                        error,
-                    });
-                }
+                "claimed initialized adapter for live TX",
+            ),
+            Err(error) => {
+                return tx_once_live_failure(TxOnceLiveFailureInput {
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth,
+                    tx_frame_len,
+                    tx_frame_source,
+                    counters: DiagnosticCounters::default(),
+                    phase_id: "usb_claim",
+                    phase_detail: "runtime USB transport open failed",
+                    error,
+                });
             }
-        };
-    let bulk_out = match endpoints.bulk_out {
+        }
+    };
+    let bulk_out = match session.selected_bulk_out_endpoint() {
         Some(endpoint) => endpoint,
         None => {
             return tx_once_live_failure(TxOnceLiveFailureInput {
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel,
                 bandwidth,
                 tx_frame_len,
                 tx_frame_source,
-                counters: claim_counters,
+                counters: diagnostic_counters_from_runtime(session.counters),
                 phase_id: "bulk_out",
                 phase_detail: "claimed interface has no bulk OUT endpoint",
                 error: DiagnosticErrorReport {
@@ -23474,31 +23477,24 @@ fn tx_once_live_report(
     let mut tx_activity_led = tx_activity_led_report(&args.tx_led);
     let mut tx_status = tx_status_probe_report(&args.tx_status);
     if tx_activity_led.is_some() || tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::On);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
-    match submit_tx_frame(
-        &mut transport,
-        bulk_out,
-        &frame,
-        channel,
-        opts,
-        &mut submit_counters,
-    ) {
+    match session.submit_80211_frame(&frame, channel, opts, &mut submit_counters) {
         Ok(bytes_written) => {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_status_probe_post(&registers, &mut tx_status);
                 tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
-                usb_control_writes: claim_counters.usb_control_writes,
+                usb_control_writes: session.counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted,
                 tx_frames: submit_counters.submitted,
                 ..DiagnosticCounters::default()
@@ -23508,8 +23504,8 @@ fn tx_once_live_report(
             pending_report(PendingReportInput {
                 command: "tx-once",
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel: Some(channel),
                 bandwidth: Some(bandwidth),
                 firmware_path: None,
@@ -23562,17 +23558,17 @@ fn tx_once_live_report(
         }
         Err(error) => {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_status_probe_post(&registers, &mut tx_status);
                 tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
-                usb_control_writes: claim_counters.usb_control_writes,
+                usb_control_writes: session.counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
                 tx_frames: submit_counters.submitted,
                 ..DiagnosticCounters::default()
@@ -23581,8 +23577,8 @@ fn tx_once_live_report(
             add_tx_status_probe_counters(&mut counters, &tx_status);
             tx_once_live_failure(TxOnceLiveFailureInput {
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel,
                 bandwidth,
                 tx_frame_len,
@@ -23864,81 +23860,84 @@ fn tx_repeat_live_report(
         }
     };
 
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for live repeated TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        repeat: repeat_tx_report_base(
-                            &args,
-                            Some(frame.len()),
-                            Some(packet_len),
-                            None,
-                            None,
-                            Some(opts),
-                        ),
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "macOS IOUSBHost retained-session open failed",
-                        error,
-                    });
-                }
+                "opened retained macOS IOUSBHost session for live repeated TX",
+            ),
+            Err(error) => {
+                return tx_repeat_live_failure(TxRepeatLiveFailureInput {
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth,
+                    tx_frame_len,
+                    tx_frame_source,
+                    repeat: repeat_tx_report_base(
+                        &args,
+                        Some(frame.len()),
+                        Some(packet_len),
+                        None,
+                        None,
+                        Some(opts),
+                    ),
+                    counters: DiagnosticCounters::default(),
+                    phase_id: "usb_claim",
+                    phase_detail: "macOS IOUSBHost retained-session open failed",
+                    error,
+                });
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed initialized adapter for live repeated TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        repeat: repeat_tx_report_base(
-                            &args,
-                            Some(frame.len()),
-                            Some(packet_len),
-                            None,
-                            None,
-                            Some(opts),
-                        ),
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "runtime USB transport open failed",
-                        error,
-                    });
-                }
+                "claimed initialized adapter for live repeated TX",
+            ),
+            Err(error) => {
+                return tx_repeat_live_failure(TxRepeatLiveFailureInput {
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth,
+                    tx_frame_len,
+                    tx_frame_source,
+                    repeat: repeat_tx_report_base(
+                        &args,
+                        Some(frame.len()),
+                        Some(packet_len),
+                        None,
+                        None,
+                        Some(opts),
+                    ),
+                    counters: DiagnosticCounters::default(),
+                    phase_id: "usb_claim",
+                    phase_detail: "runtime USB transport open failed",
+                    error,
+                });
             }
-        };
-    let bulk_out = match endpoints.bulk_out {
+        }
+    };
+    let bulk_out = match session.selected_bulk_out_endpoint() {
         Some(endpoint) => endpoint,
         None => {
             return tx_repeat_live_failure(TxRepeatLiveFailureInput {
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel,
                 bandwidth,
                 tx_frame_len,
@@ -23951,7 +23950,7 @@ fn tx_repeat_live_report(
                     None,
                     Some(opts),
                 ),
-                counters: claim_counters,
+                counters: diagnostic_counters_from_runtime(session.counters),
                 phase_id: "bulk_out_loop",
                 phase_detail: "claimed interface has no bulk OUT endpoint",
                 error: DiagnosticErrorReport {
@@ -23966,33 +23965,27 @@ fn tx_repeat_live_report(
     let mut tx_activity_led = tx_activity_led_report(&args.tx_led);
     let mut tx_status = tx_status_probe_report(&args.tx_status);
     if tx_activity_led.is_some() || tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::On);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
     let cpu_started = process_cpu_usage();
     let started = Instant::now();
     for index in 0..args.count {
-        if let Err(error) = submit_tx_frame(
-            &mut transport,
-            bulk_out,
-            &frame,
-            channel,
-            opts,
-            &mut submit_counters,
-        ) {
+        if let Err(error) = session.submit_80211_frame(&frame, channel, opts, &mut submit_counters)
+        {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_status_probe_post(&registers, &mut tx_status);
                 tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
             }
             tx_activity_led_hold(&tx_activity_led);
             if tx_activity_led.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
             }
             let mut counters = DiagnosticCounters {
-                usb_control_writes: claim_counters.usb_control_writes,
+                usb_control_writes: session.counters.usb_control_writes,
                 usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
                 tx_frames: submit_counters.submitted,
                 dropped_frames: submit_counters.failed + submit_counters.rejected,
@@ -24016,8 +24009,8 @@ fn tx_repeat_live_report(
             repeat.tx_status = tx_status;
             return tx_repeat_live_failure(TxRepeatLiveFailureInput {
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel,
                 bandwidth,
                 tx_frame_len,
@@ -24038,18 +24031,18 @@ fn tx_repeat_live_report(
         }
     }
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_post(&registers, &mut tx_status);
         tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
     }
     tx_activity_led_hold(&tx_activity_led);
     if tx_activity_led.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_activity_led_step(&registers, &mut tx_activity_led, LedAction::Off);
     }
     let elapsed_ms = elapsed_ms_u64(started);
     let mut counters = DiagnosticCounters {
-        usb_control_writes: claim_counters.usb_control_writes,
+        usb_control_writes: session.counters.usb_control_writes,
         usb_bulk_out_writes: submit_counters.submitted,
         tx_frames: submit_counters.submitted,
         ..DiagnosticCounters::default()
@@ -24073,8 +24066,8 @@ fn tx_repeat_live_report(
     pending_report(PendingReportInput {
         command: "tx-repeat",
         selector,
-        adapter: Some(adapter),
-        endpoints: Some(endpoints),
+        adapter: Some(session.adapter.clone()),
+        endpoints: Some(session.endpoints.clone()),
         channel: Some(channel),
         bandwidth: Some(bandwidth),
         firmware_path: None,
