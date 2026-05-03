@@ -24738,51 +24738,54 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         );
     }
 
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for live bridge TX listener",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_tx_listen_failure(
-                        report,
-                        "usb_claim",
-                        "macOS IOUSBHost retained-session open failed",
-                        error,
-                    );
-                }
+                "opened retained macOS IOUSBHost session for live bridge TX listener",
+            ),
+            Err(error) => {
+                return bridge_tx_listen_failure(
+                    report,
+                    "usb_claim",
+                    "macOS IOUSBHost retained-session open failed",
+                    error,
+                );
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed initialized adapter for live bridge TX listener",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_tx_listen_failure(
-                        report,
-                        "usb_claim",
-                        "runtime USB transport open failed",
-                        error,
-                    );
-                }
+                "claimed initialized adapter for live bridge TX listener",
+            ),
+            Err(error) => {
+                return bridge_tx_listen_failure(
+                    report,
+                    "usb_claim",
+                    "runtime USB transport open failed",
+                    error,
+                );
             }
-        };
+        }
+    };
 
-    let bulk_out = match endpoints.bulk_out {
+    let bulk_out = match session.selected_bulk_out_endpoint() {
         Some(endpoint) => endpoint,
         None => {
-            report.adapter = Some(adapter);
-            report.endpoints = Some(endpoints);
-            report.counters = claim_counters;
+            report.adapter = Some(session.adapter.clone());
+            report.endpoints = Some(session.endpoints.clone());
+            report.counters = diagnostic_counters_from_runtime(session.counters);
             return bridge_tx_listen_failure(
                 report,
                 "bulk_out",
@@ -24794,14 +24797,14 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
             );
         }
     };
-    report.adapter = Some(adapter);
-    report.endpoints = Some(endpoints);
+    report.adapter = Some(session.adapter.clone());
+    report.endpoints = Some(session.endpoints.clone());
     report.bulk_out_endpoint = Some(bulk_out);
     report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
-    let mut pre_tx_counters = claim_counters;
+    let mut pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
 
     if let Some(init_assets) = init_assets.as_ref() {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match run_bridge_tx_bench_same_session_init(
             &registers,
@@ -24831,7 +24834,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
 
     if args.clear_txdma_status_before_tx {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match bridge_tx_bench_clear_txdma_status(
             &registers,
@@ -24854,7 +24857,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
 
     if !args.pre_tx_rf_write.is_empty() {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         for write in &args.pre_tx_rf_write {
             match bridge_tx_bench_write_rf_serial_register(&registers, write, &mut pre_tx_counters)
@@ -24878,7 +24881,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         || !args.pre_tx_write32.is_empty()
         || !args.pre_tx_rmw32.is_empty()
     {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         for write in &args.pre_tx_write8 {
             match bridge_tx_bench_write8_register(
@@ -24964,7 +24967,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
 
     if tx_calibration_profile_requested(&args.tx_calibration) {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match apply_tx_calibration_profile(
             &registers,
@@ -24990,7 +24993,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
 
     if tx_power_control_requested(&args.tx_power) {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match apply_tx_power_control(
             &registers,
@@ -25018,7 +25021,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         || tx_power_control_requested(&args.tx_power)
         || tx_calibration_profile_requested(&args.tx_calibration)
     {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match tx_pre_calibration_probe(
             &registers,
@@ -25047,7 +25050,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     let mut submit_counters = TxSubmitCounters::default();
     let mut tx_status = tx_status_probe_report(&args.tx_status);
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
     if let Err(error) = bridge_tx_listen_write_ready_file(&args, &report) {
@@ -25213,31 +25216,18 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         });
 
         let submit_result = {
-            let mut radio = BridgeTxRadio {
-                transport: &mut transport,
-                bulk_out,
+            let mut radio = BridgeTxSessionRadio {
+                session: &mut session,
                 channel,
                 channel_bandwidth: args.bandwidth,
-                tx_rate: args.tx_overrides.tx_rate,
-                tx_bandwidth: args.tx_overrides.tx_bandwidth,
-                tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
-                tx_profile: args.tx_overrides.tx_profile,
-                tx_queue: args.tx_overrides.tx_queue.into(),
-                tx_mac_id: args.tx_overrides.mac_id,
-                tx_rate_id: args.tx_overrides.tx_rate_id,
-                tx_retries: args.tx_overrides.tx_retries,
-                tx_fallback_limit: args.tx_overrides.tx_fallback_limit,
-                hardware_sequence: None,
-                first_segment: None,
-                disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
-                aggregate_break: args.tx_overrides.no_agg_break.then_some(false),
+                overrides: &args.tx_overrides,
                 submit_counters: &mut submit_counters,
             };
             submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
         };
         if let Err(error) = submit_result {
             if tx_status.is_some() {
-                let registers = Rtl8812auRegisterAccess::new(&transport);
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
                 tx_status_probe_post(&registers, &mut tx_status);
                 tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
                 report.tx_status = tx_status;
@@ -25268,7 +25258,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
 
     if tx_status.is_some() {
-        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_post(&registers, &mut tx_status);
         tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
         report.tx_status = tx_status;
