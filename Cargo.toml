@@ -4,6 +4,7 @@ members = [
     "crates/radio-core",
     "crates/wfb-bridge",
     "crates/wfb-radio-diag",
+    "crates/wfb-radio-runtime",
 ]
 
 [workspace.package]
@@ -26,3 +27,4 @@ tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread", "sig
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wfb-bridge = { path = "crates/wfb-bridge" }
+wfb-radio-runtime = { path = "crates/wfb-radio-runtime" }

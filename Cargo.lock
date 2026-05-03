@@ -586,6 +586,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wfb-bridge",
+ "wfb-radio-runtime",
+]
+
+[[package]]
+name = "wfb-radio-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

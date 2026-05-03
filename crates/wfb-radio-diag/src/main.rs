@@ -35,6 +35,10 @@ use wfb_bridge::{
     build_rx_forward_datagram, build_wfb_data_header, parse_tx_datagram, submit_tx_datagram,
     RadioTx, RadiotapError, RxCounters, RxForwardConfig, TxCounters, TxDatagramError, WfbChannelId,
 };
+use wfb_radio_runtime::{
+    TxCalibrationClass as RuntimeTxCalibrationClass,
+    TxCalibrationProfile as RuntimeTxCalibrationProfile,
+};
 
 #[cfg(target_os = "macos")]
 mod macos_usbhost;
@@ -2043,6 +2047,18 @@ enum TxCalibrationProfileArg {
     Rtl8812aLck,
     Rtl8812aIqkProbe,
     Rtl8812aRuntimeIqk,
+}
+
+impl From<TxCalibrationProfileArg> for RuntimeTxCalibrationProfile {
+    fn from(profile: TxCalibrationProfileArg) -> Self {
+        match profile {
+            TxCalibrationProfileArg::CurrentDefault => Self::CurrentDefault,
+            TxCalibrationProfileArg::LinuxParityCh36Ht20 => Self::LinuxParityCh36Ht20,
+            TxCalibrationProfileArg::Rtl8812aLck => Self::Rtl8812aLck,
+            TxCalibrationProfileArg::Rtl8812aIqkProbe => Self::Rtl8812aIqkProbe,
+            TxCalibrationProfileArg::Rtl8812aRuntimeIqk => Self::Rtl8812aRuntimeIqk,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -14518,34 +14534,26 @@ fn tx_pre_calibration_mode(
     bandwidth: Bandwidth,
     calibration_profile: TxCalibrationProfileArg,
 ) -> RfQualityCalibrationMode {
-    if matches!(
-        calibration_profile,
-        TxCalibrationProfileArg::LinuxParityCh36Ht20
-    ) {
-        return RfQualityCalibrationMode::TargetedLinuxParity;
-    }
-    if matches!(calibration_profile, TxCalibrationProfileArg::Rtl8812aLck) {
-        return RfQualityCalibrationMode::RuntimeApproximation;
-    }
-    if matches!(
-        calibration_profile,
-        TxCalibrationProfileArg::Rtl8812aRuntimeIqk
-    ) {
-        return RfQualityCalibrationMode::RuntimeApproximation;
-    }
-    if matches!(
-        calibration_profile,
-        TxCalibrationProfileArg::Rtl8812aIqkProbe
-    ) {
-        if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
-            return RfQualityCalibrationMode::StopGapCaptured;
+    let captured_tail_applied =
+        same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth);
+    runtime_calibration_class_to_report_mode(
+        RuntimeTxCalibrationProfile::from(calibration_profile)
+            .before_tx_class(captured_tail_applied),
+    )
+}
+
+fn runtime_calibration_class_to_report_mode(
+    class: RuntimeTxCalibrationClass,
+) -> RfQualityCalibrationMode {
+    match class {
+        RuntimeTxCalibrationClass::Unknown => RfQualityCalibrationMode::Unknown,
+        RuntimeTxCalibrationClass::StopGapCaptured => RfQualityCalibrationMode::StopGapCaptured,
+        RuntimeTxCalibrationClass::TargetedLinuxParity => {
+            RfQualityCalibrationMode::TargetedLinuxParity
         }
-        return RfQualityCalibrationMode::Unknown;
-    }
-    if same_session_init && should_apply_captured_tx_bringup_tail(channel, bandwidth) {
-        RfQualityCalibrationMode::StopGapCaptured
-    } else {
-        RfQualityCalibrationMode::Unknown
+        RuntimeTxCalibrationClass::RuntimeApproximation => {
+            RfQualityCalibrationMode::RuntimeApproximation
+        }
     }
 }
 
@@ -15367,14 +15375,11 @@ where
 }
 
 fn tx_calibration_profile_requested(args: &TxCalibrationProfileArgs) -> bool {
-    !matches!(
-        args.tx_calibration_profile,
-        TxCalibrationProfileArg::CurrentDefault
-    )
+    !RuntimeTxCalibrationProfile::from(args.tx_calibration_profile).is_default()
 }
 
 fn tx_calibration_profile_requires_write_authorization(profile: TxCalibrationProfileArg) -> bool {
-    matches!(profile, TxCalibrationProfileArg::Rtl8812aRuntimeIqk)
+    RuntimeTxCalibrationProfile::from(profile).requires_register_write_authorization()
 }
 
 fn validate_tx_calibration_profile_write_authorization(
@@ -42688,6 +42693,36 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert!(report.adapter.is_none());
         assert_eq!(report.counters.usb_control_reads, 0);
         assert_eq!(report.counters.usb_control_writes, 0);
+    }
+
+    #[test]
+    fn diagnostic_calibration_profiles_map_to_runtime_policy() {
+        let cases = [
+            (
+                TxCalibrationProfileArg::CurrentDefault,
+                RuntimeTxCalibrationProfile::CurrentDefault,
+            ),
+            (
+                TxCalibrationProfileArg::LinuxParityCh36Ht20,
+                RuntimeTxCalibrationProfile::LinuxParityCh36Ht20,
+            ),
+            (
+                TxCalibrationProfileArg::Rtl8812aLck,
+                RuntimeTxCalibrationProfile::Rtl8812aLck,
+            ),
+            (
+                TxCalibrationProfileArg::Rtl8812aIqkProbe,
+                RuntimeTxCalibrationProfile::Rtl8812aIqkProbe,
+            ),
+            (
+                TxCalibrationProfileArg::Rtl8812aRuntimeIqk,
+                RuntimeTxCalibrationProfile::Rtl8812aRuntimeIqk,
+            ),
+        ];
+
+        for (diag, runtime) in cases {
+            assert_eq!(RuntimeTxCalibrationProfile::from(diag), runtime);
+        }
     }
 
     #[test]
