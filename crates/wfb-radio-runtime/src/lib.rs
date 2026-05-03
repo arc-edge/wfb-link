@@ -7,10 +7,11 @@
 use std::{error::Error, fmt, time::Duration};
 
 use radio_core::{
-    list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame, Channel,
-    ClaimedUsbDevice, DeviceSelector, EndpointInfo, InterfaceInfo, ParsedRxPacket,
-    Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError, RxParseOutcome,
-    TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
+    list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame,
+    Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo, InterfaceInfo,
+    ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError,
+    RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints,
+    UsbError,
 };
 use serde::Serialize;
 
@@ -293,7 +294,7 @@ pub struct RuntimeRadioError {
 }
 
 impl RuntimeRadioError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -695,6 +696,241 @@ pub fn rtl8812au_same_session_init_sequence(
 
 pub fn rtl8812au_llt_firmware_sequence(order: Rtl8812auInitOrder) -> &'static [Rtl8812auInitPhase] {
     &rtl8812au_same_session_init_sequence(order)[1..=2]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSameSessionInitReadiness {
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSameSessionInitPhaseStatus {
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTxCalibrationEvidenceSource {
+    Default,
+    CapturedLinuxTail,
+    TargetedLinuxParityCapture,
+    RuntimeLck,
+    ReadOnlyIqkProbe,
+    RuntimeIqk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTxCalibrationValidationStatus {
+    NotRequired,
+    ReceiverBackedValidationRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeTxCalibrationDecision {
+    pub profile: TxCalibrationProfile,
+    pub class: TxCalibrationClass,
+    pub evidence_source: RuntimeTxCalibrationEvidenceSource,
+    pub requires_live_write_authorization: bool,
+    pub authorized: bool,
+    pub validation_status: RuntimeTxCalibrationValidationStatus,
+    pub production_safe_default: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeSameSessionInitConfig {
+    pub init_order: Rtl8812auInitOrder,
+    pub channel: Channel,
+    pub bandwidth: Bandwidth,
+    pub rfe_type: u8,
+    pub tx_calibration_profile: TxCalibrationProfile,
+    pub live_write_authorized: bool,
+    pub captured_tail_applied: bool,
+}
+
+impl RuntimeSameSessionInitConfig {
+    pub fn new(channel: Channel, bandwidth: Bandwidth) -> Self {
+        Self {
+            init_order: Rtl8812auInitOrder::Default,
+            channel,
+            bandwidth,
+            rfe_type: 0,
+            tx_calibration_profile: TxCalibrationProfile::CurrentDefault,
+            live_write_authorized: false,
+            captured_tail_applied: false,
+        }
+    }
+
+    pub fn calibration_decision(self) -> Result<RuntimeTxCalibrationDecision, RuntimeRadioError> {
+        self.tx_calibration_profile
+            .calibration_decision(self.captured_tail_applied, self.live_write_authorized)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeSameSessionInitPhaseSummary {
+    pub phase: Rtl8812auInitPhase,
+    pub status: RuntimeSameSessionInitPhaseStatus,
+    pub detail: String,
+    pub register_writes: Option<usize>,
+    pub counters: RuntimeRadioCounters,
+}
+
+impl RuntimeSameSessionInitPhaseSummary {
+    pub fn completed(
+        phase: Rtl8812auInitPhase,
+        detail: impl Into<String>,
+        before: RuntimeRadioCounters,
+        after: RuntimeRadioCounters,
+    ) -> Self {
+        Self {
+            phase,
+            status: RuntimeSameSessionInitPhaseStatus::Completed,
+            detail: detail.into(),
+            register_writes: None,
+            counters: after.saturating_sub(before),
+        }
+    }
+
+    pub fn completed_with_writes(
+        phase: Rtl8812auInitPhase,
+        detail: impl Into<String>,
+        register_writes: usize,
+        before: RuntimeRadioCounters,
+        after: RuntimeRadioCounters,
+    ) -> Self {
+        Self {
+            register_writes: Some(register_writes),
+            ..Self::completed(phase, detail, before, after)
+        }
+    }
+
+    pub fn blocked(
+        phase: Rtl8812auInitPhase,
+        detail: impl Into<String>,
+        before: RuntimeRadioCounters,
+        after: RuntimeRadioCounters,
+    ) -> Self {
+        Self {
+            phase,
+            status: RuntimeSameSessionInitPhaseStatus::Blocked,
+            detail: detail.into(),
+            register_writes: None,
+            counters: after.saturating_sub(before),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeSameSessionInitResult {
+    pub config: RuntimeSameSessionInitConfig,
+    pub calibration: RuntimeTxCalibrationDecision,
+    pub phase_summaries: Vec<RuntimeSameSessionInitPhaseSummary>,
+    pub counters: RuntimeRadioCounters,
+    pub readiness: RuntimeSameSessionInitReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSameSessionInitFailure {
+    pub result: RuntimeSameSessionInitResult,
+    pub error: RuntimeRadioError,
+}
+
+impl fmt::Display for RuntimeSameSessionInitFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "same-session init failed: {}", self.error)
+    }
+}
+
+impl Error for RuntimeSameSessionInitFailure {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSameSessionInitPhaseFailure {
+    pub summary: RuntimeSameSessionInitPhaseSummary,
+    pub error: RuntimeRadioError,
+}
+
+impl RuntimeSameSessionInitPhaseFailure {
+    pub fn new(summary: RuntimeSameSessionInitPhaseSummary, error: RuntimeRadioError) -> Self {
+        Self { summary, error }
+    }
+}
+
+pub fn run_rtl8812au_same_session_init<T, F>(
+    session: &mut RuntimeRadioSession<T>,
+    config: RuntimeSameSessionInitConfig,
+    mut run_phase: F,
+) -> Result<RuntimeSameSessionInitResult, RuntimeSameSessionInitFailure>
+where
+    F: FnMut(
+        &mut RuntimeRadioSession<T>,
+        Rtl8812auInitPhase,
+    ) -> Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure>,
+{
+    let calibration = match config.calibration_decision() {
+        Ok(calibration) => calibration,
+        Err(error) => {
+            let result = RuntimeSameSessionInitResult {
+                config,
+                calibration: RuntimeTxCalibrationDecision {
+                    profile: config.tx_calibration_profile,
+                    class: config
+                        .tx_calibration_profile
+                        .before_tx_class(config.captured_tail_applied),
+                    evidence_source: config
+                        .tx_calibration_profile
+                        .evidence_source(config.captured_tail_applied),
+                    requires_live_write_authorization: config
+                        .tx_calibration_profile
+                        .requires_register_write_authorization(),
+                    authorized: config.live_write_authorized,
+                    validation_status: config.tx_calibration_profile.validation_status(),
+                    production_safe_default: config.tx_calibration_profile.is_default(),
+                },
+                phase_summaries: Vec::new(),
+                counters: session.counters,
+                readiness: RuntimeSameSessionInitReadiness::Failed,
+            };
+            return Err(RuntimeSameSessionInitFailure { result, error });
+        }
+    };
+
+    let mut phase_summaries = Vec::new();
+    for phase in rtl8812au_same_session_init_sequence(config.init_order) {
+        match run_phase(session, *phase) {
+            Ok(summary) => phase_summaries.push(summary),
+            Err(failure) => {
+                phase_summaries.push(failure.summary);
+                let result = RuntimeSameSessionInitResult {
+                    config,
+                    calibration,
+                    phase_summaries,
+                    counters: session.counters,
+                    readiness: RuntimeSameSessionInitReadiness::Failed,
+                };
+                return Err(RuntimeSameSessionInitFailure {
+                    result,
+                    error: failure.error,
+                });
+            }
+        }
+    }
+
+    Ok(RuntimeSameSessionInitResult {
+        config,
+        calibration,
+        phase_summaries,
+        counters: session.counters,
+        readiness: RuntimeSameSessionInitReadiness::Ready,
+    })
 }
 
 const REG_ACLK_MON: u16 = 0x003e;
@@ -1749,7 +1985,10 @@ impl TxCalibrationProfile {
     }
 
     pub fn requires_register_write_authorization(self) -> bool {
-        matches!(self, Self::Rtl8812aRuntimeIqk)
+        matches!(
+            self,
+            Self::LinuxParityCh36Ht20 | Self::Rtl8812aLck | Self::Rtl8812aRuntimeIqk
+        )
     }
 
     pub fn is_runtime_calibration(self) -> bool {
@@ -1768,6 +2007,58 @@ impl TxCalibrationProfile {
             Self::CurrentDefault | Self::Rtl8812aIqkProbe => TxCalibrationClass::Unknown,
         }
     }
+
+    pub fn evidence_source(
+        self,
+        captured_tail_applied: bool,
+    ) -> RuntimeTxCalibrationEvidenceSource {
+        match self {
+            Self::CurrentDefault if captured_tail_applied => {
+                RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
+            }
+            Self::CurrentDefault => RuntimeTxCalibrationEvidenceSource::Default,
+            Self::LinuxParityCh36Ht20 => {
+                RuntimeTxCalibrationEvidenceSource::TargetedLinuxParityCapture
+            }
+            Self::Rtl8812aLck => RuntimeTxCalibrationEvidenceSource::RuntimeLck,
+            Self::Rtl8812aIqkProbe => RuntimeTxCalibrationEvidenceSource::ReadOnlyIqkProbe,
+            Self::Rtl8812aRuntimeIqk => RuntimeTxCalibrationEvidenceSource::RuntimeIqk,
+        }
+    }
+
+    pub fn validation_status(self) -> RuntimeTxCalibrationValidationStatus {
+        if self.is_default() {
+            RuntimeTxCalibrationValidationStatus::NotRequired
+        } else {
+            RuntimeTxCalibrationValidationStatus::ReceiverBackedValidationRequired
+        }
+    }
+
+    pub fn calibration_decision(
+        self,
+        captured_tail_applied: bool,
+        authorized: bool,
+    ) -> Result<RuntimeTxCalibrationDecision, RuntimeRadioError> {
+        let requires_live_write_authorization = self.requires_register_write_authorization();
+        if requires_live_write_authorization && !authorized {
+            return Err(RuntimeRadioError::new(
+                "missing_write_authorization",
+                format!(
+                    "tx calibration profile {} writes live RTL8812A BB/RF calibration registers and requires hardware-write authorization",
+                    self.name()
+                ),
+            ));
+        }
+        Ok(RuntimeTxCalibrationDecision {
+            profile: self,
+            class: self.before_tx_class(captured_tail_applied),
+            evidence_source: self.evidence_source(captured_tail_applied),
+            requires_live_write_authorization,
+            authorized,
+            validation_status: self.validation_status(),
+            production_safe_default: self.is_default(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -1784,14 +2075,17 @@ mod tests {
     use std::{cell::RefCell, collections::BTreeMap, time::Duration};
 
     use radio_core::{
-        rtl8812au::Rtl8812auUsbTransport, Channel, Rtl8812auRegisterAccess, RxParseOutcome,
-        TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbError,
+        rtl8812au::Rtl8812auUsbTransport, Bandwidth, Channel, Rtl8812auRegisterAccess,
+        RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbError,
     };
 
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, RuntimeRadioSession,
-        TxCalibrationClass, TxCalibrationProfile,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, RuntimeRadioError,
+        RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
+        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
+        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
     };
 
     #[derive(Debug, Default)]
@@ -1933,21 +2227,64 @@ mod tests {
     }
 
     #[test]
-    fn runtime_iqk_requires_live_register_write_authorization() {
+    fn calibration_profiles_mark_live_register_write_authorization() {
+        assert!(TxCalibrationProfile::LinuxParityCh36Ht20.requires_register_write_authorization());
+        assert!(TxCalibrationProfile::Rtl8812aLck.requires_register_write_authorization());
         assert!(TxCalibrationProfile::Rtl8812aRuntimeIqk.requires_register_write_authorization());
 
         for profile in [
             TxCalibrationProfile::CurrentDefault,
-            TxCalibrationProfile::LinuxParityCh36Ht20,
-            TxCalibrationProfile::Rtl8812aLck,
             TxCalibrationProfile::Rtl8812aIqkProbe,
         ] {
             assert!(
                 !profile.requires_register_write_authorization(),
-                "{} should not require the runtime-IQK write gate",
+                "{} should not require live write authorization",
                 profile.name()
             );
         }
+    }
+
+    #[test]
+    fn calibration_decision_labels_evidence_and_validation() {
+        let decision = TxCalibrationProfile::LinuxParityCh36Ht20
+            .calibration_decision(false, true)
+            .expect("authorized profile");
+        assert_eq!(decision.class, TxCalibrationClass::TargetedLinuxParity);
+        assert_eq!(
+            decision.evidence_source,
+            RuntimeTxCalibrationEvidenceSource::TargetedLinuxParityCapture
+        );
+        assert_eq!(
+            decision.validation_status,
+            RuntimeTxCalibrationValidationStatus::ReceiverBackedValidationRequired
+        );
+        assert!(decision.requires_live_write_authorization);
+        assert!(decision.authorized);
+        assert!(!decision.production_safe_default);
+
+        let default_decision = TxCalibrationProfile::CurrentDefault
+            .calibration_decision(true, false)
+            .expect("default profile");
+        assert_eq!(default_decision.class, TxCalibrationClass::StopGapCaptured);
+        assert_eq!(
+            default_decision.evidence_source,
+            RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
+        );
+        assert_eq!(
+            default_decision.validation_status,
+            RuntimeTxCalibrationValidationStatus::NotRequired
+        );
+        assert!(!default_decision.requires_live_write_authorization);
+        assert!(default_decision.production_safe_default);
+    }
+
+    #[test]
+    fn calibration_decision_rejects_unauthorized_live_writes() {
+        let error = TxCalibrationProfile::Rtl8812aLck
+            .calibration_decision(false, false)
+            .expect_err("unauthorized LCK should fail");
+        assert_eq!(error.code, "missing_write_authorization");
+        assert!(error.message.contains("rtl8812a-lck"));
     }
 
     #[test]
@@ -2219,6 +2556,103 @@ mod tests {
         assert_eq!(
             sequence.last(),
             Some(&Rtl8812auInitPhase::RfCalibrationBeforeTx)
+        );
+    }
+
+    #[test]
+    fn same_session_init_executor_records_ready_phase_summaries() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let channel = Channel::from_number(36).expect("channel 36");
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let mut config = RuntimeSameSessionInitConfig::new(channel, Bandwidth::Mhz20);
+        config.init_order = Rtl8812auInitOrder::Linux;
+
+        let result =
+            super::run_rtl8812au_same_session_init(&mut session, config, |session, phase| {
+                let before = session.counters;
+                session.counters.usb_control_writes =
+                    session.counters.usb_control_writes.saturating_add(1);
+                Ok(RuntimeSameSessionInitPhaseSummary::completed_with_writes(
+                    phase,
+                    format!("completed {}", phase.id()),
+                    1,
+                    before,
+                    session.counters,
+                ))
+            })
+            .expect("same-session init");
+
+        assert_eq!(result.readiness, RuntimeSameSessionInitReadiness::Ready);
+        assert_eq!(
+            result.phase_summaries[1].phase,
+            Rtl8812auInitPhase::Llt,
+            "Linux order runs LLT before firmware"
+        );
+        assert_eq!(result.phase_summaries.len(), 14);
+        assert_eq!(result.counters.usb_control_writes, 14);
+        assert_eq!(
+            result.phase_summaries[0].status,
+            RuntimeSameSessionInitPhaseStatus::Completed
+        );
+        assert_eq!(result.phase_summaries[0].register_writes, Some(1));
+    }
+
+    #[test]
+    fn same_session_init_executor_returns_partial_failure() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let channel = Channel::from_number(36).expect("channel 36");
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let config = RuntimeSameSessionInitConfig::new(channel, Bandwidth::Mhz20);
+
+        let failure =
+            super::run_rtl8812au_same_session_init(&mut session, config, |session, phase| {
+                let before = session.counters;
+                if phase == Rtl8812auInitPhase::Llt {
+                    let summary = RuntimeSameSessionInitPhaseSummary::blocked(
+                        phase,
+                        "LLT failed in test",
+                        before,
+                        session.counters,
+                    );
+                    return Err(RuntimeSameSessionInitPhaseFailure::new(
+                        summary,
+                        RuntimeRadioError::new("llt_failed", "test failure"),
+                    ));
+                }
+                session.counters.usb_control_writes =
+                    session.counters.usb_control_writes.saturating_add(1);
+                Ok(RuntimeSameSessionInitPhaseSummary::completed(
+                    phase,
+                    format!("completed {}", phase.id()),
+                    before,
+                    session.counters,
+                ))
+            })
+            .expect_err("LLT should fail");
+
+        assert_eq!(failure.error.code, "llt_failed");
+        assert_eq!(
+            failure.result.readiness,
+            RuntimeSameSessionInitReadiness::Failed
+        );
+        assert_eq!(failure.result.phase_summaries.len(), 3);
+        assert_eq!(
+            failure.result.phase_summaries[2].status,
+            RuntimeSameSessionInitPhaseStatus::Blocked
         );
     }
 

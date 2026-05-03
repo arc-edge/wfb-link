@@ -22,11 +22,11 @@ use radio_core::rtl8812au::{TxQueue, TX_DESC_SIZE};
 use radio_core::{
     build_tx_packet, compare_usb_traces, frame_type, import_usbmon_text, parse_realtek_u32_array,
     parse_rx_packet, plan_realtek_table, plan_rtl8812au_init, probe_usb, validate_ieee80211_frame,
-    Band, Bandwidth, Channel, DeviceSelector, FirmwareImage, FirmwarePayload, FrameType,
-    InitDryRunPlan, InitPhaseCount, PcapWriter, PlannedInitTransfer, RealtekConditionEnv,
-    RealtekTableActionKind, RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess,
-    RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbDeviceInfo, UsbEndpoints,
-    UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
+    Band, Bandwidth, Channel, DeviceSelector, FirmwareImage, FrameType, InitDryRunPlan,
+    InitPhaseCount, PcapWriter, PlannedInitTransfer, RealtekConditionEnv, RealtekTableActionKind,
+    RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate,
+    TxSubmitCounters, UsbDeviceInfo, UsbEndpoints, UsbTraceComparison, UsbTraceEvent,
+    UsbTraceImport,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -39,7 +39,10 @@ use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMacAddressExecution,
     RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
-    RuntimeTransportError, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
+    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
+    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
     TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
@@ -134,6 +137,8 @@ enum Command {
     BridgeTxListen(BridgeTxListenArgs),
     /// Run bounded WFB RX forwarding and TX injection in one retained radio session.
     BridgeRun(BridgeRunArgs),
+    /// Run the production-facing WFB runtime flow with runtime-shaped telemetry.
+    RuntimeFlow(RuntimeFlowArgs),
     /// Generate WFB distributor-style datagrams and submit a bounded TX throughput burst.
     BridgeTxBench(BridgeTxBenchArgs),
     /// Build a structured RF-quality report from macOS and optional Linux baseline artifacts.
@@ -1521,6 +1526,12 @@ struct BridgeRunArgs {
     rx_frame_jsonl: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser, Clone)]
+struct RuntimeFlowArgs {
+    #[command(flatten)]
+    bridge: BridgeRunArgs,
+}
+
 #[derive(Debug, Parser, Clone, Default)]
 struct BridgeTxOverrideArgs {
     /// Descriptor profile applied before explicit TX overrides.
@@ -2696,6 +2707,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::RuntimeFlow(args) => {
+            let report = runtime_flow_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_runtime_flow_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::BridgeTxBench(args) => {
             let report = bridge_tx_bench_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -2897,6 +2918,79 @@ fn runtime_radio_error(error: RuntimeRadioError) -> DiagnosticErrorReport {
         code: error.code,
         message: error.message,
     }
+}
+
+fn runtime_radio_error_from_diagnostic(error: &DiagnosticErrorReport) -> RuntimeRadioError {
+    RuntimeRadioError::new(error.code, error.message.clone())
+}
+
+fn diagnostic_phase_status_from_runtime(
+    status: RuntimeSameSessionInitPhaseStatus,
+) -> DiagnosticPhaseStatus {
+    match status {
+        RuntimeSameSessionInitPhaseStatus::Completed => DiagnosticPhaseStatus::Completed,
+        RuntimeSameSessionInitPhaseStatus::Blocked => DiagnosticPhaseStatus::Blocked,
+    }
+}
+
+fn init_live_phase_summary_from_runtime(
+    summary: RuntimeSameSessionInitPhaseSummary,
+) -> InitLivePhaseSummary {
+    InitLivePhaseSummary {
+        id: summary.phase.id(),
+        status: diagnostic_phase_status_from_runtime(summary.status),
+        detail: summary.detail,
+        usb_control_reads: summary.counters.usb_control_reads,
+        usb_control_writes: summary.counters.usb_control_writes,
+    }
+}
+
+fn runtime_same_session_phase_completed(
+    phase: Rtl8812auInitPhase,
+    detail: impl Into<String>,
+    before: DiagnosticCounters,
+    after: DiagnosticCounters,
+) -> RuntimeSameSessionInitPhaseSummary {
+    RuntimeSameSessionInitPhaseSummary::completed(
+        phase,
+        detail,
+        runtime_radio_counters_from_diagnostic(before),
+        runtime_radio_counters_from_diagnostic(after),
+    )
+}
+
+fn runtime_same_session_phase_completed_with_writes(
+    phase: Rtl8812auInitPhase,
+    detail: impl Into<String>,
+    register_writes: usize,
+    before: DiagnosticCounters,
+    after: DiagnosticCounters,
+) -> RuntimeSameSessionInitPhaseSummary {
+    RuntimeSameSessionInitPhaseSummary::completed_with_writes(
+        phase,
+        detail,
+        register_writes,
+        runtime_radio_counters_from_diagnostic(before),
+        runtime_radio_counters_from_diagnostic(after),
+    )
+}
+
+fn runtime_same_session_phase_failure(
+    phase: Rtl8812auInitPhase,
+    detail: impl Into<String>,
+    before: DiagnosticCounters,
+    after: DiagnosticCounters,
+    error: &DiagnosticErrorReport,
+) -> RuntimeSameSessionInitPhaseFailure {
+    RuntimeSameSessionInitPhaseFailure::new(
+        RuntimeSameSessionInitPhaseSummary::blocked(
+            phase,
+            detail,
+            runtime_radio_counters_from_diagnostic(before),
+            runtime_radio_counters_from_diagnostic(after),
+        ),
+        runtime_radio_error_from_diagnostic(error),
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3296,6 +3390,56 @@ struct BridgeRunReport {
     phases: Vec<DiagnosticPhase>,
     error: Option<DiagnosticErrorReport>,
     notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeFlowReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    selector: DeviceSelector,
+    adapter: Option<UsbDeviceInfo>,
+    endpoints: Option<UsbEndpoints>,
+    channel: Option<Channel>,
+    bandwidth: Bandwidth,
+    duration_ms: u64,
+    stop_reason: &'static str,
+    bulk_in_endpoint: Option<u8>,
+    bulk_in_endpoint_hex: Option<String>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_hex: Option<String>,
+    calibration_profile: TxCalibrationProfileArg,
+    calibration_class: RuntimeTxCalibrationClass,
+    calibration_evidence_source: &'static str,
+    receiver_backed_validation_required: bool,
+    init_readiness: &'static str,
+    init_phase_count: usize,
+    init_completed_phase_count: usize,
+    rx: RuntimeFlowRxTelemetry,
+    tx: RuntimeFlowTxTelemetry,
+    counters: DiagnosticCounters,
+    result: DiagnosticResult,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeFlowRxTelemetry {
+    buffers_read: u64,
+    read_timeouts: u64,
+    parsed_frames: u64,
+    forwarded_payloads: u64,
+    dropped_packets: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeFlowTxTelemetry {
+    datagrams_received: u64,
+    submitted_frames: u64,
+    failed_submissions: u64,
+    dropped_datagrams: u64,
+    bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -15155,9 +15299,13 @@ fn validate_tx_calibration_profile_write_authorization(
     authorized: bool,
 ) -> std::result::Result<(), DiagnosticErrorReport> {
     if tx_calibration_profile_requires_write_authorization(profile) && !authorized {
+        let runtime_profile = RuntimeTxCalibrationProfile::from(profile);
         return Err(DiagnosticErrorReport {
             code: "missing_write_authorization",
-            message: "tx calibration profile rtl8812a-runtime-iqk writes live RTL8812A BB/RF calibration registers and requires --i-understand-this-writes-registers".to_string(),
+            message: format!(
+                "tx calibration profile {} writes live RTL8812A BB/RF calibration registers and requires --i-understand-this-writes-registers",
+                runtime_profile.name()
+            ),
         });
     }
     Ok(())
@@ -22447,20 +22595,18 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     if let (Some(init_assets), Some(init_bridge_args)) =
         (init_assets.as_ref(), init_bridge_args.as_ref())
     {
-        let registers = Rtl8812auRegisterAccess::new(&session.transport)
-            .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match run_bridge_tx_bench_same_session_init(
-            &registers,
+            &mut session,
             init_bridge_args,
             channel,
-            &session.endpoints,
             init_assets,
-            &mut pre_rx_counters,
         ) {
             Ok(init_report) => {
+                pre_rx_counters = diagnostic_counters_from_runtime(session.counters);
                 init_live = Some(same_session_init_into_init_live(init_report));
             }
             Err((init_report, error)) => {
+                pre_rx_counters = diagnostic_counters_from_runtime(session.counters);
                 init_live = Some(same_session_init_into_init_live(init_report));
                 return pending_report(PendingReportInput {
                     command: "rx-scan",
@@ -24788,23 +24934,18 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     let mut pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
 
     if let Some(init_assets) = init_assets.as_ref() {
-        let registers = Rtl8812auRegisterAccess::new(&session.transport)
-            .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match run_bridge_tx_bench_same_session_init(
-            &registers,
+            &mut session,
             &init_bridge_args,
             channel,
-            report
-                .endpoints
-                .as_ref()
-                .expect("bridge TX listener endpoints are present after USB claim"),
             init_assets,
-            &mut pre_tx_counters,
         ) {
             Ok(init_report) => {
+                pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
                 report.same_session_init = Some(init_report);
             }
             Err((init_report, error)) => {
+                pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
                 report.same_session_init = Some(init_report);
                 report.counters = pre_tx_counters;
                 return bridge_tx_listen_failure(
@@ -25641,6 +25782,120 @@ fn bridge_run_spawn_tx_receivers(
     })
 }
 
+fn runtime_calibration_evidence_source_label(
+    source: RuntimeTxCalibrationEvidenceSource,
+) -> &'static str {
+    match source {
+        RuntimeTxCalibrationEvidenceSource::Default => "default",
+        RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail => "captured_linux_tail",
+        RuntimeTxCalibrationEvidenceSource::TargetedLinuxParityCapture => {
+            "targeted_linux_parity_capture"
+        }
+        RuntimeTxCalibrationEvidenceSource::RuntimeLck => "runtime_lck",
+        RuntimeTxCalibrationEvidenceSource::ReadOnlyIqkProbe => "read_only_iqk_probe",
+        RuntimeTxCalibrationEvidenceSource::RuntimeIqk => "runtime_iqk",
+    }
+}
+
+fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
+    let profile = args.bridge.tx.tx_calibration.tx_calibration_profile;
+    let runtime_profile = RuntimeTxCalibrationProfile::from(profile);
+    let channel = Channel::from_number(args.bridge.tx.channel);
+    let captured_tail_applied = channel
+        .map(|channel| should_apply_captured_tx_bringup_tail(channel, args.bridge.tx.bandwidth))
+        .unwrap_or(false);
+    let calibration_class = runtime_profile.before_tx_class(captured_tail_applied);
+    let calibration_evidence_source = runtime_calibration_evidence_source_label(
+        runtime_profile.evidence_source(captured_tail_applied),
+    );
+    let receiver_backed_validation_required = !runtime_profile.is_default();
+
+    let bridge = bridge_run_report(args.bridge);
+    let init_phase_count = bridge
+        .same_session_init
+        .as_ref()
+        .map(|init| init.phase_summaries.len())
+        .unwrap_or(0);
+    let init_completed_phase_count = bridge
+        .same_session_init
+        .as_ref()
+        .map(|init| {
+            init.phase_summaries
+                .iter()
+                .filter(|phase| matches!(phase.status, DiagnosticPhaseStatus::Completed))
+                .count()
+        })
+        .unwrap_or(0);
+    let init_readiness = bridge
+        .same_session_init
+        .as_ref()
+        .map(|init| match init.result {
+            DiagnosticResult::Pass => "ready",
+            _ => "failed",
+        })
+        .unwrap_or("not_started");
+    let forwarded_payloads = bridge
+        .rx
+        .wfb_forward
+        .as_ref()
+        .map(|forward| forward.counters.forwarded)
+        .unwrap_or_default()
+        .saturating_add(
+            bridge
+                .rx
+                .wfb_forwards
+                .iter()
+                .map(|forward| forward.counters.forwarded)
+                .sum::<u64>(),
+        );
+
+    RuntimeFlowReport {
+        schema_version: 1,
+        command: "runtime-flow",
+        started_at_unix_ms: bridge.started_at_unix_ms,
+        platform: bridge.platform,
+        selector: bridge.selector,
+        adapter: bridge.adapter,
+        endpoints: bridge.endpoints,
+        channel: bridge.channel,
+        bandwidth: bridge.bandwidth,
+        duration_ms: bridge.duration_ms,
+        stop_reason: bridge.stop_reason,
+        bulk_in_endpoint: bridge.bulk_in_endpoint,
+        bulk_in_endpoint_hex: bridge.bulk_in_endpoint_hex,
+        bulk_out_endpoint: bridge.bulk_out_endpoint,
+        bulk_out_endpoint_hex: bridge.bulk_out_endpoint_hex,
+        calibration_profile: profile,
+        calibration_class,
+        calibration_evidence_source,
+        receiver_backed_validation_required,
+        init_readiness,
+        init_phase_count,
+        init_completed_phase_count,
+        rx: RuntimeFlowRxTelemetry {
+            buffers_read: bridge.rx.buffers_read,
+            read_timeouts: bridge.rx.read_timeouts,
+            parsed_frames: bridge.rx.parsed_frames,
+            forwarded_payloads,
+            dropped_packets: bridge.rx.dropped_packets,
+        },
+        tx: RuntimeFlowTxTelemetry {
+            datagrams_received: bridge.datagrams_received,
+            submitted_frames: bridge.submit_counters.submitted,
+            failed_submissions: bridge.submit_counters.failed,
+            dropped_datagrams: bridge.bridge_counters.dropped,
+            bytes_written: bridge.submit_counters.bytes_written,
+        },
+        counters: bridge.counters,
+        result: bridge.result,
+        error: bridge.error,
+        notes: vec![
+            "production-shaped runtime telemetry adapted from the runtime-backed bridge flow",
+            "long-distance RF validation remains a separate receiver-backed profile gate",
+        ],
+    }
+}
+
 fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let selector = args.tx.adapter.selector();
     let (channel, result, error) = resolve_report_channel(args.tx.channel, args.tx.bandwidth);
@@ -25863,25 +26118,20 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     report.bulk_in_endpoint_hex = Some(format_value(bulk_in, 2));
     report.bulk_out_endpoint = Some(bulk_out);
     report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
-    let mut pre_counters = diagnostic_counters_from_runtime(session.counters);
+    let mut pre_counters;
 
-    let registers = Rtl8812auRegisterAccess::new(&session.transport)
-        .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
     match run_bridge_tx_bench_same_session_init(
-        &registers,
+        &mut session,
         &init_bridge_args,
         channel,
-        report
-            .endpoints
-            .as_ref()
-            .expect("bridge run endpoints are present after USB claim"),
         &init_assets,
-        &mut pre_counters,
     ) {
         Ok(init_report) => {
+            pre_counters = diagnostic_counters_from_runtime(session.counters);
             report.same_session_init = Some(init_report);
         }
         Err((init_report, error)) => {
+            pre_counters = diagnostic_counters_from_runtime(session.counters);
             report.same_session_init = Some(init_report);
             report.counters = pre_counters;
             return bridge_run_failure(
@@ -26553,108 +26803,21 @@ fn load_bridge_tx_bench_init_assets(
     }))
 }
 
-fn run_bridge_tx_bench_firmware_phase<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    firmware_args: &FirmwareSmokeArgs,
-    firmware_payload: FirmwarePayload<'_>,
-    counters: &mut DiagnosticCounters,
-    phase_summaries: &mut Vec<InitLivePhaseSummary>,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut firmware_steps = Vec::new();
-    let mut firmware_stats = FirmwareRunStats {
-        firmware_payload_offset: Some(firmware_payload.offset),
-        firmware_payload_len: Some(firmware_payload.bytes.len()),
-        firmware_signature: firmware_payload.signature,
-        ..FirmwareRunStats::default()
-    };
-    let before = *counters;
-    if let Err(error) = run_firmware_sequence(
-        registers,
-        firmware_args,
-        firmware_payload.bytes,
-        counters,
-        &mut firmware_steps,
-        &mut firmware_stats,
-    ) {
-        push_init_live_phase(
-            phase_summaries,
-            "firmware",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} steps", error.message, firmware_steps.len()),
-            before,
-            *counters,
-        );
-        return Err(error);
-    }
-    push_init_live_phase(
-        phase_summaries,
-        "firmware",
-        DiagnosticPhaseStatus::Completed,
-        format!(
-            "downloaded {} payload bytes in {} control writes",
-            firmware_payload.bytes.len(),
-            firmware_stats.firmware_control_writes
-        ),
-        before,
-        *counters,
-    );
-    Ok(())
-}
-
-fn run_bridge_tx_bench_llt_phase<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    llt_args: &LltSmokeArgs,
-    counters: &mut DiagnosticCounters,
-    phase_summaries: &mut Vec<InitLivePhaseSummary>,
-    llt_stats: &mut LltRunStats,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut llt_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_llt_sequence(registers, llt_args, counters, &mut llt_steps, llt_stats) {
-        push_init_live_phase(
-            phase_summaries,
-            "llt",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} steps", error.message, llt_steps.len()),
-            before,
-            *counters,
-        );
-        return Err(error);
-    }
-    push_init_live_phase(
-        phase_summaries,
-        "llt",
-        DiagnosticPhaseStatus::Completed,
-        format!("wrote {} LLT entries", llt_stats.entries_written),
-        before,
-        *counters,
-    );
-    Ok(())
-}
-
 fn run_bridge_tx_bench_same_session_init<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
+    session: &mut RuntimeRadioSession<T>,
     args: &BridgeTxBenchArgs,
     channel: Channel,
-    endpoints: &UsbEndpoints,
     assets: &BridgeTxBenchInitAssets,
-    counters: &mut DiagnosticCounters,
 ) -> std::result::Result<
     BridgeTxBenchSameSessionInitReport,
     (BridgeTxBenchSameSessionInitReport, DiagnosticErrorReport),
 >
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+    for<'a> &'a T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
     let firmware_payload = assets.firmware_image.realtek_download_payload();
     let firmware_payload_len = firmware_payload.bytes.len();
-    let mut phase_summaries = Vec::new();
     let mut llt_stats = LltRunStats::default();
     let mut queue_layout = None;
     let mut bb_stats = BbSmokeStats::default();
@@ -26704,660 +26867,482 @@ where
         i_understand_this_writes_registers: true,
     };
 
-    let mut power_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_power_on_sequence(registers, &power_args, counters, &mut power_steps) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "power_on",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} steps", error.message, power_steps.len()),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "power_on",
-        DiagnosticPhaseStatus::Completed,
-        format!("completed {} power-on/RF-reset steps", power_steps.len()),
-        before,
-        *counters,
-    );
-
     let init_order = if args.linux_init_order {
         Rtl8812auInitOrder::Linux
     } else {
         Rtl8812auInitOrder::Default
     };
-    for phase in wfb_radio_runtime::rtl8812au_llt_firmware_sequence(init_order) {
-        let result = match phase {
-            Rtl8812auInitPhase::Firmware => run_bridge_tx_bench_firmware_phase(
-                registers,
-                &firmware_args,
-                firmware_payload,
-                counters,
-                &mut phase_summaries,
-            ),
-            Rtl8812auInitPhase::Llt => run_bridge_tx_bench_llt_phase(
-                registers,
-                &llt_args,
-                counters,
-                &mut phase_summaries,
-                &mut llt_stats,
-            ),
-            other => unreachable!("unexpected early init phase {}", other.id()),
-        };
-        if let Err(error) = result {
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    }
-
-    let before = *counters;
-    let mac_table_writes = match run_mac_table_plan(registers, counters, &assets.mac_plan) {
-        Ok(writes) => writes,
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "mac_table",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    };
-    push_init_live_phase(
-        &mut phase_summaries,
-        "mac_table",
-        DiagnosticPhaseStatus::Completed,
-        format!("applied {mac_table_writes} generated MAC register writes"),
-        before,
-        *counters,
-    );
-
-    let layout = match queue_layout_from_endpoints(endpoints) {
-        Ok(layout) => layout,
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "queue_dma",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                *counters,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    };
-    queue_layout = Some(layout);
-    let mut queue_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_queue_dma_sequence(registers, &layout, counters, &mut queue_steps) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "queue_dma",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} steps", error.message, queue_steps.len()),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "queue_dma",
-        DiagnosticPhaseStatus::Completed,
-        format!(
-            "programmed queue/DMA layout for {} bulk OUT endpoints",
-            layout.bulk_out_endpoint_count
-        ),
-        before,
-        *counters,
-    );
-
-    let mut mac_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_mac_sequence(registers, counters, &mut mac_steps) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "mac",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} steps", error.message, mac_steps.len()),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "mac",
-        DiagnosticPhaseStatus::Completed,
-        format!("completed {} MAC/WMAC setup steps", mac_steps.len()),
-        before,
-        *counters,
-    );
-
-    let before = *counters;
-    match program_efuse_macid(registers, counters) {
-        Ok(Some(report)) => push_init_live_phase(
-            &mut phase_summaries,
-            "mac_addr",
-            DiagnosticPhaseStatus::Completed,
-            format!(
-                "programmed REG_MACID from EFUSE MAC {} (was {})",
-                report.written, report.before
-            ),
-            before,
-            *counters,
-        ),
-        Ok(None) => push_init_live_phase(
-            &mut phase_summaries,
-            "mac_addr",
-            DiagnosticPhaseStatus::Completed,
-            "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged",
-            before,
-            *counters,
-        ),
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "mac_addr",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    }
-
-    let mut bb_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_bb_sequence(
-        registers,
-        &bb_args,
-        &assets.phy_plan,
-        &assets.agc_plan,
-        counters,
-        &mut bb_steps,
-        &mut bb_stats,
-    ) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "bb",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} setup steps", error.message, bb_steps.len()),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "bb",
-        DiagnosticPhaseStatus::Completed,
-        format!(
-            "applied {} PHY writes, {} AGC writes, and {} delays",
-            bb_stats.phy_writes_applied, bb_stats.agc_writes_applied, bb_stats.delays_applied
-        ),
-        before,
-        *counters,
-    );
-
-    let mut rf_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_rf_sequence(
-        registers,
-        &assets.radioa_plan,
-        &assets.radiob_plan,
-        counters,
-        &mut rf_steps,
-        &mut rf_stats,
-    ) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "rf",
-            DiagnosticPhaseStatus::Blocked,
-            format!("{} after {} setup steps", error.message, rf_steps.len()),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "rf",
-        DiagnosticPhaseStatus::Completed,
-        format!(
-            "applied {} radioA writes, {} radioB writes, and {} delays",
-            rf_stats.radioa_writes_applied, rf_stats.radiob_writes_applied, rf_stats.delays_applied
-        ),
-        before,
-        *counters,
-    );
-
-    let before = *counters;
-    match rf_calibration_probe(
-        registers,
-        "before_channel",
-        "read RF/RFE/IQK/LCK-related state after static BB/RF table load and before channel-specific runtime writes",
-        RfQualityCalibrationMode::Unknown,
+    let runtime_config = RuntimeSameSessionInitConfig {
+        init_order,
         channel,
-        args.bandwidth,
-        false,
-        counters,
-    ) {
-        Ok(probe) => {
-            calibration_state.push(probe);
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_before_channel",
-                DiagnosticPhaseStatus::Completed,
-                "sampled RF calibration state before channel setup",
-                before,
-                *counters,
-            );
-        }
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_before_channel",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    }
-
-    let mut channel_steps = Vec::new();
-    let before = *counters;
-    if let Err(error) = run_channel_sequence(
-        registers,
-        channel,
-        args.bandwidth,
-        args.rfe_type,
-        &assets.radioa_plan,
-        &assets.radiob_plan,
-        counters,
-        &mut channel_steps,
-    ) {
-        push_init_live_phase(
-            &mut phase_summaries,
-            "channel",
-            DiagnosticPhaseStatus::Blocked,
-            format!(
-                "{} after {} channel steps",
-                error.message,
-                channel_steps.len()
-            ),
-            before,
-            *counters,
-        );
-        return Err((
-            bridge_tx_bench_same_session_init_report(
-                args,
-                channel,
-                assets,
-                phase_summaries,
-                firmware_payload_len,
-                &llt_stats,
-                queue_layout,
-                &bb_stats,
-                &rf_stats,
-                calibration_state.clone(),
-                *counters,
-                DiagnosticResult::Fail,
-            ),
-            error,
-        ));
-    }
-    push_init_live_phase(
-        &mut phase_summaries,
-        "channel",
-        DiagnosticPhaseStatus::Completed,
-        format!(
-            "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {} steps",
-            channel.number,
-            channel.frequency_mhz,
-            args.bandwidth.mhz(),
-            format_value(args.rfe_type, 2),
-            channel_steps.len()
+        bandwidth: args.bandwidth,
+        rfe_type: args.rfe_type,
+        tx_calibration_profile: RuntimeTxCalibrationProfile::from(
+            args.tx_calibration.tx_calibration_profile,
         ),
-        before,
-        *counters,
+        live_write_authorized: args.i_understand_this_writes_registers,
+        captured_tail_applied: should_apply_captured_tx_bringup_tail(channel, args.bandwidth),
+    };
+
+    let runtime_result = wfb_radio_runtime::run_rtl8812au_same_session_init(
+        session,
+        runtime_config,
+        |session, phase| {
+            let registers = Rtl8812auRegisterAccess::new(&session.transport)
+                .with_timeout(Duration::from_millis(args.init_timeout_ms));
+            let mut counters = diagnostic_counters_from_runtime(session.counters);
+            let before = counters;
+
+            let phase_result = match phase {
+                Rtl8812auInitPhase::PowerOn => {
+                    let mut power_steps = Vec::new();
+                    match run_power_on_sequence(
+                        &registers,
+                        &power_args,
+                        &mut counters,
+                        &mut power_steps,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!("completed {} power-on/RF-reset steps", power_steps.len()),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} steps", error.message, power_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Firmware => {
+                    let mut firmware_steps = Vec::new();
+                    let mut firmware_stats = FirmwareRunStats {
+                        firmware_payload_offset: Some(firmware_payload.offset),
+                        firmware_payload_len: Some(firmware_payload.bytes.len()),
+                        firmware_signature: firmware_payload.signature,
+                        ..FirmwareRunStats::default()
+                    };
+                    match run_firmware_sequence(
+                        &registers,
+                        &firmware_args,
+                        firmware_payload.bytes,
+                        &mut counters,
+                        &mut firmware_steps,
+                        &mut firmware_stats,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "downloaded {} payload bytes in {} control writes",
+                                firmware_payload.bytes.len(),
+                                firmware_stats.firmware_control_writes
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} steps", error.message, firmware_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Llt => {
+                    let mut llt_steps = Vec::new();
+                    match run_llt_sequence(
+                        &registers,
+                        &llt_args,
+                        &mut counters,
+                        &mut llt_steps,
+                        &mut llt_stats,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed_with_writes(
+                            phase,
+                            format!("wrote {} LLT entries", llt_stats.entries_written),
+                            usize::try_from(llt_stats.entries_written).unwrap_or(usize::MAX),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} steps", error.message, llt_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::MacTable => {
+                    match run_mac_table_plan(&registers, &mut counters, &assets.mac_plan) {
+                        Ok(writes) => Ok(runtime_same_session_phase_completed_with_writes(
+                            phase,
+                            format!("applied {writes} generated MAC register writes"),
+                            writes,
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::QueueDma => {
+                    let layout = match queue_layout_from_endpoints(&session.endpoints) {
+                        Ok(layout) => layout,
+                        Err(error) => {
+                            return Err(runtime_same_session_phase_failure(
+                                phase,
+                                error.message.clone(),
+                                before,
+                                counters,
+                                &error,
+                            ));
+                        }
+                    };
+                    queue_layout = Some(layout);
+                    let mut queue_steps = Vec::new();
+                    match run_queue_dma_sequence(
+                        &registers,
+                        &layout,
+                        &mut counters,
+                        &mut queue_steps,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "programmed queue/DMA layout for {} bulk OUT endpoints",
+                                layout.bulk_out_endpoint_count
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} steps", error.message, queue_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Mac => {
+                    let mut mac_steps = Vec::new();
+                    match run_mac_sequence(&registers, &mut counters, &mut mac_steps) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!("completed {} MAC/WMAC setup steps", mac_steps.len()),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} steps", error.message, mac_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::MacAddr => {
+                    match program_efuse_macid(&registers, &mut counters) {
+                        Ok(Some(report)) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "programmed REG_MACID from EFUSE MAC {} (was {})",
+                                report.written, report.before
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Ok(None) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged",
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Bb => {
+                    let mut bb_steps = Vec::new();
+                    match run_bb_sequence(
+                        &registers,
+                        &bb_args,
+                        &assets.phy_plan,
+                        &assets.agc_plan,
+                        &mut counters,
+                        &mut bb_steps,
+                        &mut bb_stats,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "applied {} PHY writes, {} AGC writes, and {} delays",
+                                bb_stats.phy_writes_applied,
+                                bb_stats.agc_writes_applied,
+                                bb_stats.delays_applied
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} setup steps", error.message, bb_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Rf => {
+                    let mut rf_steps = Vec::new();
+                    match run_rf_sequence(
+                        &registers,
+                        &assets.radioa_plan,
+                        &assets.radiob_plan,
+                        &mut counters,
+                        &mut rf_steps,
+                        &mut rf_stats,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "applied {} radioA writes, {} radioB writes, and {} delays",
+                                rf_stats.radioa_writes_applied,
+                                rf_stats.radiob_writes_applied,
+                                rf_stats.delays_applied
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!("{} after {} setup steps", error.message, rf_steps.len()),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::RfCalibrationBeforeChannel => {
+                    match rf_calibration_probe(
+                        &registers,
+                        "before_channel",
+                        "read RF/RFE/IQK/LCK-related state after static BB/RF table load and before channel-specific runtime writes",
+                        RfQualityCalibrationMode::Unknown,
+                        channel,
+                        args.bandwidth,
+                        false,
+                        &mut counters,
+                    ) {
+                        Ok(probe) => {
+                            calibration_state.push(probe);
+                            Ok(runtime_same_session_phase_completed(
+                                phase,
+                                "sampled RF calibration state before channel setup",
+                                before,
+                                counters,
+                            ))
+                        }
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::Channel => {
+                    let mut channel_steps = Vec::new();
+                    match run_channel_sequence(
+                        &registers,
+                        channel,
+                        args.bandwidth,
+                        args.rfe_type,
+                        &assets.radioa_plan,
+                        &assets.radiob_plan,
+                        &mut counters,
+                        &mut channel_steps,
+                    ) {
+                        Ok(()) => Ok(runtime_same_session_phase_completed(
+                            phase,
+                            format!(
+                                "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {} steps",
+                                channel.number,
+                                channel.frequency_mhz,
+                                args.bandwidth.mhz(),
+                                format_value(args.rfe_type, 2),
+                                channel_steps.len()
+                            ),
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            format!(
+                                "{} after {} channel steps",
+                                error.message,
+                                channel_steps.len()
+                            ),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::RfCalibrationAfterChannel => {
+                    match rf_calibration_probe(
+                        &registers,
+                        "after_channel",
+                        "read RF/RFE/IQK/LCK-related state after channel and captured runtime TX bring-up tail",
+                        tx_pre_calibration_mode(
+                            true,
+                            channel,
+                            args.bandwidth,
+                            TxCalibrationProfileArg::CurrentDefault,
+                        ),
+                        channel,
+                        args.bandwidth,
+                        true,
+                        &mut counters,
+                    ) {
+                        Ok(probe) => {
+                            calibration_state.push(probe);
+                            Ok(runtime_same_session_phase_completed(
+                                phase,
+                                "sampled RF calibration state after channel setup",
+                                before,
+                                counters,
+                            ))
+                        }
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::TxSchedulerTail => {
+                    match run_tx_scheduler_tail_sequence(&registers, &mut counters) {
+                        Ok(steps) => Ok(runtime_same_session_phase_completed_with_writes(
+                            phase,
+                            format!("applied {steps} late Linux USB TX scheduler writes"),
+                            steps,
+                            before,
+                            counters,
+                        )),
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+                Rtl8812auInitPhase::RfCalibrationBeforeTx => {
+                    match rf_calibration_probe(
+                        &registers,
+                        "before_tx",
+                        "read final init-time RF calibration state after TX scheduler tail and before command-level TX overrides",
+                        tx_pre_calibration_mode(
+                            true,
+                            channel,
+                            args.bandwidth,
+                            TxCalibrationProfileArg::CurrentDefault,
+                        ),
+                        channel,
+                        args.bandwidth,
+                        true,
+                        &mut counters,
+                    ) {
+                        Ok(probe) => {
+                            calibration_state.push(probe);
+                            Ok(runtime_same_session_phase_completed(
+                                phase,
+                                "sampled RF calibration state before command-level TX operations",
+                                before,
+                                counters,
+                            ))
+                        }
+                        Err(error) => Err(runtime_same_session_phase_failure(
+                            phase,
+                            error.message.clone(),
+                            before,
+                            counters,
+                            &error,
+                        )),
+                    }
+                }
+            };
+
+            session.counters = runtime_radio_counters_from_diagnostic(counters);
+            phase_result
+        },
     );
 
-    let before = *counters;
-    match rf_calibration_probe(
-        registers,
-        "after_channel",
-        "read RF/RFE/IQK/LCK-related state after channel and captured runtime TX bring-up tail",
-        tx_pre_calibration_mode(
-            true,
+    match runtime_result {
+        Ok(result) => Ok(bridge_tx_bench_same_session_init_report(
+            args,
             channel,
-            args.bandwidth,
-            TxCalibrationProfileArg::CurrentDefault,
-        ),
-        channel,
-        args.bandwidth,
-        true,
-        counters,
-    ) {
-        Ok(probe) => {
-            calibration_state.push(probe);
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_after_channel",
-                DiagnosticPhaseStatus::Completed,
-                "sampled RF calibration state after channel setup",
-                before,
-                *counters,
-            );
-        }
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_after_channel",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
+            assets,
+            result
+                .phase_summaries
+                .into_iter()
+                .map(init_live_phase_summary_from_runtime)
+                .collect(),
+            firmware_payload_len,
+            &llt_stats,
+            queue_layout,
+            &bb_stats,
+            &rf_stats,
+            calibration_state.clone(),
+            diagnostic_counters_from_runtime(result.counters),
+            DiagnosticResult::Pass,
+        )),
+        Err(RuntimeSameSessionInitFailure { result, error }) => Err((
+            bridge_tx_bench_same_session_init_report(
+                args,
+                channel,
+                assets,
+                result
+                    .phase_summaries
+                    .into_iter()
+                    .map(init_live_phase_summary_from_runtime)
+                    .collect(),
+                firmware_payload_len,
+                &llt_stats,
+                queue_layout,
+                &bb_stats,
+                &rf_stats,
+                calibration_state.clone(),
+                diagnostic_counters_from_runtime(result.counters),
+                match result.readiness {
+                    RuntimeSameSessionInitReadiness::Ready => DiagnosticResult::Pass,
+                    RuntimeSameSessionInitReadiness::Failed => DiagnosticResult::Fail,
+                },
+            ),
+            runtime_radio_error(error),
+        )),
     }
-
-    let before = *counters;
-    let tx_tail_steps = match run_tx_scheduler_tail_sequence(registers, counters) {
-        Ok(steps) => steps,
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "tx_scheduler_tail",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    };
-    push_init_live_phase(
-        &mut phase_summaries,
-        "tx_scheduler_tail",
-        DiagnosticPhaseStatus::Completed,
-        format!("applied {tx_tail_steps} late Linux USB TX scheduler writes"),
-        before,
-        *counters,
-    );
-
-    let before = *counters;
-    match rf_calibration_probe(
-        registers,
-        "before_tx",
-        "read final init-time RF calibration state after TX scheduler tail and before command-level TX overrides",
-        tx_pre_calibration_mode(
-            true,
-            channel,
-            args.bandwidth,
-            TxCalibrationProfileArg::CurrentDefault,
-        ),
-        channel,
-        args.bandwidth,
-        true,
-        counters,
-    ) {
-        Ok(probe) => {
-            calibration_state.push(probe);
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_before_tx",
-                DiagnosticPhaseStatus::Completed,
-                "sampled RF calibration state before command-level TX operations",
-                before,
-                *counters,
-            );
-        }
-        Err(error) => {
-            push_init_live_phase(
-                &mut phase_summaries,
-                "rf_calibration_before_tx",
-                DiagnosticPhaseStatus::Blocked,
-                error.message.clone(),
-                before,
-                *counters,
-            );
-            return Err((
-                bridge_tx_bench_same_session_init_report(
-                    args,
-                    channel,
-                    assets,
-                    phase_summaries,
-                    firmware_payload_len,
-                    &llt_stats,
-                    queue_layout,
-                    &bb_stats,
-                    &rf_stats,
-                    calibration_state.clone(),
-                    *counters,
-                    DiagnosticResult::Fail,
-                ),
-                error,
-            ));
-        }
-    }
-
-    Ok(bridge_tx_bench_same_session_init_report(
-        args,
-        channel,
-        assets,
-        phase_summaries,
-        firmware_payload_len,
-        &llt_stats,
-        queue_layout,
-        &bb_stats,
-        &rf_stats,
-        calibration_state.clone(),
-        *counters,
-        DiagnosticResult::Pass,
-    ))
 }
 
 fn run_tx_scheduler_tail_sequence<T>(
@@ -29018,23 +29003,13 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
     let mut pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
 
     if let Some(init_assets) = init_assets.as_ref() {
-        let registers = Rtl8812auRegisterAccess::new(&session.transport)
-            .with_timeout(Duration::from_millis(args.init_timeout_ms));
-        match run_bridge_tx_bench_same_session_init(
-            &registers,
-            &args,
-            channel,
-            report
-                .endpoints
-                .as_ref()
-                .expect("bridge TX benchmark endpoints are present after USB claim"),
-            init_assets,
-            &mut pre_tx_counters,
-        ) {
+        match run_bridge_tx_bench_same_session_init(&mut session, &args, channel, init_assets) {
             Ok(init_report) => {
+                pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
                 report.same_session_init = Some(init_report);
             }
             Err((init_report, error)) => {
+                pre_tx_counters = diagnostic_counters_from_runtime(session.counters);
                 report.same_session_init = Some(init_report);
                 report.counters = pre_tx_counters;
                 return bridge_tx_bench_failure(
@@ -29828,14 +29803,15 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
         }
     };
 
-    let (transport, adapter, endpoints, mut counters, claim_detail) = if args.macos_usbhost.enabled
-    {
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
         match open_macos_usbhost_transport(&args.macos_usbhost, report.selector) {
             Ok(open) => (
-                open.transport,
-                open.adapter,
-                open.endpoints,
-                open.counters,
+                RuntimeRadioSession::new(
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    runtime_radio_counters_from_diagnostic(open.counters),
+                ),
                 "opened retained macOS IOUSBHost session for standalone IQK diagnostic",
             ),
             Err(error) => {
@@ -29850,10 +29826,12 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
     } else {
         match open_libusb_transport(report.selector) {
             Ok(open) => (
-                open.transport,
-                open.adapter,
-                open.endpoints,
-                open.counters,
+                RuntimeRadioSession::new(
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    runtime_radio_counters_from_diagnostic(open.counters),
+                ),
                 "claimed adapter for standalone IQK diagnostic",
             ),
             Err(error) => {
@@ -29867,26 +29845,19 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
         }
     };
 
-    report.adapter = Some(adapter);
-    report.endpoints = Some(endpoints);
+    report.adapter = Some(session.adapter.clone());
+    report.endpoints = Some(session.endpoints.clone());
     report.phases.push(DiagnosticPhase {
         id: "usb_claim",
         status: DiagnosticPhaseStatus::Completed,
         detail: claim_detail,
     });
 
-    let registers = Rtl8812auRegisterAccess::new(&transport)
-        .with_timeout(Duration::from_millis(args.timeout_ms));
     match run_bridge_tx_bench_same_session_init(
-        &registers,
+        &mut session,
         &init_bridge_args,
         channel,
-        report
-            .endpoints
-            .as_ref()
-            .expect("standalone IQK diagnostic endpoints are present after USB claim"),
         &init_assets,
-        &mut counters,
     ) {
         Ok(init_report) => {
             report.init = Some(init_report);
@@ -29898,7 +29869,7 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
         }
         Err((init_report, error)) => {
             report.init = Some(init_report);
-            report.counters = counters;
+            report.counters = diagnostic_counters_from_runtime(session.counters);
             return rtl8812a_iqk_diagnostic_failure(
                 report,
                 "init",
@@ -29908,6 +29879,9 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
         }
     }
 
+    let mut counters = diagnostic_counters_from_runtime(session.counters);
+    let registers = Rtl8812auRegisterAccess::new(&session.transport)
+        .with_timeout(Duration::from_millis(args.timeout_ms));
     match run_rtl8812a_iqk_standalone_diagnostic(&registers, &mut counters) {
         Ok(iqk) => {
             let cleanup_ok = iqk.cleanup_status == "restored";
@@ -36574,6 +36548,52 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
     }
 }
 
+fn print_runtime_flow_human(report: &RuntimeFlowReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    if let Some(adapter) = &report.adapter {
+        println!(
+            "Adapter: {} {} bus={} address={} speed={}",
+            adapter.vid_hex, adapter.pid_hex, adapter.bus, adapter.address, adapter.speed
+        );
+    }
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} {} MHz {:?} {:?}",
+            channel.number, channel.frequency_mhz, channel.band, report.bandwidth
+        );
+    }
+    println!(
+        "Init: readiness={} phases={}/{} calibration={:?} class={:?} evidence={} receiver_validation_required={}",
+        report.init_readiness,
+        report.init_completed_phase_count,
+        report.init_phase_count,
+        report.calibration_profile,
+        report.calibration_class,
+        report.calibration_evidence_source,
+        report.receiver_backed_validation_required
+    );
+    println!(
+        "RX: buffers={} timeouts={} frames={} forwarded={} dropped={}",
+        report.rx.buffers_read,
+        report.rx.read_timeouts,
+        report.rx.parsed_frames,
+        report.rx.forwarded_payloads,
+        report.rx.dropped_packets
+    );
+    println!(
+        "TX: datagrams={} submitted={} failed={} dropped={} bytes={}",
+        report.tx.datagrams_received,
+        report.tx.submitted_frames,
+        report.tx.failed_submissions,
+        report.tx.dropped_datagrams,
+        report.tx.bytes_written
+    );
+    println!("Stop reason: {}", report.stop_reason);
+    if let Some(error) = &report.error {
+        println!("Error: {} - {}", error.code, error.message);
+    }
+}
+
 fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -41661,7 +41681,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
     }
 
     #[test]
-    fn runtime_iqk_profile_parses_and_requires_write_authorization() {
+    fn calibration_profiles_parse_and_require_live_write_authorization() {
         let cli = Cli::try_parse_from([
             "wfb-radio-diag",
             "bridge-tx-bench",
@@ -41694,11 +41714,17 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert!(!tx_calibration_profile_requires_write_authorization(
             TxCalibrationProfileArg::CurrentDefault
         ));
-        assert!(!tx_calibration_profile_requires_write_authorization(
+        assert!(tx_calibration_profile_requires_write_authorization(
+            TxCalibrationProfileArg::LinuxParityCh36Ht20
+        ));
+        assert!(tx_calibration_profile_requires_write_authorization(
             TxCalibrationProfileArg::Rtl8812aLck
         ));
         assert!(!tx_calibration_profile_requires_write_authorization(
             TxCalibrationProfileArg::Rtl8812aIqkProbe
+        ));
+        assert!(tx_calibration_profile_requires_write_authorization(
+            TxCalibrationProfileArg::Rtl8812aRuntimeIqk
         ));
 
         let mut args = bridge_tx_bench_args(true);
@@ -41741,6 +41767,33 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
 
         for (diag, runtime) in cases {
             assert_eq!(RuntimeTxCalibrationProfile::from(diag), runtime);
+        }
+    }
+
+    #[test]
+    fn runtime_flow_cli_exposes_runtime_shaped_command() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "runtime-flow",
+            "--channel",
+            "36",
+            "--duration-ms",
+            "1",
+            "--init-before-tx",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse runtime-flow");
+
+        match cli.command {
+            Command::RuntimeFlow(args) => {
+                assert_eq!(args.bridge.tx.channel, 36);
+                assert_eq!(args.bridge.duration_ms, 1);
+                assert!(args.bridge.tx.init_before_tx);
+                assert!(args.bridge.tx.i_understand_this_transmits);
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 
