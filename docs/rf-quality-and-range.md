@@ -48,7 +48,9 @@ The script runs from the local checkout, starts the hardware-Mac UDP relay and
 hardware Mac jump host, collects artifacts into a timestamped local `/tmp`
 directory, restores the Linux WFB service, and generates an `rf-quality-report`
 when the Mac report, EFUSE report, Linux baseline, and receiver counter are
-available.
+available. The bridge writes a ready marker after init/calibration and before
+traffic starts; the default automation no longer sleeps after that marker unless
+`BRIDGE_START_DELAY` is explicitly set.
 
 Inspect the command plan without claiming USB or transmitting RF:
 

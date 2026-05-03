@@ -37,13 +37,13 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeMacAddressExecution,
-    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
-    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
-    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
-    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
-    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
-    TxCalibrationClass as RuntimeTxCalibrationClass,
+    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry,
+    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
+    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
+    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
+    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
 
@@ -3413,6 +3413,7 @@ struct BridgeRunReport {
     bandwidth: Bandwidth,
     bind_addr: String,
     bind_addrs: Vec<String>,
+    ready_file: Option<PathBuf>,
     tx_bind_reports: Vec<BridgeRunTxBindReport>,
     duration_ms: u64,
     rx_timeout_ms: u64,
@@ -3459,6 +3460,7 @@ struct RuntimeFlowReport {
     channel: Option<Channel>,
     bandwidth: Bandwidth,
     duration_ms: u64,
+    ready_file: Option<PathBuf>,
     stop_reason: &'static str,
     bulk_in_endpoint: Option<u8>,
     bulk_in_endpoint_hex: Option<String>,
@@ -3477,24 +3479,6 @@ struct RuntimeFlowReport {
     result: DiagnosticResult,
     error: Option<DiagnosticErrorReport>,
     notes: Vec<&'static str>,
-}
-
-#[derive(Debug, Serialize)]
-struct RuntimeFlowRxTelemetry {
-    buffers_read: u64,
-    read_timeouts: u64,
-    parsed_frames: u64,
-    forwarded_payloads: u64,
-    dropped_packets: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct RuntimeFlowTxTelemetry {
-    datagrams_received: u64,
-    submitted_frames: u64,
-    failed_submissions: u64,
-    dropped_datagrams: u64,
-    bytes_written: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26036,6 +26020,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
         channel: bridge.channel,
         bandwidth: bridge.bandwidth,
         duration_ms: bridge.duration_ms,
+        ready_file: bridge.ready_file,
         stop_reason: bridge.stop_reason,
         bulk_in_endpoint: bridge.bulk_in_endpoint,
         bulk_in_endpoint_hex: bridge.bulk_in_endpoint_hex,
@@ -26474,6 +26459,15 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_pre(&registers, &mut tx_status);
     }
+    if let Err(error) = bridge_run_write_ready_file(&args, &report) {
+        report.counters = pre_counters;
+        return bridge_run_failure(
+            report,
+            "bridge_ready",
+            "bridge run failed to write the ready marker before RX/TX loops",
+            error,
+        );
+    }
     let cpu_started = process_cpu_usage();
     let started = Instant::now();
     let deadline = if args.duration_ms == 0 {
@@ -26790,6 +26784,7 @@ fn bridge_run_base_report(
             .iter()
             .map(|addr| addr.to_string())
             .collect(),
+        ready_file: args.tx.ready_file.clone(),
         tx_bind_reports: bridge_run_bind_addrs(args)
             .into_iter()
             .map(|addr| BridgeRunTxBindReport {
@@ -26834,6 +26829,42 @@ fn bridge_run_base_report(
         error: None,
         notes: Vec::new(),
     }
+}
+
+fn bridge_run_write_ready_file(
+    args: &BridgeRunArgs,
+    report: &BridgeRunReport,
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    let Some(path) = args.tx.ready_file.as_ref() else {
+        return Ok(());
+    };
+    let marker = serde_json::json!({
+        "source": "bridge-run",
+        "ready_at_unix_ms": started_at_unix_ms(),
+        "bind_addr": report.bind_addr,
+        "bind_addrs": report.bind_addrs,
+        "channel": report.channel.as_ref().map(|channel| channel.number),
+        "channel_frequency_mhz": report.channel.as_ref().map(|channel| channel.frequency_mhz),
+        "bandwidth_mhz": args.tx.bandwidth.mhz(),
+        "duration_ms": args.duration_ms,
+        "max_datagrams": args.tx.max_datagrams,
+        "rx_timeout_ms": args.rx_timeout_ms,
+        "tx_burst_limit": args.tx_burst_limit,
+        "init_before_tx": args.tx.init_before_tx,
+        "same_session_init_result": report.same_session_init.as_ref().map(|init| init.result.as_str()),
+        "monitor_opmode_applied": report.monitor_opmode.is_some(),
+        "tx_power_control_applied": report.tx_power_control.is_some(),
+        "tx_calibration_profile_applied": report.tx_calibration_profile.is_some(),
+    });
+    let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| DiagnosticErrorReport {
+        code: "bridge_ready_marker_serialize_failed",
+        message: error.to_string(),
+    })?;
+    bytes.push(b'\n');
+    fs::write(path, bytes).map_err(|error| DiagnosticErrorReport {
+        code: "bridge_ready_marker_write_failed",
+        message: format!("{}: {error}", path.display()),
+    })
 }
 
 fn bridge_run_update_counters(
@@ -36639,6 +36670,9 @@ fn print_bridge_run_human(report: &BridgeRunReport) {
         report.rx.buffers_read,
         report.rx.parsed_frames
     );
+    if let Some(path) = &report.ready_file {
+        println!("Ready file: {}", path.display());
+    }
     for bind in &report.tx_bind_reports {
         println!(
             "TX bind {}: datagrams={} bytes={} last_peer={}",
@@ -36765,6 +36799,9 @@ fn print_runtime_flow_human(report: &RuntimeFlowReport) {
         report.tx.bytes_written
     );
     println!("Stop reason: {}", report.stop_reason);
+    if let Some(path) = &report.ready_file {
+        println!("Ready file: {}", path.display());
+    }
     if let Some(error) = &report.error {
         println!("Error: {} - {}", error.code, error.message);
     }
@@ -40981,6 +41018,44 @@ u8 array_mp_8812a_fw_nic[] = {
     }
 
     #[test]
+    fn bridge_run_ready_file_records_pre_loop_marker() {
+        let stamp = started_at_unix_ms();
+        let ready_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-bridge-run-ready-{}-{stamp}.json",
+            std::process::id()
+        ));
+        let mut args = bridge_run_args();
+        args.tx.ready_file = Some(ready_path.clone());
+        args.tx.init_before_tx = true;
+        args.tx.max_datagrams = 3000;
+        let channel = Channel::from_number(36).expect("channel 36");
+        let report = bridge_run_base_report(&args, args.tx.adapter.selector(), Some(channel));
+
+        bridge_run_write_ready_file(&args, &report).expect("write ready marker");
+        let marker: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&ready_path).expect("ready marker"))
+                .expect("ready marker json");
+        let _ = fs::remove_file(ready_path);
+
+        assert_eq!(
+            rf_quality_json_string(&marker, &["source"]).as_deref(),
+            Some("bridge-run")
+        );
+        assert_eq!(
+            rf_quality_json_string(&marker, &["bind_addrs", "0"]).as_deref(),
+            Some("127.0.0.1:0")
+        );
+        assert_eq!(rf_quality_json_u64(&marker, &["channel"]), Some(36));
+        assert_eq!(rf_quality_json_u64(&marker, &["bandwidth_mhz"]), Some(20));
+        assert_eq!(rf_quality_json_u64(&marker, &["max_datagrams"]), Some(3000));
+        assert_eq!(
+            rf_quality_json_bool(&marker, &["init_before_tx"]),
+            Some(true)
+        );
+        assert!(rf_quality_json_string(&marker, &["same_session_init_result"]).is_none());
+    }
+
+    #[test]
     fn bridge_tx_listen_rejects_zero_max_datagrams_before_usb() {
         let mut args = bridge_tx_listen_args(true);
         args.max_datagrams = 0;
@@ -42064,6 +42139,8 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             "36",
             "--duration-ms",
             "1",
+            "--ready-file",
+            "/tmp/runtime-flow-ready.json",
             "--init-before-tx",
             "--firmware",
             "/tmp/rtl8812a_fw.bin",
@@ -42075,6 +42152,10 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             Command::RuntimeFlow(args) => {
                 assert_eq!(args.bridge.tx.channel, 36);
                 assert_eq!(args.bridge.duration_ms, 1);
+                assert_eq!(
+                    args.bridge.tx.ready_file.as_deref(),
+                    Some(Path::new("/tmp/runtime-flow-ready.json"))
+                );
                 assert!(args.bridge.tx.init_before_tx);
                 assert!(args.bridge.tx.i_understand_this_transmits);
             }

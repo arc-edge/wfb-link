@@ -349,6 +349,26 @@ pub struct RuntimeRxRead {
     pub counters: RuntimeRadioCounters,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeFlowRxTelemetry {
+    pub buffers_read: u64,
+    pub read_timeouts: u64,
+    pub parsed_frames: u64,
+    pub forwarded_payloads: u64,
+    pub dropped_packets: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeFlowTxTelemetry {
+    pub datagrams_received: u64,
+    pub submitted_frames: u64,
+    pub failed_submissions: u64,
+    pub dropped_datagrams: u64,
+    pub bytes_written: u64,
+}
+
 pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
     pub transport: T,
     pub adapter: UsbDeviceInfo,
@@ -2081,11 +2101,12 @@ mod tests {
 
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeRadioCounters, RuntimeRadioError,
-        RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
-        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
-        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+        RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
+        RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
+        TxCalibrationClass, TxCalibrationProfile,
     };
 
     #[derive(Debug, Default)]
@@ -2313,6 +2334,29 @@ mod tests {
             TxCalibrationProfile::Rtl8812aIqkProbe.before_tx_class(false),
             TxCalibrationClass::Unknown
         );
+    }
+
+    #[test]
+    fn runtime_flow_telemetry_shapes_are_report_neutral() {
+        let rx = RuntimeFlowRxTelemetry {
+            buffers_read: 2,
+            read_timeouts: 1,
+            parsed_frames: 7,
+            forwarded_payloads: 3,
+            dropped_packets: 4,
+        };
+        let tx = RuntimeFlowTxTelemetry {
+            datagrams_received: 5,
+            submitted_frames: 5,
+            failed_submissions: 0,
+            dropped_datagrams: 1,
+            bytes_written: 4096,
+        };
+
+        assert_eq!(rx.forwarded_payloads, 3);
+        assert_eq!(tx.bytes_written, 4096);
+        assert_eq!(RuntimeFlowRxTelemetry::default().buffers_read, 0);
+        assert_eq!(RuntimeFlowTxTelemetry::default().submitted_frames, 0);
     }
 
     #[test]

@@ -85,6 +85,10 @@ The system SHALL run combined WFB bridge RX/TX traffic through the userspace USB
 - **WHEN** `bridge-run` enables both RX and TX
 - **THEN** both directions share one runtime-owned initialized USB radio session rather than opening or initializing the adapter separately per direction
 
+#### Scenario: Bridge run announces readiness
+- **WHEN** `bridge-run` is supplied a ready-marker path
+- **THEN** it writes a JSON marker after same-session init, calibration, and monitor setup and before entering the RX/TX loop
+
 ### Requirement: WFB TX Benchmark Runtime
 The system SHALL submit bounded WFB TX benchmark traffic through the userspace USB radio runtime without requiring a Linux monitor interface.
 

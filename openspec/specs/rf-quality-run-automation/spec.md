@@ -9,7 +9,7 @@ The system SHALL provide a single operator-facing command that orchestrates the 
 
 #### Scenario: Close-range automation run starts
 - **WHEN** the operator invokes the automation command with the required host, channel, payload, and report settings
-- **THEN** the command starts the Mac-side relay and bridge listener, prepares the Linux WFB peer, runs the Linux sender and receiver, and records the produced artifact paths
+- **THEN** the command starts the Mac-side relay and bridge listener, waits for the bridge ready marker, prepares the Linux WFB peer, runs the Linux sender and receiver, and records the produced artifact paths
 
 #### Scenario: Close-range automation run rejects missing settings
 - **WHEN** required host, repository, firmware, key, or network settings are missing
