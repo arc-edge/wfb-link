@@ -25,8 +25,8 @@ use radio_core::{
     validate_ieee80211_frame, Band, Bandwidth, Channel, DeviceSelector, FirmwareImage,
     FirmwarePayload, FrameType, InitDryRunPlan, InitPhaseCount, PcapWriter, PlannedInitTransfer,
     RealtekConditionEnv, RealtekTableActionKind, RealtekTableKind, RealtekTablePlan,
-    Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbBulkTransfer,
-    UsbDeviceInfo, UsbEndpoints, UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
+    Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters, UsbDeviceInfo,
+    UsbEndpoints, UsbTraceComparison, UsbTraceEvent, UsbTraceImport,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -22316,98 +22316,101 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         .map(|assets| assets.firmware_path.clone());
     let init_firmware = init_assets.as_ref().map(|assets| assets.firmware.clone());
     let selector = args.adapter.selector();
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for live RX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return pending_report(PendingReportInput {
-                        command: "rx-scan",
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth: Some(args.bandwidth),
-                        firmware_path: None,
-                        firmware: None,
-                        init_dry_run: None,
-                        init_live: None,
-                        duration_ms: Some(args.duration_ms),
-                        pcap_path: args.pcap,
-                        tx_frame_len: None,
-                        tx_frame_source: None,
-                        tx_dry_run: None,
-                        tx_live: None,
-                        rx_fixture: None,
-                        repeat_tx: None,
-                        counters: DiagnosticCounters::default(),
-                        result: DiagnosticResult::Fail,
-                        phases: vec![DiagnosticPhase {
-                            id: "usb_claim",
-                            status: DiagnosticPhaseStatus::Blocked,
-                            detail: "macOS IOUSBHost retained-session open failed",
-                        }],
-                        error: Some(error),
-                        notes: vec!["live RX stopped before bulk IN reads"],
-                    });
-                }
+                "opened retained macOS IOUSBHost session for live RX",
+            ),
+            Err(error) => {
+                return pending_report(PendingReportInput {
+                    command: "rx-scan",
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth: Some(args.bandwidth),
+                    firmware_path: None,
+                    firmware: None,
+                    init_dry_run: None,
+                    init_live: None,
+                    duration_ms: Some(args.duration_ms),
+                    pcap_path: args.pcap,
+                    tx_frame_len: None,
+                    tx_frame_source: None,
+                    tx_dry_run: None,
+                    tx_live: None,
+                    rx_fixture: None,
+                    repeat_tx: None,
+                    counters: DiagnosticCounters::default(),
+                    result: DiagnosticResult::Fail,
+                    phases: vec![DiagnosticPhase {
+                        id: "usb_claim",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "macOS IOUSBHost retained-session open failed",
+                    }],
+                    error: Some(error),
+                    notes: vec!["live RX stopped before bulk IN reads"],
+                });
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed initialized adapter for live RX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return pending_report(PendingReportInput {
-                        command: "rx-scan",
-                        selector,
-                        adapter: None,
-                        endpoints: None,
-                        channel,
-                        bandwidth: Some(args.bandwidth),
-                        firmware_path: None,
-                        firmware: None,
-                        init_dry_run: None,
-                        init_live: None,
-                        duration_ms: Some(args.duration_ms),
-                        pcap_path: args.pcap,
-                        tx_frame_len: None,
-                        tx_frame_source: None,
-                        tx_dry_run: None,
-                        tx_live: None,
-                        rx_fixture: None,
-                        repeat_tx: None,
-                        counters: DiagnosticCounters::default(),
-                        result: DiagnosticResult::Fail,
-                        phases: vec![DiagnosticPhase {
-                            id: "usb_claim",
-                            status: DiagnosticPhaseStatus::Blocked,
-                            detail: "runtime USB transport open failed",
-                        }],
-                        error: Some(error),
-                        notes: vec!["live RX stopped before bulk IN reads"],
-                    });
-                }
+                "claimed initialized adapter for live RX",
+            ),
+            Err(error) => {
+                return pending_report(PendingReportInput {
+                    command: "rx-scan",
+                    selector,
+                    adapter: None,
+                    endpoints: None,
+                    channel,
+                    bandwidth: Some(args.bandwidth),
+                    firmware_path: None,
+                    firmware: None,
+                    init_dry_run: None,
+                    init_live: None,
+                    duration_ms: Some(args.duration_ms),
+                    pcap_path: args.pcap,
+                    tx_frame_len: None,
+                    tx_frame_source: None,
+                    tx_dry_run: None,
+                    tx_live: None,
+                    rx_fixture: None,
+                    repeat_tx: None,
+                    counters: DiagnosticCounters::default(),
+                    result: DiagnosticResult::Fail,
+                    phases: vec![DiagnosticPhase {
+                        id: "usb_claim",
+                        status: DiagnosticPhaseStatus::Blocked,
+                        detail: "runtime USB transport open failed",
+                    }],
+                    error: Some(error),
+                    notes: vec!["live RX stopped before bulk IN reads"],
+                });
             }
-        };
-    let bulk_in = match endpoints.bulk_in {
-        Some(endpoint) => endpoint,
+        }
+    };
+    match session.selected_bulk_in_endpoint() {
+        Some(_) => {}
         None => {
             return pending_report(PendingReportInput {
                 command: "rx-scan",
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel,
                 bandwidth: Some(args.bandwidth),
                 firmware_path: None,
@@ -22422,7 +22425,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                 tx_live: None,
                 rx_fixture: None,
                 repeat_tx: None,
-                counters: claim_counters,
+                counters: diagnostic_counters_from_runtime(session.counters),
                 result: DiagnosticResult::Fail,
                 phases: vec![DiagnosticPhase {
                     id: "bulk_in_loop",
@@ -22439,18 +22442,18 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     };
 
     let channel = channel.expect("channel resolved before live RX");
-    let mut pre_rx_counters = claim_counters;
+    let mut pre_rx_counters = diagnostic_counters_from_runtime(session.counters);
     let mut init_live = None;
     if let (Some(init_assets), Some(init_bridge_args)) =
         (init_assets.as_ref(), init_bridge_args.as_ref())
     {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match run_bridge_tx_bench_same_session_init(
             &registers,
             init_bridge_args,
             channel,
-            &endpoints,
+            &session.endpoints,
             init_assets,
             &mut pre_rx_counters,
         ) {
@@ -22462,8 +22465,8 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                 return pending_report(PendingReportInput {
                     command: "rx-scan",
                     selector,
-                    adapter: Some(adapter),
-                    endpoints: Some(endpoints),
+                    adapter: Some(session.adapter.clone()),
+                    endpoints: Some(session.endpoints.clone()),
                     channel: Some(channel),
                     bandwidth: Some(args.bandwidth),
                     firmware_path: init_firmware_path,
@@ -22502,14 +22505,14 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     }
 
     if args.monitor_opmode_before_rx {
-        let registers = Rtl8812auRegisterAccess::new(&transport)
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         if let Err(error) = bridge_tx_bench_set_monitor_opmode(&registers, &mut pre_rx_counters) {
             return pending_report(PendingReportInput {
                 command: "rx-scan",
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel: Some(channel),
                 bandwidth: Some(args.bandwidth),
                 firmware_path: init_firmware_path,
@@ -22549,8 +22552,7 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     let pcap_path = args.pcap.clone();
     let frame_jsonl_path = args.frame_jsonl.clone();
     match run_rx_bulk_in_capture(
-        &mut transport,
-        bulk_in,
+        &mut session,
         channel,
         args.duration_ms,
         args.timeout_ms,
@@ -22613,8 +22615,8 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
             pending_report(PendingReportInput {
                 command: "rx-scan",
                 selector,
-                adapter: Some(adapter),
-                endpoints: Some(endpoints),
+                adapter: Some(session.adapter.clone()),
+                endpoints: Some(session.endpoints.clone()),
                 channel: Some(channel),
                 bandwidth: Some(args.bandwidth),
                 firmware_path: init_firmware_path,
@@ -22639,8 +22641,8 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
         Err(error) => pending_report(PendingReportInput {
             command: "rx-scan",
             selector,
-            adapter: Some(adapter),
-            endpoints: Some(endpoints),
+            adapter: Some(session.adapter.clone()),
+            endpoints: Some(session.endpoints.clone()),
             channel: Some(channel),
             bandwidth: Some(args.bandwidth),
             firmware_path: init_firmware_path,
@@ -22668,19 +22670,22 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
     }
 }
 
-fn run_rx_bulk_in_capture<T>(
-    transport: &mut T,
-    bulk_in_endpoint: u8,
+fn run_rx_bulk_in_capture(
+    session: &mut RuntimeRadioSession<RuntimeUsbTransport>,
     channel: Channel,
     duration_ms: u64,
     timeout_ms: u64,
     pcap_path: Option<&Path>,
     frame_jsonl_path: Option<&Path>,
     wfb_forward_config: Option<RxScanWfbForwardConfig>,
-) -> std::result::Result<(RxFixtureReport, DiagnosticCounters), DiagnosticErrorReport>
-where
-    T: UsbBulkTransfer,
-{
+) -> std::result::Result<(RxFixtureReport, DiagnosticCounters), DiagnosticErrorReport> {
+    let bulk_in_endpoint =
+        session
+            .selected_bulk_in_endpoint()
+            .ok_or_else(|| DiagnosticErrorReport {
+                code: "missing_bulk_in_endpoint",
+                message: "runtime radio session has no selected bulk IN endpoint".to_string(),
+            })?;
     let mut report = RxFixtureReport {
         frame_jsonl_path: frame_jsonl_path.map(Path::to_path_buf),
         ..RxFixtureReport::default()
@@ -22699,23 +22704,24 @@ where
             break;
         }
         let timeout = per_read_timeout.min(remaining);
-        match transport.read_bulk_transfer(bulk_in_endpoint, &mut buf, timeout) {
-            Ok(0) => {
+        match session.read_rx_packets(channel, &mut buf, timeout) {
+            Ok(read) if read.bytes_read == 0 => {
                 report.buffers_read += 1;
             }
-            Ok(len) => {
+            Ok(read) => {
                 report.buffers_read += 1;
-                report.bulk_bytes += len as u64;
-                process_rx_buffer(
+                report.bulk_bytes += read.bytes_read as u64;
+                debug_assert_eq!(read.endpoint, bulk_in_endpoint);
+                process_rx_packet_outcomes(
                     &mut report,
                     &mut pcap,
                     &mut frame_jsonl,
                     &mut wfb_forwards,
                     channel,
-                    &buf[..len],
+                    &read.packets,
                 )?;
             }
-            Err(error) if error.is_timeout() => {
+            Err(error) if error.timeout => {
                 report.read_timeouts += 1;
             }
             Err(error) => {
