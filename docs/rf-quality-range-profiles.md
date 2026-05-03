@@ -198,6 +198,32 @@ Telemetry-gated default rerun on May 2, 2026:
   payload recovery, Linux-margin comparison, and
   `macos.wfb_outcome.receiver_telemetry` are all present.
 
+Ready-marker default rerun on May 2, 2026:
+
+- Local artifact directory: `/tmp/wfb-rfq-prod-ready-marker-default-a1`.
+- RF-quality report:
+  `/tmp/wfb-rfq-prod-ready-marker-default-a1/rf-quality-report.json`.
+- Bridge readiness:
+  `/tmp/wfb-rfq-prod-ready-marker-default-a1/bridge-ready-wait.log` observed
+  `${REMOTE_PREFIX}-bridge-ready.json` after `1s`. The marker records
+  `same_session_init_result=pass`, channel 36 / 5180 MHz, 20 MHz bandwidth,
+  `max_datagrams=3000`, and TX power control applied before the receive loop.
+- Mac bridge result: `pass`, `3000/3000` datagrams received and submitted.
+- Linux receiver counter: `1988/2000` marked payloads recovered, zero decrypt
+  failures, six `RX_ANT` reports, and session observed.
+- Receiver signal: tuple-consistent `RX_ANT` at `5180/MCS1/20`, two antennas,
+  RSSI average range `-24..-16 dBm`, and SNR fields reported as `0 dB`.
+- Restore evidence: `${REMOTE_PREFIX}-restore.json` was collected and
+  `macos.wfb_outcome.receiver_evidence.linux_restore.status=ok`;
+  `missing-artifacts.txt` was empty.
+- Report result: `pass`, `acceptance.status=baseline_comparable`,
+  `comparison.status=matched`, and
+  `comparison.outcome.acceptance_margin.status=within_margin`; loss delta was
+  `0.55` percentage points versus the Linux baseline.
+- This supersedes `/tmp/wfb-rfq-prod-default-telemetry-gate2` as the current
+  close-range artifact shape because it includes bridge readiness, receiver
+  signal, and Linux restore evidence.
+
 Runtime LCK negative A/B on May 2, 2026:
 
 - No warmup:

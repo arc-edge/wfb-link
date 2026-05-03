@@ -93,6 +93,14 @@ before the receive loop. The runner waits up to `BRIDGE_READY_WAIT_SECONDS`
 for that marker before starting Linux traffic, which avoids classifying bridge
 startup races as RF loss.
 
+The current hardened automation evidence is
+`/tmp/wfb-rfq-prod-ready-marker-default-a1/rf-quality-report.json` from May 2,
+2026. It passed as `baseline_comparable` / `matched` / `within_margin`, with
+`3000/3000` bridge submissions, `1988/2000` Linux receiver payloads recovered,
+zero decrypt failures, tuple-consistent `RX_ANT` telemetry at `5180/MCS1/20`,
+bridge-ready evidence before RF traffic, restore JSON, and an empty
+`missing-artifacts.txt`.
+
 The automation also accepts the targeted calibration profile:
 
 ```sh
