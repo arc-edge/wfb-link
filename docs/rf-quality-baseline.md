@@ -160,6 +160,16 @@ completed both TX/RX IQK paths in the sustained receiver-backed flow, recovered
 work until it has stepped or outdoor evidence, but this run establishes the
 signed-selection path as close-range safe.
 
+After matching the RX IQK retry loop to Linux by re-triggering every TX-ready
+path on each RX retry,
+`/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report.json`
+completed runtime IQK by sweep 2, restored cleanup state, recovered
+`2000/2000`, submitted `3000/3000`, and stayed
+`baseline_comparable`/`within_margin` with zero decrypt failures. This
+supersedes the earlier fallback-applied runtime-IQK artifacts for close-range
+gating; stepped or outdoor distance evidence is still required before making
+runtime IQK the default long-distance profile.
+
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
 present. Use `risk`, `completed`, `cleanup_restored`, `sweep_count`,

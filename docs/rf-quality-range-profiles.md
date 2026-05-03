@@ -179,6 +179,17 @@ Runtime IQK validation on May 2, 2026:
   three sweeps, so `runtime_iqk_summary.risk` stayed `fallback_applied`.
   Multi-sweep retry improves evidence quality, but it is not the path-A RX IQK
   root fix.
+- Upstream RX-trigger parity rerun:
+  `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report.json`
+  recovered `2000/2000`, submitted `3000/3000` bridge datagrams, logged zero
+  decrypt failures, and reported `runtime_iqk_summary.risk=completed` after
+  sweep 2 with cleanup restored. The fix keeps every TX-ready path triggered
+  on each RX IQK retry, matching the Linux loop, instead of stopping triggers
+  for a path after that path's RX stage has finished. A shorter 400-payload
+  smoke at `/tmp/wfb-rfq-runtime-iqk-peer-trigger-smoke-a1` produced the same
+  completed-risk shape. This is the current runtime-IQK close-range reference;
+  stepped or outdoor evidence is still required before making runtime IQK the
+  long-distance accepted calibration mode.
 
 Telemetry-gated default rerun on May 2, 2026:
 

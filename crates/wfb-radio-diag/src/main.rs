@@ -17409,35 +17409,33 @@ where
     };
 
     while !((path_a.finished || tx_a_iqc.is_none()) && (path_b.finished || tx_b_iqc.is_none())) {
+        // The upstream loop re-triggers every TX-ready path on each RX retry,
+        // even when that path's RX IQK has already found a stable pair.
         if let Some(tx_iqc) = tx_a_iqc.as_ref() {
-            if !path_a.finished {
-                runtime_iqk_trigger_rx_path(
-                    registers,
-                    counters,
-                    tx_iqc.clone(),
-                    "A",
-                    "R_0xc8c",
-                    REG_IQK_RFE_SETTING_A_C8C,
-                    "R_0xcb8",
-                    REG_RFE_TIMING_A_JAGUAR,
-                    path_a_mixer,
-                )?;
-            }
+            runtime_iqk_trigger_rx_path(
+                registers,
+                counters,
+                tx_iqc.clone(),
+                "A",
+                "R_0xc8c",
+                REG_IQK_RFE_SETTING_A_C8C,
+                "R_0xcb8",
+                REG_RFE_TIMING_A_JAGUAR,
+                path_a_mixer,
+            )?;
         }
         if let Some(tx_iqc) = tx_b_iqc.as_ref() {
-            if !path_b.finished {
-                runtime_iqk_trigger_rx_path(
-                    registers,
-                    counters,
-                    tx_iqc.clone(),
-                    "B",
-                    "R_0xe8c",
-                    REG_IQK_RFE_SETTING_B_E8C,
-                    "R_0xeb8",
-                    REG_RFE_TIMING_B_JAGUAR,
-                    path_b_mixer,
-                )?;
-            }
+            runtime_iqk_trigger_rx_path(
+                registers,
+                counters,
+                tx_iqc.clone(),
+                "B",
+                "R_0xe8c",
+                REG_IQK_RFE_SETTING_B_E8C,
+                "R_0xeb8",
+                REG_RFE_TIMING_B_JAGUAR,
+                path_b_mixer,
+            )?;
         }
 
         let mut delay_count = 0;

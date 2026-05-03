@@ -369,11 +369,21 @@ Hardware validation on May 2, 2026:
   both paths plus RX on path B, but path-A RX still fell back in every sweep.
   This rules out a single unlucky sweep as the only cause of the path-A RX
   instability.
+- The RX-trigger parity fix in `run_rtl8812a_runtime_iqk_rx_oneshot` now keeps
+  every TX-ready path triggered on each RX IQK retry, matching the upstream
+  Linux loop. Hardware evidence:
+  `/tmp/wfb-rfq-runtime-iqk-peer-trigger-smoke-a1/rf-quality-report.json`
+  completed in sweep 2 with `400/400`; the full run at
+  `/tmp/wfb-rfq-runtime-iqk-peer-trigger-full-a1/rf-quality-report.json`
+  completed in sweep 2 with `2000/2000`, zero decrypt failures, restore ok,
+  and `runtime_iqk_summary.risk=completed`. This resolves the path-A RX
+  fallback seen in `/tmp/wfb-rfq-prod-runtime-iqk-multisweep-a1` for
+  close-range gates.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
-  paths A and B, RX IQK succeeded on path B, and RX IQK on path A remains
-  intermittent: it fell back in the full close-range runs but completed in the
-  one-frame IQC-readback smoke. Keep this profile experimental until path-A RX
-  one-shot stability is understood at distance.
+  paths A and B, RX IQK succeeded on path B, and the latest RX-trigger parity
+  run completed RX IQK on path A in the receiver-backed flow. Keep this profile
+  experimental for default long-distance use until stepped or outdoor evidence
+  shows whether runtime IQK improves distance margin.
 - The attempt-evidence smoke showed path-A RX was ready immediately on every
   attempt, but alternated usable candidates with explicit hardware fail flags
   (`0x0000ee00`/`0x0000ef00`) before fallback. That points at IQK candidate
