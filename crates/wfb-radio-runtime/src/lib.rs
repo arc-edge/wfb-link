@@ -439,6 +439,64 @@ impl<T> RuntimeRadioSession<T> {
         result.map_err(runtime_tx_submit_error)
     }
 
+    pub fn submit_raw_tx_packet(
+        &mut self,
+        packet: &[u8],
+        tx_counters: &mut TxSubmitCounters,
+        timeout: Duration,
+    ) -> Result<usize, RuntimeRadioError>
+    where
+        T: UsbBulkTransfer,
+    {
+        let bulk_out = self.selected_bulk_out_endpoint().ok_or_else(|| {
+            RuntimeRadioError::new(
+                "missing_bulk_out_endpoint",
+                "runtime radio session has no selected bulk OUT endpoint",
+            )
+        })?;
+        tx_counters.attempted = tx_counters.attempted.saturating_add(1);
+        match self
+            .transport
+            .write_bulk_transfer(bulk_out, packet, timeout)
+        {
+            Ok(written) if written == packet.len() => {
+                tx_counters.submitted = tx_counters.submitted.saturating_add(1);
+                tx_counters.bytes_written =
+                    tx_counters.bytes_written.saturating_add(written as u64);
+                self.counters.usb_bulk_out_writes =
+                    self.counters.usb_bulk_out_writes.saturating_add(1);
+                self.counters.tx_frames = self.counters.tx_frames.saturating_add(1);
+                Ok(written)
+            }
+            Ok(written) => {
+                tx_counters.failed = tx_counters.failed.saturating_add(1);
+                tx_counters.short_writes = tx_counters.short_writes.saturating_add(1);
+                tx_counters.bytes_written =
+                    tx_counters.bytes_written.saturating_add(written as u64);
+                self.counters.usb_bulk_out_writes =
+                    self.counters.usb_bulk_out_writes.saturating_add(1);
+                self.counters.dropped_frames = self.counters.dropped_frames.saturating_add(1);
+                Err(RuntimeRadioError::new(
+                    "raw_tx_packet_short_write",
+                    format!(
+                        "short bulk OUT write to endpoint 0x{bulk_out:02x}: expected {} bytes, wrote {written}",
+                        packet.len()
+                    ),
+                ))
+            }
+            Err(error) => {
+                tx_counters.failed = tx_counters.failed.saturating_add(1);
+                self.counters.usb_bulk_out_writes =
+                    self.counters.usb_bulk_out_writes.saturating_add(1);
+                self.counters.dropped_frames = self.counters.dropped_frames.saturating_add(1);
+                Err(RuntimeRadioError::new(
+                    "raw_tx_packet_submit_failed",
+                    error.to_string(),
+                ))
+            }
+        }
+    }
+
     pub fn read_rx_packets(
         &mut self,
         channel: Channel,
@@ -2033,6 +2091,36 @@ mod tests {
         assert_eq!(session.transport.bulk_writes[0].0, 0x02);
         assert_eq!(submit_counters.attempted, 1);
         assert_eq!(submit_counters.submitted, 1);
+        assert_eq!(session.counters.usb_bulk_out_writes, 1);
+        assert_eq!(session.counters.tx_frames, 1);
+        assert_eq!(session.counters.dropped_frames, 0);
+    }
+
+    #[test]
+    fn runtime_radio_session_submits_raw_tx_packet_and_updates_counters() {
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+        let packet = [0xa5; 48];
+        let mut submit_counters = TxSubmitCounters::default();
+
+        let written = session
+            .submit_raw_tx_packet(&packet, &mut submit_counters, Duration::from_millis(10))
+            .expect("raw tx packet submit");
+
+        assert_eq!(written, packet.len());
+        assert_eq!(session.transport.bulk_writes.len(), 1);
+        assert_eq!(session.transport.bulk_writes[0].0, 0x02);
+        assert_eq!(session.transport.bulk_writes[0].1, packet);
+        assert_eq!(submit_counters.attempted, 1);
+        assert_eq!(submit_counters.submitted, 1);
+        assert_eq!(submit_counters.bytes_written, packet.len() as u64);
         assert_eq!(session.counters.usb_bulk_out_writes, 1);
         assert_eq!(session.counters.tx_frames, 1);
         assert_eq!(session.counters.dropped_frames, 0);
