@@ -25958,6 +25958,15 @@ fn runtime_calibration_evidence_source_label(
 }
 
 fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
+    if let Some(error) = runtime_flow_reject_diagnostic_only_options(&args) {
+        return runtime_flow_failure_report(
+            &args,
+            "argument_validation",
+            "runtime-flow rejects diagnostic-only bridge options",
+            error,
+        );
+    }
+
     let profile = args.bridge.tx.tx_calibration.tx_calibration_profile;
     let runtime_profile = RuntimeTxCalibrationProfile::from(profile);
     let channel = Channel::from_number(args.bridge.tx.channel);
@@ -26054,6 +26063,94 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             "production-shaped runtime telemetry adapted from the runtime-backed bridge flow",
             "long-distance RF validation remains a separate receiver-backed profile gate",
         ],
+    }
+}
+
+fn runtime_flow_reject_diagnostic_only_options(
+    args: &RuntimeFlowArgs,
+) -> Option<DiagnosticErrorReport> {
+    let tx = &args.bridge.tx;
+    let mut options = Vec::new();
+    if tx.clear_txdma_status_before_tx {
+        options.push("--clear-txdma-status-before-tx");
+    }
+    if !tx.pre_tx_write8.is_empty() {
+        options.push("--pre-tx-write8");
+    }
+    if !tx.pre_tx_write16.is_empty() {
+        options.push("--pre-tx-write16");
+    }
+    if !tx.pre_tx_write32.is_empty() {
+        options.push("--pre-tx-write32");
+    }
+    if !tx.pre_tx_rmw32.is_empty() {
+        options.push("--pre-tx-rmw32");
+    }
+    if !tx.pre_tx_rf_write.is_empty() {
+        options.push("--pre-tx-rf-write");
+    }
+    if tx_status_enabled(&tx.tx_status) {
+        options.push("--tx-status");
+    }
+
+    if options.is_empty() {
+        None
+    } else {
+        Some(DiagnosticErrorReport {
+            code: "diagnostic_only_runtime_flow_option",
+            message: format!(
+                "runtime-flow rejects diagnostic-only option(s): {}; use bridge-run or bridge-tx-listen for register experiments",
+                options.join(", ")
+            ),
+        })
+    }
+}
+
+fn runtime_flow_failure_report(
+    args: &RuntimeFlowArgs,
+    _phase_id: &'static str,
+    phase_detail: &'static str,
+    error: DiagnosticErrorReport,
+) -> RuntimeFlowReport {
+    let profile = args.bridge.tx.tx_calibration.tx_calibration_profile;
+    let runtime_profile = RuntimeTxCalibrationProfile::from(profile);
+    let channel = Channel::from_number(args.bridge.tx.channel).ok();
+    let captured_tail_applied = channel
+        .map(|channel| should_apply_captured_tx_bringup_tail(channel, args.bridge.tx.bandwidth))
+        .unwrap_or(false);
+
+    RuntimeFlowReport {
+        schema_version: 1,
+        command: "runtime-flow",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        selector: args.bridge.tx.adapter.selector(),
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.bridge.tx.bandwidth,
+        duration_ms: args.bridge.duration_ms,
+        ready_file: args.bridge.tx.ready_file.clone(),
+        stop_reason: "not_started",
+        bulk_in_endpoint: None,
+        bulk_in_endpoint_hex: None,
+        bulk_out_endpoint: None,
+        bulk_out_endpoint_hex: None,
+        calibration_profile: profile,
+        calibration_class: runtime_profile.before_tx_class(captured_tail_applied),
+        calibration_evidence_source: runtime_calibration_evidence_source_label(
+            runtime_profile.evidence_source(captured_tail_applied),
+        ),
+        receiver_backed_validation_required: !runtime_profile.is_default(),
+        init_readiness: "not_started",
+        init_phase_count: 0,
+        init_completed_phase_count: 0,
+        rx: RuntimeFlowRxTelemetry::default(),
+        tx: RuntimeFlowTxTelemetry::default(),
+        counters: DiagnosticCounters::default(),
+        result: DiagnosticResult::Fail,
+        error: Some(error),
+        notes: vec![phase_detail],
     }
 }
 
@@ -42161,6 +42258,31 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_flow_rejects_diagnostic_register_options_before_usb() {
+        let mut args = RuntimeFlowArgs {
+            bridge: bridge_run_args(),
+        };
+        args.bridge.tx.init_before_tx = true;
+        args.bridge.tx.firmware = Some(PathBuf::from("/tmp/rtl8812a_fw.bin"));
+        args.bridge.tx.pre_tx_write8.push(PreTxRegisterWriteArg {
+            address: REG_TXPAUSE,
+            value: 0,
+        });
+
+        let report = runtime_flow_report(args);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("diagnostic_only_runtime_flow_option")
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.counters.usb_control_reads, 0);
+        assert_eq!(report.tx.submitted_frames, 0);
+        assert_eq!(report.init_readiness, "not_started");
     }
 
     #[test]

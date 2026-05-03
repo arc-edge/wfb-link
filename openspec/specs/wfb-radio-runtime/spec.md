@@ -37,6 +37,10 @@ The system SHALL provide a production-facing WFB runtime flow that opens, initia
 - **WHEN** the production runtime flow is built
 - **THEN** it MUST NOT depend on diagnostic command argument structs or diagnostic report structs for radio initialization, RX, or TX execution
 
+#### Scenario: Production flow rejects diagnostic register experiments
+- **WHEN** a caller starts `runtime-flow` with diagnostic-only register pokes or TX-status probes
+- **THEN** the command rejects the request before opening USB
+
 #### Scenario: Production flow reports readiness
 - **WHEN** initialization completes
 - **THEN** the production runtime flow reports adapter identity, channel, bandwidth, calibration class, init phase status, runtime-owned RX/TX flow counters, USB counters, and last error state through production-facing telemetry
