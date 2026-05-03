@@ -62,6 +62,8 @@ preflight before RF transmission and collects:
 - `${REMOTE_PREFIX}-preflight.json`
 - `${REMOTE_PREFIX}-preflight.log`
 - `${REMOTE_PREFIX}-setup.log`
+- `${REMOTE_PREFIX}-restore.json`
+- `${REMOTE_PREFIX}-restore.log`
 - `${REMOTE_PREFIX}-summary.json`
 
 The preflight searches `LINUX_REMOTE_PATH` in addition to the remote shell
@@ -81,6 +83,9 @@ Set `LINUX_REQUIRE_IW=1` to fail before RF if the runner cannot set and verify
 the Linux interface channel. The preflight JSON records `sudo_noninteractive`,
 `iface_status`, `wfb_key_status`, and `docker_service_state` so failed field
 runs can distinguish missing peer prerequisites from RF loss.
+The restore JSON records the post-run service action, service state, and WFB
+process matches after the controlled sender/receiver processes are stopped, so
+cleanup failures are visible in machine-readable run evidence.
 
 The automation also accepts the targeted calibration profile:
 

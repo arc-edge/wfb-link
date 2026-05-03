@@ -30,6 +30,8 @@ Use this checklist before any stepped, attenuated, or outdoor run.
 
 - Stop temporary WFB processes, relays, packet captures, and counters.
 - Restore `arc-wfb-link-1` or the normal Linux WFB service set.
+- Check `${REMOTE_PREFIX}-restore.json` when using the close-range runner; it
+  should show the expected service state after cleanup.
 - Build an `rf-quality-report` envelope.
 - Attach receiver logs, pcap, frame JSONL, counter JSON, SDR/spectrum captures,
   photos, or maps as companion artifacts.

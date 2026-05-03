@@ -478,6 +478,7 @@ restore_log="${REMOTE_PREFIX}-restore.log"
 summary_json="${REMOTE_PREFIX}-summary.json"
 counter_json="${REMOTE_PREFIX}-counter.json"
 receiver_health_json="${REMOTE_PREFIX}-receiver-health.json"
+restore_json="${REMOTE_PREFIX}-restore.json"
 preflight_json="${REMOTE_PREFIX}-preflight.json"
 preflight_log="${REMOTE_PREFIX}-preflight.log"
 
@@ -667,8 +668,16 @@ case "$BANDWIDTH_MHZ" in
   *) echo "unsupported BANDWIDTH_MHZ=$BANDWIDTH_MHZ" > "$setup_log"; exit 2 ;;
 esac
 
+cleanup_linux_completed=0
 cleanup_linux() {
   set +e
+  if (( cleanup_linux_completed == 1 )); then
+    return
+  fi
+  local restore_status=ok
+  local restore_service_action=skipped
+  local restore_service_state=unknown
+  local restore_process_matches=""
   if [[ -n "$SUDO_BIN" && -n "$PKILL_BIN" ]]; then
     "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_tx .* -u ${LINUX_SOURCE_PORT} ${MAC_LAN_IP}:${RELAY_PORT}" >/dev/null 2>&1 || true
     "$SUDO_BIN" -n "$PKILL_BIN" -f "wfb_rx .* -u ${LINUX_RX_PORT} ${IFACE}" >/dev/null 2>&1 || true
@@ -678,20 +687,58 @@ cleanup_linux() {
   {
     if [[ -n "$DATE_BIN" ]]; then "$DATE_BIN"; else date; fi
     if [[ -n "$SUDO_BIN" && -n "$DOCKER_BIN" ]]; then
+      restore_service_action=start
       "$SUDO_BIN" -n "$DOCKER_BIN" start "$WFB_SERVICE" || true
-      "$SUDO_BIN" -n "$DOCKER_BIN" ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}'
+      restore_service_state=$("$SUDO_BIN" -n "$DOCKER_BIN" ps --filter "name=$WFB_SERVICE" --format '{{.Names}} {{.Status}}' 2>/dev/null || true)
+      [[ -n "$restore_service_state" ]] || restore_service_state=not_running
+      printf '%s\n' "$restore_service_state"
+      if [[ "$restore_service_state" == "not_running" ]]; then
+        restore_status=degraded
+      fi
     else
+      restore_status=degraded
+      restore_service_action=skipped
+      restore_service_state=unavailable
       echo "docker or sudo unavailable; skipped service restore"
     fi
     if [[ -n "$PS_BIN" && -n "$GREP_BIN" ]]; then
-      "$PS_BIN" -eo pid,user,comm,args | "$GREP_BIN" -Ei 'arc-wfb|wfb' | "$GREP_BIN" -v grep || true
+      restore_process_matches=$("$PS_BIN" -eo pid,user,comm,args | "$GREP_BIN" -Ei 'arc-wfb|wfb' | "$GREP_BIN" -v grep || true)
+      printf '%s\n' "$restore_process_matches"
     fi
   } > "$restore_log" 2>&1
+  if [[ -n "$PYTHON3_BIN" ]]; then
+    export restore_status restore_service_action restore_service_state restore_process_matches
+    export WFB_SERVICE IFACE REMOTE_PREFIX
+    "$PYTHON3_BIN" - "$restore_json" <<'PY' || true
+import json
+import os
+import sys
+
+process_matches = [
+    line for line in os.environ.get("restore_process_matches", "").splitlines() if line.strip()
+]
+report = {
+    "source": "scripts/run-rf-quality-close-range.sh",
+    "remote_prefix": os.environ.get("REMOTE_PREFIX", ""),
+    "status": os.environ.get("restore_status", "unknown"),
+    "wfb_service": os.environ.get("WFB_SERVICE", ""),
+    "interface": os.environ.get("IFACE", ""),
+    "service_action": os.environ.get("restore_service_action", "unknown"),
+    "service_state": os.environ.get("restore_service_state", "unknown"),
+    "process_match_count": len(process_matches),
+    "process_matches": process_matches,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(report, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+  fi
+  cleanup_linux_completed=1
 }
 trap cleanup_linux EXIT INT TERM
 
 rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.log \
-  "${REMOTE_PREFIX}"-{summary,counter,receiver-health}.json \
+  "${REMOTE_PREFIX}"-{summary,counter,receiver-health,restore}.json \
   "${REMOTE_PREFIX}-rf.pcap"
 
 {
@@ -957,7 +1004,9 @@ report = {
 out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 PY
 
-"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" "$receiver_health_json" <<'PY'
+cleanup_linux
+
+"$PYTHON3_BIN" - "$summary_json" "$counter_json" "$setup_log" "$restore_log" "$preflight_json" "$receiver_health_json" "$restore_json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -975,13 +1024,19 @@ receiver_health = {}
 receiver_health_path = Path(sys.argv[6])
 if receiver_health_path.exists():
     receiver_health = json.loads(receiver_health_path.read_text())
+linux_restore = {}
+restore_path = Path(sys.argv[7])
+if restore_path.exists():
+    linux_restore = json.loads(restore_path.read_text())
 summary = {
     "preflight": preflight,
     "counter": counter,
     "receiver_health": receiver_health,
+    "linux_restore": linux_restore,
     "artifacts": {
         "counter": str(counter_path),
         "receiver_health": sys.argv[6],
+        "linux_restore": sys.argv[7],
         "setup_log": sys.argv[3],
         "restore_log": sys.argv[4],
         "preflight": sys.argv[5],
@@ -1057,6 +1112,7 @@ collect_artifacts() {
   copy_linux_artifact "${REMOTE_PREFIX}-setup.log"
   copy_linux_artifact "${REMOTE_PREFIX}-preflight.json"
   copy_linux_artifact "${REMOTE_PREFIX}-preflight.log"
+  copy_linux_artifact "${REMOTE_PREFIX}-restore.json"
   copy_linux_artifact "${REMOTE_PREFIX}-restore.log"
   copy_linux_artifact "${REMOTE_PREFIX}-summary.json"
   copy_linux_artifact "${REMOTE_PREFIX}-tcpdump.log"
@@ -1086,6 +1142,7 @@ generate_report() {
   local counter_report
   local efuse_report
   local receiver_health_report
+  local restore_state_report
   local recovered
   local datagram_evidence
   local receiver_args=()
@@ -1093,6 +1150,7 @@ generate_report() {
   mac_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-listen.json")"
   counter_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-counter.json")"
   receiver_health_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-receiver-health.json")"
+  restore_state_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-restore.json")"
   efuse_report="$OUT_DIR/$(basename "$EFUSE_REPORT")"
 
   if [[ ! -f "$mac_report" || ! -f "$counter_report" || ! -f "$efuse_report" ]]; then
@@ -1110,7 +1168,7 @@ generate_report() {
   [[ -n "$recovered" ]] || die "counter report did not include recovered_payloads"
 
   datagram_evidence="$OUT_DIR/datagram-evidence.json"
-  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" <<'PY'
+  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" "$restore_state_report" <<'PY'
 import json
 import os
 import sys
@@ -1123,6 +1181,10 @@ receiver_health_path = Path(sys.argv[4])
 receiver_health = {}
 if receiver_health_path.exists():
     receiver_health = json.loads(receiver_health_path.read_text())
+restore_state_path = Path(sys.argv[5])
+linux_restore = {}
+if restore_state_path.exists():
+    linux_restore = json.loads(restore_state_path.read_text())
 
 def env_int(name):
     value = os.environ.get(name)
@@ -1178,6 +1240,7 @@ report = {
     "receiver_session_observed": receiver_health.get("session_observed"),
     "receiver_status": receiver_health.get("status"),
     "receiver_unable_decrypt_count": receiver_health.get("unable_decrypt_count"),
+    "linux_restore": linux_restore,
     "note": "short smoke runs can emit one fewer WFB datagram than the FEC ceiling while still recovering every source payload",
 }
 out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -1189,6 +1252,7 @@ PY
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-tx.log")" \
     "$datagram_evidence" \
     "$receiver_health_report" \
+    "$restore_state_report" \
     "$counter_report"; do
     [[ -f "$artifact" ]] && receiver_args+=(--receiver-artifact "$artifact")
   done
