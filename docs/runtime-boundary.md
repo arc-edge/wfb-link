@@ -10,6 +10,7 @@
 - Unified runtime USB transport over libusb claims and macOS USBHost retained sessions.
 - macOS IOUSBHost direct-control and retained-session transport wrappers.
 - macOS USBHost endpoint validation, synthetic adapter metadata, and retained-session open policy.
+- Runtime libusb adapter selection/claim policy for bridge, init, TX, RX, and IQK runtime transport paths.
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 
 ## Still Diagnostic-Owned
@@ -18,6 +19,7 @@
 - Runtime IQK/LCK register execution.
 - WFB TX/RX traffic loops and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports.
+- Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
 
 ## Migration Order
 

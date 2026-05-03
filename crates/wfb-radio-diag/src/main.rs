@@ -37,7 +37,7 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, RuntimeTransportError, RuntimeUsbTransport,
+    MacosUsbHostConfig, RuntimeTransportError, RuntimeUsbOpenConfig, RuntimeUsbTransport,
     TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
@@ -8476,21 +8476,7 @@ fn tx_status_width_digits(width: &str) -> usize {
 fn select_supported_adapter(
     selector: DeviceSelector,
 ) -> std::result::Result<UsbDeviceInfo, DiagnosticErrorReport> {
-    let devices = radio_core::list_usb_devices(false).map_err(|error| DiagnosticErrorReport {
-        code: "usb_list_failed",
-        message: error.to_string(),
-    })?;
-    devices
-        .into_iter()
-        .find(|device| selector.matches(device))
-        .ok_or_else(|| DiagnosticErrorReport {
-            code: "no_supported_adapter",
-            message: if selector.is_empty() {
-                "no supported RTL8812AU adapter found".to_string()
-            } else {
-                "no supported RTL8812AU adapter matched selector".to_string()
-            },
-        })
+    wfb_radio_runtime::select_libusb_supported_adapter(selector).map_err(runtime_transport_error)
 }
 
 fn read_smoke_register<T>(
@@ -10706,13 +10692,11 @@ struct LiveUsbTransportOpen {
     counters: DiagnosticCounters,
 }
 
-fn open_macos_usbhost_transport(
-    args: &MacosUsbHostArgs,
-    selector: DeviceSelector,
+fn open_runtime_transport(
+    config: RuntimeUsbOpenConfig,
 ) -> std::result::Result<LiveUsbTransportOpen, DiagnosticErrorReport> {
-    let config = macos_usbhost_config(args);
-    let open = wfb_radio_runtime::open_macos_usbhost_transport(&config, selector)
-        .map_err(runtime_transport_error)?;
+    let open =
+        wfb_radio_runtime::open_runtime_usb_transport(config).map_err(runtime_transport_error)?;
     let counters = DiagnosticCounters {
         usb_control_writes: open.initial_usb_control_writes,
         ..DiagnosticCounters::default()
@@ -10724,6 +10708,20 @@ fn open_macos_usbhost_transport(
         endpoints: open.endpoints,
         counters,
     })
+}
+
+fn open_libusb_transport(
+    selector: DeviceSelector,
+) -> std::result::Result<LiveUsbTransportOpen, DiagnosticErrorReport> {
+    open_runtime_transport(RuntimeUsbOpenConfig::libusb(selector))
+}
+
+fn open_macos_usbhost_transport(
+    args: &MacosUsbHostArgs,
+    selector: DeviceSelector,
+) -> std::result::Result<LiveUsbTransportOpen, DiagnosticErrorReport> {
+    let config = macos_usbhost_config(args);
+    open_runtime_transport(RuntimeUsbOpenConfig::macos_usbhost(selector, config))
 }
 
 fn queue_map_for_endpoint_count(bulk_out_endpoint_count: usize) -> u16 {
@@ -20995,14 +20993,26 @@ fn init_live_report(
             }
         }
     } else {
-        let selected = match select_supported_adapter(selector) {
-            Ok(device) => device,
+        match open_libusb_transport(selector) {
+            Ok(open) => {
+                adapter = Some(open.adapter);
+                endpoints = Some(open.endpoints);
+                push_init_live_phase(
+                    &mut phase_summaries,
+                    "usb_claim",
+                    DiagnosticPhaseStatus::Completed,
+                    "claimed adapter interface and discovered bulk endpoints",
+                    before,
+                    counters,
+                );
+                open.transport
+            }
             Err(error) => {
                 push_init_live_phase(
                     &mut phase_summaries,
                     "usb_claim",
                     DiagnosticPhaseStatus::Blocked,
-                    "no supported adapter matched the selector",
+                    format!("USB runtime transport open failed: {}", error.message),
                     before,
                     counters,
                 );
@@ -21027,56 +21037,7 @@ fn init_live_report(
                     notes: vec!["live init stopped before hardware register writes"],
                 });
             }
-        };
-
-        let claimed = match radio_core::usb::claim_usb_device(&selected) {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                adapter = Some(selected);
-                push_init_live_phase(
-                    &mut phase_summaries,
-                    "usb_claim",
-                    DiagnosticPhaseStatus::Blocked,
-                    format!("USB claim failed: {error}"),
-                    before,
-                    counters,
-                );
-                return init_live_pending_report(InitLivePendingReportInput {
-                    args: &args,
-                    selector,
-                    adapter,
-                    endpoints,
-                    channel,
-                    firmware_path,
-                    firmware,
-                    phase_summaries,
-                    firmware_payload_len,
-                    llt_stats: &llt_stats,
-                    queue_layout,
-                    bb_stats: &bb_stats,
-                    rf_stats: &rf_stats,
-                    counters,
-                    result: DiagnosticResult::Fail,
-                    phases: init_live_phases("usb_claim"),
-                    error: Some(DiagnosticErrorReport {
-                        code: "usb_claim_failed",
-                        message: error.to_string(),
-                    }),
-                    notes: vec!["live init stopped before hardware register writes"],
-                });
-            }
-        };
-        adapter = Some(claimed.info.clone());
-        endpoints = Some(claimed.endpoints.clone());
-        push_init_live_phase(
-            &mut phase_summaries,
-            "usb_claim",
-            DiagnosticPhaseStatus::Completed,
-            "claimed adapter interface and discovered bulk endpoints",
-            before,
-            counters,
-        );
-        RuntimeUsbTransport::Libusb(Box::new(claimed))
+        }
     };
 
     let registers = Rtl8812auRegisterAccess::new(transport)
@@ -22391,8 +22352,14 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live RX",
+                ),
                 Err(error) => {
                     return pending_report(PendingReportInput {
                         command: "rx-scan",
@@ -22418,60 +22385,13 @@ fn rx_scan_report(args: RxScanArgs) -> PendingDiagnosticReport {
                         phases: vec![DiagnosticPhase {
                             id: "usb_claim",
                             status: DiagnosticPhaseStatus::Blocked,
-                            detail: "no supported adapter matched the selector",
+                            detail: "runtime USB transport open failed",
                         }],
                         error: Some(error),
-                        notes: vec!["live RX stopped before USB claim"],
-                    });
-                }
-            };
-
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    return pending_report(PendingReportInput {
-                        command: "rx-scan",
-                        selector,
-                        adapter: Some(selected),
-                        endpoints: None,
-                        channel,
-                        bandwidth: Some(args.bandwidth),
-                        firmware_path: None,
-                        firmware: None,
-                        init_dry_run: None,
-                        init_live: None,
-                        duration_ms: Some(args.duration_ms),
-                        pcap_path: args.pcap,
-                        tx_frame_len: None,
-                        tx_frame_source: None,
-                        tx_dry_run: None,
-                        tx_live: None,
-                        rx_fixture: None,
-                        repeat_tx: None,
-                        counters: DiagnosticCounters::default(),
-                        result: DiagnosticResult::Fail,
-                        phases: vec![DiagnosticPhase {
-                            id: "usb_claim",
-                            status: DiagnosticPhaseStatus::Blocked,
-                            detail: "USB interface claim failed",
-                        }],
-                        error: Some(DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        }),
                         notes: vec!["live RX stopped before bulk IN reads"],
                     });
                 }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live RX",
-            )
+            }
         };
     let bulk_in = match endpoints.bulk_in {
         Some(endpoint) => endpoint,
@@ -23450,8 +23370,14 @@ fn tx_once_live_report(
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live TX",
+                ),
                 Err(error) => {
                     return tx_once_live_failure(TxOnceLiveFailureInput {
                         selector,
@@ -23463,41 +23389,11 @@ fn tx_once_live_report(
                         tx_frame_source,
                         counters: DiagnosticCounters::default(),
                         phase_id: "usb_claim",
-                        phase_detail: "no supported adapter matched the selector",
+                        phase_detail: "runtime USB transport open failed",
                         error,
                     });
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    return tx_once_live_failure(TxOnceLiveFailureInput {
-                        selector,
-                        adapter: Some(selected),
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "USB interface claim failed",
-                        error: DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    });
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live TX",
-            )
+            }
         };
     let bulk_out = match endpoints.bulk_out {
         Some(endpoint) => endpoint,
@@ -23950,8 +23846,14 @@ fn tx_repeat_live_report(
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live repeated TX",
+                ),
                 Err(error) => {
                     return tx_repeat_live_failure(TxRepeatLiveFailureInput {
                         selector,
@@ -23971,49 +23873,11 @@ fn tx_repeat_live_report(
                         ),
                         counters: DiagnosticCounters::default(),
                         phase_id: "usb_claim",
-                        phase_detail: "no supported adapter matched the selector",
+                        phase_detail: "runtime USB transport open failed",
                         error,
                     });
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    return tx_repeat_live_failure(TxRepeatLiveFailureInput {
-                        selector,
-                        adapter: Some(selected),
-                        endpoints: None,
-                        channel,
-                        bandwidth,
-                        tx_frame_len,
-                        tx_frame_source,
-                        repeat: repeat_tx_report_base(
-                            &args,
-                            Some(frame.len()),
-                            Some(packet_len),
-                            None,
-                            None,
-                            Some(opts),
-                        ),
-                        counters: DiagnosticCounters::default(),
-                        phase_id: "usb_claim",
-                        phase_detail: "USB interface claim failed",
-                        error: DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    });
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live repeated TX",
-            )
+            }
         };
     let bulk_out = match endpoints.bulk_out {
         Some(endpoint) => endpoint,
@@ -24405,41 +24269,23 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live bridge TX",
+                ),
                 Err(error) => {
                     return bridge_tx_once_failure(
                         report,
                         "usb_claim",
-                        "no supported adapter matched the selector",
+                        "runtime USB transport open failed",
                         error,
                     );
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    report.adapter = Some(selected);
-                    return bridge_tx_once_failure(
-                        report,
-                        "usb_claim",
-                        "USB interface claim failed",
-                        DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live bridge TX",
-            )
+            }
         };
 
     let bulk_out = match endpoints.bulk_out {
@@ -24898,41 +24744,23 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live bridge TX listener",
+                ),
                 Err(error) => {
                     return bridge_tx_listen_failure(
                         report,
                         "usb_claim",
-                        "no supported adapter matched the selector",
+                        "runtime USB transport open failed",
                         error,
                     );
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    report.adapter = Some(selected);
-                    return bridge_tx_listen_failure(
-                        report,
-                        "usb_claim",
-                        "USB interface claim failed",
-                        DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live bridge TX listener",
-            )
+            }
         };
 
     let bulk_out = match endpoints.bulk_out {
@@ -25985,41 +25813,23 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed adapter for bridge run",
+                ),
                 Err(error) => {
                     return bridge_run_failure(
                         report,
                         "usb_claim",
-                        "no supported adapter matched the selector",
+                        "runtime USB transport open failed",
                         error,
                     );
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    report.adapter = Some(selected);
-                    return bridge_run_failure(
-                        report,
-                        "usb_claim",
-                        "USB interface claim failed",
-                        DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed adapter for bridge run",
-            )
+            }
         };
 
     let bulk_in = match endpoints.bulk_in {
@@ -29418,41 +29228,23 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
                 }
             }
         } else {
-            let selected = match select_supported_adapter(selector) {
-                Ok(device) => device,
+            match open_libusb_transport(selector) {
+                Ok(open) => (
+                    open.transport,
+                    open.adapter,
+                    open.endpoints,
+                    open.counters,
+                    "claimed initialized adapter for live bridge TX benchmark",
+                ),
                 Err(error) => {
                     return bridge_tx_bench_failure(
                         report,
                         "usb_claim",
-                        "no supported adapter matched the selector",
+                        "runtime USB transport open failed",
                         error,
                     );
                 }
-            };
-            let claimed = match radio_core::usb::claim_usb_device(&selected) {
-                Ok(claimed) => claimed,
-                Err(error) => {
-                    report.adapter = Some(selected);
-                    return bridge_tx_bench_failure(
-                        report,
-                        "usb_claim",
-                        "USB interface claim failed",
-                        DiagnosticErrorReport {
-                            code: "usb_claim_failed",
-                            message: error.to_string(),
-                        },
-                    );
-                }
-            };
-            let adapter = claimed.info.clone();
-            let endpoints = claimed.endpoints.clone();
-            (
-                RuntimeUsbTransport::Libusb(Box::new(claimed)),
-                adapter,
-                endpoints,
-                DiagnosticCounters::default(),
-                "claimed initialized adapter for live bridge TX benchmark",
-            )
+            }
         };
 
     let bulk_out = match endpoints.bulk_out {
@@ -30352,41 +30144,23 @@ fn rtl8812a_iqk_diagnostic_report(args: Rtl8812aIqkDiagnosticArgs) -> Rtl8812aIq
             }
         }
     } else {
-        let selected = match select_supported_adapter(report.selector) {
-            Ok(device) => device,
+        match open_libusb_transport(report.selector) {
+            Ok(open) => (
+                open.transport,
+                open.adapter,
+                open.endpoints,
+                open.counters,
+                "claimed adapter for standalone IQK diagnostic",
+            ),
             Err(error) => {
                 return rtl8812a_iqk_diagnostic_failure(
                     report,
                     "usb_claim",
-                    "no supported adapter matched the selector",
+                    "runtime USB transport open failed",
                     error,
                 );
             }
-        };
-        let claimed = match radio_core::usb::claim_usb_device(&selected) {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                report.adapter = Some(selected);
-                return rtl8812a_iqk_diagnostic_failure(
-                    report,
-                    "usb_claim",
-                    "USB interface claim failed",
-                    DiagnosticErrorReport {
-                        code: "usb_claim_failed",
-                        message: error.to_string(),
-                    },
-                );
-            }
-        };
-        let adapter = claimed.info.clone();
-        let endpoints = claimed.endpoints.clone();
-        (
-            RuntimeUsbTransport::Libusb(Box::new(claimed)),
-            adapter,
-            endpoints,
-            DiagnosticCounters::default(),
-            "claimed adapter for standalone IQK diagnostic",
-        )
+        }
     };
 
     report.adapter = Some(adapter);

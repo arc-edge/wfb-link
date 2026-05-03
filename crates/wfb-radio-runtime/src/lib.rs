@@ -7,8 +7,8 @@
 use std::{error::Error, fmt, time::Duration};
 
 use radio_core::{
-    rtl8812au::Rtl8812auUsbTransport, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
-    InterfaceInfo, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
+    list_usb_devices, rtl8812au::Rtl8812auUsbTransport, ClaimedUsbDevice, DeviceSelector,
+    EndpointInfo, InterfaceInfo, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 
@@ -172,6 +172,81 @@ pub struct RuntimeUsbTransportOpen {
     pub adapter: UsbDeviceInfo,
     pub endpoints: UsbEndpoints,
     pub initial_usb_control_writes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeUsbBackend {
+    Libusb,
+    MacosUsbHost(MacosUsbHostConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeUsbOpenConfig {
+    pub selector: DeviceSelector,
+    pub backend: RuntimeUsbBackend,
+}
+
+impl RuntimeUsbOpenConfig {
+    pub fn libusb(selector: DeviceSelector) -> Self {
+        Self {
+            selector,
+            backend: RuntimeUsbBackend::Libusb,
+        }
+    }
+
+    pub fn macos_usbhost(selector: DeviceSelector, config: MacosUsbHostConfig) -> Self {
+        Self {
+            selector,
+            backend: RuntimeUsbBackend::MacosUsbHost(config),
+        }
+    }
+}
+
+pub fn select_libusb_supported_adapter(
+    selector: DeviceSelector,
+) -> Result<UsbDeviceInfo, RuntimeTransportError> {
+    let devices = list_usb_devices(false)
+        .map_err(|error| RuntimeTransportError::new("usb_list_failed", error.to_string()))?;
+    devices
+        .into_iter()
+        .find(|device| selector.matches(device))
+        .ok_or_else(|| {
+            RuntimeTransportError::new(
+                "no_supported_adapter",
+                if selector.is_empty() {
+                    "no supported RTL8812AU adapter found"
+                } else {
+                    "no supported RTL8812AU adapter matched selector"
+                },
+            )
+        })
+}
+
+pub fn open_libusb_transport(
+    selector: DeviceSelector,
+) -> Result<RuntimeUsbTransportOpen, RuntimeTransportError> {
+    let selected = select_libusb_supported_adapter(selector)?;
+    let claimed = radio_core::usb::claim_usb_device(&selected)
+        .map_err(|error| RuntimeTransportError::new("usb_claim_failed", error.to_string()))?;
+    let adapter = claimed.info.clone();
+    let endpoints = claimed.endpoints.clone();
+    Ok(RuntimeUsbTransportOpen {
+        transport: RuntimeUsbTransport::Libusb(Box::new(claimed)),
+        adapter,
+        endpoints,
+        initial_usb_control_writes: 0,
+    })
+}
+
+pub fn open_runtime_usb_transport(
+    config: RuntimeUsbOpenConfig,
+) -> Result<RuntimeUsbTransportOpen, RuntimeTransportError> {
+    match config.backend {
+        RuntimeUsbBackend::Libusb => open_libusb_transport(config.selector),
+        RuntimeUsbBackend::MacosUsbHost(macos_config) => {
+            open_macos_usbhost_transport(&macos_config, config.selector)
+        }
+    }
 }
 
 pub fn macos_usbhost_bulk_out_endpoints(
