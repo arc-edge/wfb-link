@@ -24256,51 +24256,54 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
         );
     }
 
-    let (mut transport, adapter, endpoints, claim_counters, claim_detail) =
-        if args.macos_usbhost.enabled {
-            match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
-                Ok(open) => (
+    let (mut session, claim_detail) = if args.macos_usbhost.enabled {
+        match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "opened retained macOS IOUSBHost session for live bridge TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_tx_once_failure(
-                        report,
-                        "usb_claim",
-                        "macOS IOUSBHost retained-session open failed",
-                        error,
-                    );
-                }
+                "opened retained macOS IOUSBHost session for live bridge TX",
+            ),
+            Err(error) => {
+                return bridge_tx_once_failure(
+                    report,
+                    "usb_claim",
+                    "macOS IOUSBHost retained-session open failed",
+                    error,
+                );
             }
-        } else {
-            match open_libusb_transport(selector) {
-                Ok(open) => (
+        }
+    } else {
+        match open_libusb_transport(selector) {
+            Ok(open) => (
+                RuntimeRadioSession::new(
                     open.transport,
                     open.adapter,
                     open.endpoints,
-                    open.counters,
-                    "claimed initialized adapter for live bridge TX",
+                    runtime_radio_counters_from_diagnostic(open.counters),
                 ),
-                Err(error) => {
-                    return bridge_tx_once_failure(
-                        report,
-                        "usb_claim",
-                        "runtime USB transport open failed",
-                        error,
-                    );
-                }
+                "claimed initialized adapter for live bridge TX",
+            ),
+            Err(error) => {
+                return bridge_tx_once_failure(
+                    report,
+                    "usb_claim",
+                    "runtime USB transport open failed",
+                    error,
+                );
             }
-        };
+        }
+    };
 
-    let bulk_out = match endpoints.bulk_out {
+    let bulk_out = match session.selected_bulk_out_endpoint() {
         Some(endpoint) => endpoint,
         None => {
-            report.adapter = Some(adapter);
-            report.endpoints = Some(endpoints);
-            report.counters = claim_counters;
+            report.adapter = Some(session.adapter.clone());
+            report.endpoints = Some(session.endpoints.clone());
+            report.counters = diagnostic_counters_from_runtime(session.counters);
             return bridge_tx_once_failure(
                 report,
                 "bulk_out",
@@ -24316,38 +24319,20 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
     let submit_result = {
-        let mut radio = BridgeTxRadio {
-            transport: &mut transport,
-            bulk_out,
+        let mut radio = BridgeTxSessionRadio {
+            session: &mut session,
             channel,
             channel_bandwidth: args.bandwidth,
-            tx_rate: args.tx_overrides.tx_rate,
-            tx_bandwidth: args.tx_overrides.tx_bandwidth,
-            tx_channel_bandwidth: args.tx_overrides.tx_channel_bandwidth,
-            tx_profile: args.tx_overrides.tx_profile,
-            tx_queue: args.tx_overrides.tx_queue.into(),
-            tx_mac_id: args.tx_overrides.mac_id,
-            tx_rate_id: args.tx_overrides.tx_rate_id,
-            tx_retries: args.tx_overrides.tx_retries,
-            tx_fallback_limit: args.tx_overrides.tx_fallback_limit,
-            hardware_sequence: None,
-            first_segment: None,
-            disable_rate_fallback: args.tx_overrides.enable_rate_fallback.then_some(false),
-            aggregate_break: args.tx_overrides.no_agg_break.then_some(false),
+            overrides: &args.tx_overrides,
             submit_counters: &mut submit_counters,
         };
         submit_tx_datagram(&datagram, &mut radio, &mut bridge_counters)
     };
 
-    let counters = DiagnosticCounters {
-        usb_control_writes: claim_counters.usb_control_writes,
-        usb_bulk_out_writes: submit_counters.submitted + submit_counters.failed,
-        tx_frames: submit_counters.submitted,
-        dropped_frames: bridge_counters.dropped,
-        ..DiagnosticCounters::default()
-    };
-    report.adapter = Some(adapter);
-    report.endpoints = Some(endpoints);
+    let mut counters = diagnostic_counters_from_runtime(session.counters);
+    counters.dropped_frames = counters.dropped_frames.max(bridge_counters.dropped);
+    report.adapter = Some(session.adapter.clone());
+    report.endpoints = Some(session.endpoints.clone());
     report.bulk_out_endpoint = Some(bulk_out);
     report.bulk_out_endpoint_hex = Some(format_value(bulk_out, 2));
     report.bridge_counters = bridge_counters;
@@ -24415,6 +24400,14 @@ struct BridgeTxRadio<'a> {
     first_segment: Option<bool>,
     disable_rate_fallback: Option<bool>,
     aggregate_break: Option<bool>,
+    submit_counters: &'a mut TxSubmitCounters,
+}
+
+struct BridgeTxSessionRadio<'a> {
+    session: &'a mut RuntimeRadioSession<RuntimeUsbTransport>,
+    channel: Channel,
+    channel_bandwidth: Bandwidth,
+    overrides: &'a BridgeTxOverrideArgs,
     submit_counters: &'a mut TxSubmitCounters,
 }
 
@@ -24532,6 +24525,20 @@ impl RadioTx for BridgeTxRadio<'_> {
         )
         .map(|_| ())
         .map_err(|error| error.to_string())
+    }
+}
+
+impl RadioTx for BridgeTxSessionRadio<'_> {
+    fn submit_80211(
+        &mut self,
+        frame: &[u8],
+        options: TxOptions,
+    ) -> std::result::Result<(), String> {
+        let options = apply_bridge_tx_overrides(self.overrides, self.channel_bandwidth, options);
+        self.session
+            .submit_80211_frame(frame, self.channel, options, self.submit_counters)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
