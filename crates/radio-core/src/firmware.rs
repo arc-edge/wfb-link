@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::realtek_table::{parse_realtek_u8_array, RealtekTableError};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -49,6 +50,39 @@ impl FirmwareImage {
         Self::from_bytes(FirmwareSource::External(path.to_path_buf()), bytes)
     }
 
+    pub fn load_realtek_c_array(
+        path: impl AsRef<Path>,
+        array_name: &str,
+    ) -> Result<Self, FirmwareError> {
+        let path = path.as_ref();
+        let source = fs::read_to_string(path).map_err(|source| FirmwareError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::from_realtek_c_array_source(
+            FirmwareSource::RealtekCArray {
+                path: path.to_path_buf(),
+                array_name: array_name.to_string(),
+            },
+            &source,
+            array_name,
+        )
+    }
+
+    pub fn from_realtek_c_array_source(
+        source: FirmwareSource,
+        c_source: &str,
+        array_name: &str,
+    ) -> Result<Self, FirmwareError> {
+        let bytes = parse_realtek_u8_array(c_source, array_name).map_err(|source| {
+            FirmwareError::RealtekArrayParse {
+                array_name: array_name.to_string(),
+                source,
+            }
+        })?;
+        Self::from_bytes(source, bytes)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -93,6 +127,7 @@ impl FirmwareImage {
 #[serde(rename_all = "snake_case")]
 pub enum FirmwareSource {
     External(PathBuf),
+    RealtekCArray { path: PathBuf, array_name: String },
     Embedded(&'static str),
     InMemory,
 }
@@ -147,6 +182,11 @@ pub enum FirmwareError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to parse firmware C array {array_name:?}: {source}")]
+    RealtekArrayParse {
+        array_name: String,
+        source: RealtekTableError,
+    },
 }
 
 #[cfg(test)]
@@ -199,5 +239,24 @@ mod tests {
         assert_eq!(payload.offset, REALTEK_FIRMWARE_HEADER_LEN);
         assert_eq!(payload.signature, Some(0x9501));
         assert_eq!(payload.bytes, &[0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn loads_firmware_from_realtek_c_array_source() {
+        let source = r#"
+            u8 array_mp_8812a_fw_nic[] = {
+                0x01, 0x95, 0x00, 0x00,
+            };
+        "#;
+        let firmware = FirmwareImage::from_realtek_c_array_source(
+            FirmwareSource::InMemory,
+            source,
+            "array_mp_8812a_fw_nic",
+        )
+        .expect("firmware");
+
+        assert_eq!(firmware.len, 4);
+        assert_eq!(firmware.bytes(), &[0x01, 0x95, 0x00, 0x00]);
+        assert_eq!(firmware.realtek_download_payload().signature, Some(0x9501));
     }
 }

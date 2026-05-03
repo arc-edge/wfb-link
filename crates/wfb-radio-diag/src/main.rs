@@ -111,6 +111,8 @@ enum Command {
     PowerOnSmoke(PowerOnSmokeArgs),
     /// Download RTL8812A firmware and poll checksum/readiness with guarded writes.
     FirmwareSmoke(FirmwareSmokeArgs),
+    /// Extract an RTL8812A firmware image from a Realtek driver C array.
+    ExtractFirmware(ExtractFirmwareArgs),
     /// Program the RTL8812A LLT table with guarded writes and per-entry polling.
     LltSmoke(LltSmokeArgs),
     /// Program RTL8812A queue and DMA boundary registers with guarded writes.
@@ -515,6 +517,29 @@ struct FirmwareSmokeArgs {
     /// Required acknowledgement that this command writes hardware registers.
     #[arg(long)]
     i_understand_this_writes_registers: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct ExtractFirmwareArgs {
+    /// Realtek hal8812a_fw.c source file containing the firmware C arrays.
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = "/tmp/wfb-ref-rtl8812au/hal/rtl8812a/hal8812a_fw.c"
+    )]
+    source: PathBuf,
+
+    /// Firmware array symbol to extract; NIC is the normal station/monitor image.
+    #[arg(long, default_value = "array_mp_8812a_fw_nic")]
+    array: String,
+
+    /// Output firmware image path consumed by init/firmware smoke commands.
+    #[arg(long, value_name = "PATH", default_value = "/tmp/rtl8812aefw.bin")]
+    out: PathBuf,
+
+    /// Replace an existing output file.
+    #[arg(long)]
+    overwrite: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -2527,6 +2552,16 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Command::ExtractFirmware(args) => {
+            let report = extract_firmware_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_extract_firmware_human(&report);
+            }
+            if let Some(code) = report.result.exit_code() {
+                std::process::exit(code);
+            }
+        }
         Command::LltSmoke(args) => {
             let report = llt_smoke_report(args);
             emit_report(&report, emit_json, report_path.as_deref())?;
@@ -3000,6 +3035,26 @@ struct FirmwareReport {
     byte_sum: u32,
     chunk_size: usize,
     chunk_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ExtractFirmwareReport {
+    schema_version: u8,
+    command: &'static str,
+    started_at_unix_ms: u64,
+    platform: PlatformInfo,
+    source: PathBuf,
+    array: String,
+    out: PathBuf,
+    overwrite: bool,
+    output_existed: bool,
+    firmware: Option<FirmwareReport>,
+    firmware_payload_offset: Option<usize>,
+    firmware_payload_len: Option<usize>,
+    firmware_signature_hex: Option<String>,
+    result: DiagnosticResult,
+    error: Option<DiagnosticErrorReport>,
+    notes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -8917,6 +8972,127 @@ fn power_on_smoke_failure_with_command(
         notes: vec![
             "guarded hardware write test aborted before firmware download, bulk traffic, channel tuning, or TX operation",
         ],
+    }
+}
+
+fn extract_firmware_report(args: ExtractFirmwareArgs) -> ExtractFirmwareReport {
+    let output_existed = args.out.exists();
+    if output_existed && !args.overwrite {
+        return extract_firmware_failure(
+            &args,
+            output_existed,
+            DiagnosticErrorReport {
+                code: "output_exists",
+                message: format!(
+                    "{} already exists; pass --overwrite to replace it",
+                    args.out.display()
+                ),
+            },
+        );
+    }
+
+    let image = match FirmwareImage::load_realtek_c_array(&args.source, &args.array) {
+        Ok(image) => image,
+        Err(error) => {
+            return extract_firmware_failure(
+                &args,
+                output_existed,
+                DiagnosticErrorReport {
+                    code: "firmware_array_parse_failed",
+                    message: error.to_string(),
+                },
+            );
+        }
+    };
+
+    if let Some(parent) = args
+        .out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return extract_firmware_failure(
+                &args,
+                output_existed,
+                DiagnosticErrorReport {
+                    code: "output_parent_create_failed",
+                    message: format!("failed to create {}: {error}", parent.display()),
+                },
+            );
+        }
+    }
+
+    if let Err(error) = fs::write(&args.out, image.bytes()) {
+        return extract_firmware_failure(
+            &args,
+            output_existed,
+            DiagnosticErrorReport {
+                code: "output_write_failed",
+                message: format!("failed to write {}: {error}", args.out.display()),
+            },
+        );
+    }
+
+    let firmware = match firmware_report_from_image(&args.source, &image) {
+        Ok(report) => report,
+        Err(message) => {
+            return extract_firmware_failure(
+                &args,
+                output_existed,
+                DiagnosticErrorReport {
+                    code: "firmware_report_failed",
+                    message,
+                },
+            );
+        }
+    };
+    let payload = image.realtek_download_payload();
+
+    ExtractFirmwareReport {
+        schema_version: 1,
+        command: "extract-firmware",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        source: args.source,
+        array: args.array,
+        out: args.out,
+        overwrite: args.overwrite,
+        output_existed,
+        firmware: Some(firmware),
+        firmware_payload_offset: Some(payload.offset),
+        firmware_payload_len: Some(payload.bytes.len()),
+        firmware_signature_hex: payload.signature.map(|value| format_value(value, 4)),
+        result: DiagnosticResult::Pass,
+        error: None,
+        notes: vec![
+            "firmware was extracted from a Realtek driver C array; no USB or hardware operation was issued",
+            "the output image includes the Realtek firmware header when present, matching existing firmware loader expectations",
+        ],
+    }
+}
+
+fn extract_firmware_failure(
+    args: &ExtractFirmwareArgs,
+    output_existed: bool,
+    error: DiagnosticErrorReport,
+) -> ExtractFirmwareReport {
+    ExtractFirmwareReport {
+        schema_version: 1,
+        command: "extract-firmware",
+        started_at_unix_ms: started_at_unix_ms(),
+        platform: platform_info(),
+        source: args.source.clone(),
+        array: args.array.clone(),
+        out: args.out.clone(),
+        overwrite: args.overwrite,
+        output_existed,
+        firmware: None,
+        firmware_payload_offset: None,
+        firmware_payload_len: None,
+        firmware_signature_hex: None,
+        result: DiagnosticResult::Fail,
+        error: Some(error),
+        notes: vec!["firmware extraction aborted before writing a usable image"],
     }
 }
 
@@ -37698,6 +37874,39 @@ fn print_firmware_smoke_human(report: &FirmwareSmokeReport) {
     }
 }
 
+fn print_extract_firmware_human(report: &ExtractFirmwareReport) {
+    println!("Extract firmware: {}", report.result.as_str());
+    println!("Platform: {} {}", report.platform.os, report.platform.arch);
+    println!("Source: {}", report.source.display());
+    println!("Array: {}", report.array);
+    println!(
+        "Output: {} existed={} overwrite={}",
+        report.out.display(),
+        report.output_existed,
+        report.overwrite
+    );
+    if let Some(firmware) = &report.firmware {
+        println!(
+            "Firmware image: {} bytes, byte_sum=0x{:08x}, pages={}x{}",
+            firmware.len, firmware.byte_sum, firmware.chunk_count, firmware.chunk_size
+        );
+    }
+    if let Some(payload_len) = report.firmware_payload_len {
+        println!(
+            "Firmware payload: offset={} len={} signature={}",
+            report.firmware_payload_offset.unwrap_or_default(),
+            payload_len,
+            report.firmware_signature_hex.as_deref().unwrap_or("-")
+        );
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {}: {}", error.code, error.message);
+    }
+    for note in &report.notes {
+        println!("Note: {note}");
+    }
+}
+
 fn print_llt_smoke_human(report: &LltSmokeReport) {
     println!("LLT smoke: {}", report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -38439,6 +38648,82 @@ mod tests {
             frame_jsonl: None,
             fixture_bulk_in: Vec::new(),
         }
+    }
+
+    #[test]
+    fn extract_firmware_writes_realtek_c_array() {
+        let stamp = started_at_unix_ms();
+        let source_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-fw-source-{}-{stamp}.c",
+            std::process::id()
+        ));
+        let out_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-fw-out-{}-{stamp}.bin",
+            std::process::id()
+        ));
+        fs::write(
+            &source_path,
+            r#"
+u8 array_mp_8812a_fw_nic[] = {
+    0x01, 0x95, 0x20, 0x00,
+};
+"#,
+        )
+        .expect("write source");
+
+        let report = extract_firmware_report(ExtractFirmwareArgs {
+            source: source_path.clone(),
+            array: "array_mp_8812a_fw_nic".to_string(),
+            out: out_path.clone(),
+            overwrite: false,
+        });
+
+        assert_eq!(report.result, DiagnosticResult::Pass);
+        assert_eq!(report.firmware_payload_len, Some(4));
+        assert_eq!(report.firmware_signature_hex.as_deref(), Some("0x9501"));
+        assert_eq!(
+            fs::read(&out_path).expect("firmware out"),
+            vec![0x01, 0x95, 0x20, 0x00]
+        );
+
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(out_path);
+    }
+
+    #[test]
+    fn extract_firmware_refuses_existing_output_without_overwrite() {
+        let stamp = started_at_unix_ms();
+        let source_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-fw-source-existing-{}-{stamp}.c",
+            std::process::id()
+        ));
+        let out_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-fw-out-existing-{}-{stamp}.bin",
+            std::process::id()
+        ));
+        fs::write(
+            &source_path,
+            "u8 array_mp_8812a_fw_nic[] = { 0x01, 0x95 };\n",
+        )
+        .expect("write source");
+        fs::write(&out_path, [0xaa, 0xbb]).expect("write existing");
+
+        let report = extract_firmware_report(ExtractFirmwareArgs {
+            source: source_path.clone(),
+            array: "array_mp_8812a_fw_nic".to_string(),
+            out: out_path.clone(),
+            overwrite: false,
+        });
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("output_exists")
+        );
+        assert_eq!(fs::read(&out_path).expect("existing out"), vec![0xaa, 0xbb]);
+
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(out_path);
     }
 
     #[test]

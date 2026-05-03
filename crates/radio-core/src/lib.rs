@@ -22,8 +22,9 @@ pub use init_plan::{
 };
 pub use pcap::PcapWriter;
 pub use realtek_table::{
-    parse_realtek_u32_array, plan_realtek_table, RealtekConditionEnv, RealtekTableAction,
-    RealtekTableActionKind, RealtekTableError, RealtekTableKind, RealtekTablePlan,
+    parse_realtek_u32_array, parse_realtek_u8_array, plan_realtek_table, RealtekConditionEnv,
+    RealtekTableAction, RealtekTableActionKind, RealtekTableError, RealtekTableKind,
+    RealtekTablePlan,
 };
 pub use registry::{known_adapters, lookup_known_adapter, Chipset, KnownAdapter};
 pub use rtl8812au::{

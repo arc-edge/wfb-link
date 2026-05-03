@@ -18,6 +18,8 @@ pub enum RealtekTableError {
         array_name: String,
         value_count: usize,
     },
+    #[error("array {array_name:?} contains non-u8 literal {literal:?}")]
+    ByteOutOfRange { array_name: String, literal: u32 },
     #[error("invalid numeric literal {literal:?}: {message}")]
     InvalidNumber { literal: String, message: String },
 }
@@ -128,6 +130,23 @@ pub fn parse_realtek_u32_array(
         });
     }
     Ok(values)
+}
+
+pub fn parse_realtek_u8_array(
+    source: &str,
+    array_name: &str,
+) -> Result<Vec<u8>, RealtekTableError> {
+    let body = find_array_body(source, array_name)?;
+    let body = strip_c_comments(body);
+    scan_u32_literals(&body)?
+        .into_iter()
+        .map(|value| {
+            u8::try_from(value).map_err(|_| RealtekTableError::ByteOutOfRange {
+                array_name: array_name.to_string(),
+                literal: value,
+            })
+        })
+        .collect()
 }
 
 pub fn plan_realtek_table(
@@ -484,6 +503,34 @@ mod tests {
         let values = parse_realtek_u32_array(source, "array_mp_8812a_phy_reg").expect("array");
 
         assert_eq!(values, vec![0x800, 0x1234_5678, 0xfe, 0]);
+    }
+
+    #[test]
+    fn parses_realtek_u8_array() {
+        let source = r#"
+            u8 array_mp_8812a_fw_nic[] = {
+                0x01, 0x95, 2, /* skipped */ 0xff,
+            };
+        "#;
+
+        let values = parse_realtek_u8_array(source, "array_mp_8812a_fw_nic").expect("array");
+
+        assert_eq!(values, vec![0x01, 0x95, 2, 0xff]);
+    }
+
+    #[test]
+    fn rejects_non_u8_array_literal() {
+        let source = r#"
+            u8 array_mp_8812a_fw_nic[] = { 0x100 };
+        "#;
+
+        assert!(matches!(
+            parse_realtek_u8_array(source, "array_mp_8812a_fw_nic"),
+            Err(RealtekTableError::ByteOutOfRange {
+                array_name,
+                literal: 0x100
+            }) if array_name == "array_mp_8812a_fw_nic"
+        ));
     }
 
     #[test]
