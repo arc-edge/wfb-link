@@ -3,9 +3,7 @@
 ## Purpose
 
 Define how WFB-ng distributor and aggregator traffic is translated to and from the native userspace radio backend.
-
 ## Requirements
-
 ### Requirement: TX Bridge Input
 The system SHALL accept WFB-ng distributor or injector datagrams containing a firmware mark and radiotap-prefixed IEEE 802.11 frame.
 
@@ -32,11 +30,11 @@ The system SHALL translate WFB-ng radiotap TX metadata into userspace radio TX o
 The system SHALL inject WFB-ng IEEE 802.11 frames through the userspace USB radio without requiring a Linux monitor interface.
 
 #### Scenario: Frame injection succeeds
-- **WHEN** the TX bridge receives a valid WFB 802.11 frame for the active radio
-- **THEN** it submits the frame to the radio backend and increments the injected-packet and injected-byte counters
+- **WHEN** the TX bridge receives a valid WFB 802.11 frame for the active radio from a one-shot input or UDP listener
+- **THEN** it submits the frame through the runtime radio session and increments the injected-packet and injected-byte counters
 
 #### Scenario: Frame injection fails
-- **WHEN** the radio backend rejects or fails a TX request
+- **WHEN** the runtime radio session rejects or fails a TX request
 - **THEN** the bridge increments the dropped-packet counter and logs the radio error with the bridge packet context
 
 ### Requirement: RX WFB Frame Filtering
@@ -71,3 +69,29 @@ The system SHALL allow operators to configure adapter selection, channel, link I
 #### Scenario: Required configuration missing
 - **WHEN** required bridge configuration is missing
 - **THEN** the bridge exits before radio initialization and reports the missing field
+
+### Requirement: Combined WFB Bridge Runtime
+The system SHALL run a combined WFB RX/TX bridge loop over the userspace USB radio without requiring a Linux monitor interface.
+
+#### Scenario: Bridge-run frame injection succeeds
+- **WHEN** `bridge-run` receives a valid WFB 802.11 frame from a configured UDP TX listener
+- **THEN** it submits the frame through the runtime radio session and increments the injected-packet and injected-byte counters
+
+#### Scenario: Bridge-run RX forwarding remains available
+- **WHEN** the runtime radio session returns a bulk-IN read with supported receive metadata and an IEEE 802.11 payload
+- **THEN** `bridge-run` processes the runtime-parsed packet and forwards matching WFB payloads to the configured UDP peers
+
+#### Scenario: Bridge-run RX incomplete tail remains visible
+- **WHEN** the runtime radio session returns a bulk-IN read whose trailing bytes do not contain a complete RX packet
+- **THEN** `bridge-run` increments the RX need-more-data counter without treating the read as a fatal bridge error
+
+### Requirement: WFB TX Benchmark Runtime
+The system SHALL submit bounded WFB TX benchmark traffic through the userspace USB radio runtime without requiring a Linux monitor interface.
+
+#### Scenario: Generated benchmark submissions use runtime TX
+- **WHEN** `bridge-tx-bench` generates valid WFB datagrams for the active channel
+- **THEN** it submits each generated frame through the runtime radio session and records runtime-aligned TX counters
+
+#### Scenario: Exact packet replay uses runtime TX
+- **WHEN** `bridge-tx-bench` is supplied an exact descriptor-prefixed packet override
+- **THEN** it submits the packet through the runtime radio session bulk-OUT path and records short-write or USB errors in the submit counters

@@ -3,9 +3,7 @@
 ## Purpose
 
 Define the evidence, reports, guarded power behavior, calibration tracking, and acceptance gates required before macOS RTL8812AU WFB operation can be considered range-ready.
-
 ## Requirements
-
 ### Requirement: Linux Baseline Comparison
 The system SHALL support RF-quality comparison runs that use a Linux RTL8812AU/WFB-ng baseline captured with the same adapter class, antenna setup, channel, bandwidth, WFB key, radio port, FEC settings, payload size, and fixed TX rate/profile as the macOS run.
 
@@ -22,11 +20,11 @@ The system SHALL emit structured RF-quality reports for macOS WFB runs that capt
 
 #### Scenario: RF state is reportable
 - **WHEN** a macOS RF-quality run completes
-- **THEN** the report MUST include channel, bandwidth, TX rate/MCS, TX descriptor profile, TX queue, MACID, rate ID, retry/fallback settings, RFE type, EFUSE summary, TX power mode, TX power register evidence, and calibration state
+- **THEN** the report MUST include channel, bandwidth, TX rate/MCS, TX descriptor profile, TX queue, MACID, rate ID, retry/fallback settings, RFE type, EFUSE summary, TX power mode, TX power register evidence, calibration state, and any selected TX calibration profile evidence
 
 #### Scenario: WFB outcome is reportable
 - **WHEN** a macOS RF-quality run forwards or injects WFB traffic
-- **THEN** the report MUST include submitted datagrams, recovered payloads when available, malformed/dropped counters, FEC/source payload settings, throughput, CPU usage, and receiver artifact paths
+- **THEN** the report MUST include submitted datagrams, recovered payloads when available, malformed/dropped counters, FEC/source payload settings, throughput, CPU usage, receiver artifact paths, expected-versus-observed datagram evidence for short FEC runs, and receiver session/decrypt health when supplied by the run automation
 
 ### Requirement: EFUSE-Derived TX Power Programming
 The system SHALL provide an explicit TX power mode that computes RTL8812AU per-path/per-rate TXAGC register values from decoded EFUSE power data and records the calculation inputs and writes.
@@ -40,7 +38,7 @@ The system SHALL provide an explicit TX power mode that computes RTL8812AU per-p
 - **THEN** the command MUST require explicit RF-transmit authorization and MUST reject values outside the guarded RTL8812AU TX power index range
 
 ### Requirement: Calibration State Tracking
-The system SHALL track and report IQK, LCK, thermal, RFE pinmux, and RF path calibration state for RF-quality runs, even when the implementation is still using a stop-gap or captured value.
+The system SHALL track and report IQK, LCK, thermal, RFE pinmux, and RF path calibration state for RF-quality runs, even when the implementation is still using a stop-gap, captured value, read-only probe, or runtime approximation.
 
 #### Scenario: Stop-gap calibration is labeled
 - **WHEN** a run uses planted, captured, or static calibration values
@@ -49,6 +47,10 @@ The system SHALL track and report IQK, LCK, thermal, RFE pinmux, and RF path cal
 #### Scenario: Runtime calibration is verified
 - **WHEN** a runtime calibration routine or approximation is enabled
 - **THEN** the report MUST include the calibration routine name, affected registers, success/failure status, and before/after values sufficient to compare against Linux behavior
+
+#### Scenario: Read-only IQK probe is labeled
+- **WHEN** a run uses a read-only IQK probe profile
+- **THEN** the report MUST include safe final-state IQK register readback, label profile-time RF-serial/page-C1/deep IQK evidence as deferred, and clearly state that runtime IQK calibration was not performed
 
 ### Requirement: Range Test Profiles
 The system SHALL define repeatable range-test profiles for close-range sanity, stepped/attenuated comparison, and outdoor/long-distance validation.
@@ -82,3 +84,52 @@ The system SHALL require separate evidence before claiming HT40 or VHT80 wide-PP
 #### Scenario: Wide-mode promotion requires evidence
 - **WHEN** an operator marks a 40 MHz or 80 MHz profile as range-ready
 - **THEN** the profile MUST reference receiver metadata, SDR/spectrum evidence, or equivalent proof that the intended wide-PPDU mode is actually being transmitted and decoded
+
+### Requirement: Production Readiness Evidence
+The system SHALL classify RF-quality production readiness using Linux peer preflight status, calibration profile evidence, receiver-backed WFB outcomes, and RX metadata confidence.
+
+#### Scenario: Production evidence is incomplete
+- **WHEN** a run lacks channel-state evidence, uses stop-gap calibration, or only has fallback RSSI metadata
+- **THEN** the RF-quality report MUST keep the run usable for bench diagnostics but MUST NOT classify it as long-distance production-ready
+
+#### Scenario: Targeted parity is used
+- **WHEN** a run uses targeted Linux-parity calibration overrides
+- **THEN** the report MUST identify the profile and affected registers and MUST keep full IQK/LCK validation listed as remaining work unless the full routines have been ported and validated
+
+### Requirement: Standalone IQK Evidence Handling
+The system SHALL distinguish standalone IQK evidence from runtime IQK
+calibration when evaluating RF-quality and range-readiness reports.
+
+#### Scenario: Standalone IQK evidence is attachable
+- **WHEN** a standalone IQK diagnostic artifact is supplied to an RF-quality or
+  range-readiness review
+- **THEN** the review material MUST identify the artifact path, diagnostic
+  mode, cleanup status, and captured IQK evidence groups
+
+#### Scenario: Standalone IQK evidence is not runtime calibration
+- **WHEN** a report includes standalone IQK diagnostic evidence but no runtime
+  IQK calibration routine was executed
+- **THEN** the report MUST NOT classify the run as Linux-parity runtime IQK
+  calibration
+
+### Requirement: Runtime IQK RF-Quality Classification
+The system SHALL distinguish runtime IQK calibration from captured or
+standalone IQK evidence when evaluating RF-quality and range-readiness reports.
+
+#### Scenario: Runtime IQK is classified as calibration
+- **WHEN** an RF-quality run uses the guarded runtime IQK profile and cleanup
+  succeeds
+- **THEN** the report MAY classify IQK as runtime calibration and MUST include
+  the runtime IQK artifact fields needed to compare the run with Linux behavior
+
+#### Scenario: Runtime IQK failure is not hidden
+- **WHEN** runtime IQK fails, times out, falls back, or cannot restore a saved
+  selector/register state
+- **THEN** the RF-quality report MUST preserve the failure evidence and MUST NOT
+  classify the profile as Linux-parity runtime IQK
+
+#### Scenario: Runtime IQK needs receiver-backed validation
+- **WHEN** runtime IQK completes successfully on hardware
+- **THEN** the profile MUST remain experimental until a receiver-backed
+  close-range A/B run compares default, captured IQK, LCK, and runtime IQK under
+  the same channel, bandwidth, rate, power mode, payload, and antenna geometry
