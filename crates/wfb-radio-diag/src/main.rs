@@ -35,13 +35,12 @@ use wfb_bridge::{
     build_rx_forward_datagram, build_wfb_data_header, parse_tx_datagram, submit_tx_datagram,
     RadioTx, RadiotapError, RxCounters, RxForwardConfig, TxCounters, TxDatagramError, WfbChannelId,
 };
+#[cfg(target_os = "macos")]
+use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile,
 };
-
-#[cfg(target_os = "macos")]
-mod macos_usbhost;
 
 #[derive(Debug, Parser)]
 #[command(name = "wfb-radio-diag")]

@@ -6,6 +6,9 @@
 
 use serde::Serialize;
 
+#[cfg(target_os = "macos")]
+pub mod macos_usbhost;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxCalibrationProfile {

@@ -6,4 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+radio-core.workspace = true
 serde.workspace = true
+
+[build-dependencies]
+cc.workspace = true

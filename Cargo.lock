@@ -577,7 +577,6 @@ name = "wfb-radio-diag"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cc",
  "clap",
  "libc",
  "radio-core",
@@ -593,6 +592,8 @@ dependencies = [
 name = "wfb-radio-runtime"
 version = "0.1.0"
 dependencies = [
+ "cc",
+ "radio-core",
  "serde",
 ]
 
