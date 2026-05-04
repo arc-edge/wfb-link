@@ -2238,6 +2238,7 @@ const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
 const REG_IQK_MACBB_0X0520: u16 = 0x0520;
 const REG_IQK_MACBB_0X090C: u16 = 0x090c;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
+const REG_IQK_TRIGGER_980: u16 = 0x0980;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_RX_PATH_JAGUAR: u16 = 0x0a07;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
@@ -2250,8 +2251,10 @@ const REG_IQK_TX_TONE_A_C80: u16 = 0x0c80;
 const REG_IQK_RX_TONE_A_C84: u16 = 0x0c84;
 const REG_IQK_RFE_SETTING_A_C88: u16 = 0x0c88;
 const REG_IQK_RFE_SETTING_A_C8C: u16 = 0x0c8c;
+const REG_IQK_RESULT_A_D00: u16 = 0x0d00;
 const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
 const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
+const REG_IQK_RESULT_B_D40: u16 = 0x0d40;
 const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
 const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
 const REG_IQK_TX_POWER_CTRL_A_C94: u16 = 0x0c94;
@@ -2322,6 +2325,11 @@ const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
 const RF_LCK_MODE_BIT: u32 = 1 << 14;
 const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
+const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
+const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
+const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
+const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
+const RTL8812A_IQK_RESULT_FIELD_MASK: u32 = 0x07ff_0000;
 const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
     | RCR_APM
     | RCR_AM
@@ -3156,6 +3164,349 @@ pub fn rtl8812au_runtime_iqk_sweep_summary(
         fallback_stage_count,
         path_statuses,
     }
+}
+
+fn bb_masked_field(value: u32, mask: u32) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+    (value & mask) >> mask.trailing_zeros()
+}
+
+fn runtime_iqk_write32<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    value: u32,
+    error_code: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write32_with_counter(
+        registers,
+        counters,
+        address,
+        value,
+        register_name,
+        "runtime-iqk",
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            error_code,
+            format!(
+                "{register_name} {} write {} failed: {}",
+                format_register_address(address),
+                format_register_value(value, 8),
+                error.message
+            ),
+        )
+    })
+}
+
+fn runtime_iqk_read32<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    error_code: &'static str,
+) -> Result<u32, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    read32_with_counter(registers, counters, address, register_name, "runtime-iqk").map_err(
+        |error| {
+            RuntimeRadioError::new(
+                error_code,
+                format!(
+                    "{register_name} {} read failed: {}",
+                    format_register_address(address),
+                    error.message
+                ),
+            )
+        },
+    )
+}
+
+fn runtime_iqk_capture_tx_candidate<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path_name: &'static str,
+    latch_register_name: &'static str,
+    latch_register: u16,
+    result_register_name: &'static str,
+    result_register: u16,
+) -> Result<Rtl8812auRuntimeIqkIqcValue, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0200_0000,
+        "rtl8812a_runtime_iqk_tx_failed",
+    )?;
+    let tx_x_raw = runtime_iqk_read32(
+        registers,
+        counters,
+        result_register_name,
+        result_register,
+        "rtl8812a_runtime_iqk_tx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0400_0000,
+        "rtl8812a_runtime_iqk_tx_failed",
+    )?;
+    let tx_y_raw = runtime_iqk_read32(
+        registers,
+        counters,
+        result_register_name,
+        result_register,
+        "rtl8812a_runtime_iqk_tx_failed",
+    )?;
+    let candidate = rtl8812au_runtime_iqk_iqc_value(
+        bb_masked_field(tx_x_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
+        bb_masked_field(tx_y_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
+    );
+    if candidate.x == 0 && candidate.y == 0 {
+        return Err(RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_tx_failed",
+            format!("path {path_name} TX IQK produced a zero TX_X/TX_Y candidate"),
+        ));
+    }
+    Ok(candidate)
+}
+
+pub fn run_rtl8812au_runtime_iqk_tx_oneshot<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<
+    (
+        Rtl8812auRuntimeIqkStageReport,
+        Rtl8812auRuntimeIqkStageReport,
+    ),
+    RuntimeRadioError,
+>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut path_a = Rtl8812auRuntimeIqkOneShotPathState::default();
+    let mut path_b = Rtl8812auRuntimeIqkOneShotPathState::default();
+
+    while !(path_a.is_finished() && path_b.is_finished()) {
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xcb8",
+            REG_RFE_TIMING_A_JAGUAR,
+            0x0010_0000,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xeb8",
+            REG_RFE_TIMING_B_JAGUAR,
+            0x0010_0000,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0x980",
+            REG_IQK_TRIGGER_980,
+            0xfa00_0000,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0x980",
+            REG_IQK_TRIGGER_980,
+            0xf800_0000,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+
+        thread::sleep(Duration::from_millis(10));
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xcb8",
+            REG_RFE_TIMING_A_JAGUAR,
+            0,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xeb8",
+            REG_RFE_TIMING_B_JAGUAR,
+            0,
+            "rtl8812a_runtime_iqk_tx_failed",
+        )?;
+
+        let mut delay_count = 0;
+        loop {
+            if !path_a.is_finished() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd00",
+                    REG_IQK_RESULT_A_D00,
+                    "rtl8812a_runtime_iqk_tx_failed",
+                )?;
+                path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
+            }
+            if !path_b.is_finished() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd40",
+                    REG_IQK_RESULT_B_D40,
+                    "rtl8812a_runtime_iqk_tx_failed",
+                )?;
+                path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
+            }
+            let path_a_ready = path_a.is_finished() || path_a.ready().unwrap_or(false);
+            let path_b_ready = path_b.is_finished() || path_b.ready().unwrap_or(false);
+            if (path_a_ready && path_b_ready) || delay_count > RTL8812A_IQK_READY_POLL_LIMIT {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+            delay_count += 1;
+        }
+        path_a.note_delay_count(delay_count);
+        path_b.note_delay_count(delay_count);
+
+        if delay_count < RTL8812A_IQK_READY_POLL_LIMIT {
+            if !path_a.is_finished() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd00",
+                    REG_IQK_RESULT_A_D00,
+                    "rtl8812a_runtime_iqk_tx_failed",
+                )?;
+                let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
+                path_a.set_failed(failed);
+                if failed {
+                    path_a.push_attempt(
+                        path_a.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("tx_iqk_failed_flag"),
+                    );
+                    path_a.note_retry("tx_iqk_failed_flag");
+                } else {
+                    let candidate = runtime_iqk_capture_tx_candidate(
+                        registers,
+                        counters,
+                        "A",
+                        "R_0xcb8",
+                        REG_RFE_TIMING_A_JAGUAR,
+                        "R_0xd00",
+                        REG_IQK_RESULT_A_D00,
+                    )?;
+                    path_a.push_attempt(
+                        path_a.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_a.push_candidate(candidate);
+                }
+            }
+            if !path_b.is_finished() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd40",
+                    REG_IQK_RESULT_B_D40,
+                    "rtl8812a_runtime_iqk_tx_failed",
+                )?;
+                let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
+                path_b.set_failed(failed);
+                if failed {
+                    path_b.push_attempt(
+                        path_b.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("tx_iqk_failed_flag"),
+                    );
+                    path_b.note_retry("tx_iqk_failed_flag");
+                } else {
+                    let candidate = runtime_iqk_capture_tx_candidate(
+                        registers,
+                        counters,
+                        "B",
+                        "R_0xeb8",
+                        REG_RFE_TIMING_B_JAGUAR,
+                        "R_0xd40",
+                        REG_IQK_RESULT_B_D40,
+                    )?;
+                    path_b.push_attempt(
+                        path_b.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_b.push_candidate(candidate);
+                }
+            }
+        } else {
+            if !path_a.is_finished() {
+                path_a.push_attempt(
+                    path_a.ready(),
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("tx_iqk_not_ready"),
+                );
+                path_a.note_retry("tx_iqk_not_ready");
+            }
+            if !path_b.is_finished() {
+                path_b.push_attempt(
+                    path_b.ready(),
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("tx_iqk_not_ready"),
+                );
+                path_b.note_retry("tx_iqk_not_ready");
+            }
+        }
+
+        if path_a.is_finished() && path_b.is_finished() {
+            break;
+        }
+        if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
+            || path_b.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
+        {
+            break;
+        }
+    }
+
+    Ok((
+        path_a.into_stage_report("tx", rtl8812au_runtime_iqk_iqc_value(0x200, 0), Vec::new()),
+        path_b.into_stage_report("tx", rtl8812au_runtime_iqk_iqc_value(0x200, 0), Vec::new()),
+    ))
 }
 
 pub fn rtl8812au_runtime_iqk_masked_bb_write_plan(
@@ -6276,6 +6627,58 @@ mod tests {
             summary.path_statuses[0].rx_failure_label,
             Some("rx_iqk_skipped_without_tx_iqk")
         );
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_tx_oneshot_runs_attempt_loop() {
+        let transport = MockTransport::default();
+        transport.insert_u32(
+            super::REG_IQK_RESULT_A_D00,
+            super::RTL8812A_IQK_READY_MASK | (0x120 << 16),
+        );
+        transport.insert_u32(
+            super::REG_IQK_RESULT_B_D40,
+            super::RTL8812A_IQK_READY_MASK | (0x121 << 16),
+        );
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let (path_a, path_b) =
+            super::run_rtl8812au_runtime_iqk_tx_oneshot(&registers, &mut counters)
+                .expect("TX IQK one-shot");
+
+        assert_eq!(path_a.stage, "tx");
+        assert_eq!(path_a.status, "success");
+        assert_eq!(path_a.average_count, 2);
+        assert_eq!(
+            path_a.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
+            Some((0x120, 0x120))
+        );
+        assert_eq!(path_b.status, "success");
+        assert_eq!(path_b.average_count, 2);
+        assert_eq!(
+            path_b.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
+            Some((0x121, 0x121))
+        );
+        assert!(counters.usb_control_reads > 0);
+        assert!(counters.usb_control_writes > 0);
+
+        let writes = transport.writes();
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_IQK_TRIGGER_980
+                && bytes.as_slice() == 0xfa00_0000_u32.to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_IQK_TRIGGER_980
+                && bytes.as_slice() == 0xf800_0000_u32.to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RFE_TIMING_A_JAGUAR
+                && bytes.as_slice() == 0x0010_0000_u32.to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RFE_TIMING_A_JAGUAR && bytes.as_slice() == 0_u32.to_le_bytes()
+        }));
     }
 
     #[test]
