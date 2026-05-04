@@ -19,11 +19,11 @@
 - Runtime-owned RTL8812AU LCK calibration execution, RF-serial helper reports,
   register read/write evidence, cleanup handling, and counter deltas.
 - Runtime-owned RTL8812AU IQK setup-plan generation and live application,
-  backup/restore execution, candidate selection, and TX/RX IQC fill-plan
-  helpers. These preserve the upstream MAC/AFE/RF prerequisites, backup
-  register groups, RF serial backup offsets, masks, path-specific latch
-  registers, fallback rules, and signed-component tolerance used by the live
-  IQK sweep.
+  backup/restore execution, candidate selection, one-shot stage outcome state,
+  sweep summaries, and TX/RX IQC fill-plan helpers. These preserve the upstream
+  MAC/AFE/RF prerequisites, backup register groups, RF serial backup offsets,
+  masks, path-specific latch registers, retry/fallback reporting, and
+  signed-component tolerance used by the live IQK sweep.
 - Runtime radio session metadata, endpoint selection, counters, and error classification.
 - Runtime 802.11 TX submission through descriptor construction and bulk OUT.
 - Runtime descriptor-prefixed raw TX packet replay for trace-parity and benchmark paths.
@@ -83,10 +83,10 @@ boundary shifts.
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
-- Runtime IQK live one-shot sweep execution and evidence reports while parity
-  is still being hardened. Targeted parity, LCK execution, and IQK
-  setup/backup/restore plus candidate/IQC planning have moved into the
-  runtime library.
+- Runtime IQK live one-shot register sequencing and diagnostic evidence
+  formatting while parity is still being hardened. Targeted parity, LCK
+  execution, and IQK setup/backup/restore plus candidate/IQC planning and
+  one-shot outcome state have moved into the runtime library.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -103,7 +103,7 @@ boundary shifts.
    2 after that non-regression gate passes. This gate passed on May 4, 2026:
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
-3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK setup/backup/restore plus candidate/IQC planning are runtime-owned; IQK one-shot sweep execution remains the next calibration-extraction target.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK setup/backup/restore plus candidate/IQC planning and one-shot outcome state are runtime-owned; IQK one-shot register sequencing remains the next calibration-extraction target.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
@@ -134,12 +134,13 @@ profile as diagnostic-only evidence until its register values are corrected or
 validated independently; it is not part of the production-ready path.
 
 The first IQK extraction slices moved setup planning, setup-plan application,
-backup/restore execution, candidate selection, and TX/RX IQC fill-plan helpers
-into `wfb-radio-runtime`. The diagnostic command still owns one-shot IQK sweep
-execution and JSON evidence reporting. Focused runtime and diagnostic IQK
-helper tests verify MAC/AFE/RF prerequisites, live setup writes, backup register
-groups, RF serial backup/restore offsets, masks, latch registers, fallback
-behavior, invalid-path rejection, and signed-component selection tolerance.
+backup/restore execution, candidate selection, one-shot stage outcome state,
+sweep summaries, and TX/RX IQC fill-plan helpers into `wfb-radio-runtime`. The
+diagnostic command still owns one-shot IQK register sequencing and JSON evidence
+formatting. Focused runtime and diagnostic IQK helper tests verify MAC/AFE/RF
+prerequisites, live setup writes, backup register groups, RF serial
+backup/restore offsets, masks, latch registers, retry/fallback report shape,
+invalid-path rejection, and signed-component selection tolerance.
 
 ## Latest Runtime-Flow Smoke
 

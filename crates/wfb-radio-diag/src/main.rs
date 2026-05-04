@@ -49,9 +49,12 @@ use wfb_radio_runtime::{
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
-    Rtl8812auRfPath, Rtl8812auRuntimeIqkBackupReport, Rtl8812auRuntimeIqkCleanupReport,
-    Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
-    Rtl8812auRuntimeIqkSetupWritePlan, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+    Rtl8812auRfPath, Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkBackupReport,
+    Rtl8812auRuntimeIqkCleanupReport, Rtl8812auRuntimeIqkIqcValue,
+    Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkOneShotPathState,
+    Rtl8812auRuntimeIqkPathReport, Rtl8812auRuntimeIqkSetupWritePlan,
+    Rtl8812auRuntimeIqkStageReport, Rtl8812auRuntimeIqkSweepPathSummaryReport,
+    Rtl8812auRuntimeIqkSweepSummaryReport, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
     RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
     RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
     RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
@@ -3824,73 +3827,17 @@ struct TxRuntimeIqkCalibrationReport {
     counters: DiagnosticCounters,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct TxRuntimeIqkSweepSummaryReport {
-    sweep_index: u8,
-    status: &'static str,
-    cleanup_status: &'static str,
-    fallback_stage_count: usize,
-    path_statuses: Vec<TxRuntimeIqkSweepPathSummaryReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TxRuntimeIqkSweepPathSummaryReport {
-    path_name: &'static str,
-    tx_status: &'static str,
-    tx_retry_count: u8,
-    tx_average_count: u8,
-    tx_fallback_used: bool,
-    tx_failure_label: Option<&'static str>,
-    rx_status: &'static str,
-    rx_retry_count: u8,
-    rx_average_count: u8,
-    rx_fallback_used: bool,
-    rx_failure_label: Option<&'static str>,
-}
-
+type TxRuntimeIqkSweepSummaryReport = Rtl8812auRuntimeIqkSweepSummaryReport;
+type TxRuntimeIqkSweepPathSummaryReport = Rtl8812auRuntimeIqkSweepPathSummaryReport;
 type TxRuntimeIqkBackupReport = Rtl8812auRuntimeIqkBackupReport;
 type TxRuntimeIqkCleanupReport = Rtl8812auRuntimeIqkCleanupReport;
-
-#[derive(Debug, Serialize)]
-struct TxRuntimeIqkPathReport {
-    path: TxPowerPathArg,
-    path_name: &'static str,
-    tx: TxRuntimeIqkStageReport,
-    rx: TxRuntimeIqkStageReport,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TxRuntimeIqkStageReport {
-    stage: &'static str,
-    status: &'static str,
-    ready: Option<bool>,
-    failed: Option<bool>,
-    retry_count: u8,
-    average_count: u8,
-    delay_count_max: Option<u8>,
-    attempts: Vec<TxRuntimeIqkAttemptReport>,
-    candidates: Vec<TxRuntimeIqkIqcValue>,
-    selected_iqc: Option<TxRuntimeIqkIqcValue>,
-    fallback_used: bool,
-    failure_label: Option<&'static str>,
-    fill_plan: Vec<TxRuntimeIqkMaskedBbWritePlan>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TxRuntimeIqkAttemptReport {
-    attempt_index: u8,
-    ready: Option<bool>,
-    failed: Option<bool>,
-    delay_count: Option<u8>,
-    status_raw: Option<u32>,
-    status_raw_hex: Option<String>,
-    candidate: Option<TxRuntimeIqkIqcValue>,
-    label: Option<&'static str>,
-}
-
+type TxRuntimeIqkPathReport = Rtl8812auRuntimeIqkPathReport;
+type TxRuntimeIqkStageReport = Rtl8812auRuntimeIqkStageReport;
+type TxRuntimeIqkAttemptReport = Rtl8812auRuntimeIqkAttemptReport;
 type TxRuntimeIqkIqcValue = Rtl8812auRuntimeIqkIqcValue;
 type TxRuntimeIqkMaskedBbWritePlan = Rtl8812auRuntimeIqkMaskedBbWritePlan;
 type TxRuntimeIqkSetupWritePlan = Rtl8812auRuntimeIqkSetupWritePlan;
+type RuntimeIqkOneShotPathState = Rtl8812auRuntimeIqkOneShotPathState;
 
 #[derive(Debug, Serialize)]
 struct Rtl8812aIqkDiagnosticReport {
@@ -15697,104 +15644,6 @@ fn rtl8812a_runtime_iqk_setup_plan(
     wfb_radio_runtime::rtl8812au_runtime_iqk_setup_plan(band, rfe_type, ext_pa_5g, ext_pa_2g)
 }
 
-#[derive(Debug, Clone, Default)]
-struct RuntimeIqkOneShotPathState {
-    attempts: Vec<TxRuntimeIqkAttemptReport>,
-    candidates: Vec<TxRuntimeIqkIqcValue>,
-    selected_iqc: Option<TxRuntimeIqkIqcValue>,
-    retry_count: u8,
-    delay_count_max: Option<u8>,
-    ready: Option<bool>,
-    failed: Option<bool>,
-    failure_label: Option<&'static str>,
-    finished: bool,
-}
-
-impl RuntimeIqkOneShotPathState {
-    fn attempts(&self) -> u8 {
-        self.retry_count
-            .saturating_add(u8::try_from(self.candidates.len()).unwrap_or(u8::MAX))
-    }
-
-    fn note_delay_count(&mut self, delay_count: u8) {
-        self.delay_count_max = Some(self.delay_count_max.unwrap_or(0).max(delay_count));
-    }
-
-    fn push_candidate(&mut self, candidate: TxRuntimeIqkIqcValue) {
-        self.candidates.push(candidate);
-        if let Some(selected) = rtl8812a_iqk_select_candidate(&self.candidates) {
-            self.selected_iqc = Some(selected);
-            self.finished = true;
-            self.failure_label = None;
-        }
-    }
-
-    fn push_attempt(
-        &mut self,
-        ready: Option<bool>,
-        failed: Option<bool>,
-        delay_count: Option<u8>,
-        status_raw: Option<u32>,
-        candidate: Option<TxRuntimeIqkIqcValue>,
-        label: Option<&'static str>,
-    ) {
-        let attempt_index = u8::try_from(self.attempts.len() + 1).unwrap_or(u8::MAX);
-        self.attempts.push(TxRuntimeIqkAttemptReport {
-            attempt_index,
-            ready,
-            failed,
-            delay_count,
-            status_raw,
-            status_raw_hex: status_raw.map(|value| format_value(value, 8)),
-            candidate,
-            label,
-        });
-    }
-
-    fn note_retry(&mut self, label: &'static str) {
-        self.retry_count = self.retry_count.saturating_add(1);
-        if !self.finished {
-            self.failure_label = Some(label);
-        }
-    }
-
-    fn into_stage_report(
-        self,
-        stage: &'static str,
-        fallback_iqc: TxRuntimeIqkIqcValue,
-        fill_plan: Vec<TxRuntimeIqkMaskedBbWritePlan>,
-    ) -> TxRuntimeIqkStageReport {
-        let (status, selected_iqc, fallback_used, failure_label) = if self.finished {
-            ("success", self.selected_iqc, false, None)
-        } else {
-            (
-                "failed",
-                Some(fallback_iqc),
-                true,
-                Some(
-                    self.failure_label
-                        .unwrap_or("iqk_candidate_selection_failed"),
-                ),
-            )
-        };
-        TxRuntimeIqkStageReport {
-            stage,
-            status,
-            ready: self.ready,
-            failed: self.failed,
-            retry_count: self.retry_count,
-            average_count: u8::try_from(self.candidates.len()).unwrap_or(u8::MAX),
-            delay_count_max: self.delay_count_max,
-            attempts: self.attempts,
-            candidates: self.candidates,
-            selected_iqc,
-            fallback_used,
-            failure_label,
-            fill_plan,
-        }
-    }
-}
-
 fn runtime_iqk_iqc_value(x: u32, y: u32) -> TxRuntimeIqkIqcValue {
     wfb_radio_runtime::rtl8812au_runtime_iqk_iqc_value(x, y)
 }
@@ -16020,7 +15869,7 @@ where
     let mut path_a = RuntimeIqkOneShotPathState::default();
     let mut path_b = RuntimeIqkOneShotPathState::default();
 
-    while !(path_a.finished && path_b.finished) {
+    while !(path_a.is_finished() && path_b.is_finished()) {
         runtime_iqk_write32(
             registers,
             counters,
@@ -16074,7 +15923,7 @@ where
 
         let mut delay_count = 0;
         loop {
-            if !path_a.finished {
+            if !path_a.is_finished() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16082,9 +15931,9 @@ where
                     REG_IQK_RESULT_A_D00,
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
-                path_a.ready = Some(value & RTL8812A_IQK_READY_MASK != 0);
+                path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
-            if !path_b.finished {
+            if !path_b.is_finished() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16092,10 +15941,10 @@ where
                     REG_IQK_RESULT_B_D40,
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
-                path_b.ready = Some(value & RTL8812A_IQK_READY_MASK != 0);
+                path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
-            let path_a_ready = path_a.finished || path_a.ready.unwrap_or(false);
-            let path_b_ready = path_b.finished || path_b.ready.unwrap_or(false);
+            let path_a_ready = path_a.is_finished() || path_a.ready().unwrap_or(false);
+            let path_b_ready = path_b.is_finished() || path_b.ready().unwrap_or(false);
             if (path_a_ready && path_b_ready) || delay_count > RTL8812A_IQK_READY_POLL_LIMIT {
                 break;
             }
@@ -16106,7 +15955,7 @@ where
         path_b.note_delay_count(delay_count);
 
         if delay_count < RTL8812A_IQK_READY_POLL_LIMIT {
-            if !path_a.finished {
+            if !path_a.is_finished() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16115,10 +15964,10 @@ where
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
                 let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
-                path_a.failed = Some(failed);
+                path_a.set_failed(failed);
                 if failed {
                     path_a.push_attempt(
-                        path_a.ready,
+                        path_a.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16137,7 +15986,7 @@ where
                         REG_IQK_RESULT_A_D00,
                     )?;
                     path_a.push_attempt(
-                        path_a.ready,
+                        path_a.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16147,7 +15996,7 @@ where
                     path_a.push_candidate(candidate);
                 }
             }
-            if !path_b.finished {
+            if !path_b.is_finished() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16156,10 +16005,10 @@ where
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
                 let failed = value & RTL8812A_IQK_TX_FAIL_MASK != 0;
-                path_b.failed = Some(failed);
+                path_b.set_failed(failed);
                 if failed {
                     path_b.push_attempt(
-                        path_b.ready,
+                        path_b.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16178,7 +16027,7 @@ where
                         REG_IQK_RESULT_B_D40,
                     )?;
                     path_b.push_attempt(
-                        path_b.ready,
+                        path_b.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16189,9 +16038,9 @@ where
                 }
             }
         } else {
-            if !path_a.finished {
+            if !path_a.is_finished() {
                 path_a.push_attempt(
-                    path_a.ready,
+                    path_a.ready(),
                     None,
                     Some(delay_count),
                     None,
@@ -16200,9 +16049,9 @@ where
                 );
                 path_a.note_retry("tx_iqk_not_ready");
             }
-            if !path_b.finished {
+            if !path_b.is_finished() {
                 path_b.push_attempt(
-                    path_b.ready,
+                    path_b.ready(),
                     None,
                     Some(delay_count),
                     None,
@@ -16213,7 +16062,7 @@ where
             }
         }
 
-        if path_a.finished && path_b.finished {
+        if path_a.is_finished() && path_b.is_finished() {
             break;
         }
         if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
@@ -16587,7 +16436,9 @@ where
         0x2816_0ca0
     };
 
-    while !((path_a.finished || tx_a_iqc.is_none()) && (path_b.finished || tx_b_iqc.is_none())) {
+    while !((path_a.is_finished() || tx_a_iqc.is_none())
+        && (path_b.is_finished() || tx_b_iqc.is_none()))
+    {
         // The upstream loop re-triggers every TX-ready path on each RX retry,
         // even when that path's RX IQK has already found a stable pair.
         if let Some(tx_iqc) = tx_a_iqc.as_ref() {
@@ -16619,7 +16470,7 @@ where
 
         let mut delay_count = 0;
         loop {
-            if !path_a.finished && tx_a_iqc.is_some() {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16627,9 +16478,9 @@ where
                     REG_IQK_RESULT_A_D00,
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
-                path_a.ready = Some(value & RTL8812A_IQK_READY_MASK != 0);
+                path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
-            if !path_b.finished && tx_b_iqc.is_some() {
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16637,12 +16488,12 @@ where
                     REG_IQK_RESULT_B_D40,
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
-                path_b.ready = Some(value & RTL8812A_IQK_READY_MASK != 0);
+                path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
             let path_a_ready =
-                path_a.finished || tx_a_iqc.is_none() || path_a.ready.unwrap_or(false);
+                path_a.is_finished() || tx_a_iqc.is_none() || path_a.ready().unwrap_or(false);
             let path_b_ready =
-                path_b.finished || tx_b_iqc.is_none() || path_b.ready.unwrap_or(false);
+                path_b.is_finished() || tx_b_iqc.is_none() || path_b.ready().unwrap_or(false);
             if (path_a_ready && path_b_ready) || delay_count > RTL8812A_IQK_READY_POLL_LIMIT {
                 break;
             }
@@ -16653,7 +16504,7 @@ where
         path_b.note_delay_count(delay_count);
 
         if delay_count < RTL8812A_IQK_READY_POLL_LIMIT {
-            if !path_a.finished && tx_a_iqc.is_some() {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16662,10 +16513,10 @@ where
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
                 let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
-                path_a.failed = Some(failed);
+                path_a.set_failed(failed);
                 if failed {
                     path_a.push_attempt(
-                        path_a.ready,
+                        path_a.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16683,7 +16534,7 @@ where
                         REG_IQK_RESULT_A_D00,
                     )?;
                     path_a.push_attempt(
-                        path_a.ready,
+                        path_a.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16693,7 +16544,7 @@ where
                     path_a.push_candidate(candidate);
                 }
             }
-            if !path_b.finished && tx_b_iqc.is_some() {
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
                 let value = runtime_iqk_read32(
                     registers,
                     counters,
@@ -16702,10 +16553,10 @@ where
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
                 let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
-                path_b.failed = Some(failed);
+                path_b.set_failed(failed);
                 if failed {
                     path_b.push_attempt(
-                        path_b.ready,
+                        path_b.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16723,7 +16574,7 @@ where
                         REG_IQK_RESULT_B_D40,
                     )?;
                     path_b.push_attempt(
-                        path_b.ready,
+                        path_b.ready(),
                         Some(failed),
                         Some(delay_count),
                         Some(value),
@@ -16734,9 +16585,9 @@ where
                 }
             }
         } else {
-            if !path_a.finished && tx_a_iqc.is_some() {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
                 path_a.push_attempt(
-                    path_a.ready,
+                    path_a.ready(),
                     None,
                     Some(delay_count),
                     None,
@@ -16745,9 +16596,9 @@ where
                 );
                 path_a.note_retry("rx_iqk_not_ready");
             }
-            if !path_b.finished && tx_b_iqc.is_some() {
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
                 path_b.push_attempt(
-                    path_b.ready,
+                    path_b.ready(),
                     None,
                     Some(delay_count),
                     None,
@@ -16758,13 +16609,15 @@ where
             }
         }
 
-        if (path_a.finished || tx_a_iqc.is_none()) && (path_b.finished || tx_b_iqc.is_none()) {
+        if (path_a.is_finished() || tx_a_iqc.is_none())
+            && (path_b.is_finished() || tx_b_iqc.is_none())
+        {
             break;
         }
         if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
             || path_b.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
-            || path_a.candidates.len() == 3
-            || path_b.candidates.len() == 3
+            || path_a.candidate_count() == 3
+            || path_b.candidate_count() == 3
         {
             break;
         }
@@ -16973,13 +16826,13 @@ where
 
     let paths = vec![
         TxRuntimeIqkPathReport {
-            path: TxPowerPathArg::A,
+            path: Rtl8812auRfPath::A,
             path_name: "A",
             tx: tx_a,
             rx: rx_a,
         },
         TxRuntimeIqkPathReport {
-            path: TxPowerPathArg::B,
+            path: Rtl8812auRfPath::B,
             path_name: "B",
             tx: tx_b,
             rx: rx_b,

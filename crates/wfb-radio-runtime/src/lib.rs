@@ -2435,6 +2435,67 @@ pub struct Rtl8812auRuntimeIqkMaskedBbWritePlan {
     pub reason: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkAttemptReport {
+    pub attempt_index: u8,
+    pub ready: Option<bool>,
+    pub failed: Option<bool>,
+    pub delay_count: Option<u8>,
+    pub status_raw: Option<u32>,
+    pub status_raw_hex: Option<String>,
+    pub candidate: Option<Rtl8812auRuntimeIqkIqcValue>,
+    pub label: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkStageReport {
+    pub stage: &'static str,
+    pub status: &'static str,
+    pub ready: Option<bool>,
+    pub failed: Option<bool>,
+    pub retry_count: u8,
+    pub average_count: u8,
+    pub delay_count_max: Option<u8>,
+    pub attempts: Vec<Rtl8812auRuntimeIqkAttemptReport>,
+    pub candidates: Vec<Rtl8812auRuntimeIqkIqcValue>,
+    pub selected_iqc: Option<Rtl8812auRuntimeIqkIqcValue>,
+    pub fallback_used: bool,
+    pub failure_label: Option<&'static str>,
+    pub fill_plan: Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkPathReport {
+    pub path: Rtl8812auRfPath,
+    pub path_name: &'static str,
+    pub tx: Rtl8812auRuntimeIqkStageReport,
+    pub rx: Rtl8812auRuntimeIqkStageReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkSweepPathSummaryReport {
+    pub path_name: &'static str,
+    pub tx_status: &'static str,
+    pub tx_retry_count: u8,
+    pub tx_average_count: u8,
+    pub tx_fallback_used: bool,
+    pub tx_failure_label: Option<&'static str>,
+    pub rx_status: &'static str,
+    pub rx_retry_count: u8,
+    pub rx_average_count: u8,
+    pub rx_fallback_used: bool,
+    pub rx_failure_label: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkSweepSummaryReport {
+    pub sweep_index: u8,
+    pub status: &'static str,
+    pub cleanup_status: &'static str,
+    pub fallback_stage_count: usize,
+    pub path_statuses: Vec<Rtl8812auRuntimeIqkSweepPathSummaryReport>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Rtl8812auRuntimeIqkBackupReport {
     pub hssi_read_register: Rtl8812auRegisterReadReport,
@@ -2874,6 +2935,227 @@ pub fn rtl8812au_iqk_select_candidate(
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Rtl8812auRuntimeIqkOneShotPathState {
+    attempts: Vec<Rtl8812auRuntimeIqkAttemptReport>,
+    candidates: Vec<Rtl8812auRuntimeIqkIqcValue>,
+    selected_iqc: Option<Rtl8812auRuntimeIqkIqcValue>,
+    retry_count: u8,
+    delay_count_max: Option<u8>,
+    ready: Option<bool>,
+    failed: Option<bool>,
+    failure_label: Option<&'static str>,
+    finished: bool,
+}
+
+impl Rtl8812auRuntimeIqkOneShotPathState {
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn ready(&self) -> Option<bool> {
+        self.ready
+    }
+
+    pub fn set_ready(&mut self, ready: bool) {
+        self.ready = Some(ready);
+    }
+
+    pub fn failed(&self) -> Option<bool> {
+        self.failed
+    }
+
+    pub fn set_failed(&mut self, failed: bool) {
+        self.failed = Some(failed);
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    pub fn attempts(&self) -> u8 {
+        self.retry_count
+            .saturating_add(u8::try_from(self.candidates.len()).unwrap_or(u8::MAX))
+    }
+
+    pub fn note_delay_count(&mut self, delay_count: u8) {
+        self.delay_count_max = Some(self.delay_count_max.unwrap_or(0).max(delay_count));
+    }
+
+    pub fn push_candidate(&mut self, candidate: Rtl8812auRuntimeIqkIqcValue) {
+        self.candidates.push(candidate);
+        if let Some(selected) = rtl8812au_iqk_select_candidate(&self.candidates) {
+            self.selected_iqc = Some(selected);
+            self.finished = true;
+            self.failure_label = None;
+        }
+    }
+
+    pub fn push_attempt(
+        &mut self,
+        ready: Option<bool>,
+        failed: Option<bool>,
+        delay_count: Option<u8>,
+        status_raw: Option<u32>,
+        candidate: Option<Rtl8812auRuntimeIqkIqcValue>,
+        label: Option<&'static str>,
+    ) {
+        let attempt_index = u8::try_from(self.attempts.len() + 1).unwrap_or(u8::MAX);
+        self.attempts.push(Rtl8812auRuntimeIqkAttemptReport {
+            attempt_index,
+            ready,
+            failed,
+            delay_count,
+            status_raw,
+            status_raw_hex: status_raw.map(|value| format_register_value(value, 8)),
+            candidate,
+            label,
+        });
+    }
+
+    pub fn note_retry(&mut self, label: &'static str) {
+        self.retry_count = self.retry_count.saturating_add(1);
+        if !self.finished {
+            self.failure_label = Some(label);
+        }
+    }
+
+    pub fn into_stage_report(
+        self,
+        stage: &'static str,
+        fallback_iqc: Rtl8812auRuntimeIqkIqcValue,
+        fill_plan: Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>,
+    ) -> Rtl8812auRuntimeIqkStageReport {
+        let (status, selected_iqc, fallback_used, failure_label) = if self.finished {
+            ("success", self.selected_iqc, false, None)
+        } else {
+            (
+                "failed",
+                Some(fallback_iqc),
+                true,
+                Some(
+                    self.failure_label
+                        .unwrap_or("iqk_candidate_selection_failed"),
+                ),
+            )
+        };
+        Rtl8812auRuntimeIqkStageReport {
+            stage,
+            status,
+            ready: self.ready,
+            failed: self.failed,
+            retry_count: self.retry_count,
+            average_count: u8::try_from(self.candidates.len()).unwrap_or(u8::MAX),
+            delay_count_max: self.delay_count_max,
+            attempts: self.attempts,
+            candidates: self.candidates,
+            selected_iqc,
+            fallback_used,
+            failure_label,
+            fill_plan,
+        }
+    }
+}
+
+pub fn rtl8812au_runtime_iqk_skipped_stage_report(
+    stage: &'static str,
+    label: &'static str,
+    fill_plan: Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>,
+) -> Rtl8812auRuntimeIqkStageReport {
+    Rtl8812auRuntimeIqkStageReport {
+        stage,
+        status: "skipped",
+        ready: None,
+        failed: None,
+        retry_count: 0,
+        average_count: 0,
+        delay_count_max: None,
+        attempts: Vec::new(),
+        candidates: Vec::new(),
+        selected_iqc: Some(rtl8812au_runtime_iqk_iqc_value(0x200, 0)),
+        fallback_used: true,
+        failure_label: Some(label),
+        fill_plan,
+    }
+}
+
+pub fn rtl8812au_runtime_iqk_stage_success_iqc(
+    stage: &Rtl8812auRuntimeIqkStageReport,
+) -> Option<Rtl8812auRuntimeIqkIqcValue> {
+    if stage.status == "success" && !stage.fallback_used {
+        stage.selected_iqc.clone()
+    } else {
+        None
+    }
+}
+
+pub fn rtl8812au_runtime_iqk_stage_iqc_or_fallback(
+    stage: &Rtl8812auRuntimeIqkStageReport,
+) -> Rtl8812auRuntimeIqkIqcValue {
+    stage
+        .selected_iqc
+        .clone()
+        .unwrap_or_else(|| rtl8812au_runtime_iqk_iqc_value(0x200, 0))
+}
+
+pub fn rtl8812au_runtime_iqk_report_status(
+    paths: &[Rtl8812auRuntimeIqkPathReport],
+    cleanup_status: &str,
+) -> &'static str {
+    if cleanup_status != "restored" {
+        return "restore_failed";
+    }
+    if paths
+        .iter()
+        .all(|path| path.tx.status == "success" && path.rx.status == "success")
+    {
+        "completed"
+    } else {
+        "fallback_applied"
+    }
+}
+
+pub fn rtl8812au_runtime_iqk_sweep_summary(
+    paths: &[Rtl8812auRuntimeIqkPathReport],
+    status: &'static str,
+    cleanup_status: &'static str,
+    sweep_index: u8,
+) -> Rtl8812auRuntimeIqkSweepSummaryReport {
+    let mut fallback_stage_count = 0;
+    let path_statuses = paths
+        .iter()
+        .map(|path| {
+            if path.tx.fallback_used || path.tx.status != "success" {
+                fallback_stage_count += 1;
+            }
+            if path.rx.fallback_used || path.rx.status != "success" {
+                fallback_stage_count += 1;
+            }
+            Rtl8812auRuntimeIqkSweepPathSummaryReport {
+                path_name: path.path_name,
+                tx_status: path.tx.status,
+                tx_retry_count: path.tx.retry_count,
+                tx_average_count: path.tx.average_count,
+                tx_fallback_used: path.tx.fallback_used,
+                tx_failure_label: path.tx.failure_label,
+                rx_status: path.rx.status,
+                rx_retry_count: path.rx.retry_count,
+                rx_average_count: path.rx.average_count,
+                rx_fallback_used: path.rx.fallback_used,
+                rx_failure_label: path.rx.failure_label,
+            }
+        })
+        .collect();
+
+    Rtl8812auRuntimeIqkSweepSummaryReport {
+        sweep_index,
+        status,
+        cleanup_status,
+        fallback_stage_count,
+        path_statuses,
+    }
 }
 
 pub fn rtl8812au_runtime_iqk_masked_bb_write_plan(
@@ -5936,6 +6218,64 @@ mod tests {
         .expect("selected signed-wrap candidate");
         assert_eq!(signed_wrap_selected.x, 0x1f8);
         assert_eq!(signed_wrap_selected.y, 0x000);
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_report_state_serializes_failure_and_summary() {
+        let mut state = super::Rtl8812auRuntimeIqkOneShotPathState::default();
+        state.set_ready(false);
+        state.set_failed(true);
+        state.note_delay_count(21);
+        state.push_attempt(
+            state.ready(),
+            state.failed(),
+            Some(21),
+            Some(0x0000_1000),
+            None,
+            Some("tx_iqk_not_ready"),
+        );
+        state.note_retry("tx_iqk_not_ready");
+
+        let stage = state.into_stage_report(
+            "tx",
+            super::rtl8812au_runtime_iqk_iqc_value(0x200, 0),
+            super::rtl8812au_iqk_tx_fill_iqc_plan(super::Rtl8812auRfPath::A, 0x200, 0, false)
+                .expect("fallback TX fill plan"),
+        );
+        assert_eq!(stage.status, "failed");
+        assert_eq!(stage.retry_count, 1);
+        assert!(stage.fallback_used);
+        assert_eq!(stage.failure_label, Some("tx_iqk_not_ready"));
+
+        let value = serde_json::to_value(&stage).expect("serialize stage");
+        assert_eq!(value["attempts"][0]["status_raw_hex"], "0x00001000");
+        assert_eq!(value["selected_iqc"]["x_hex"], "0x200");
+        assert_eq!(value["fill_plan"].as_array().expect("fill plan").len(), 7);
+
+        let skipped_rx = super::rtl8812au_runtime_iqk_skipped_stage_report(
+            "rx",
+            "rx_iqk_skipped_without_tx_iqk",
+            Vec::new(),
+        );
+        let paths = vec![super::Rtl8812auRuntimeIqkPathReport {
+            path: super::Rtl8812auRfPath::A,
+            path_name: "A",
+            tx: stage,
+            rx: skipped_rx,
+        }];
+        assert_eq!(
+            super::rtl8812au_runtime_iqk_report_status(&paths, "restored"),
+            "fallback_applied"
+        );
+        let summary =
+            super::rtl8812au_runtime_iqk_sweep_summary(&paths, "fallback_applied", "restored", 2);
+        assert_eq!(summary.sweep_index, 2);
+        assert_eq!(summary.fallback_stage_count, 2);
+        assert_eq!(summary.path_statuses[0].tx_retry_count, 1);
+        assert_eq!(
+            summary.path_statuses[0].rx_failure_label,
+            Some("rx_iqk_skipped_without_tx_iqk")
+        );
     }
 
     #[test]
