@@ -2225,10 +2225,21 @@ const REG_EARLY_MODE_CONTROL_8812: u16 = 0x02bc;
 const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
 const REG_QUEUE_CTRL: u16 = 0x04c6;
 const REG_TX_RPT_TIME: u16 = 0x04f0;
+const REG_TXPAUSE: u16 = 0x0522;
 const REG_RCR: u16 = 0x0608;
 const REG_MACID: u16 = 0x0610;
 const REG_NAV_UPPER: u16 = 0x0652;
 const REG_RXFLTMAP2: u16 = 0x06a4;
+const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
+const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
+const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
+const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
+const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
+const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
+const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
+const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
+const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
+const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
 const REG_USB_HRPWM: u16 = 0xfe58;
 
 const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
@@ -2253,6 +2264,11 @@ const RCR_ACF: u32 = 1 << 12;
 const RCR_AMF: u32 = 1 << 13;
 const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
 const RCR_APPFCS: u32 = 1 << 31;
+const RF_CHNLBW_JAGUAR: u32 = 0x18;
+const RF_LCK_JAGUAR: u32 = 0xb4;
+const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
+const RF_LCK_MODE_BIT: u32 = 1 << 14;
+const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
 const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
     | RCR_APM
     | RCR_AM
@@ -2282,6 +2298,118 @@ const RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES: &[(u16, u8, &str)] = &[
 pub struct RuntimePhaseExecution {
     pub phase: Rtl8812auInitPhase,
     pub register_writes: usize,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rtl8812auRfPath {
+    A,
+    B,
+    Both,
+}
+
+impl Rtl8812auRfPath {
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Self::A => Some("A"),
+            Self::B => Some("B"),
+            Self::Both => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRegisterReadReport {
+    pub register_name: &'static str,
+    pub address: u16,
+    pub address_hex: String,
+    pub width: &'static str,
+    pub value: u32,
+    pub value_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRegisterWriteReport {
+    pub register_name: &'static str,
+    pub address: u16,
+    pub address_hex: String,
+    pub width: &'static str,
+    pub before: u32,
+    pub before_hex: String,
+    pub written: u32,
+    pub written_hex: String,
+    pub after: u32,
+    pub after_hex: String,
+    pub changed: bool,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRfSerialWriteReport {
+    pub register_name: &'static str,
+    pub path: Rtl8812auRfPath,
+    pub path_name: &'static str,
+    pub bb_register_name: &'static str,
+    pub bb_register: u16,
+    pub bb_register_hex: String,
+    pub rf_offset: u32,
+    pub rf_offset_hex: String,
+    pub value: u32,
+    pub value_hex: String,
+    pub encoded: u32,
+    pub encoded_hex: String,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRfSerialReadReport {
+    pub register_name: &'static str,
+    pub path: Rtl8812auRfPath,
+    pub path_name: &'static str,
+    pub rf_offset: u32,
+    pub rf_offset_hex: String,
+    pub hssi_register_name: &'static str,
+    pub hssi_register: u16,
+    pub hssi_register_hex: String,
+    pub hssi_mask_hex: String,
+    pub pi_mode_register_name: &'static str,
+    pub pi_mode_register: u16,
+    pub pi_mode_register_hex: String,
+    pub pi_mode_value: u32,
+    pub pi_mode_value_hex: String,
+    pub pi_mode: bool,
+    pub readback_register_name: &'static str,
+    pub readback_register: u16,
+    pub readback_register_hex: String,
+    pub readback_mask_hex: String,
+    pub value: u32,
+    pub value_hex: String,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auLckCalibrationReport {
+    pub semantics: &'static str,
+    pub upstream_basis: &'static str,
+    pub rf_path: Rtl8812auRfPath,
+    pub rf_path_name: &'static str,
+    pub continuous_tx_register: Rtl8812auRegisterReadReport,
+    pub continuous_tx_active: bool,
+    pub tx_pause_before: Rtl8812auRegisterReadReport,
+    pub tx_pause_write: Option<Rtl8812auRegisterWriteReport>,
+    pub tx_pause_restore: Option<Rtl8812auRegisterWriteReport>,
+    pub rf_chnlbw_backup: Rtl8812auRfSerialReadReport,
+    pub rf_lck_before_enter: Rtl8812auRfSerialReadReport,
+    pub rf_lck_enter_write: Rtl8812auRfSerialWriteReport,
+    pub rf_chnlbw_before_trigger: Rtl8812auRfSerialReadReport,
+    pub rf_chnlbw_trigger_write: Rtl8812auRfSerialWriteReport,
+    pub delay_ms: u64,
+    pub rf_lck_before_exit: Rtl8812auRfSerialReadReport,
+    pub rf_lck_exit_write: Rtl8812auRfSerialWriteReport,
+    pub rf_chnlbw_restore_write: Rtl8812auRfSerialWriteReport,
+    pub rf_chnlbw_after_restore: Rtl8812auRfSerialReadReport,
+    pub rf_lck_after_exit: Rtl8812auRfSerialReadReport,
     pub counters: RuntimeRadioCounters,
 }
 
@@ -2504,6 +2632,545 @@ where
 
 fn format_register_address(address: u16) -> String {
     format!("0x{address:04x}")
+}
+
+fn format_register_value<T>(value: T, digits: usize) -> String
+where
+    T: Into<u64>,
+{
+    format!("0x{:0width$x}", value.into(), width = digits)
+}
+
+fn register_read_report(
+    register_name: &'static str,
+    address: u16,
+    width: &'static str,
+    value: u32,
+    digits: usize,
+) -> Rtl8812auRegisterReadReport {
+    Rtl8812auRegisterReadReport {
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        width,
+        value,
+        value_hex: format_register_value(value, digits),
+    }
+}
+
+fn write8_register_report<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    value: u8,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRegisterWriteReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let before = read8_with_counter(registers, counters, address, register_name, "pre-write")?;
+    write8_with_counter(registers, counters, address, value, register_name, "write")?;
+    let after = read8_with_counter(registers, counters, address, register_name, "post-write")?;
+    Ok(Rtl8812auRegisterWriteReport {
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        width: "u8",
+        before: u32::from(before),
+        before_hex: format_register_value(before, 2),
+        written: u32::from(value),
+        written_hex: format_register_value(value, 2),
+        after: u32::from(after),
+        after_hex: format_register_value(after, 2),
+        changed: before != after,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
+fn bb_set_bb_reg<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    address: u16,
+    bitmask: u32,
+    data: u32,
+    register_name: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    if bitmask == u32::MAX {
+        return write32_with_counter(registers, counters, address, data, register_name, "bb-set");
+    }
+    if bitmask == 0 {
+        return Ok(());
+    }
+
+    let original = read32_with_counter(registers, counters, address, register_name, "bb-set")?;
+    let bitshift = bitmask.trailing_zeros();
+    let written = (original & !bitmask) | ((data << bitshift) & bitmask);
+    write32_with_counter(
+        registers,
+        counters,
+        address,
+        written,
+        register_name,
+        "bb-set",
+    )
+}
+
+fn encode_rf_serial_write(rf_offset: u32, data: u32) -> u32 {
+    (((rf_offset & 0xff) << 20) | (data & RF_REGISTER_OFFSET_MASK)) & 0x0fff_ffff
+}
+
+type RfSerialWriteTarget = (Rtl8812auRfPath, &'static str, &'static str, u16);
+type RfSerialReadTarget = (
+    Rtl8812auRfPath,
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    u16,
+    &'static str,
+    u16,
+);
+
+const RF_SERIAL_TARGET_A: [RfSerialWriteTarget; 1] = [(
+    Rtl8812auRfPath::A,
+    "A",
+    "rA_LSSIWrite_Jaguar",
+    REG_RF_PATH_A_3WIRE,
+)];
+const RF_SERIAL_TARGET_B: [RfSerialWriteTarget; 1] = [(
+    Rtl8812auRfPath::B,
+    "B",
+    "rB_LSSIWrite_Jaguar",
+    REG_RF_PATH_B_3WIRE,
+)];
+const RF_SERIAL_TARGET_BOTH: [RfSerialWriteTarget; 2] = [
+    (
+        Rtl8812auRfPath::A,
+        "A",
+        "rA_LSSIWrite_Jaguar",
+        REG_RF_PATH_A_3WIRE,
+    ),
+    (
+        Rtl8812auRfPath::B,
+        "B",
+        "rB_LSSIWrite_Jaguar",
+        REG_RF_PATH_B_3WIRE,
+    ),
+];
+const RF_SERIAL_READ_TARGET_A: RfSerialReadTarget = (
+    Rtl8812auRfPath::A,
+    "A",
+    "rA_PI_Mode_Jaguar",
+    REG_RF_PI_MODE_A_JAGUAR,
+    "rA_PIRead_Jaguar",
+    REG_RF_PI_READ_A_JAGUAR,
+    "rA_SIRead_Jaguar",
+    REG_RF_SI_READ_A_JAGUAR,
+);
+const RF_SERIAL_READ_TARGET_B: RfSerialReadTarget = (
+    Rtl8812auRfPath::B,
+    "B",
+    "rB_PI_Mode_Jaguar",
+    REG_RF_PI_MODE_B_JAGUAR,
+    "rB_PIRead_Jaguar",
+    REG_RF_PI_READ_B_JAGUAR,
+    "rB_SIRead_Jaguar",
+    REG_RF_SI_READ_B_JAGUAR,
+);
+
+fn rf_serial_write_targets(path: Rtl8812auRfPath) -> &'static [RfSerialWriteTarget] {
+    match path {
+        Rtl8812auRfPath::A => &RF_SERIAL_TARGET_A,
+        Rtl8812auRfPath::B => &RF_SERIAL_TARGET_B,
+        Rtl8812auRfPath::Both => &RF_SERIAL_TARGET_BOTH,
+    }
+}
+
+fn rf_serial_read_target(path: Rtl8812auRfPath) -> Option<RfSerialReadTarget> {
+    match path {
+        Rtl8812auRfPath::A => Some(RF_SERIAL_READ_TARGET_A),
+        Rtl8812auRfPath::B => Some(RF_SERIAL_READ_TARGET_B),
+        Rtl8812auRfPath::Both => None,
+    }
+}
+
+fn rf_register_display_name(rf_offset: u32) -> &'static str {
+    match rf_offset {
+        RF_CHNLBW_JAGUAR => "RF_CHNLBW_Jaguar",
+        RF_LCK_JAGUAR => "RF_LCK",
+        _ => "RF register",
+    }
+}
+
+fn rf_serial_write_single_path<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    path: Rtl8812auRfPath,
+    rf_offset: u32,
+    value: u32,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRfSerialWriteReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut reports = Vec::new();
+    for &(path, path_name, bb_register_name, bb_register) in rf_serial_write_targets(path) {
+        let before = *counters;
+        let value = value & RF_REGISTER_OFFSET_MASK;
+        let encoded = encode_rf_serial_write(rf_offset, value);
+        write32_with_counter(
+            registers,
+            counters,
+            bb_register,
+            encoded,
+            bb_register_name,
+            "rf-serial-write",
+        )?;
+        reports.push(Rtl8812auRfSerialWriteReport {
+            register_name: rf_register_display_name(rf_offset),
+            path,
+            path_name,
+            bb_register_name,
+            bb_register,
+            bb_register_hex: format_register_value(bb_register, 4),
+            rf_offset,
+            rf_offset_hex: format_register_value(rf_offset, 2),
+            value,
+            value_hex: format_register_value(value, 5),
+            encoded,
+            encoded_hex: format_register_value(encoded, 8),
+            counters: counters.saturating_sub(before),
+        });
+        thread::sleep(Duration::from_micros(1));
+    }
+
+    reports.pop().ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rf_serial_write_failed",
+            format!("RF serial write produced no report for path {path:?}"),
+        )
+    })
+}
+
+fn rf_serial_read_register<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    path: Rtl8812auRfPath,
+    rf_offset: u32,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRfSerialReadReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let (
+        path,
+        path_name,
+        pi_mode_register_name,
+        pi_mode_register,
+        pi_readback_register_name,
+        pi_readback_register,
+        si_readback_register_name,
+        si_readback_register,
+    ) = rf_serial_read_target(path).ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rf_serial_read_path_unsupported",
+            "RF serial read requires path A or path B, not both",
+        )
+    })?;
+    let before = *counters;
+    let rf_offset = rf_offset & 0xff;
+
+    let pi_mode_value = read32_with_counter(
+        registers,
+        counters,
+        pi_mode_register,
+        pi_mode_register_name,
+        "rf-serial-read",
+    )?;
+    let pi_mode = pi_mode_value & 0x4 != 0;
+
+    bb_set_bb_reg(
+        registers,
+        counters,
+        REG_HSSI_READ_JAGUAR,
+        0x0000_00ff,
+        rf_offset,
+        "rHSSIRead_Jaguar",
+    )?;
+    thread::sleep(Duration::from_micros(20));
+
+    let (readback_register_name, readback_register) = if pi_mode {
+        (pi_readback_register_name, pi_readback_register)
+    } else {
+        (si_readback_register_name, si_readback_register)
+    };
+    let value = read32_with_counter(
+        registers,
+        counters,
+        readback_register,
+        readback_register_name,
+        "rf-serial-read",
+    )? & RF_REGISTER_OFFSET_MASK;
+
+    Ok(Rtl8812auRfSerialReadReport {
+        register_name: rf_register_display_name(rf_offset),
+        path,
+        path_name,
+        rf_offset,
+        rf_offset_hex: format_register_value(rf_offset, 2),
+        hssi_register_name: "rHSSIRead_Jaguar",
+        hssi_register: REG_HSSI_READ_JAGUAR,
+        hssi_register_hex: format_register_address(REG_HSSI_READ_JAGUAR),
+        hssi_mask_hex: format_register_value(0x0000_00ff_u32, 8),
+        pi_mode_register_name,
+        pi_mode_register,
+        pi_mode_register_hex: format_register_address(pi_mode_register),
+        pi_mode_value,
+        pi_mode_value_hex: format_register_value(pi_mode_value, 8),
+        pi_mode,
+        readback_register_name,
+        readback_register,
+        readback_register_hex: format_register_address(readback_register),
+        readback_mask_hex: format_register_value(RF_REGISTER_OFFSET_MASK, 5),
+        value,
+        value_hex: format_register_value(value, 5),
+        counters: counters.saturating_sub(before),
+    })
+}
+
+#[derive(Default)]
+struct Rtl8812auLckCleanupState {
+    tx_pause_restore: Option<u8>,
+    rf_lck_restore: Option<u32>,
+    rf_chnlbw_restore: Option<u32>,
+}
+
+fn cleanup_rtl8812au_lck_after_error<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    cleanup: &mut Rtl8812auLckCleanupState,
+) -> Vec<String>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut failures = Vec::new();
+    if let Some(value) = cleanup.rf_lck_restore.take() {
+        let encoded = encode_rf_serial_write(RF_LCK_JAGUAR, value);
+        if let Err(error) = write32_with_counter(
+            registers,
+            counters,
+            REG_RF_PATH_A_3WIRE,
+            encoded,
+            "rA_LSSIWrite_Jaguar",
+            "lck-cleanup",
+        ) {
+            failures.push(format!(
+                "RF_LCK restore to {} failed: {error}",
+                format_register_value(value, 5)
+            ));
+        }
+        thread::sleep(Duration::from_micros(1));
+    }
+    if let Some(value) = cleanup.rf_chnlbw_restore.take() {
+        let encoded = encode_rf_serial_write(RF_CHNLBW_JAGUAR, value);
+        if let Err(error) = write32_with_counter(
+            registers,
+            counters,
+            REG_RF_PATH_A_3WIRE,
+            encoded,
+            "rA_LSSIWrite_Jaguar",
+            "lck-cleanup",
+        ) {
+            failures.push(format!(
+                "RF_CHNLBW restore to {} failed: {error}",
+                format_register_value(value, 5)
+            ));
+        }
+        thread::sleep(Duration::from_micros(1));
+    }
+    if let Some(value) = cleanup.tx_pause_restore.take() {
+        if let Err(error) = write8_with_counter(
+            registers,
+            counters,
+            REG_TXPAUSE,
+            value,
+            "REG_TXPAUSE",
+            "lck-cleanup",
+        ) {
+            failures.push(format!(
+                "REG_TXPAUSE restore to {} failed: {error}",
+                format_register_value(value, 2)
+            ));
+        }
+    }
+    failures
+}
+
+pub fn run_rtl8812au_lck_calibration<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auLckCalibrationReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = *counters;
+    let mut cleanup = Rtl8812auLckCleanupState::default();
+    match run_rtl8812au_lck_calibration_inner(registers, counters, &mut cleanup) {
+        Ok(mut report) => {
+            report.counters = counters.saturating_sub(before);
+            Ok(report)
+        }
+        Err(mut error) => {
+            let cleanup_failures =
+                cleanup_rtl8812au_lck_after_error(registers, counters, &mut cleanup);
+            if !cleanup_failures.is_empty() {
+                error.message.push_str("; cleanup failures: ");
+                error.message.push_str(&cleanup_failures.join("; "));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn run_rtl8812au_lck_calibration_inner<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    cleanup: &mut Rtl8812auLckCleanupState,
+) -> Result<Rtl8812auLckCalibrationReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let continuous_tx_value = read32_with_counter(
+        registers,
+        counters,
+        REG_SINGLE_TONE_CONT_TX_JAGUAR,
+        "REG_SINGLE_TONE_CONT_TX_JAGUAR",
+        "lck",
+    )?;
+    let continuous_tx_register = register_read_report(
+        "REG_SINGLE_TONE_CONT_TX_JAGUAR",
+        REG_SINGLE_TONE_CONT_TX_JAGUAR,
+        "u32",
+        continuous_tx_value,
+        8,
+    );
+    let continuous_tx_active = continuous_tx_value & 0x0007_0000 != 0;
+
+    let tx_pause_before_value =
+        read8_with_counter(registers, counters, REG_TXPAUSE, "REG_TXPAUSE", "lck")?;
+    let tx_pause_before = register_read_report(
+        "REG_TXPAUSE",
+        REG_TXPAUSE,
+        "u8",
+        u32::from(tx_pause_before_value),
+        2,
+    );
+
+    let rf_chnlbw_backup =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_CHNLBW_JAGUAR, counters)?;
+
+    let tx_pause_write = if continuous_tx_active {
+        None
+    } else {
+        cleanup.tx_pause_restore = Some(tx_pause_before_value);
+        Some(write8_register_report(
+            registers,
+            "REG_TXPAUSE",
+            REG_TXPAUSE,
+            0xff,
+            counters,
+        )?)
+    };
+
+    let rf_lck_before_enter =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_LCK_JAGUAR, counters)?;
+    cleanup.rf_lck_restore = Some(rf_lck_before_enter.value);
+    let rf_lck_enter_write = rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_LCK_JAGUAR,
+        rf_lck_before_enter.value | RF_LCK_MODE_BIT,
+        counters,
+    )?;
+
+    let rf_chnlbw_before_trigger =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_CHNLBW_JAGUAR, counters)?;
+    cleanup.rf_chnlbw_restore = Some(rf_chnlbw_before_trigger.value);
+    let rf_chnlbw_trigger_write = rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_CHNLBW_JAGUAR,
+        rf_chnlbw_before_trigger.value | RF_CHNLBW_LCK_TRIGGER_BIT,
+        counters,
+    )?;
+
+    thread::sleep(Duration::from_millis(150));
+
+    let rf_lck_before_exit =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_LCK_JAGUAR, counters)?;
+    let rf_lck_exit_write = rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_LCK_JAGUAR,
+        rf_lck_before_exit.value & !RF_LCK_MODE_BIT,
+        counters,
+    )?;
+    cleanup.rf_lck_restore = None;
+
+    let tx_pause_restore = if let Some(restore_value) = cleanup.tx_pause_restore.take() {
+        Some(write8_register_report(
+            registers,
+            "REG_TXPAUSE",
+            REG_TXPAUSE,
+            restore_value,
+            counters,
+        )?)
+    } else {
+        None
+    };
+
+    let rf_chnlbw_restore_value = cleanup
+        .rf_chnlbw_restore
+        .take()
+        .unwrap_or(rf_chnlbw_before_trigger.value);
+    let rf_chnlbw_restore_write = rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_CHNLBW_JAGUAR,
+        rf_chnlbw_restore_value,
+        counters,
+    )?;
+
+    let rf_chnlbw_after_restore =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_CHNLBW_JAGUAR, counters)?;
+    let rf_lck_after_exit =
+        rf_serial_read_register(registers, Rtl8812auRfPath::A, RF_LCK_JAGUAR, counters)?;
+
+    Ok(Rtl8812auLckCalibrationReport {
+        semantics: "guarded RTL8812A local-oscillator calibration; pauses packet TX when needed, runs the upstream RF_LCK/RF_CHNLBW sequence, and restores RF channel state",
+        upstream_basis: "aircrack-ng _phy_lc_calibrate_8812a / phy_RFSerialRead for RTL8812A",
+        rf_path: Rtl8812auRfPath::A,
+        rf_path_name: "A",
+        continuous_tx_register,
+        continuous_tx_active,
+        tx_pause_before,
+        tx_pause_write,
+        tx_pause_restore,
+        rf_chnlbw_backup,
+        rf_lck_before_enter,
+        rf_lck_enter_write,
+        rf_chnlbw_before_trigger,
+        rf_chnlbw_trigger_write,
+        delay_ms: 150,
+        rf_lck_before_exit,
+        rf_lck_exit_write,
+        rf_chnlbw_restore_write,
+        rf_chnlbw_after_restore,
+        rf_lck_after_exit,
+        counters: RuntimeRadioCounters::default(),
+    })
 }
 
 pub fn rtl8812au_tx_scheduler_tail_expected_writes() -> usize {
@@ -3408,6 +4075,25 @@ mod tests {
             transport
         }
 
+        fn with_u32(address: u16, value: u32) -> Self {
+            let transport = Self::default();
+            transport
+                .registers
+                .borrow_mut()
+                .insert(address, value.to_le_bytes().to_vec());
+            transport
+        }
+
+        fn insert_u32(&self, address: u16, value: u32) {
+            self.registers
+                .borrow_mut()
+                .insert(address, value.to_le_bytes().to_vec());
+        }
+
+        fn insert_u8(&self, address: u16, value: u8) {
+            self.registers.borrow_mut().insert(address, vec![value]);
+        }
+
         fn with_macid(mac: [u8; 6]) -> Self {
             let transport = Self::default();
             for (offset, value) in mac.into_iter().enumerate() {
@@ -3594,6 +4280,59 @@ mod tests {
             .expect_err("unauthorized LCK should fail");
         assert_eq!(error.code, "missing_write_authorization");
         assert!(error.message.contains("rtl8812a-lck"));
+    }
+
+    #[test]
+    fn rtl8812au_lck_calibration_runs_runtime_rf_sequence() {
+        let transport = MockTransport::with_u32(super::REG_SINGLE_TONE_CONT_TX_JAGUAR, 0);
+        transport.insert_u8(super::REG_TXPAUSE, 0x00);
+        transport.insert_u32(super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_HSSI_READ_JAGUAR, 0);
+        transport.insert_u32(super::REG_RF_PI_READ_A_JAGUAR, 0x0001_2345);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let report = super::run_rtl8812au_lck_calibration(&registers, &mut counters)
+            .expect("runtime LCK report");
+
+        assert_eq!(report.rf_path, super::Rtl8812auRfPath::A);
+        assert_eq!(report.rf_path_name, "A");
+        assert!(!report.continuous_tx_active);
+        assert_eq!(report.tx_pause_before.value, 0);
+        assert!(report.tx_pause_write.is_some());
+        assert!(report.tx_pause_restore.is_some());
+        assert_eq!(
+            report.rf_lck_enter_write.value,
+            0x0001_2345 | super::RF_LCK_MODE_BIT
+        );
+        assert_eq!(
+            report.rf_chnlbw_trigger_write.value,
+            0x0001_2345 | super::RF_CHNLBW_LCK_TRIGGER_BIT
+        );
+        assert_eq!(
+            report.rf_lck_exit_write.value,
+            0x0001_2345 & !super::RF_LCK_MODE_BIT
+        );
+        assert_eq!(report.counters, counters);
+        assert!(counters.usb_control_reads > 0);
+        assert!(counters.usb_control_writes > 0);
+
+        let writes = transport.writes();
+        assert!(writes
+            .iter()
+            .any(|(address, bytes)| *address == super::REG_TXPAUSE && bytes.as_slice() == [0xff]));
+        assert!(writes
+            .iter()
+            .any(|(address, bytes)| *address == super::REG_TXPAUSE && bytes.as_slice() == [0x00]));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RF_PATH_A_3WIRE
+                && bytes.as_slice()
+                    == super::encode_rf_serial_write(
+                        super::RF_LCK_JAGUAR,
+                        0x0001_2345 | super::RF_LCK_MODE_BIT,
+                    )
+                    .to_le_bytes()
+        }));
     }
 
     #[test]

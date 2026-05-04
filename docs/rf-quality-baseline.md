@@ -368,6 +368,13 @@ with decrypt failures after missing the WFB session; the immediate short control
 and full rerun recovered normally, so keep session/decrypt fields in the gate
 instead of treating that artifact as RF loss.
 
+After moving LCK execution into `wfb-radio-runtime`,
+`/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json` reran the LCK
+profile and recovered `1981/2000`, submitted `3000/3000`, reported zero decrypt
+failures, verified channel 36 / 20 MHz, and stayed `within_margin`. This keeps
+the LCK runtime extraction comparable with both the May 2 tuple and the May 4
+pre-extraction gate.
+
 Standalone IQK diagnostic artifacts from `rtl8812a-iqk-diagnostic` can be used
 as RF-quality review evidence, but they are not runtime calibration evidence.
 When attaching one to a range-readiness note, record the artifact path,

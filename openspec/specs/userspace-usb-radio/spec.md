@@ -144,6 +144,10 @@ The system SHALL provide an explicit RTL8812A LCK calibration profile that runs 
 - **WHEN** the operator enables the LCK calibration profile
 - **THEN** the command MUST pause packet TX when appropriate, read and preserve RF channel state, enter LCK mode, trigger the RF CHNLBW calibration bit, wait for the calibration window, exit LCK mode, restore state, and record structured evidence
 
+#### Scenario: Runtime library executes LCK
+- **WHEN** an initialized runtime or diagnostic caller enables the LCK calibration profile
+- **THEN** the LCK register sequence and cleanup handling MUST execute through runtime-owned helpers while diagnostic code remains responsible only for CLI parsing and report adaptation
+
 #### Scenario: LCK profile is not enabled
 - **WHEN** the operator uses the default calibration profile
 - **THEN** the command MUST NOT run LCK and MUST preserve the existing default TX behavior

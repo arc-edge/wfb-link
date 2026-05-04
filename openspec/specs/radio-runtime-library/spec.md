@@ -140,6 +140,17 @@ The runtime library SHALL provide production-facing calibration selection for RT
 - **WHEN** a caller selects targeted parity, captured IQK/LCK, or runtime IQK calibration
 - **THEN** the runtime library classifies the profile as experimental, records the evidence source, and reports whether receiver-backed validation is still required
 
+### Requirement: Runtime LCK Calibration Execution
+The runtime library SHALL execute the guarded RTL8812AU LCK calibration sequence without depending on diagnostic command or report types.
+
+#### Scenario: Runtime LCK runs
+- **WHEN** a caller provides RTL8812AU register access and runtime counters for the LCK profile
+- **THEN** the runtime library pauses packet TX when needed, reads and preserves RF channel state, enters LCK mode, triggers the RF CHNLBW calibration bit, waits for the calibration window, exits LCK mode, restores state, and returns report-neutral register and RF-serial evidence
+
+#### Scenario: Diagnostic command adapts runtime LCK
+- **WHEN** a diagnostic command enables the LCK calibration profile
+- **THEN** it calls the runtime LCK executor and only maps counters and serialization into the diagnostic report
+
 ### Requirement: Runtime RX Metadata
 The runtime library SHALL expose parsed RTL8812AU RX descriptor metadata needed by production bridge and RF-quality callers.
 

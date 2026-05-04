@@ -14,6 +14,8 @@
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 - RTL8812AU same-session init phase identities and default/Linux-order phase sequencing policy.
 - Runtime execution helpers for the TX scheduler tail, monitor/no-link receive filter, and EFUSE MACID programming.
+- Runtime-owned RTL8812AU LCK calibration execution, RF-serial helper reports,
+  register read/write evidence, cleanup handling, and counter deltas.
 - Runtime radio session metadata, endpoint selection, counters, and error classification.
 - Runtime 802.11 TX submission through descriptor construction and bulk OUT.
 - Runtime descriptor-prefixed raw TX packet replay for trace-parity and benchmark paths.
@@ -73,7 +75,8 @@ boundary shifts.
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
-- Runtime IQK/LCK register orchestration and evidence reports while parity is still being hardened.
+- Runtime IQK register orchestration and evidence reports while parity is
+  still being hardened. LCK execution has moved into the runtime library.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -90,7 +93,7 @@ boundary shifts.
    2 after that non-regression gate passes. This gate passed on May 4, 2026:
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
-3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. LCK execution is runtime-owned; runtime IQK and targeted parity override execution remain the next calibration-extraction targets.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
@@ -100,6 +103,16 @@ boundary shifts.
 6. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
 
 The diagnostic binary should continue to be able to run every bring-up probe. Production behavior should live in runtime APIs first, then in a thinner runtime-oriented command surface.
+
+## Latest Calibration Extraction Smoke
+
+On May 4, 2026, after moving RTL8812AU LCK execution into
+`wfb-radio-runtime`, the close-range receiver-backed LCK gate was rerun through
+`scripts/run-rf-quality-close-range.sh`. The run completed with `result=pass`,
+`acceptance=baseline_comparable`, `comparison=matched`, `within_margin`,
+`3000/3000` submitted datagrams, `1981/2000` recovered payloads, zero decrypt
+failures, and Linux channel state verified at channel 36 / 20 MHz. Artifact:
+`/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json`.
 
 ## Latest Runtime-Flow Smoke
 
