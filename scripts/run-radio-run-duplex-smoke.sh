@@ -14,7 +14,7 @@ attached to this Mac:
 Configuration is via environment variables. Common overrides:
   LINUX_HOST=pi@drone-2f389.local
   MAC_LAN_IP=192.168.122.84
-  LINUX_LAN_IP=192.168.122.77
+  LINUX_LAN_IP=192.168.122.77  # or auto, resolved from Linux route to MAC_LAN_IP
   LINK_ID=0x000001        # report/runtime value
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
@@ -39,6 +39,10 @@ die() {
   exit 1
 }
 
+quote() {
+  printf '%q' "$1"
+}
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
@@ -50,6 +54,7 @@ REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-radio-run-duplex-$RUN_ID-peer}
 LINUX_HOST=${LINUX_HOST:-pi@drone-2f389.local}
 MAC_LAN_IP=${MAC_LAN_IP:-192.168.122.84}
 LINUX_LAN_IP=${LINUX_LAN_IP:-192.168.122.77}
+LINUX_LAN_IP_REQUESTED=$LINUX_LAN_IP
 LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"}
 # shellcheck disable=SC2206
@@ -116,6 +121,25 @@ for cmd in cargo python3 ssh scp; do
 done
 [[ -f "$FIRMWARE" ]] || die "firmware not found: $FIRMWARE"
 [[ -f "$EFUSE_REPORT" ]] || die "EFUSE report not found: $EFUSE_REPORT"
+
+resolve_linux_lan_ip() {
+  if [[ "$LINUX_LAN_IP" != "auto" ]]; then
+    return
+  fi
+  local route_output
+  local resolved
+  route_output=$(ssh -n "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
+    "ip -4 route get $(quote "$MAC_LAN_IP") 2>/dev/null" || true)
+  resolved=$(printf '%s\n' "$route_output" | sed -n 's/.* src \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+  if [[ -z "$resolved" ]]; then
+    die "could not resolve LINUX_LAN_IP from $LINUX_HOST route to MAC_LAN_IP=$MAC_LAN_IP; set LINUX_LAN_IP explicitly"
+  fi
+  LINUX_LAN_IP=$resolved
+  log "resolved LINUX_LAN_IP=$LINUX_LAN_IP from Linux route to MAC_LAN_IP=$MAC_LAN_IP"
+}
+
+resolve_linux_lan_ip
+export LINUX_HOST MAC_LAN_IP LINUX_LAN_IP LINUX_LAN_IP_REQUESTED
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
@@ -261,6 +285,12 @@ summary = {
     "smoke_result": "fail",
     "failures": failures,
     "startup_failure_reason": reason,
+    "network": {
+        "linux_host": os.environ.get("LINUX_HOST"),
+        "linux_lan_ip": os.environ.get("LINUX_LAN_IP"),
+        "linux_lan_ip_requested": os.environ.get("LINUX_LAN_IP_REQUESTED"),
+        "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
+    },
     "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
     "radio_result": report.get("result"),
     "stop_reason": report.get("stop_reason"),
@@ -604,6 +634,12 @@ if calibration_success_required and runtime_iqk.get("selected_iqc_fill_applied")
 summary = {
     "smoke_result": "fail" if failures else "pass",
     "failures": failures,
+    "network": {
+        "linux_host": os.environ.get("LINUX_HOST"),
+        "linux_lan_ip": os.environ.get("LINUX_LAN_IP"),
+        "linux_lan_ip_requested": os.environ.get("LINUX_LAN_IP_REQUESTED"),
+        "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
+    },
     "radio_result": report.get("result"),
     "stop_reason": report.get("stop_reason"),
     "tx": tx,

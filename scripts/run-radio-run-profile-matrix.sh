@@ -403,6 +403,7 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
     dec = summary.get("peer_wfb_rx") or {}
     rx = summary.get("rx") or {}
     signal = rx.get("signal") or {}
+    network = summary.get("network") or {}
     run = {
         "run_dir": str(run_dir),
         "profile": meta.get("profile_name") or run_dir.name,
@@ -413,8 +414,9 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
         "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
         "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
-        "linux_lan_ip": meta.get("linux_lan_ip"),
-        "mac_lan_ip": meta.get("mac_lan_ip"),
+        "linux_lan_ip": network.get("linux_lan_ip") or meta.get("linux_lan_ip"),
+        "linux_lan_ip_requested": network.get("linux_lan_ip_requested") or meta.get("linux_lan_ip"),
+        "mac_lan_ip": network.get("mac_lan_ip") or meta.get("mac_lan_ip"),
         "m2l_unique": int(m2l.get("unique_sequences") or 0),
         "l2m_unique": int(l2m.get("unique_sequences") or 0),
         "m2l_decrypt_failures": int(dec.get("m2l_decrypt_failures") or 0),

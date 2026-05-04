@@ -530,7 +530,13 @@ Remote hardware currently requires the hardware Mac to reach the Linux peer
 over SSH and UDP, and `LINUX_LAN_IP` must be the peer address reachable from
 that hardware Mac. In the current remote-Mac topology, the Linux peer is
 `10.42.0.1` on `wlan1`; using `192.168.122.77` caused Linux-to-Mac forwarding
-to report `0/80` despite a working RF direction.
+to report `0/80` despite a working RF direction. Set `LINUX_LAN_IP=auto` when
+the peer has multiple addresses and the correct Mac-visible source address
+should be resolved from the Linux route to `MAC_LAN_IP`. The auto path was
+validated at
+`/tmp/wfb-radio-profile-matrix-remote-asym-smoke-auto-20260504-190319`: it
+resolved `auto` to `10.42.0.1`, recovered `80/80` both directions, and logged
+zero decrypt failures.
 
 On May 4, 2026, after local reachability was restored, the remote matrix
 accepted the asymmetric short-range sustained profile only after increasing
