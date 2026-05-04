@@ -2235,8 +2235,10 @@ const REG_AGC_TABLE_JAGUAR: u16 = 0x082c;
 const REG_OFDMCCKEN_JAGUAR: u16 = 0x0808;
 const REG_CCA_ON_SEC_JAGUAR: u16 = 0x0838;
 const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
+const REG_IQK_MACBB_0X0520: u16 = 0x0520;
 const REG_IQK_MACBB_0X090C: u16 = 0x090c;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
+const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_RX_PATH_JAGUAR: u16 = 0x0a07;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
 const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
@@ -2255,6 +2257,8 @@ const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
 const REG_IQK_TX_POWER_CTRL_A_C94: u16 = 0x0c94;
 const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
+const REG_RFE_INV_A_JAGUAR: u16 = 0x0cb4;
+const REG_RFE_TIMING_A_JAGUAR: u16 = 0x0cb8;
 const REG_IQK_TX_CTRL_A_CC4: u16 = 0x0cc4;
 const REG_IQK_TX_CTRL_A_CC8: u16 = 0x0cc8;
 const REG_IQK_TX_Y_A_CCC: u16 = 0x0ccc;
@@ -2275,6 +2279,8 @@ const REG_TX_BB_CTRL_B_JAGUAR: u16 = REG_RF_PATH_B_3WIRE;
 const REG_TX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0e94;
 const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
+const REG_RFE_INV_B_JAGUAR: u16 = 0x0eb4;
+const REG_RFE_TIMING_B_JAGUAR: u16 = 0x0eb8;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
 const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
 const REG_IQK_TX_CTRL_B_EC4: u16 = 0x0ec4;
@@ -2340,6 +2346,42 @@ const RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES: &[(u16, u8, &str)] = &[
     (REG_NAV_UPPER, 0x00, "REG_NAV_UPPER"),
 ];
 
+type Rtl8812auRegisterReadSpec = (&'static str, u16);
+
+const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
+    ("R_0x520", REG_IQK_MACBB_0X0520),
+    ("REG_BCN_CTRL", REG_BCN_CTRL),
+    ("REG_OFDMCCKEN_JAGUAR", REG_OFDMCCKEN_JAGUAR),
+    ("REG_CCK_RX_JAGUAR", REG_CCK_RX_JAGUAR),
+    ("R_0x90c", REG_IQK_MACBB_0X090C),
+    ("rA_PI_Mode_Jaguar", REG_RF_PI_MODE_A_JAGUAR),
+    ("rB_PI_Mode_Jaguar", REG_RF_PI_MODE_B_JAGUAR),
+    ("REG_CCA_ON_SEC_JAGUAR", REG_CCA_ON_SEC_JAGUAR),
+    ("REG_AGC_TABLE_JAGUAR", REG_AGC_TABLE_JAGUAR),
+];
+
+const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
+    ("R_0xc5c", REG_IQK_AFE_A_C5C),
+    ("R_0xc60", REG_IQK_AFE_A_C60),
+    ("R_0xc64", REG_IQK_AFE_A_C64),
+    ("R_0xc68", REG_IQK_AFE_A_C68),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR),
+    ("R_0xe5c", REG_IQK_AFE_B_E5C),
+    ("R_0xe60", REG_IQK_AFE_B_E60),
+    ("R_0xe64", REG_IQK_AFE_B_E64),
+    ("R_0xe68", REG_IQK_AFE_B_E68),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR),
+];
+
+const RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
+    ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
+    ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
+];
+
+const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[0x65, 0x8f, 0x00];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimePhaseExecution {
@@ -2391,6 +2433,33 @@ pub struct Rtl8812auRuntimeIqkMaskedBbWritePlan {
     pub data: u32,
     pub data_hex: String,
     pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRuntimeIqkBackupReport {
+    pub hssi_read_register: Rtl8812auRegisterReadReport,
+    pub page_select_register: Rtl8812auRegisterReadReport,
+    pub tx_pause_register: Rtl8812auRegisterReadReport,
+    pub macbb_backup: Vec<Rtl8812auRegisterReadReport>,
+    pub afe_backup: Vec<Rtl8812auRegisterReadReport>,
+    pub rf_backup_path_a: Vec<Rtl8812auRfSerialReadReport>,
+    pub rf_backup_path_b: Vec<Rtl8812auRfSerialReadReport>,
+    pub page_c1_latches: Vec<Rtl8812auRegisterReadReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRuntimeIqkCleanupReport {
+    pub status: &'static str,
+    pub failures: Vec<String>,
+    pub macbb_restore_count: usize,
+    pub afe_restore_count: usize,
+    pub rf_path_a_restore_count: usize,
+    pub rf_path_b_restore_count: usize,
+    pub page_c1_latch_restore_count: usize,
+    pub hssi_read_restored: Option<bool>,
+    pub page_select_restored: Option<bool>,
+    pub tx_pause_restored: Option<bool>,
+    pub counters: RuntimeRadioCounters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3803,6 +3872,449 @@ where
         }
     }
     Ok(applied)
+}
+
+fn rtl8812au_iqk_select_page<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    page_c1: bool,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    bb_set_bb_reg(
+        registers,
+        counters,
+        REG_AGC_TABLE_JAGUAR,
+        RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+        u32::from(page_c1),
+        "REG_AGC_TABLE_JAGUAR",
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_page_select_failed",
+            format!(
+                "REG_AGC_TABLE_JAGUAR page {} select failed: {}",
+                if page_c1 { "C1" } else { "C" },
+                error.message
+            ),
+        )
+    })
+}
+
+fn rtl8812au_iqk_read32_group<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    group: &[Rtl8812auRegisterReadSpec],
+) -> Result<Vec<Rtl8812auRegisterReadReport>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut reports = Vec::with_capacity(group.len());
+    for &(register_name, address) in group {
+        let value = read32_with_counter(
+            registers,
+            counters,
+            address,
+            register_name,
+            "runtime-iqk-backup",
+        )?;
+        reports.push(register_read_report(
+            register_name,
+            address,
+            "u32",
+            value,
+            8,
+        ));
+    }
+    Ok(reports)
+}
+
+fn rtl8812au_iqk_rf_backup_reads<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+) -> Result<Vec<Rtl8812auRfSerialReadReport>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut reports = Vec::with_capacity(RTL8812A_IQK_RF_BACKUP_OFFSETS.len());
+    for &rf_offset in RTL8812A_IQK_RF_BACKUP_OFFSETS {
+        reports.push(rf_serial_read_register(
+            registers, path, rf_offset, counters,
+        )?);
+    }
+    Ok(reports)
+}
+
+pub fn run_rtl8812au_runtime_iqk_backup<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRuntimeIqkBackupReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let hssi_read_value = read32_with_counter(
+        registers,
+        counters,
+        REG_HSSI_READ_JAGUAR,
+        "rHSSIRead_Jaguar",
+        "runtime-iqk-backup",
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_backup_failed",
+            format!("rHSSIRead_Jaguar backup read failed: {}", error.message),
+        )
+    })?;
+    let hssi_read_register = register_read_report(
+        "rHSSIRead_Jaguar",
+        REG_HSSI_READ_JAGUAR,
+        "u32",
+        hssi_read_value,
+        8,
+    );
+
+    let page_select_value = read32_with_counter(
+        registers,
+        counters,
+        REG_AGC_TABLE_JAGUAR,
+        "REG_AGC_TABLE_JAGUAR",
+        "runtime-iqk-backup",
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_backup_failed",
+            format!("REG_AGC_TABLE_JAGUAR backup read failed: {}", error.message),
+        )
+    })?;
+    let page_select_register = register_read_report(
+        "REG_AGC_TABLE_JAGUAR",
+        REG_AGC_TABLE_JAGUAR,
+        "u32",
+        page_select_value,
+        8,
+    );
+
+    let tx_pause_value = read8_with_counter(
+        registers,
+        counters,
+        REG_TXPAUSE,
+        "REG_TXPAUSE",
+        "runtime-iqk-backup",
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_backup_failed",
+            format!("REG_TXPAUSE backup read failed: {}", error.message),
+        )
+    })?;
+    let tx_pause_register = register_read_report(
+        "REG_TXPAUSE",
+        REG_TXPAUSE,
+        "u8",
+        u32::from(tx_pause_value),
+        2,
+    );
+
+    rtl8812au_iqk_select_page(registers, counters, false)?;
+    let macbb_backup =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_MACBB_BACKUP_REGISTERS)?;
+
+    rtl8812au_iqk_select_page(registers, counters, true)?;
+    let page_c1_latches =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS)?;
+
+    rtl8812au_iqk_select_page(registers, counters, false)?;
+    let afe_backup =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_AFE_BACKUP_REGISTERS)?;
+    let rf_backup_path_a = rtl8812au_iqk_rf_backup_reads(registers, counters, Rtl8812auRfPath::A)?;
+    let rf_backup_path_b = rtl8812au_iqk_rf_backup_reads(registers, counters, Rtl8812auRfPath::B)?;
+
+    Ok(Rtl8812auRuntimeIqkBackupReport {
+        hssi_read_register,
+        page_select_register,
+        tx_pause_register,
+        macbb_backup,
+        afe_backup,
+        rf_backup_path_a,
+        rf_backup_path_b,
+        page_c1_latches,
+    })
+}
+
+fn restore_runtime_iqk_register_group<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    group_name: &'static str,
+    backups: &[Rtl8812auRegisterReadReport],
+    failures: &mut Vec<String>,
+) -> usize
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut restored = 0;
+    for backup in backups {
+        match write32_with_counter(
+            registers,
+            counters,
+            backup.address,
+            backup.value,
+            backup.register_name,
+            "runtime-iqk-restore",
+        ) {
+            Ok(()) => restored += 1,
+            Err(error) => failures.push(format!(
+                "{group_name} restore {} {} to {} failed: {}",
+                backup.register_name, backup.address_hex, backup.value_hex, error.message
+            )),
+        }
+    }
+    restored
+}
+
+fn restore_runtime_iqk_rf_group<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+    backups: &[Rtl8812auRfSerialReadReport],
+    failures: &mut Vec<String>,
+) -> usize
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut restored = 0;
+    for backup in backups {
+        match rf_serial_write_single_path(registers, path, backup.rf_offset, backup.value, counters)
+        {
+            Ok(_) => restored += 1,
+            Err(error) => failures.push(format!(
+                "RF path {} restore {} to {} failed: {}",
+                backup.path_name, backup.rf_offset_hex, backup.value_hex, error.message
+            )),
+        }
+    }
+    if let Err(error) =
+        rf_serial_write_single_path(registers, path, RF_IQK_MODE_JAGUAR, 0, counters)
+    {
+        let path_name = path.name().unwrap_or("?");
+        failures.push(format!(
+            "RF path {path_name} RF_0xef IQK mode clear failed: {}",
+            error.message
+        ));
+    }
+    restored
+}
+
+pub fn restore_rtl8812au_runtime_iqk_backup<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    backup: &Rtl8812auRuntimeIqkBackupReport,
+) -> Rtl8812auRuntimeIqkCleanupReport
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = *counters;
+    let mut failures = Vec::new();
+
+    if let Err(error) = rtl8812au_iqk_select_page(registers, counters, false) {
+        failures.push(error.message);
+    }
+    let rf_path_a_restore_count = restore_runtime_iqk_rf_group(
+        registers,
+        counters,
+        Rtl8812auRfPath::A,
+        &backup.rf_backup_path_a,
+        &mut failures,
+    );
+    let rf_path_b_restore_count = restore_runtime_iqk_rf_group(
+        registers,
+        counters,
+        Rtl8812auRfPath::B,
+        &backup.rf_backup_path_b,
+        &mut failures,
+    );
+
+    if let Err(error) = rtl8812au_iqk_select_page(registers, counters, false) {
+        failures.push(error.message);
+    }
+    let afe_restore_count = restore_runtime_iqk_register_group(
+        registers,
+        counters,
+        "AFE",
+        &backup.afe_backup,
+        &mut failures,
+    );
+
+    if let Err(error) = rtl8812au_iqk_select_page(registers, counters, true) {
+        failures.push(error.message);
+    }
+    let page_c1_latch_restore_count = restore_runtime_iqk_register_group(
+        registers,
+        counters,
+        "page-C1 latch",
+        &backup.page_c1_latches,
+        &mut failures,
+    );
+
+    if let Err(error) = rtl8812au_iqk_select_page(registers, counters, false) {
+        failures.push(error.message);
+    }
+    let macbb_restore_count = restore_runtime_iqk_register_group(
+        registers,
+        counters,
+        "MAC/BB",
+        &backup.macbb_backup,
+        &mut failures,
+    );
+
+    let hssi_read_restored = match write32_with_counter(
+        registers,
+        counters,
+        REG_HSSI_READ_JAGUAR,
+        backup.hssi_read_register.value,
+        backup.hssi_read_register.register_name,
+        "runtime-iqk-restore",
+    ) {
+        Ok(()) => match read32_with_counter(
+            registers,
+            counters,
+            REG_HSSI_READ_JAGUAR,
+            backup.hssi_read_register.register_name,
+            "runtime-iqk-restore",
+        ) {
+            Ok(after) => {
+                let restored = after == backup.hssi_read_register.value;
+                if !restored {
+                    failures.push(format!(
+                        "rHSSIRead_Jaguar restored to {}, expected {}",
+                        format_register_value(after, 8),
+                        backup.hssi_read_register.value_hex
+                    ));
+                }
+                Some(restored)
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "rHSSIRead_Jaguar post-restore read failed: {}",
+                    error.message
+                ));
+                None
+            }
+        },
+        Err(error) => {
+            failures.push(format!(
+                "rHSSIRead_Jaguar restore to {} failed: {}",
+                backup.hssi_read_register.value_hex, error.message
+            ));
+            None
+        }
+    };
+
+    let page_select_restored = match write32_with_counter(
+        registers,
+        counters,
+        REG_AGC_TABLE_JAGUAR,
+        backup.page_select_register.value,
+        backup.page_select_register.register_name,
+        "runtime-iqk-restore",
+    ) {
+        Ok(()) => match read32_with_counter(
+            registers,
+            counters,
+            REG_AGC_TABLE_JAGUAR,
+            backup.page_select_register.register_name,
+            "runtime-iqk-restore",
+        ) {
+            Ok(after) => {
+                let restored = after == backup.page_select_register.value;
+                if !restored {
+                    failures.push(format!(
+                        "REG_AGC_TABLE_JAGUAR restored to {}, expected {}",
+                        format_register_value(after, 8),
+                        backup.page_select_register.value_hex
+                    ));
+                }
+                Some(restored)
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "REG_AGC_TABLE_JAGUAR post-restore read failed: {}",
+                    error.message
+                ));
+                None
+            }
+        },
+        Err(error) => {
+            failures.push(format!(
+                "REG_AGC_TABLE_JAGUAR restore to {} failed: {}",
+                backup.page_select_register.value_hex, error.message
+            ));
+            None
+        }
+    };
+
+    let tx_pause_restored = match write8_with_counter(
+        registers,
+        counters,
+        REG_TXPAUSE,
+        backup.tx_pause_register.value as u8,
+        backup.tx_pause_register.register_name,
+        "runtime-iqk-restore",
+    ) {
+        Ok(()) => match read8_with_counter(
+            registers,
+            counters,
+            REG_TXPAUSE,
+            backup.tx_pause_register.register_name,
+            "runtime-iqk-restore",
+        ) {
+            Ok(after) => {
+                let restored = u32::from(after) == backup.tx_pause_register.value;
+                if !restored {
+                    failures.push(format!(
+                        "REG_TXPAUSE restored to {}, expected {}",
+                        format_register_value(after, 2),
+                        backup.tx_pause_register.value_hex
+                    ));
+                }
+                Some(restored)
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "REG_TXPAUSE post-restore read failed: {}",
+                    error.message
+                ));
+                None
+            }
+        },
+        Err(error) => {
+            failures.push(format!(
+                "REG_TXPAUSE restore to {} failed: {}",
+                backup.tx_pause_register.value_hex, error.message
+            ));
+            None
+        }
+    };
+
+    let status = if failures.is_empty() {
+        "restored"
+    } else {
+        "restore_failed"
+    };
+    Rtl8812auRuntimeIqkCleanupReport {
+        status,
+        failures,
+        macbb_restore_count,
+        afe_restore_count,
+        rf_path_a_restore_count,
+        rf_path_b_restore_count,
+        page_c1_latch_restore_count,
+        hssi_read_restored,
+        page_select_restored,
+        tx_pause_restored,
+        counters: counters.saturating_sub(before),
+    }
 }
 
 const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
@@ -5591,6 +6103,64 @@ mod tests {
                     == super::encode_rf_serial_write(super::RF_IQK_MODE_JAGUAR, 0x80002)
                         .to_le_bytes()
         }));
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_backup_and_restore_preserve_state() {
+        let transport = MockTransport::default();
+        transport.insert_u32(super::REG_HSSI_READ_JAGUAR, 0x0000_0058);
+        transport.insert_u32(super::REG_AGC_TABLE_JAGUAR, 0);
+        transport.insert_u8(super::REG_TXPAUSE, 0x2a);
+        transport.insert_u32(super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_MODE_B_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_READ_A_JAGUAR, 0x000a_bcde);
+        transport.insert_u32(super::REG_RF_PI_READ_B_JAGUAR, 0x000b_cdef);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let backup = super::run_rtl8812au_runtime_iqk_backup(&registers, &mut counters)
+            .expect("runtime IQK backup");
+
+        assert_eq!(backup.hssi_read_register.value, 0x0000_0058);
+        assert_eq!(backup.tx_pause_register.value, 0x2a);
+        assert_eq!(backup.macbb_backup.len(), 9);
+        assert_eq!(backup.afe_backup.len(), 12);
+        assert_eq!(backup.page_c1_latches.len(), 2);
+        assert_eq!(backup.rf_backup_path_a.len(), 3);
+        assert_eq!(backup.rf_backup_path_b.len(), 3);
+        assert_eq!(
+            backup.rf_backup_path_a[0].value,
+            0x000a_bcde & super::RF_REGISTER_OFFSET_MASK
+        );
+        assert_eq!(
+            backup.rf_backup_path_b[0].value,
+            0x000b_cdef & super::RF_REGISTER_OFFSET_MASK
+        );
+
+        let cleanup =
+            super::restore_rtl8812au_runtime_iqk_backup(&registers, &mut counters, &backup);
+
+        assert_eq!(cleanup.status, "restored");
+        assert!(cleanup.failures.is_empty());
+        assert_eq!(cleanup.macbb_restore_count, 9);
+        assert_eq!(cleanup.afe_restore_count, 12);
+        assert_eq!(cleanup.page_c1_latch_restore_count, 2);
+        assert_eq!(cleanup.rf_path_a_restore_count, 3);
+        assert_eq!(cleanup.rf_path_b_restore_count, 3);
+        assert_eq!(cleanup.hssi_read_restored, Some(true));
+        assert_eq!(cleanup.page_select_restored, Some(true));
+        assert_eq!(cleanup.tx_pause_restored, Some(true));
+        assert!(cleanup.counters.usb_control_writes > 0);
+        let writes = transport.writes();
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RF_PATH_A_3WIRE
+                && bytes.as_slice()
+                    == super::encode_rf_serial_write(super::RF_IQK_MODE_JAGUAR, 0).to_le_bytes()
+        }));
+        assert_eq!(
+            transport.register_bytes(super::REG_TXPAUSE).as_deref(),
+            Some(&[0x2a][..])
+        );
     }
 
     #[test]

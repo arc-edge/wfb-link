@@ -49,7 +49,8 @@ use wfb_radio_runtime::{
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
-    Rtl8812auRfPath, Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
+    Rtl8812auRfPath, Rtl8812auRuntimeIqkBackupReport, Rtl8812auRuntimeIqkCleanupReport,
+    Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
     Rtl8812auRuntimeIqkSetupWritePlan, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
     RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
     RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
@@ -3847,32 +3848,8 @@ struct TxRuntimeIqkSweepPathSummaryReport {
     rx_failure_label: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct TxRuntimeIqkBackupReport {
-    hssi_read_register: RfCalibrationRegisterReadReport,
-    page_select_register: RfCalibrationRegisterReadReport,
-    tx_pause_register: RfCalibrationRegisterReadReport,
-    macbb_backup: Vec<RfCalibrationRegisterReadReport>,
-    afe_backup: Vec<RfCalibrationRegisterReadReport>,
-    rf_backup_path_a: Vec<RfSerialReadReport>,
-    rf_backup_path_b: Vec<RfSerialReadReport>,
-    page_c1_latches: Vec<RfCalibrationRegisterReadReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TxRuntimeIqkCleanupReport {
-    status: &'static str,
-    failures: Vec<String>,
-    macbb_restore_count: usize,
-    afe_restore_count: usize,
-    rf_path_a_restore_count: usize,
-    rf_path_b_restore_count: usize,
-    page_c1_latch_restore_count: usize,
-    hssi_read_restored: Option<bool>,
-    page_select_restored: Option<bool>,
-    tx_pause_restored: Option<bool>,
-    counters: DiagnosticCounters,
-}
+type TxRuntimeIqkBackupReport = Rtl8812auRuntimeIqkBackupReport;
+type TxRuntimeIqkCleanupReport = Rtl8812auRuntimeIqkCleanupReport;
 
 #[derive(Debug, Serialize)]
 struct TxRuntimeIqkPathReport {
@@ -15547,14 +15524,6 @@ fn runtime_rf_path_from_tx_power_path(
     }
 }
 
-fn tx_power_path_name(path: TxPowerPathArg) -> Option<&'static str> {
-    match path {
-        TxPowerPathArg::A => Some("A"),
-        TxPowerPathArg::B => Some("B"),
-        TxPowerPathArg::Both => None,
-    }
-}
-
 #[allow(dead_code)]
 fn rtl8812a_iqk_tx_fill_iqc_plan(
     path: TxPowerPathArg,
@@ -15618,132 +15587,12 @@ fn run_rtl8812a_runtime_iqk_backup<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let hssi_read_value =
-        read32_with_counter(registers, counters, REG_HSSI_READ_JAGUAR).map_err(|error| {
-            DiagnosticErrorReport {
-                code: "rtl8812a_runtime_iqk_backup_failed",
-                message: format!("rHSSIRead_Jaguar backup read failed: {error}"),
-            }
-        })?;
-    let hssi_read_register = calibration_register_read_report(
-        "rHSSIRead_Jaguar",
-        REG_HSSI_READ_JAGUAR,
-        "u32",
-        hssi_read_value,
-        8,
-    );
-
-    let page_select_value = read32_with_counter(registers, counters, REG_AGC_TABLE_JAGUAR)
-        .map_err(|error| DiagnosticErrorReport {
-            code: "rtl8812a_runtime_iqk_backup_failed",
-            message: format!("REG_AGC_TABLE_JAGUAR backup read failed: {error}"),
-        })?;
-    let page_select_register = calibration_register_read_report(
-        "REG_AGC_TABLE_JAGUAR",
-        REG_AGC_TABLE_JAGUAR,
-        "u32",
-        page_select_value,
-        8,
-    );
-
-    let tx_pause_value = read8_with_counter(registers, counters, REG_TXPAUSE).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "rtl8812a_runtime_iqk_backup_failed",
-            message: format!("REG_TXPAUSE backup read failed: {error}"),
-        }
-    })?;
-    let tx_pause_register = calibration_register_read_report(
-        "REG_TXPAUSE",
-        REG_TXPAUSE,
-        "u8",
-        u32::from(tx_pause_value),
-        2,
-    );
-
-    rtl8812a_iqk_select_page(registers, counters, false)?;
-    let macbb_backup =
-        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_MACBB_BACKUP_REGISTERS)?;
-
-    rtl8812a_iqk_select_page(registers, counters, true)?;
-    let page_c1_latches =
-        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS)?;
-
-    rtl8812a_iqk_select_page(registers, counters, false)?;
-    let afe_backup =
-        rf_calibration_read32_group(registers, counters, RTL8812A_IQK_AFE_BACKUP_REGISTERS)?;
-    let rf_backup_path_a =
-        run_rtl8812a_iqk_rf_backup_reads(registers, TxPowerPathArg::A, counters)?;
-    let rf_backup_path_b =
-        run_rtl8812a_iqk_rf_backup_reads(registers, TxPowerPathArg::B, counters)?;
-
-    Ok(TxRuntimeIqkBackupReport {
-        hssi_read_register,
-        page_select_register,
-        tx_pause_register,
-        macbb_backup,
-        afe_backup,
-        rf_backup_path_a,
-        rf_backup_path_b,
-        page_c1_latches,
-    })
-}
-
-#[allow(dead_code)]
-fn restore_runtime_iqk_register_group<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    group_name: &'static str,
-    backups: &[RfCalibrationRegisterReadReport],
-    failures: &mut Vec<String>,
-) -> usize
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut restored = 0;
-    for backup in backups {
-        match write32_with_counter(registers, counters, backup.address, backup.value) {
-            Ok(()) => restored += 1,
-            Err(error) => failures.push(format!(
-                "{group_name} restore {} {} to {} failed: {error}",
-                backup.register_name, backup.address_hex, backup.value_hex
-            )),
-        }
-    }
-    restored
-}
-
-#[allow(dead_code)]
-fn restore_runtime_iqk_rf_group<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    path: TxPowerPathArg,
-    backups: &[RfSerialReadReport],
-    failures: &mut Vec<String>,
-) -> usize
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut restored = 0;
-    for backup in backups {
-        match rf_serial_write_single_path(registers, path, backup.rf_offset, backup.value, counters)
-        {
-            Ok(_) => restored += 1,
-            Err(error) => failures.push(format!(
-                "RF path {} restore {} to {} failed: {}",
-                backup.path_name, backup.rf_offset_hex, backup.value_hex, error.message
-            )),
-        }
-    }
-    if let Err(error) =
-        rf_serial_write_single_path(registers, path, RF_IQK_MODE_JAGUAR, 0, counters)
-    {
-        let path_name = tx_power_path_name(path).unwrap_or("?");
-        failures.push(format!(
-            "RF path {path_name} RF_0xef IQK mode clear failed: {}",
-            error.message
-        ));
-    }
-    restored
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let backup =
+        wfb_radio_runtime::run_rtl8812au_runtime_iqk_backup(registers, &mut runtime_counters)
+            .map_err(runtime_radio_error)?;
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    Ok(backup)
 }
 
 #[allow(dead_code)]
@@ -15755,178 +15604,14 @@ fn restore_rtl8812a_runtime_iqk_backup<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let before = *counters;
-    let mut failures = Vec::new();
-
-    if let Err(error) = rtl8812a_iqk_select_page(registers, counters, false) {
-        failures.push(error.message);
-    }
-    let rf_path_a_restore_count = restore_runtime_iqk_rf_group(
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let cleanup = wfb_radio_runtime::restore_rtl8812au_runtime_iqk_backup(
         registers,
-        counters,
-        TxPowerPathArg::A,
-        &backup.rf_backup_path_a,
-        &mut failures,
+        &mut runtime_counters,
+        backup,
     );
-    let rf_path_b_restore_count = restore_runtime_iqk_rf_group(
-        registers,
-        counters,
-        TxPowerPathArg::B,
-        &backup.rf_backup_path_b,
-        &mut failures,
-    );
-
-    if let Err(error) = rtl8812a_iqk_select_page(registers, counters, false) {
-        failures.push(error.message);
-    }
-    let afe_restore_count = restore_runtime_iqk_register_group(
-        registers,
-        counters,
-        "AFE",
-        &backup.afe_backup,
-        &mut failures,
-    );
-
-    if let Err(error) = rtl8812a_iqk_select_page(registers, counters, true) {
-        failures.push(error.message);
-    }
-    let page_c1_latch_restore_count = restore_runtime_iqk_register_group(
-        registers,
-        counters,
-        "page-C1 latch",
-        &backup.page_c1_latches,
-        &mut failures,
-    );
-
-    if let Err(error) = rtl8812a_iqk_select_page(registers, counters, false) {
-        failures.push(error.message);
-    }
-    let macbb_restore_count = restore_runtime_iqk_register_group(
-        registers,
-        counters,
-        "MAC/BB",
-        &backup.macbb_backup,
-        &mut failures,
-    );
-
-    let hssi_read_restored = match write32_with_counter(
-        registers,
-        counters,
-        REG_HSSI_READ_JAGUAR,
-        backup.hssi_read_register.value,
-    ) {
-        Ok(()) => match read32_with_counter(registers, counters, REG_HSSI_READ_JAGUAR) {
-            Ok(after) => {
-                let restored = after == backup.hssi_read_register.value;
-                if !restored {
-                    failures.push(format!(
-                        "rHSSIRead_Jaguar restored to {}, expected {}",
-                        format_value(after, 8),
-                        backup.hssi_read_register.value_hex
-                    ));
-                }
-                Some(restored)
-            }
-            Err(error) => {
-                failures.push(format!(
-                    "rHSSIRead_Jaguar post-restore read failed: {error}"
-                ));
-                None
-            }
-        },
-        Err(error) => {
-            failures.push(format!(
-                "rHSSIRead_Jaguar restore to {} failed: {error}",
-                backup.hssi_read_register.value_hex
-            ));
-            None
-        }
-    };
-
-    let page_select_restored = match write32_with_counter(
-        registers,
-        counters,
-        REG_AGC_TABLE_JAGUAR,
-        backup.page_select_register.value,
-    ) {
-        Ok(()) => match read32_with_counter(registers, counters, REG_AGC_TABLE_JAGUAR) {
-            Ok(after) => {
-                let restored = after == backup.page_select_register.value;
-                if !restored {
-                    failures.push(format!(
-                        "REG_AGC_TABLE_JAGUAR restored to {}, expected {}",
-                        format_value(after, 8),
-                        backup.page_select_register.value_hex
-                    ));
-                }
-                Some(restored)
-            }
-            Err(error) => {
-                failures.push(format!(
-                    "REG_AGC_TABLE_JAGUAR post-restore read failed: {error}"
-                ));
-                None
-            }
-        },
-        Err(error) => {
-            failures.push(format!(
-                "REG_AGC_TABLE_JAGUAR restore to {} failed: {error}",
-                backup.page_select_register.value_hex
-            ));
-            None
-        }
-    };
-
-    let tx_pause_restored = match write8_with_counter(
-        registers,
-        counters,
-        REG_TXPAUSE,
-        backup.tx_pause_register.value as u8,
-    ) {
-        Ok(()) => match read8_with_counter(registers, counters, REG_TXPAUSE) {
-            Ok(after) => {
-                let restored = u32::from(after) == backup.tx_pause_register.value;
-                if !restored {
-                    failures.push(format!(
-                        "REG_TXPAUSE restored to {}, expected {}",
-                        format_value(after, 2),
-                        backup.tx_pause_register.value_hex
-                    ));
-                }
-                Some(restored)
-            }
-            Err(error) => {
-                failures.push(format!("REG_TXPAUSE post-restore read failed: {error}"));
-                None
-            }
-        },
-        Err(error) => {
-            failures.push(format!(
-                "REG_TXPAUSE restore to {} failed: {error}",
-                backup.tx_pause_register.value_hex
-            ));
-            None
-        }
-    };
-
-    let status = if failures.is_empty() {
-        "restored"
-    } else {
-        "restore_failed"
-    };
-    TxRuntimeIqkCleanupReport {
-        status,
-        failures,
-        macbb_restore_count,
-        afe_restore_count,
-        rf_path_a_restore_count,
-        rf_path_b_restore_count,
-        page_c1_latch_restore_count,
-        hssi_read_restored,
-        page_select_restored,
-        tx_pause_restored,
-        counters: diagnostic_counters_delta(before, *counters),
-    }
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    cleanup
 }
 
 fn apply_runtime_iqk_masked_bb_write<T>(

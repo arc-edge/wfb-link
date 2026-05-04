@@ -220,16 +220,16 @@ setup without making runtime IQK the default path.
 - **WHEN** a diagnostic or production calibration caller configures runtime
   IQK for the current band/RFE state and has selected TX/RX IQK values for
   path A or path B
-- **THEN** setup planning, setup-plan application, candidate selection, and
-  TX/RX IQC masked-write planning MUST come from runtime-owned helpers while
-  live sweep execution and evidence formatting remain diagnostic-owned until
-  full IQK execution is migrated
+- **THEN** setup planning, setup-plan application, state backup/restore,
+  candidate selection, and TX/RX IQC masked-write planning MUST come from
+  runtime-owned helpers while live sweep execution and evidence formatting
+  remain diagnostic-owned until full IQK execution is migrated
 
 #### Scenario: Runtime IQK restores saved state
 - **WHEN** runtime IQK exits after success or failure
-- **THEN** the system attempts to restore saved MAC/BB, AFE, RF, BB page-select,
-  and HSSI selector state and reports any restore failure separately from the
-  calibration result
+- **THEN** the runtime library attempts to restore saved MAC/BB, AFE, RF, BB
+  page-select, HSSI selector, and TX pause state and reports any restore
+  failure separately from the calibration result
 
 #### Scenario: Runtime IQK remains opt-in
 - **WHEN** an operator uses the default calibration profile
