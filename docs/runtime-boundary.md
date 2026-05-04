@@ -38,6 +38,9 @@
   max-datagram stop, TX burst draining, and RX timeout clamping. Diagnostic
   commands now provide packet-specific TX/RX callbacks to this executor instead
   of owning the loop cadence directly.
+- Runtime-owned queued WFB TX datagram handler for radiotap parsing, TX option
+  override application, RTL8812AU descriptor preview, radio submission, and
+  report-neutral TX counters/metadata.
 
 ## Production Command
 
@@ -58,16 +61,17 @@ loop. Its emitted JSON is `ProductionRuntimeFlowReport` from
 `wfb-radio-runtime`, not the diagnostic `RuntimeFlowReport`.
 
 The active cutover has moved production WFB loop planning, TX ingress socket
-threads, and bridge-loop scheduling into runtime ownership. Packet-specific TX
-datagram parsing, bulk-IN packet handling, PCAP/JSONL output, and diagnostic
-report mutation still live in the diagnostic adapter while the boundary shifts.
+threads, bridge-loop scheduling, and queued TX datagram handling into runtime
+ownership. Bulk-IN packet handling, PCAP/JSONL output, and diagnostic report
+mutation still live in the diagnostic adapter while the boundary shifts.
 
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
 - Runtime IQK/LCK register orchestration and evidence reports while parity is still being hardened.
-- WFB bridge loop ready-marker file writing, packet-specific TX/RX handlers,
-  PCAP/JSONL output, diagnostic report mutation, and RF-quality automation.
+- WFB bridge loop ready-marker file writing, packet-specific RX handlers,
+  PCAP/JSONL output, diagnostic report mutation, TX status probes, and
+  RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
   production `radio-run` command adapter.
 - Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
@@ -76,7 +80,7 @@ report mutation still live in the diagnostic adapter while the boundary shifts.
 
 1. Move full RTL8812AU init phase execution behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
 2. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
-3. Move packet-specific bridge-loop TX/RX handlers into `wfb-radio-runtime`.
+3. Move packet-specific bridge-loop RX handlers into `wfb-radio-runtime`.
 4. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
    `wfb-radio-runtime`; RX/TX flow counters and adapter-side RSSI/SNR/noise

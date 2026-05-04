@@ -18,14 +18,17 @@ use std::{
 };
 
 use radio_core::{
-    list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame,
-    Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo, InterfaceInfo,
-    ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError,
-    RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints,
-    UsbError,
+    build_tx_packet, list_usb_devices, parse_rx_packet,
+    rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
+    submit_tx_frame, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
+    InterfaceInfo, ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
+    Rtl8812auTxSubmitError, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
+    UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
-use wfb_bridge::{RxForwardConfig, WfbChannelId};
+use wfb_bridge::{
+    parse_tx_datagram, RadiotapError, RxForwardConfig, TxCounters, TxDatagramError, WfbChannelId,
+};
 
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
@@ -958,6 +961,280 @@ where
             | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => {}
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeBridgeTxProfile {
+    LinuxMonitor,
+    RadiotapDirect,
+}
+
+impl Default for ProductionRuntimeBridgeTxProfile {
+    fn default() -> Self {
+        Self::LinuxMonitor
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProductionRuntimeBridgeTxOverrides {
+    pub tx_profile: ProductionRuntimeBridgeTxProfile,
+    pub tx_rate: Option<radio_core::TxRate>,
+    pub tx_bandwidth: Option<Bandwidth>,
+    pub tx_channel_bandwidth: Option<Bandwidth>,
+    pub tx_queue: Option<TxQueue>,
+    pub mac_id: Option<u8>,
+    pub tx_rate_id: Option<u8>,
+    pub tx_retries: Option<u8>,
+    pub tx_fallback_limit: Option<u8>,
+    pub enable_rate_fallback: bool,
+    pub no_agg_break: bool,
+}
+
+impl Default for ProductionRuntimeBridgeTxOverrides {
+    fn default() -> Self {
+        Self {
+            tx_profile: ProductionRuntimeBridgeTxProfile::LinuxMonitor,
+            tx_rate: None,
+            tx_bandwidth: None,
+            tx_channel_bandwidth: None,
+            tx_queue: None,
+            mac_id: None,
+            tx_rate_id: None,
+            tx_retries: None,
+            tx_fallback_limit: None,
+            enable_rate_fallback: false,
+            no_agg_break: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProductionRuntimeBridgeTxConfig {
+    pub channel: Channel,
+    pub channel_bandwidth: Bandwidth,
+    pub overrides: ProductionRuntimeBridgeTxOverrides,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionRuntimeBridgeTxDatagramMetadata {
+    pub peer: SocketAddr,
+    pub datagram_len: usize,
+    pub fwmark: u32,
+    pub radiotap_len: usize,
+    pub frame_len: usize,
+    pub packet_len: usize,
+    pub tx_descriptor_preview_hex: String,
+    pub tx_profile: ProductionRuntimeBridgeTxProfile,
+    pub tx_options: TxOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionRuntimeBridgeTxOutcome {
+    pub metadata: Option<ProductionRuntimeBridgeTxDatagramMetadata>,
+    pub datagram_bytes: u64,
+    pub frame_bytes: u64,
+    pub bridge_counters: TxCounters,
+    pub submit_counters: TxSubmitCounters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProductionRuntimeBridgeTxError {
+    pub code: &'static str,
+    pub message: String,
+    pub metadata: Option<ProductionRuntimeBridgeTxDatagramMetadata>,
+    pub datagram_bytes: u64,
+    pub frame_bytes: u64,
+    pub bridge_counters: TxCounters,
+    pub submit_counters: TxSubmitCounters,
+}
+
+impl fmt::Display for ProductionRuntimeBridgeTxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl Error for ProductionRuntimeBridgeTxError {}
+
+pub fn apply_production_bridge_tx_overrides(
+    overrides: ProductionRuntimeBridgeTxOverrides,
+    channel_bandwidth: Bandwidth,
+    mut options: TxOptions,
+) -> TxOptions {
+    options.channel_bandwidth = Some(overrides.tx_channel_bandwidth.unwrap_or(channel_bandwidth));
+    if let Some(rate) = overrides.tx_rate {
+        options.rate = rate;
+    }
+    if let Some(bandwidth) = overrides.tx_bandwidth {
+        options.bandwidth = bandwidth;
+    }
+    options = match overrides.tx_profile {
+        ProductionRuntimeBridgeTxProfile::LinuxMonitor => {
+            apply_production_wfb_monitor_tx_defaults(options)
+        }
+        ProductionRuntimeBridgeTxProfile::RadiotapDirect => options,
+    };
+    if let Some(queue) = overrides.tx_queue {
+        options.queue = queue;
+    }
+    if let Some(mac_id) = overrides.mac_id {
+        options.mac_id = mac_id;
+    }
+    if let Some(rate_id) = overrides.tx_rate_id {
+        options.rate_id = Some(rate_id);
+    }
+    if let Some(retries) = overrides.tx_retries {
+        options.retries = retries;
+    }
+    if let Some(fallback_limit) = overrides.tx_fallback_limit {
+        options.rate_fallback_limit = fallback_limit;
+    }
+    if overrides.enable_rate_fallback {
+        options.disable_rate_fallback = false;
+    }
+    if overrides.no_agg_break {
+        options.aggregate_break = false;
+    }
+    options
+}
+
+fn apply_production_wfb_monitor_tx_defaults(mut options: TxOptions) -> TxOptions {
+    if matches!(
+        options.rate,
+        radio_core::TxRate::Mcs(_) | radio_core::TxRate::Vht { .. }
+    ) {
+        options.queue = TxQueue::Mgnt;
+        options.mac_id = 1;
+        if matches!(options.rate, radio_core::TxRate::Mcs(_)) {
+            options.rate_id = Some(7);
+        }
+        options.disable_rate_fallback = false;
+        options.rate_fallback_limit = 0;
+        options.aggregate_break = false;
+        if options.no_retry {
+            options.retries = 0;
+        }
+    }
+
+    options
+}
+
+pub fn handle_production_bridge_tx_datagram<T>(
+    session: &mut RuntimeRadioSession<T>,
+    queued: &ProductionRuntimeQueuedDatagram,
+    config: ProductionRuntimeBridgeTxConfig,
+    bridge_counters: &mut TxCounters,
+    submit_counters: &mut TxSubmitCounters,
+) -> Result<ProductionRuntimeBridgeTxOutcome, ProductionRuntimeBridgeTxError>
+where
+    T: UsbBulkTransfer,
+{
+    let datagram = queued.data.as_slice();
+    let datagram_bytes = datagram.len() as u64;
+    let parsed = match parse_tx_datagram(datagram) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            bridge_counters.incoming = bridge_counters.incoming.saturating_add(1);
+            bridge_counters.dropped = bridge_counters.dropped.saturating_add(1);
+            bridge_counters.malformed = bridge_counters.malformed.saturating_add(1);
+            bridge_counters.unsupported_radiotap = bridge_counters
+                .unsupported_radiotap
+                .saturating_add(u64::from(is_unsupported_runtime_radiotap(&error)));
+            return Ok(ProductionRuntimeBridgeTxOutcome {
+                metadata: None,
+                datagram_bytes,
+                frame_bytes: 0,
+                bridge_counters: bridge_counters.clone(),
+                submit_counters: submit_counters.clone(),
+            });
+        }
+    };
+
+    let tx_options = apply_production_bridge_tx_overrides(
+        config.overrides,
+        config.channel_bandwidth,
+        parsed.tx_options,
+    );
+    let frame_bytes = parsed.ieee80211_frame.len() as u64;
+    let packet = match build_tx_packet(parsed.ieee80211_frame, config.channel, tx_options) {
+        Ok(packet) => packet,
+        Err(_) => {
+            bridge_counters.incoming = bridge_counters.incoming.saturating_add(1);
+            bridge_counters.dropped = bridge_counters.dropped.saturating_add(1);
+            bridge_counters.malformed = bridge_counters.malformed.saturating_add(1);
+            return Ok(ProductionRuntimeBridgeTxOutcome {
+                metadata: None,
+                datagram_bytes,
+                frame_bytes,
+                bridge_counters: bridge_counters.clone(),
+                submit_counters: submit_counters.clone(),
+            });
+        }
+    };
+    let metadata = ProductionRuntimeBridgeTxDatagramMetadata {
+        peer: queued.peer,
+        datagram_len: datagram.len(),
+        fwmark: parsed.fwmark,
+        radiotap_len: parsed.radiotap_len,
+        frame_len: parsed.ieee80211_frame.len(),
+        packet_len: packet.len(),
+        tx_descriptor_preview_hex: encode_runtime_hex(&packet[..TX_DESC_SIZE.min(packet.len())]),
+        tx_profile: config.overrides.tx_profile,
+        tx_options,
+    };
+
+    bridge_counters.incoming = bridge_counters.incoming.saturating_add(1);
+    match session.submit_80211_frame(
+        parsed.ieee80211_frame,
+        config.channel,
+        tx_options,
+        submit_counters,
+    ) {
+        Ok(_) => {
+            bridge_counters.injected = bridge_counters.injected.saturating_add(1);
+            Ok(ProductionRuntimeBridgeTxOutcome {
+                metadata: Some(metadata),
+                datagram_bytes,
+                frame_bytes,
+                bridge_counters: bridge_counters.clone(),
+                submit_counters: submit_counters.clone(),
+            })
+        }
+        Err(error) => {
+            bridge_counters.dropped = bridge_counters.dropped.saturating_add(1);
+            Err(ProductionRuntimeBridgeTxError {
+                code: "tx_submit_failed",
+                message: format!("radio TX failed: {error}"),
+                metadata: Some(metadata),
+                datagram_bytes,
+                frame_bytes,
+                bridge_counters: bridge_counters.clone(),
+                submit_counters: submit_counters.clone(),
+            })
+        }
+    }
+}
+
+fn is_unsupported_runtime_radiotap(error: &TxDatagramError) -> bool {
+    matches!(
+        error,
+        TxDatagramError::Radiotap(
+            RadiotapError::UnsupportedPresentFlags { .. }
+                | RadiotapError::UnsupportedHtBandwidth { .. }
+                | RadiotapError::UnsupportedVhtBandwidth { .. }
+        )
+    )
+}
+
+fn encode_runtime_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2900,19 +3177,21 @@ mod tests {
     };
 
     use radio_core::{
-        rtl8812au::Rtl8812auUsbTransport, Bandwidth, Channel, DeviceSelector,
-        Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
-        UsbError,
+        rtl8812au::{Rtl8812auUsbTransport, TxQueue},
+        Bandwidth, Channel, DeviceSelector, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions,
+        TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
     };
 
     use super::{
-        bind_production_tx_ingress_sockets, macos_usbhost_adapter_info, macos_usbhost_endpoints,
-        plan_production_wfb_loop, run_production_bridge_loop,
-        spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+        bind_production_tx_ingress_sockets, handle_production_bridge_tx_datagram,
+        macos_usbhost_adapter_info, macos_usbhost_endpoints, plan_production_wfb_loop,
+        run_production_bridge_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
         ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
-        ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
-        ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
+        ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
+        ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
+        ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
+        ProductionRuntimeQueuedDatagram, ProductionRuntimeRxForwardConfig,
         ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
         Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
         RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
@@ -2922,6 +3201,8 @@ mod tests {
         TxCalibrationClass, TxCalibrationProfile, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
+    use wfb_bridge::TxCounters;
+
     #[derive(Debug, Default)]
     struct MockTransport {
         registers: RefCell<BTreeMap<u16, Vec<u8>>>,
@@ -2929,6 +3210,7 @@ mod tests {
         writes: RefCell<Vec<(u16, Vec<u8>)>>,
         bulk_reads: Vec<Vec<u8>>,
         bulk_writes: Vec<(u8, Vec<u8>)>,
+        bulk_write_len: Option<usize>,
     }
 
     impl MockTransport {
@@ -2962,6 +3244,13 @@ mod tests {
         fn with_bulk_read(data: Vec<u8>) -> Self {
             Self {
                 bulk_reads: vec![data],
+                ..Self::default()
+            }
+        }
+
+        fn with_short_bulk_write(written: usize) -> Self {
+            Self {
+                bulk_write_len: Some(written),
                 ..Self::default()
             }
         }
@@ -3055,8 +3344,9 @@ mod tests {
             data: &[u8],
             _timeout: Duration,
         ) -> std::result::Result<usize, UsbError> {
-            self.bulk_writes.push((endpoint, data.to_vec()));
-            Ok(data.len())
+            let written = self.bulk_write_len.unwrap_or(data.len()).min(data.len());
+            self.bulk_writes.push((endpoint, data[..written].to_vec()));
+            Ok(written)
         }
     }
 
@@ -3378,6 +3668,169 @@ mod tests {
         assert_eq!(queued.report_index, 0);
         assert_eq!(queued.data, b"wfb-test");
         assert_eq!(queued.peer, sender.local_addr().expect("sender addr"));
+    }
+
+    fn runtime_tx_session(transport: MockTransport) -> RuntimeRadioSession<MockTransport> {
+        let endpoints = UsbEndpoints {
+            interface_number: 0,
+            bulk_in: Some(0x81),
+            bulk_out: Some(0x02),
+            bulk_in_all: vec![0x81],
+            bulk_out_all: vec![0x02],
+        };
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        RuntimeRadioSession::new(
+            transport,
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        )
+    }
+
+    fn valid_wfb_tx_datagram() -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&0x0102_0304u32.to_be_bytes());
+        packet.extend_from_slice(&[
+            0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x01, 0x03,
+        ]);
+        packet.extend_from_slice(&[0x08; 24]);
+        packet
+    }
+
+    fn queued_tx_datagram(data: Vec<u8>) -> ProductionRuntimeQueuedDatagram {
+        ProductionRuntimeQueuedDatagram {
+            report_index: 0,
+            peer: "127.0.0.1:5600".parse().expect("peer"),
+            data,
+        }
+    }
+
+    fn bridge_tx_config() -> ProductionRuntimeBridgeTxConfig {
+        ProductionRuntimeBridgeTxConfig {
+            channel: Channel::from_number(36).expect("channel 36"),
+            channel_bandwidth: Bandwidth::Mhz40,
+            overrides: ProductionRuntimeBridgeTxOverrides::default(),
+        }
+    }
+
+    #[test]
+    fn production_bridge_tx_handler_submits_valid_datagram() {
+        let mut session = runtime_tx_session(MockTransport::default());
+        let queued = queued_tx_datagram(valid_wfb_tx_datagram());
+        let mut bridge_counters = TxCounters::default();
+        let mut submit_counters = TxSubmitCounters::default();
+
+        let outcome = handle_production_bridge_tx_datagram(
+            &mut session,
+            &queued,
+            bridge_tx_config(),
+            &mut bridge_counters,
+            &mut submit_counters,
+        )
+        .expect("tx datagram handled");
+
+        let metadata = outcome.metadata.expect("metadata");
+        assert_eq!(metadata.peer, queued.peer);
+        assert_eq!(metadata.datagram_len, queued.data.len());
+        assert_eq!(metadata.fwmark, 0x0102_0304);
+        assert_eq!(metadata.radiotap_len, 13);
+        assert_eq!(metadata.frame_len, 24);
+        assert_eq!(
+            metadata.tx_profile,
+            ProductionRuntimeBridgeTxProfile::LinuxMonitor
+        );
+        assert_eq!(metadata.tx_options.queue, TxQueue::Mgnt);
+        assert_eq!(
+            metadata.tx_descriptor_preview_hex.len(),
+            super::TX_DESC_SIZE * 2
+        );
+        assert_eq!(outcome.datagram_bytes, queued.data.len() as u64);
+        assert_eq!(outcome.frame_bytes, 24);
+        assert_eq!(outcome.bridge_counters.incoming, 1);
+        assert_eq!(outcome.bridge_counters.injected, 1);
+        assert_eq!(outcome.submit_counters.submitted, 1);
+        assert_eq!(session.transport.bulk_writes.len(), 1);
+    }
+
+    #[test]
+    fn production_bridge_tx_handler_counts_malformed_datagram() {
+        let mut session = runtime_tx_session(MockTransport::default());
+        let queued = queued_tx_datagram(vec![0u8; 4]);
+        let mut bridge_counters = TxCounters::default();
+        let mut submit_counters = TxSubmitCounters::default();
+
+        let outcome = handle_production_bridge_tx_datagram(
+            &mut session,
+            &queued,
+            bridge_tx_config(),
+            &mut bridge_counters,
+            &mut submit_counters,
+        )
+        .expect("malformed datagram is non-fatal");
+
+        assert!(outcome.metadata.is_none());
+        assert_eq!(outcome.datagram_bytes, 4);
+        assert_eq!(outcome.frame_bytes, 0);
+        assert_eq!(outcome.bridge_counters.incoming, 1);
+        assert_eq!(outcome.bridge_counters.dropped, 1);
+        assert_eq!(outcome.bridge_counters.malformed, 1);
+        assert_eq!(outcome.submit_counters.attempted, 0);
+        assert!(session.transport.bulk_writes.is_empty());
+    }
+
+    #[test]
+    fn production_bridge_tx_handler_counts_descriptor_build_rejection() {
+        let mut session = runtime_tx_session(MockTransport::default());
+        let queued = queued_tx_datagram(valid_wfb_tx_datagram());
+        let mut bridge_counters = TxCounters::default();
+        let mut submit_counters = TxSubmitCounters::default();
+        let mut config = bridge_tx_config();
+        config.channel = Channel::from_number(165).expect("channel 165");
+        config.overrides.tx_bandwidth = Some(Bandwidth::Mhz80);
+
+        let outcome = handle_production_bridge_tx_datagram(
+            &mut session,
+            &queued,
+            config,
+            &mut bridge_counters,
+            &mut submit_counters,
+        )
+        .expect("descriptor rejection is non-fatal");
+
+        assert!(outcome.metadata.is_none());
+        assert_eq!(outcome.frame_bytes, 24);
+        assert_eq!(outcome.bridge_counters.incoming, 1);
+        assert_eq!(outcome.bridge_counters.dropped, 1);
+        assert_eq!(outcome.bridge_counters.malformed, 1);
+        assert_eq!(outcome.submit_counters.attempted, 0);
+        assert!(session.transport.bulk_writes.is_empty());
+    }
+
+    #[test]
+    fn production_bridge_tx_handler_reports_radio_submit_failure() {
+        let mut session = runtime_tx_session(MockTransport::with_short_bulk_write(1));
+        let queued = queued_tx_datagram(valid_wfb_tx_datagram());
+        let mut bridge_counters = TxCounters::default();
+        let mut submit_counters = TxSubmitCounters::default();
+
+        let error = handle_production_bridge_tx_datagram(
+            &mut session,
+            &queued,
+            bridge_tx_config(),
+            &mut bridge_counters,
+            &mut submit_counters,
+        )
+        .expect_err("short write should fail submission");
+
+        assert_eq!(error.code, "tx_submit_failed");
+        assert!(error.message.contains("radio TX failed"));
+        assert!(error.metadata.is_some());
+        assert_eq!(error.bridge_counters.incoming, 1);
+        assert_eq!(error.bridge_counters.dropped, 1);
+        assert_eq!(error.submit_counters.attempted, 1);
+        assert_eq!(error.submit_counters.failed, 1);
+        assert_eq!(error.submit_counters.short_writes, 1);
+        assert_eq!(session.transport.bulk_writes.len(), 1);
     }
 
     #[test]

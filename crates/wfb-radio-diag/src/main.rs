@@ -34,11 +34,14 @@ use wfb_bridge::{
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
-    run_production_bridge_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+    handle_production_bridge_tx_datagram, run_production_bridge_loop,
+    spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
     ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
-    ProductionRuntimeFlowConfig, ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport,
-    ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
+    ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
+    ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
+    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
@@ -24875,6 +24878,30 @@ struct BridgeTxBenchSessionRadio<'a> {
     submit_counters: &'a mut TxSubmitCounters,
 }
 
+fn production_bridge_tx_overrides(
+    overrides: &BridgeTxOverrideArgs,
+) -> ProductionRuntimeBridgeTxOverrides {
+    ProductionRuntimeBridgeTxOverrides {
+        tx_profile: match overrides.tx_profile {
+            BridgeTxProfileArg::LinuxMonitor => ProductionRuntimeBridgeTxProfile::LinuxMonitor,
+            BridgeTxProfileArg::RadiotapDirect => ProductionRuntimeBridgeTxProfile::RadiotapDirect,
+        },
+        tx_rate: overrides.tx_rate,
+        tx_bandwidth: overrides.tx_bandwidth,
+        tx_channel_bandwidth: overrides.tx_channel_bandwidth,
+        tx_queue: match overrides.tx_queue {
+            TxQueueArg::Auto => None,
+            queue => Some(queue.into()),
+        },
+        mac_id: overrides.mac_id,
+        tx_rate_id: overrides.tx_rate_id,
+        tx_retries: overrides.tx_retries,
+        tx_fallback_limit: overrides.tx_fallback_limit,
+        enable_rate_fallback: overrides.enable_rate_fallback,
+        no_agg_break: overrides.no_agg_break,
+    }
+}
+
 fn apply_bridge_tx_overrides(
     overrides: &BridgeTxOverrideArgs,
     channel_bandwidth: Bandwidth,
@@ -26868,9 +26895,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
 
                         report.datagrams_received += 1;
                         report.last_peer = Some(queued.peer.to_string());
-                        let datagram = queued.data.as_slice();
-                        let len = datagram.len();
-                        datagram_bytes = datagram_bytes.saturating_add(len as u64);
+                        let len = queued.data.len();
                         if let Some(bind_report) =
                             report.tx_bind_reports.get_mut(queued.report_index)
                         {
@@ -26880,71 +26905,72 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                                 bind_report.datagram_bytes.saturating_add(len as u64);
                             bind_report.last_peer = Some(queued.peer.to_string());
                         }
-                        let parsed = match parse_tx_datagram(datagram) {
-                            Ok(parsed) => parsed,
-                            Err(error) => {
-                                bridge_counters.incoming += 1;
-                                bridge_counters.dropped += 1;
-                                bridge_counters.malformed += 1;
-                                bridge_counters.unsupported_radiotap +=
-                                    u64::from(bridge_tx_is_unsupported_radiotap(&error));
-                                return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed);
-                            }
-                        };
-                        frame_bytes =
-                            frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-                        let tx_options = apply_bridge_tx_overrides(
-                            &args.tx.tx_overrides,
-                            args.tx.bandwidth,
-                            parsed.tx_options,
-                        );
-                        let (packet_len, tx_descriptor_hex) =
-                            match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
-                                Ok(packet) => (
-                                    packet.len(),
-                                    Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
-                                ),
-                                Err(_) => {
-                                    bridge_counters.incoming += 1;
-                                    bridge_counters.dropped += 1;
-                                    bridge_counters.malformed += 1;
-                                    return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed);
-                                }
-                            };
-                        report.last_datagram = Some(BridgeTxDatagramReport {
-                            source: "udp",
-                            datagram_len: len,
-                            fwmark: parsed.fwmark,
-                            fwmark_hex: format_value(parsed.fwmark, 8),
-                            radiotap_len: parsed.radiotap_len,
-                            frame_len: parsed.ieee80211_frame.len(),
-                            packet_len: Some(packet_len),
-                            tx_descriptor_hex,
-                            tx_profile: args.tx.tx_overrides.tx_profile,
-                            tx_options,
-                        });
-                        let submit_result = {
-                            let mut radio = BridgeTxSessionRadio {
-                                session: &mut session,
+
+                        let tx_result = handle_production_bridge_tx_datagram(
+                            &mut session,
+                            &queued,
+                            ProductionRuntimeBridgeTxConfig {
                                 channel,
                                 channel_bandwidth: args.tx.bandwidth,
-                                overrides: &args.tx.tx_overrides,
-                                submit_counters: &mut submit_counters,
-                            };
-                            submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
-                        };
-                        match submit_result {
-                            Ok(_) => Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed),
-                            Err(error) => Err(BridgeRunLoopFailure {
-                                phase_id: "bridge_tx_submit",
-                                phase_detail: "bridge run TX submission failed",
-                                error: DiagnosticErrorReport {
-                                    code: "bridge_tx_submit_failed",
-                                    message: error.to_string(),
-                                },
-                                attach_tx_status: true,
-                                set_runtime_metrics: true,
-                            }),
+                                overrides: production_bridge_tx_overrides(&args.tx.tx_overrides),
+                            },
+                            &mut bridge_counters,
+                            &mut submit_counters,
+                        );
+                        match tx_result {
+                            Ok(outcome) => {
+                                datagram_bytes =
+                                    datagram_bytes.saturating_add(outcome.datagram_bytes);
+                                frame_bytes = frame_bytes.saturating_add(outcome.frame_bytes);
+                                bridge_counters = outcome.bridge_counters;
+                                submit_counters = outcome.submit_counters;
+                                if let Some(metadata) = outcome.metadata {
+                                    report.last_datagram = Some(BridgeTxDatagramReport {
+                                        source: "udp",
+                                        datagram_len: metadata.datagram_len,
+                                        fwmark: metadata.fwmark,
+                                        fwmark_hex: format_value(metadata.fwmark, 8),
+                                        radiotap_len: metadata.radiotap_len,
+                                        frame_len: metadata.frame_len,
+                                        packet_len: Some(metadata.packet_len),
+                                        tx_descriptor_hex: Some(metadata.tx_descriptor_preview_hex),
+                                        tx_profile: args.tx.tx_overrides.tx_profile,
+                                        tx_options: metadata.tx_options,
+                                    });
+                                }
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                            }
+                            Err(error) => {
+                                datagram_bytes =
+                                    datagram_bytes.saturating_add(error.datagram_bytes);
+                                frame_bytes = frame_bytes.saturating_add(error.frame_bytes);
+                                bridge_counters = error.bridge_counters;
+                                submit_counters = error.submit_counters;
+                                if let Some(metadata) = error.metadata {
+                                    report.last_datagram = Some(BridgeTxDatagramReport {
+                                        source: "udp",
+                                        datagram_len: metadata.datagram_len,
+                                        fwmark: metadata.fwmark,
+                                        fwmark_hex: format_value(metadata.fwmark, 8),
+                                        radiotap_len: metadata.radiotap_len,
+                                        frame_len: metadata.frame_len,
+                                        packet_len: Some(metadata.packet_len),
+                                        tx_descriptor_hex: Some(metadata.tx_descriptor_preview_hex),
+                                        tx_profile: args.tx.tx_overrides.tx_profile,
+                                        tx_options: metadata.tx_options,
+                                    });
+                                }
+                                Err(BridgeRunLoopFailure {
+                                    phase_id: "bridge_tx_submit",
+                                    phase_detail: "bridge run TX submission failed",
+                                    error: DiagnosticErrorReport {
+                                        code: "bridge_tx_submit_failed",
+                                        message: error.message,
+                                    },
+                                    attach_tx_status: true,
+                                    set_runtime_metrics: true,
+                                })
+                            }
                         }
                     }
                     ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => {
