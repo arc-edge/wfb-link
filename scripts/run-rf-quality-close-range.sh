@@ -438,9 +438,11 @@ if [[ "$SYNC_HW_REPO" == "1" ]]; then
 fi
 cd "$repo"
 write_auth_arg=
-if [[ "$TX_CALIBRATION_PROFILE" == "rtl8812a-runtime-iqk" ]]; then
-  write_auth_arg=--i-understand-this-writes-registers
-fi
+case "$TX_CALIBRATION_PROFILE" in
+  linux-parity-ch36-ht20|rtl8812a-lck|rtl8812a-runtime-iqk)
+    write_auth_arg=--i-understand-this-writes-registers
+    ;;
+esac
 nohup cargo run -p wfb-radio-diag -- --json \
   --report "${REMOTE_PREFIX}-listen.json" \
   bridge-tx-listen \

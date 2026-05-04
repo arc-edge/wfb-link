@@ -87,7 +87,9 @@ boundary shifts.
    against the current runtime-flow/radio-run code and verify the runtime
    extraction did not regress the May 2 evening baseline tuple
    `1973/1980/1970` recovered payloads. Only start calibration-extraction Step
-   2 after that non-regression gate passes.
+   2 after that non-regression gate passes. This gate passed on May 4, 2026:
+   the accepted current-default, IQK marker, and LCK reruns recovered
+   `1989/1988/1992` payloads with zero decrypt failures.
 3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.

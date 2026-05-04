@@ -166,10 +166,10 @@ and `runtime-approximation` for `TX_CALIBRATION_PROFILE=rtl8812a-lck` or
 `TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk`.
 `rtl8812a-iqk-probe` remains `stop-gap-captured` because it is a marker for
 safe IQK readback already captured by the bridge report; it does not perform
-runtime IQK or additional profile-time hardware reads. The runtime IQK profile
-also adds `--i-understand-this-writes-registers` to the hardware-Mac bridge
-command because it runs the TX/RX IQK one-shot sequence and writes final IQC
-values before restoring saved RF/BB state.
+runtime IQK or additional profile-time hardware reads. The targeted Linux
+parity, LCK, and runtime IQK profiles add
+`--i-understand-this-writes-registers` to the hardware-Mac bridge command
+because they apply live register writes before RF traffic.
 
 May 2, 2026 hardware evidence for `TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk`
 lives at `/tmp/wfb-rfq-runtime-iqk-a2/rf-quality-report.json` and
@@ -348,6 +348,25 @@ These are software sanity checks for the current bench geometry, not distance
 acceptance. They are useful before changing calibration code because all three
 profiles submitted `3000/3000` datagrams, observed the WFB session, and stayed
 inside the configured Linux payload-loss margin.
+
+Before starting the runtime calibration-extraction slice, the May 2 tuple above
+was rerun against the current runtime-flow/radio-run cutover code on May 4,
+2026:
+
+- `current-default`: `/tmp/wfb-rfq-runtime-cutover-current-default-a2`,
+  `1989/2000` recovered, zero decrypt failures, `within_margin`.
+- `rtl8812a-iqk-probe`: `/tmp/wfb-rfq-runtime-cutover-iqk-marker-a1`,
+  `1988/2000` recovered, zero decrypt failures, `within_margin`.
+- `rtl8812a-lck`: `/tmp/wfb-rfq-runtime-cutover-lck-a1`,
+  `1992/2000` recovered, zero decrypt failures, `within_margin`.
+
+The non-regression gate passed: all accepted reruns recovered at least as many
+payloads as the May 2 hardened tuple under the same close-range bench geometry.
+One earlier current-default run
+(`/tmp/wfb-rfq-runtime-cutover-current-default-a1`) recovered only `416/2000`
+with decrypt failures after missing the WFB session; the immediate short control
+and full rerun recovered normally, so keep session/decrypt fields in the gate
+instead of treating that artifact as RF loss.
 
 Standalone IQK diagnostic artifacts from `rtl8812a-iqk-diagnostic` can be used
 as RF-quality review evidence, but they are not runtime calibration evidence.
