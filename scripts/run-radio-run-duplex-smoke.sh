@@ -18,6 +18,7 @@ Configuration is via environment variables. Common overrides:
   LINK_ID=0x000001        # report/runtime value
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
+  M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
 }
@@ -56,6 +57,10 @@ L2M_RADIO_PORT=${L2M_RADIO_PORT:-1}
 FEC_K=${FEC_K:-8}
 FEC_N=${FEC_N:-12}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
+M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
+L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
+MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
+export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
@@ -312,6 +317,7 @@ write_summary() {
   log "writing summary"
   python3 - "$OUT_DIR" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -327,22 +333,48 @@ report = load(run / "radio-run.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
 rx = report.get("rx") or {}
+tx = report.get("tx") or {}
 rx_forwards = rx.get("rx_forwards") or []
+radio_rx_forwarded = sum(
+    ((forward.get("counters") or {}).get("forwarded") or 0)
+    for forward in rx_forwards
+)
+m2l_unique = int(m2l.get("unique_sequences") or 0)
+l2m_unique = int(l2m.get("unique_sequences") or 0)
+m2l_min_unique = int(os.environ["M2L_MIN_UNIQUE"])
+l2m_min_unique = int(os.environ["L2M_MIN_UNIQUE"])
+min_radio_rx_forwarded = int(os.environ["MIN_RADIO_RX_FORWARDED"])
+failures = []
+if report.get("result") != "pass":
+    failures.append(f"radio_result={report.get('result')}")
+if (tx.get("failed_submissions") or 0) != 0:
+    failures.append(f"tx_failed_submissions={tx.get('failed_submissions')}")
+if (tx.get("dropped_datagrams") or 0) != 0:
+    failures.append(f"tx_dropped_datagrams={tx.get('dropped_datagrams')}")
+if m2l_unique < m2l_min_unique:
+    failures.append(f"m2l_unique_sequences={m2l_unique}<{m2l_min_unique}")
+if l2m_unique < l2m_min_unique:
+    failures.append(f"l2m_unique_sequences={l2m_unique}<{l2m_min_unique}")
+if radio_rx_forwarded < min_radio_rx_forwarded:
+    failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
 summary = {
+    "smoke_result": "fail" if failures else "pass",
+    "failures": failures,
     "radio_result": report.get("result"),
     "stop_reason": report.get("stop_reason"),
-    "tx": report.get("tx"),
+    "tx": tx,
     "rx": rx,
-    "radio_rx_forwarded_from_snapshots": sum(
-        ((forward.get("counters") or {}).get("forwarded") or 0)
-        for forward in rx_forwards
-    ),
+    "radio_rx_forwarded_from_snapshots": radio_rx_forwarded,
     "radio_rx_forwards": rx_forwards,
+    "m2l_min_unique": m2l_min_unique,
+    "l2m_min_unique": l2m_min_unique,
     "m2l_counter": m2l,
     "l2m_counter": l2m,
 }
 (run / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, indent=2, sort_keys=True))
+if failures:
+    sys.exit(1)
 PY
 }
 
