@@ -19,6 +19,8 @@ Configuration is via environment variables. Common overrides:
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
+  MAX_M2L_DECRYPT_FAILURES=0 MAX_L2M_DECRYPT_FAILURES=0
+  TX_POWER_MODE=current-default
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   REQUIRE_CALIBRATION_SUCCESS=auto
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
@@ -62,8 +64,10 @@ EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
 M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
+MAX_M2L_DECRYPT_FAILURES=${MAX_M2L_DECRYPT_FAILURES:-0}
+MAX_L2M_DECRYPT_FAILURES=${MAX_L2M_DECRYPT_FAILURES:-0}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
-export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED REQUIRE_CALIBRATION_SUCCESS
+export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
@@ -74,7 +78,7 @@ L2M_WARMUP_MARKER=${L2M_WARMUP_MARKER:-L2MWARM1}
 
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 EFUSE_REPORT=${EFUSE_REPORT:-/tmp/wfb-remote-macos-efuse-dump.json}
-TX_POWER_MODE=${TX_POWER_MODE:-efuse-derived}
+TX_POWER_MODE=${TX_POWER_MODE:-current-default}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 
@@ -112,7 +116,8 @@ cleanup() {
   ssh "$LINUX_HOST" "REMOTE_PREFIX='$REMOTE_PREFIX' IFACE='$IFACE' WFB_SERVICE='$WFB_SERVICE' bash -s" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || true
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 sudo -n pkill -f "$REMOTE_PREFIX" || true
-sudo -n pkill -f "wfb_rx .*5801|wfb_rx .*5900|wfb_rx .*5911|wfb_tx .*5621|wfb_tx .*5600" || true
+sudo -n pkill -x wfb_rx || true
+sudo -n pkill -x wfb_tx || true
 sudo -n pkill -f "tcpdump -i $IFACE" || true
 sudo -n docker start "$WFB_SERVICE" || true
 REMOTE_CLEANUP
@@ -128,8 +133,9 @@ export PATH="$LINUX_REMOTE_PATH:$PATH"
 rm -rf "$REMOTE_PREFIX"
 mkdir -p "$REMOTE_PREFIX"
 sudo -n docker stop "$WFB_SERVICE" >/dev/null 2>&1 || true
-sudo -n pkill -f "wfb_rx .*${IFACE}|wfb_tx .*${IFACE}|tcpdump -i ${IFACE}" >/dev/null 2>&1 || true
-sudo -n pkill -f "wfb_rx .*5801|wfb_rx .*5900|wfb_rx .*5911|wfb_tx .*5621|wfb_tx .*5600" >/dev/null 2>&1 || true
+sudo -n pkill -x wfb_rx >/dev/null 2>&1 || true
+sudo -n pkill -x wfb_tx >/dev/null 2>&1 || true
+sudo -n pkill -f "tcpdump -i ${IFACE}" >/dev/null 2>&1 || true
 sudo -n nmcli dev set "$IFACE" managed no >/dev/null 2>&1 || true
 sudo -n nmcli dev set "p2p-dev-$IFACE" managed no >/dev/null 2>&1 || true
 sudo -n ip link set "$IFACE" down
@@ -137,6 +143,11 @@ sudo -n iw dev "$IFACE" set type monitor
 sudo -n ip link set "$IFACE" up
 sudo -n iw dev "$IFACE" set channel "$CHANNEL" HT20
 sudo -n iw dev "$IFACE" info > "$REMOTE_PREFIX/channel-state-before.txt" 2>&1 || true
+ip -d link show "$IFACE" > "$REMOTE_PREFIX/link-state-before.txt" 2>&1 || true
+sudo -n timeout 3 tcpdump -i "$IFACE" -L > "$REMOTE_PREFIX/pcap-linktypes-before.txt" 2>&1 || true
+grep -q "type monitor" "$REMOTE_PREFIX/channel-state-before.txt"
+grep -q "link/ieee802.11/radiotap" "$REMOTE_PREFIX/link-state-before.txt"
+grep -q "IEEE802_11_RADIO" "$REMOTE_PREFIX/pcap-linktypes-before.txt"
 REMOTE_PREP
 }
 
@@ -172,7 +183,7 @@ start_radio() {
     --rx-timeout-ms "$RX_TIMEOUT_MS" \
     --tx-burst-limit "$TX_BURST_LIMIT" \
     --max-datagrams 0 \
-    "${tx_power_args[@]}" \
+    ${tx_power_args[@]+"${tx_power_args[@]}"} \
     --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
     ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
     --wfb-link-id "$LINK_ID" \
@@ -203,7 +214,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' FEC_K='$FEC_K' FEC_N='$FEC_N' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' FEC_K='$FEC_K' FEC_N='$FEC_N' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 cat > "$REMOTE_PREFIX/counter.py" <<'PY'
@@ -258,18 +269,37 @@ report = {
 out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 PY
 
+sudo -n ip link set "$IFACE" down
+sudo -n iw dev "$IFACE" set type monitor
+sudo -n ip link set "$IFACE" up
+sudo -n iw dev "$IFACE" set channel "$CHANNEL" HT20
+sudo -n iw dev "$IFACE" info > "$REMOTE_PREFIX/channel-state-traffic.txt" 2>&1 || true
+ip -d link show "$IFACE" > "$REMOTE_PREFIX/link-state-traffic.txt" 2>&1 || true
+sudo -n timeout 3 tcpdump -i "$IFACE" -L > "$REMOTE_PREFIX/pcap-linktypes-traffic.txt" 2>&1 || true
+grep -q "type monitor" "$REMOTE_PREFIX/channel-state-traffic.txt"
+grep -q "link/ieee802.11/radiotap" "$REMOTE_PREFIX/link-state-traffic.txt"
+grep -q "IEEE802_11_RADIO" "$REMOTE_PREFIX/pcap-linktypes-traffic.txt"
+
 python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-m2l.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-m2l.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/counter-m2l.pid"
 python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-l2m.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-l2m.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/counter-l2m.pid"
 
-sudo -n tcpdump -i "$IFACE" -s 256 -w "$REMOTE_PREFIX/rf.pcap" > "$REMOTE_PREFIX/tcpdump.log" 2>&1 &
+sudo -n tcpdump -i "$IFACE" -y IEEE802_11_RADIO -s 256 -w "$REMOTE_PREFIX/rf.pcap" > "$REMOTE_PREFIX/tcpdump.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/tcpdump.pid"
 sudo -n timeout "$COUNTER_SECONDS" wfb_rx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -c 127.0.0.1 -u "$M2L_COUNTER_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-rx-m2l.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/wfb-rx-m2l.pid"
 sudo -n timeout "$COUNTER_SECONDS" wfb_rx -a "$L2M_AGG_PORT" -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -c 127.0.0.1 -u "$L2M_COUNTER_PORT" > "$REMOTE_PREFIX/wfb-rx-l2m-agg.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/wfb-rx-l2m-agg.pid"
 sleep 3
+if ! kill -0 "$(cat "$REMOTE_PREFIX/wfb-rx-m2l.pid")" >/dev/null 2>&1; then
+  cat "$REMOTE_PREFIX/wfb-rx-m2l.log" >&2 || true
+  exit 21
+fi
+if grep -qi "unknown encapsulation" "$REMOTE_PREFIX/wfb-rx-m2l.log"; then
+  cat "$REMOTE_PREFIX/wfb-rx-m2l.log" >&2 || true
+  exit 22
+fi
 sudo -n timeout "$COUNTER_SECONDS" wfb_tx -d -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -B 20 -k "$FEC_K" -n "$FEC_N" -u "$LINUX_M2L_SOURCE_PORT" "$MAC_LAN_IP:$RADIO_BIND_PORT" > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/wfb-tx-m2l-dist.pid"
 sudo -n timeout "$COUNTER_SECONDS" wfb_tx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -B 20 -k "$FEC_K" -n "$FEC_N" -u "$LINUX_L2M_SOURCE_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-tx-l2m-rf.log" 2>&1 &
@@ -339,6 +369,12 @@ def load(path):
     except Exception as exc:
         return {"error": str(exc), "path": str(path)}
 
+def count_lines(path, needle):
+    try:
+        return sum(1 for line in path.read_text(errors="replace").splitlines() if needle in line)
+    except Exception:
+        return 0
+
 report = load(run / "radio-run.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
@@ -358,6 +394,11 @@ l2m_unique = int(l2m.get("unique_sequences") or 0)
 m2l_min_unique = int(os.environ["M2L_MIN_UNIQUE"])
 l2m_min_unique = int(os.environ["L2M_MIN_UNIQUE"])
 min_radio_rx_forwarded = int(os.environ["MIN_RADIO_RX_FORWARDED"])
+max_m2l_decrypt_failures = int(os.environ["MAX_M2L_DECRYPT_FAILURES"])
+max_l2m_decrypt_failures = int(os.environ["MAX_L2M_DECRYPT_FAILURES"])
+m2l_decrypt_failures = count_lines(run / "peer" / "wfb-rx-m2l.log", "Unable to decrypt")
+l2m_decrypt_failures = count_lines(run / "peer" / "wfb-rx-l2m-agg.log", "Unable to decrypt")
+m2l_unknown_encapsulation = count_lines(run / "peer" / "wfb-rx-m2l.log", "unknown encapsulation")
 require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
 calibration_success_required = require_calibration_success in {"1", "true", "yes"}
 if require_calibration_success == "auto":
@@ -375,6 +416,10 @@ if l2m_unique < l2m_min_unique:
     failures.append(f"l2m_unique_sequences={l2m_unique}<{l2m_min_unique}")
 if radio_rx_forwarded < min_radio_rx_forwarded:
     failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
+if m2l_decrypt_failures > max_m2l_decrypt_failures:
+    failures.append(f"m2l_decrypt_failures={m2l_decrypt_failures}>{max_m2l_decrypt_failures}")
+if l2m_decrypt_failures > max_l2m_decrypt_failures:
+    failures.append(f"l2m_decrypt_failures={l2m_decrypt_failures}>{max_l2m_decrypt_failures}")
 if calibration_success_required and runtime_iqk.get("status") not in {"completed", "success"}:
     failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
 summary = {
@@ -400,6 +445,13 @@ summary = {
     },
     "m2l_min_unique": m2l_min_unique,
     "l2m_min_unique": l2m_min_unique,
+    "max_m2l_decrypt_failures": max_m2l_decrypt_failures,
+    "max_l2m_decrypt_failures": max_l2m_decrypt_failures,
+    "peer_wfb_rx": {
+        "m2l_decrypt_failures": m2l_decrypt_failures,
+        "l2m_decrypt_failures": l2m_decrypt_failures,
+        "m2l_unknown_encapsulation": m2l_unknown_encapsulation,
+    },
     "m2l_counter": m2l,
     "l2m_counter": l2m,
 }
@@ -423,10 +475,16 @@ case "${1:-}" in
 esac
 
 log "output directory: $OUT_DIR"
-prepare_peer
+if ! prepare_peer; then
+  collect_peer_artifacts || true
+  die "Linux peer preparation failed; partial artifacts copied to $OUT_DIR/peer"
+fi
 start_radio
 wait_for_radio_ready
-run_peer_traffic
+if ! run_peer_traffic; then
+  collect_peer_artifacts || true
+  die "Linux peer traffic failed; partial artifacts copied to $OUT_DIR/peer"
+fi
 wait "$RADIO_PID"
 RADIO_PID=
 collect_peer_artifacts

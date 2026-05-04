@@ -2434,10 +2434,15 @@ const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
     ("REG_OFDMCCKEN_JAGUAR", REG_OFDMCCKEN_JAGUAR),
     ("REG_CCK_RX_JAGUAR", REG_CCK_RX_JAGUAR),
     ("R_0x90c", REG_IQK_MACBB_0X090C),
+    ("R_0x978", 0x0978),
+    ("R_0x97c", 0x097c),
+    ("R_0x984", 0x0984),
     ("rA_PI_Mode_Jaguar", REG_RF_PI_MODE_A_JAGUAR),
     ("rB_PI_Mode_Jaguar", REG_RF_PI_MODE_B_JAGUAR),
     ("REG_CCA_ON_SEC_JAGUAR", REG_CCA_ON_SEC_JAGUAR),
     ("REG_AGC_TABLE_JAGUAR", REG_AGC_TABLE_JAGUAR),
+    ("R_0xc94", REG_IQK_TX_POWER_CTRL_A_C94),
+    ("R_0xe94", REG_TX_POWER_BEFORE_IQK_A_JAGUAR),
 ];
 
 const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
@@ -2456,8 +2461,26 @@ const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
 ];
 
 const RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
+    ("R_0xc80_page_c1", REG_IQK_TX_TONE_A_C80),
+    ("R_0xc84_page_c1", REG_IQK_RX_TONE_A_C84),
+    ("R_0xc88_page_c1", REG_IQK_RFE_SETTING_A_C88),
+    ("R_0xc8c_page_c1", REG_IQK_RFE_SETTING_A_C8C),
     ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
+    ("R_0xcc4_page_c1", REG_IQK_TX_CTRL_A_CC4),
+    ("R_0xcc8_page_c1", REG_IQK_TX_CTRL_A_CC8),
+    ("R_0xccc_page_c1", REG_IQK_TX_Y_A_CCC),
+    ("R_0xcd4_page_c1", REG_IQK_TX_X_A_CD4),
+    ("R_0xce8_page_c1", REG_IQK_VDF_A_CE8),
+    ("R_0xe80_page_c1", REG_IQK_TX_TONE_B_E80),
+    ("R_0xe84_page_c1", REG_IQK_RX_TONE_B_E84),
+    ("R_0xe88_page_c1", REG_IQK_RFE_SETTING_B_E88),
+    ("R_0xe8c_page_c1", REG_IQK_RFE_SETTING_B_E8C),
     ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
+    ("R_0xec4_page_c1", REG_IQK_TX_CTRL_B_EC4),
+    ("R_0xec8_page_c1", REG_IQK_TX_CTRL_B_EC8),
+    ("R_0xecc_page_c1", REG_IQK_TX_Y_B_ECC),
+    ("R_0xed4_page_c1", REG_IQK_TX_X_B_ED4),
+    ("R_0xee8_page_c1", REG_IQK_VDF_B_EE8),
 ];
 
 const RTL8812A_IQK_RESULT_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
@@ -2501,7 +2524,16 @@ const RTL8812A_IQK_RESULT_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
     ("rRx_Power_After_IQK_B_2", REG_RX_POWER_AFTER_IQK_B_2_JAGUAR),
 ];
 
-const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[0x65, 0x8f, 0x00];
+const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[
+    0x65,
+    0x8f,
+    0x00,
+    RF_IQK_MODE_JAGUAR,
+    RF_IQK_TX_0X30_JAGUAR,
+    RF_IQK_TX_0X31_JAGUAR,
+    RF_IQK_TX_0X32_JAGUAR,
+    RF_IQK_LOK_LOAD_JAGUAR,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -5751,15 +5783,6 @@ where
             )),
         }
     }
-    if let Err(error) =
-        rf_serial_write_single_path(registers, path, RF_IQK_MODE_JAGUAR, 0, counters)
-    {
-        let path_name = path.name().unwrap_or("?");
-        failures.push(format!(
-            "RF path {path_name} RF_0xef IQK mode clear failed: {}",
-            error.message
-        ));
-    }
     restored
 }
 
@@ -8623,11 +8646,11 @@ mod tests {
 
         assert_eq!(backup.hssi_read_register.value, 0x0000_0058);
         assert_eq!(backup.tx_pause_register.value, 0x2a);
-        assert_eq!(backup.macbb_backup.len(), 9);
+        assert_eq!(backup.macbb_backup.len(), 14);
         assert_eq!(backup.afe_backup.len(), 12);
-        assert_eq!(backup.page_c1_latches.len(), 2);
-        assert_eq!(backup.rf_backup_path_a.len(), 3);
-        assert_eq!(backup.rf_backup_path_b.len(), 3);
+        assert_eq!(backup.page_c1_latches.len(), 20);
+        assert_eq!(backup.rf_backup_path_a.len(), 8);
+        assert_eq!(backup.rf_backup_path_b.len(), 8);
         assert_eq!(
             backup.rf_backup_path_a[0].value,
             0x000a_bcde & super::RF_REGISTER_OFFSET_MASK
@@ -8642,11 +8665,11 @@ mod tests {
 
         assert_eq!(cleanup.status, "restored");
         assert!(cleanup.failures.is_empty());
-        assert_eq!(cleanup.macbb_restore_count, 9);
+        assert_eq!(cleanup.macbb_restore_count, 14);
         assert_eq!(cleanup.afe_restore_count, 12);
-        assert_eq!(cleanup.page_c1_latch_restore_count, 2);
-        assert_eq!(cleanup.rf_path_a_restore_count, 3);
-        assert_eq!(cleanup.rf_path_b_restore_count, 3);
+        assert_eq!(cleanup.page_c1_latch_restore_count, 20);
+        assert_eq!(cleanup.rf_path_a_restore_count, 8);
+        assert_eq!(cleanup.rf_path_b_restore_count, 8);
         assert_eq!(cleanup.hssi_read_restored, Some(true));
         assert_eq!(cleanup.page_select_restored, Some(true));
         assert_eq!(cleanup.tx_pause_restored, Some(true));
@@ -8655,7 +8678,20 @@ mod tests {
         assert!(writes.iter().any(|(address, bytes)| {
             *address == super::REG_RF_PATH_A_3WIRE
                 && bytes.as_slice()
-                    == super::encode_rf_serial_write(super::RF_IQK_MODE_JAGUAR, 0).to_le_bytes()
+                    == super::encode_rf_serial_write(super::RF_IQK_MODE_JAGUAR, 0xabcde)
+                        .to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RF_PATH_A_3WIRE
+                && bytes.as_slice()
+                    == super::encode_rf_serial_write(super::RF_IQK_TX_0X30_JAGUAR, 0xabcde)
+                        .to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RF_PATH_A_3WIRE
+                && bytes.as_slice()
+                    == super::encode_rf_serial_write(super::RF_IQK_LOK_LOAD_JAGUAR, 0xabcde)
+                        .to_le_bytes()
         }));
         assert_eq!(
             transport.register_bytes(super::REG_TXPAUSE).as_deref(),

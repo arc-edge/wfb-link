@@ -548,3 +548,30 @@ selected sweep. This removed the Mac-to-Linux collapse in the same bench:
 `80/80` Mac-to-Linux. The run still failed the strict duplex gate because the
 Linux-to-Mac direction recovered only `69/80`, so this is a fallback-safety fix,
 not distance-readiness evidence.
+
+Second cleanup correction: the first fail-closed implementation still backed up
+too little state. IQK setup and RX one-shot mutate RF offsets `0x30`, `0x31`,
+`0x32`, `0x58`, and `0xef`, normal BB registers `0x978`, `0x97c`, `0x984`,
+`0xc94`, and `0xe94`, and a wider set of page-C1 tone/RFE/fill latches. Before
+expanding that restore set, `/tmp/wfb-radio-run-duplex-iqk-currenttx-20260504-150531`
+fell back in sweep 3 and corrupted Mac-to-Linux (`0/80`, 123 decrypt failures)
+despite reporting `cleanup_status=restored`. After backing up/restoring 14
+MAC/BB registers, 12 AFE registers, 8 RF offsets per path, and 20 page-C1
+registers, `/tmp/wfb-radio-run-duplex-iqk-restorefull-20260504-151048`
+completed IQK in sweep 2 with fallback count 0, logged zero decrypt failures,
+and recovered `75/80` Mac-to-Linux plus `77/80` Linux-to-Mac. Runtime IQK is
+still receiver-gated, but fallback/completed sweeps no longer leave the radio in
+the byte-corrupting TX state seen before this restore fix.
+
+Follow-up TXAGC correction: May 4 local production A/B shows the
+EFUSE-derived TX power override still needs receiver-gated soak evidence. With
+`TX_POWER_MODE=efuse-derived`, `/tmp/wfb-radio-run-duplex-default-hardened-20260504-145458`
+submitted `149/149` frames and Linux captured strong MCS1 frames, but
+Mac-to-Linux recovered `0/80` and Linux `wfb_rx` logged 125 unable-decrypt
+events. The same flow later recovered `80/80` Mac-to-Linux with zero decrypt
+failures at `/tmp/wfb-radio-run-duplex-efuse-full-20260504-150316`, so the
+failure is state-sensitive rather than deterministic. `TX_POWER_MODE=current-default`
+at `/tmp/wfb-radio-run-duplex-no-txpower-20260504-145725` recovered `80/80`
+Mac-to-Linux with zero decrypt failures. Production smokes should therefore
+default to current-default/captured values and require explicit A/B intent plus
+decrypt-failure gates for EFUSE-derived power writes.
