@@ -3716,6 +3716,95 @@ pub fn rtl8812au_runtime_iqk_setup_plan(
     plan
 }
 
+pub fn apply_rtl8812au_runtime_iqk_setup_plan<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    plan: &[Rtl8812auRuntimeIqkSetupWritePlan],
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut applied = 0;
+    for action in plan {
+        match action {
+            Rtl8812auRuntimeIqkSetupWritePlan::Register {
+                register_name,
+                address,
+                width,
+                value,
+                ..
+            } if *width == "u8" => {
+                write8_with_counter(
+                    registers,
+                    counters,
+                    *address,
+                    *value as u8,
+                    register_name,
+                    "runtime-iqk-setup",
+                )?;
+                applied += 1;
+            }
+            Rtl8812auRuntimeIqkSetupWritePlan::Register {
+                register_name,
+                address,
+                value,
+                ..
+            } => {
+                write32_with_counter(
+                    registers,
+                    counters,
+                    *address,
+                    *value,
+                    register_name,
+                    "runtime-iqk-setup",
+                )?;
+                applied += 1;
+            }
+            Rtl8812auRuntimeIqkSetupWritePlan::MaskedBb { write, .. } => {
+                let before = read32_with_counter(
+                    registers,
+                    counters,
+                    write.address,
+                    write.register_name,
+                    "runtime-iqk-setup",
+                )?;
+                let shifted = if write.mask == 0 {
+                    0
+                } else {
+                    (write.data << write.mask.trailing_zeros()) & write.mask
+                };
+                let written = (before & !write.mask) | shifted;
+                write32_with_counter(
+                    registers,
+                    counters,
+                    write.address,
+                    written,
+                    write.register_name,
+                    "runtime-iqk-setup",
+                )?;
+                let _after = read32_with_counter(
+                    registers,
+                    counters,
+                    write.address,
+                    write.register_name,
+                    "runtime-iqk-setup",
+                )?;
+                applied += 1;
+            }
+            Rtl8812auRuntimeIqkSetupWritePlan::Rf {
+                path,
+                rf_offset,
+                value,
+                ..
+            } => {
+                rf_serial_write_single_path(registers, *path, *rf_offset, *value, counters)?;
+                applied += 1;
+            }
+        }
+    }
+    Ok(applied)
+}
+
 const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
     Rtl8812auRegisterWriteSpec {
         register_name: "rA_TxScale_Jaguar",
@@ -5465,6 +5554,43 @@ mod tests {
             .count();
         assert_eq!(path_a_rf_writes, 6);
         assert_eq!(path_b_rf_writes, 6);
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_setup_plan_applies_live_writes() {
+        let plan = super::rtl8812au_runtime_iqk_setup_plan(Band::Ghz5, 0x03, true, false);
+        let expected_reads = plan
+            .iter()
+            .filter(|write| {
+                matches!(
+                    write,
+                    super::Rtl8812auRuntimeIqkSetupWritePlan::MaskedBb { .. }
+                )
+            })
+            .count()
+            * 2;
+        let expected_writes = plan.len();
+        let transport = MockTransport::default();
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let applied =
+            super::apply_rtl8812au_runtime_iqk_setup_plan(&registers, &mut counters, &plan)
+                .expect("apply runtime IQK setup");
+
+        assert_eq!(applied, plan.len());
+        assert_eq!(counters.usb_control_reads, expected_reads as u64);
+        assert_eq!(counters.usb_control_writes, expected_writes as u64);
+        let writes = transport.writes();
+        assert!(writes
+            .iter()
+            .any(|(address, bytes)| *address == super::REG_TXPAUSE && bytes.as_slice() == [0x3f]));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RF_PATH_A_3WIRE
+                && bytes.as_slice()
+                    == super::encode_rf_serial_write(super::RF_IQK_MODE_JAGUAR, 0x80002)
+                        .to_le_bytes()
+        }));
     }
 
     #[test]

@@ -15547,19 +15547,6 @@ fn runtime_rf_path_from_tx_power_path(
     }
 }
 
-fn tx_power_path_from_runtime_rf_path(
-    path: Rtl8812auRfPath,
-) -> std::result::Result<TxPowerPathArg, DiagnosticErrorReport> {
-    match path {
-        Rtl8812auRfPath::A => Ok(TxPowerPathArg::A),
-        Rtl8812auRfPath::B => Ok(TxPowerPathArg::B),
-        Rtl8812auRfPath::Both => Err(DiagnosticErrorReport {
-            code: "rtl8812a_runtime_iqk_invalid_path",
-            message: "RTL8812A IQK helper requires path A or path B, not both".to_string(),
-        }),
-    }
-}
-
 fn tx_power_path_name(path: TxPowerPathArg) -> Option<&'static str> {
     match path {
         TxPowerPathArg::A => Some("A"),
@@ -16005,66 +15992,14 @@ fn apply_runtime_iqk_setup_plan<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let mut applied = 0;
-    for action in plan {
-        match action {
-            TxRuntimeIqkSetupWritePlan::Register {
-                register_name,
-                address,
-                width,
-                value,
-                ..
-            } if *width == "u8" => {
-                write8_with_counter(registers, counters, *address, *value as u8).map_err(
-                    |error| DiagnosticErrorReport {
-                        code: "rtl8812a_runtime_iqk_setup_failed",
-                        message: format!("{register_name} setup write failed: {error}"),
-                    },
-                )?;
-                applied += 1;
-            }
-            TxRuntimeIqkSetupWritePlan::Register {
-                register_name,
-                address,
-                value,
-                ..
-            } => {
-                runtime_iqk_write32(
-                    registers,
-                    counters,
-                    register_name,
-                    *address,
-                    *value,
-                    "rtl8812a_runtime_iqk_setup_failed",
-                )?;
-                applied += 1;
-            }
-            TxRuntimeIqkSetupWritePlan::MaskedBb { write, .. } => {
-                apply_runtime_iqk_masked_bb_write(
-                    registers,
-                    counters,
-                    write,
-                    "rtl8812a_runtime_iqk_setup_failed",
-                )?;
-                applied += 1;
-            }
-            TxRuntimeIqkSetupWritePlan::Rf {
-                path,
-                rf_offset,
-                value,
-                ..
-            } => {
-                let tx_path = tx_power_path_from_runtime_rf_path(*path)?;
-                rf_serial_write_single_path(registers, tx_path, *rf_offset, *value, counters)
-                    .map_err(|error| DiagnosticErrorReport {
-                        code: "rtl8812a_runtime_iqk_setup_failed",
-                        message: format!("runtime IQK RF setup failed: {}", error.message),
-                    })?;
-                applied += 1;
-            }
-        }
-    }
-    Ok(applied)
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result = wfb_radio_runtime::apply_rtl8812au_runtime_iqk_setup_plan(
+        registers,
+        &mut runtime_counters,
+        plan,
+    );
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result.map_err(runtime_radio_error)
 }
 
 #[allow(dead_code)]
