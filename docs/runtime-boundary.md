@@ -98,3 +98,9 @@ with `result=pass`, `stop_reason=duration_elapsed`, init readiness `ready`,
 PHY status, valid RSSI, SNR, and derived noise. No TX datagrams were injected in
 that smoke. Artifact: `/tmp/wfb-radio-run-smoke.json` on the hardware Mac
 deploy checkout.
+
+After the `move-bridge-loop-runtime` slice on May 4, 2026, the same short
+hardware-Mac smoke was rerun through the runtime-owned WFB loop plan. The run
+completed with `result=pass`, init readiness `ready`, 14/14 phases completed,
+and 4 RX frames with PHY status, valid RSSI, SNR, and derived noise. Artifact:
+`/tmp/wfb-radio-run-loop-plan-smoke.json` on the hardware Mac deploy checkout.
