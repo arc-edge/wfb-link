@@ -34,9 +34,11 @@ use wfb_bridge::{
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
-    spawn_production_tx_ingress_receivers, MacosUsbHostConfig, ProductionRuntimeFlowConfig,
-    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
-    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
+    run_production_bridge_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
+    ProductionRuntimeFlowConfig, ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport,
+    ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
@@ -26827,114 +26829,192 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
     let cpu_started = process_cpu_usage();
     let started = Instant::now();
-    let deadline = if args.duration_ms == 0 {
-        None
-    } else {
-        Some(started + Duration::from_millis(args.duration_ms))
-    };
-    let max_datagrams = u64::from(args.tx.max_datagrams);
-    let unlimited_datagrams = args.tx.max_datagrams == 0;
     let mut datagram_bytes = 0u64;
     let mut frame_bytes = 0u64;
     let mut rx_buf = vec![0u8; 16 * 1024];
-    let stop_reason = loop {
-        if BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst) {
-            break "signal";
-        }
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                break "duration_elapsed";
-            }
-        } else if !unlimited_datagrams && report.datagrams_received >= max_datagrams {
-            break "tx_datagram_limit";
-        }
+    #[derive(Debug)]
+    struct BridgeRunLoopFailure {
+        phase_id: &'static str,
+        phase_detail: &'static str,
+        error: DiagnosticErrorReport,
+        attach_tx_status: bool,
+        set_runtime_metrics: bool,
+    }
 
-        let mut tx_burst_count = 0u32;
-        while (unlimited_datagrams || report.datagrams_received < max_datagrams)
-            && tx_burst_count < args.tx_burst_limit
-        {
-            let queued = match tx_receiver.receiver.try_recv() {
-                Ok(queued) => queued,
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            };
+    let loop_result =
+        run_production_bridge_loop(
+            ProductionRuntimeBridgeLoopRunConfig::from_bounds(
+                args.duration_ms,
+                args.rx_timeout_ms,
+                args.tx_burst_limit,
+                u64::from(args.tx.max_datagrams),
+            ),
+            || BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst),
+            |step| -> std::result::Result<
+                ProductionRuntimeBridgeLoopStepOutcome,
+                BridgeRunLoopFailure,
+            > {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        let queued = match tx_receiver.receiver.try_recv() {
+                            Ok(queued) => queued,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected)
+                            }
+                        };
 
-            report.datagrams_received += 1;
-            tx_burst_count = tx_burst_count.saturating_add(1);
-            report.last_peer = Some(queued.peer.to_string());
-            let datagram = queued.data.as_slice();
-            let len = datagram.len();
-            datagram_bytes = datagram_bytes.saturating_add(len as u64);
-            if let Some(bind_report) = report.tx_bind_reports.get_mut(queued.report_index) {
-                bind_report.datagrams_received = bind_report.datagrams_received.saturating_add(1);
-                bind_report.datagram_bytes = bind_report.datagram_bytes.saturating_add(len as u64);
-                bind_report.last_peer = Some(queued.peer.to_string());
-            }
-            let parsed = match parse_tx_datagram(datagram) {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    bridge_counters.incoming += 1;
-                    bridge_counters.dropped += 1;
-                    bridge_counters.malformed += 1;
-                    bridge_counters.unsupported_radiotap +=
-                        u64::from(bridge_tx_is_unsupported_radiotap(&error));
-                    continue;
-                }
-            };
-            frame_bytes = frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
-            let tx_options = apply_bridge_tx_overrides(
-                &args.tx.tx_overrides,
-                args.tx.bandwidth,
-                parsed.tx_options,
-            );
-            let (packet_len, tx_descriptor_hex) =
-                match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
-                    Ok(packet) => (
-                        packet.len(),
-                        Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
-                    ),
-                    Err(_) => {
-                        bridge_counters.incoming += 1;
-                        bridge_counters.dropped += 1;
-                        bridge_counters.malformed += 1;
-                        continue;
+                        report.datagrams_received += 1;
+                        report.last_peer = Some(queued.peer.to_string());
+                        let datagram = queued.data.as_slice();
+                        let len = datagram.len();
+                        datagram_bytes = datagram_bytes.saturating_add(len as u64);
+                        if let Some(bind_report) =
+                            report.tx_bind_reports.get_mut(queued.report_index)
+                        {
+                            bind_report.datagrams_received =
+                                bind_report.datagrams_received.saturating_add(1);
+                            bind_report.datagram_bytes =
+                                bind_report.datagram_bytes.saturating_add(len as u64);
+                            bind_report.last_peer = Some(queued.peer.to_string());
+                        }
+                        let parsed = match parse_tx_datagram(datagram) {
+                            Ok(parsed) => parsed,
+                            Err(error) => {
+                                bridge_counters.incoming += 1;
+                                bridge_counters.dropped += 1;
+                                bridge_counters.malformed += 1;
+                                bridge_counters.unsupported_radiotap +=
+                                    u64::from(bridge_tx_is_unsupported_radiotap(&error));
+                                return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed);
+                            }
+                        };
+                        frame_bytes =
+                            frame_bytes.saturating_add(parsed.ieee80211_frame.len() as u64);
+                        let tx_options = apply_bridge_tx_overrides(
+                            &args.tx.tx_overrides,
+                            args.tx.bandwidth,
+                            parsed.tx_options,
+                        );
+                        let (packet_len, tx_descriptor_hex) =
+                            match build_tx_packet(parsed.ieee80211_frame, channel, tx_options) {
+                                Ok(packet) => (
+                                    packet.len(),
+                                    Some(encode_hex(&packet[..TX_DESC_SIZE.min(packet.len())])),
+                                ),
+                                Err(_) => {
+                                    bridge_counters.incoming += 1;
+                                    bridge_counters.dropped += 1;
+                                    bridge_counters.malformed += 1;
+                                    return Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed);
+                                }
+                            };
+                        report.last_datagram = Some(BridgeTxDatagramReport {
+                            source: "udp",
+                            datagram_len: len,
+                            fwmark: parsed.fwmark,
+                            fwmark_hex: format_value(parsed.fwmark, 8),
+                            radiotap_len: parsed.radiotap_len,
+                            frame_len: parsed.ieee80211_frame.len(),
+                            packet_len: Some(packet_len),
+                            tx_descriptor_hex,
+                            tx_profile: args.tx.tx_overrides.tx_profile,
+                            tx_options,
+                        });
+                        let submit_result = {
+                            let mut radio = BridgeTxSessionRadio {
+                                session: &mut session,
+                                channel,
+                                channel_bandwidth: args.tx.bandwidth,
+                                overrides: &args.tx.tx_overrides,
+                                submit_counters: &mut submit_counters,
+                            };
+                            submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
+                        };
+                        match submit_result {
+                            Ok(_) => Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed),
+                            Err(error) => Err(BridgeRunLoopFailure {
+                                phase_id: "bridge_tx_submit",
+                                phase_detail: "bridge run TX submission failed",
+                                error: DiagnosticErrorReport {
+                                    code: "bridge_tx_submit_failed",
+                                    message: error.to_string(),
+                                },
+                                attach_tx_status: true,
+                                set_runtime_metrics: true,
+                            }),
+                        }
                     }
-                };
-            report.last_datagram = Some(BridgeTxDatagramReport {
-                source: "udp",
-                datagram_len: len,
-                fwmark: parsed.fwmark,
-                fwmark_hex: format_value(parsed.fwmark, 8),
-                radiotap_len: parsed.radiotap_len,
-                frame_len: parsed.ieee80211_frame.len(),
-                packet_len: Some(packet_len),
-                tx_descriptor_hex,
-                tx_profile: args.tx.tx_overrides.tx_profile,
-                tx_options,
-            });
-            let submit_result = {
-                let mut radio = BridgeTxSessionRadio {
-                    session: &mut session,
-                    channel,
-                    channel_bandwidth: args.tx.bandwidth,
-                    overrides: &args.tx.tx_overrides,
-                    submit_counters: &mut submit_counters,
-                };
-                submit_tx_datagram(datagram, &mut radio, &mut bridge_counters)
-            };
-            if let Err(error) = submit_result {
-                if tx_status.is_some() {
-                    let registers = Rtl8812auRegisterAccess::new(&session.transport);
-                    tx_status_probe_post(&registers, &mut tx_status);
-                    tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
-                    report.tx_status = tx_status;
+                    ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => {
+                        match session.read_rx_packets(channel, &mut rx_buf, timeout) {
+                            Ok(read) if read.bytes_read == 0 => {
+                                report.rx.buffers_read += 1;
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
+                            }
+                            Ok(read) => {
+                                report.rx.buffers_read += 1;
+                                report.rx.bulk_bytes += read.bytes_read as u64;
+                                debug_assert_eq!(read.endpoint, bulk_in);
+                                if let Err(error) = process_rx_packet_outcomes(
+                                    &mut report.rx,
+                                    &mut pcap,
+                                    &mut frame_jsonl,
+                                    &mut wfb_forwards,
+                                    channel,
+                                    &read.packets,
+                                ) {
+                                    return Err(BridgeRunLoopFailure {
+                                        phase_id: "bridge_rx",
+                                        phase_detail: "bridge run RX buffer processing failed",
+                                        error,
+                                        attach_tx_status: false,
+                                        set_runtime_metrics: false,
+                                    });
+                                }
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
+                            }
+                            Err(error) if error.timeout => {
+                                report.rx.read_timeouts += 1;
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                            }
+                            Err(error) => {
+                                if BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst) {
+                                    Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
+                                        ProductionRuntimeBridgeLoopStopReason::Signal,
+                                    ))
+                                } else {
+                                    Err(BridgeRunLoopFailure {
+                                        phase_id: "bridge_rx",
+                                        phase_detail: "bridge run bulk-IN read failed",
+                                        error: DiagnosticErrorReport {
+                                            code: "bulk_in_read_failed",
+                                            message: format!(
+                                                "bulk IN read from endpoint 0x{bulk_in:02x} failed: {error}"
+                                            ),
+                                        },
+                                        attach_tx_status: false,
+                                        set_runtime_metrics: false,
+                                    })
+                                }
+                            }
+                        }
+                    }
                 }
-                bridge_run_update_counters(
-                    &mut report,
-                    pre_counters,
-                    bridge_counters,
-                    submit_counters,
-                );
+            },
+        );
+    let loop_outcome = match loop_result {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            if failure.attach_tx_status && tx_status.is_some() {
+                let registers = Rtl8812auRegisterAccess::new(&session.transport);
+                tx_status_probe_post(&registers, &mut tx_status);
+                tx_status_attach_rf_summary(&mut tx_status, &submit_counters);
+                report.tx_status = tx_status;
+            }
+            bridge_run_update_counters(&mut report, pre_counters, bridge_counters, submit_counters);
+            if failure.set_runtime_metrics {
                 bridge_run_set_runtime_metrics(
                     &mut report,
                     started,
@@ -26942,86 +27022,16 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                     datagram_bytes,
                     frame_bytes,
                 );
-                return bridge_run_failure(
-                    report,
-                    "bridge_tx_submit",
-                    "bridge run TX submission failed",
-                    DiagnosticErrorReport {
-                        code: "bridge_tx_submit_failed",
-                        message: error.to_string(),
-                    },
-                );
             }
-        }
-
-        let timeout = match deadline {
-            Some(deadline) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break "duration_elapsed";
-                }
-                Duration::from_millis(args.rx_timeout_ms).min(remaining)
-            }
-            None => Duration::from_millis(args.rx_timeout_ms),
-        };
-        match session.read_rx_packets(channel, &mut rx_buf, timeout) {
-            Ok(read) if read.bytes_read == 0 => {
-                report.rx.buffers_read += 1;
-            }
-            Ok(read) => {
-                report.rx.buffers_read += 1;
-                report.rx.bulk_bytes += read.bytes_read as u64;
-                debug_assert_eq!(read.endpoint, bulk_in);
-                if let Err(error) = process_rx_packet_outcomes(
-                    &mut report.rx,
-                    &mut pcap,
-                    &mut frame_jsonl,
-                    &mut wfb_forwards,
-                    channel,
-                    &read.packets,
-                ) {
-                    bridge_run_update_counters(
-                        &mut report,
-                        pre_counters,
-                        bridge_counters,
-                        submit_counters,
-                    );
-                    return bridge_run_failure(
-                        report,
-                        "bridge_rx",
-                        "bridge run RX buffer processing failed",
-                        error,
-                    );
-                }
-            }
-            Err(error) if error.timeout => {
-                report.rx.read_timeouts += 1;
-            }
-            Err(error) => {
-                if BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst) {
-                    break "signal";
-                }
-                bridge_run_update_counters(
-                    &mut report,
-                    pre_counters,
-                    bridge_counters,
-                    submit_counters,
-                );
-                return bridge_run_failure(
-                    report,
-                    "bridge_rx",
-                    "bridge run bulk-IN read failed",
-                    DiagnosticErrorReport {
-                        code: "bulk_in_read_failed",
-                        message: format!(
-                            "bulk IN read from endpoint 0x{bulk_in:02x} failed: {error}"
-                        ),
-                    },
-                );
-            }
+            return bridge_run_failure(
+                report,
+                failure.phase_id,
+                failure.phase_detail,
+                failure.error,
+            );
         }
     };
-    report.stop_reason = stop_reason;
+    report.stop_reason = loop_outcome.stop_reason.as_str();
 
     if let Err(error) = flush_optional_pcap(&mut pcap) {
         return bridge_run_failure(report, "rx_pcap", "failed to flush RX PCAP", error);

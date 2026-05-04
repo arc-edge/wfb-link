@@ -780,6 +780,186 @@ fn set_udp_receive_buffer(_socket: &UdpSocket, _bytes: usize) -> io::Result<()> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeBridgeLoopRunConfig {
+    pub duration: Option<Duration>,
+    pub rx_timeout: Duration,
+    pub tx_burst_limit: u32,
+    pub max_datagrams: u64,
+}
+
+impl ProductionRuntimeBridgeLoopRunConfig {
+    pub fn from_bounds(
+        duration_ms: u64,
+        rx_timeout_ms: u64,
+        tx_burst_limit: u32,
+        max_datagrams: u64,
+    ) -> Self {
+        Self {
+            duration: (duration_ms != 0).then(|| Duration::from_millis(duration_ms)),
+            rx_timeout: Duration::from_millis(rx_timeout_ms),
+            tx_burst_limit,
+            max_datagrams,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeBridgeLoopStopReason {
+    Signal,
+    DurationElapsed,
+    TxDatagramLimit,
+}
+
+impl ProductionRuntimeBridgeLoopStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Signal => "signal",
+            Self::DurationElapsed => "duration_elapsed",
+            Self::TxDatagramLimit => "tx_datagram_limit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionRuntimeBridgeLoopStep {
+    TryTx,
+    ReadRx { timeout: Duration },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionRuntimeBridgeLoopStepOutcome {
+    TxProcessed,
+    TxEmpty,
+    TxDisconnected,
+    RxRead,
+    RxTimeout,
+    Stop(ProductionRuntimeBridgeLoopStopReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeBridgeLoopOutcome {
+    pub stop_reason: ProductionRuntimeBridgeLoopStopReason,
+    pub tx_datagrams_processed: u64,
+    pub iterations: u64,
+    pub tx_polls: u64,
+    pub rx_polls: u64,
+}
+
+pub fn run_production_bridge_loop<E, StopRequested, HandleStep>(
+    config: ProductionRuntimeBridgeLoopRunConfig,
+    mut stop_requested: StopRequested,
+    mut handle_step: HandleStep,
+) -> Result<ProductionRuntimeBridgeLoopOutcome, E>
+where
+    StopRequested: FnMut() -> bool,
+    HandleStep:
+        FnMut(ProductionRuntimeBridgeLoopStep) -> Result<ProductionRuntimeBridgeLoopStepOutcome, E>,
+{
+    let started = std::time::Instant::now();
+    let deadline = config.duration.map(|duration| started + duration);
+    let unlimited_datagrams = config.max_datagrams == 0;
+    let mut tx_datagrams_processed = 0u64;
+    let mut iterations = 0u64;
+    let mut tx_polls = 0u64;
+    let mut rx_polls = 0u64;
+
+    loop {
+        iterations = iterations.saturating_add(1);
+        if stop_requested() {
+            return Ok(ProductionRuntimeBridgeLoopOutcome {
+                stop_reason: ProductionRuntimeBridgeLoopStopReason::Signal,
+                tx_datagrams_processed,
+                iterations,
+                tx_polls,
+                rx_polls,
+            });
+        }
+        if let Some(deadline) = deadline {
+            if std::time::Instant::now() >= deadline {
+                return Ok(ProductionRuntimeBridgeLoopOutcome {
+                    stop_reason: ProductionRuntimeBridgeLoopStopReason::DurationElapsed,
+                    tx_datagrams_processed,
+                    iterations,
+                    tx_polls,
+                    rx_polls,
+                });
+            }
+        } else if !unlimited_datagrams && tx_datagrams_processed >= config.max_datagrams {
+            return Ok(ProductionRuntimeBridgeLoopOutcome {
+                stop_reason: ProductionRuntimeBridgeLoopStopReason::TxDatagramLimit,
+                tx_datagrams_processed,
+                iterations,
+                tx_polls,
+                rx_polls,
+            });
+        }
+
+        let mut tx_burst_count = 0u32;
+        while (unlimited_datagrams || tx_datagrams_processed < config.max_datagrams)
+            && tx_burst_count < config.tx_burst_limit
+        {
+            tx_polls = tx_polls.saturating_add(1);
+            match handle_step(ProductionRuntimeBridgeLoopStep::TryTx)? {
+                ProductionRuntimeBridgeLoopStepOutcome::TxProcessed => {
+                    tx_datagrams_processed = tx_datagrams_processed.saturating_add(1);
+                    tx_burst_count = tx_burst_count.saturating_add(1);
+                }
+                ProductionRuntimeBridgeLoopStepOutcome::TxEmpty
+                | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => break,
+                ProductionRuntimeBridgeLoopStepOutcome::Stop(stop_reason) => {
+                    return Ok(ProductionRuntimeBridgeLoopOutcome {
+                        stop_reason,
+                        tx_datagrams_processed,
+                        iterations,
+                        tx_polls,
+                        rx_polls,
+                    });
+                }
+                ProductionRuntimeBridgeLoopStepOutcome::RxRead
+                | ProductionRuntimeBridgeLoopStepOutcome::RxTimeout => break,
+            }
+        }
+
+        let timeout = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Ok(ProductionRuntimeBridgeLoopOutcome {
+                        stop_reason: ProductionRuntimeBridgeLoopStopReason::DurationElapsed,
+                        tx_datagrams_processed,
+                        iterations,
+                        tx_polls,
+                        rx_polls,
+                    });
+                }
+                config.rx_timeout.min(remaining)
+            }
+            None => config.rx_timeout,
+        };
+        rx_polls = rx_polls.saturating_add(1);
+        match handle_step(ProductionRuntimeBridgeLoopStep::ReadRx { timeout })? {
+            ProductionRuntimeBridgeLoopStepOutcome::RxRead
+            | ProductionRuntimeBridgeLoopStepOutcome::RxTimeout => {}
+            ProductionRuntimeBridgeLoopStepOutcome::Stop(stop_reason) => {
+                return Ok(ProductionRuntimeBridgeLoopOutcome {
+                    stop_reason,
+                    tx_datagrams_processed,
+                    iterations,
+                    tx_polls,
+                    rx_polls,
+                });
+            }
+            ProductionRuntimeBridgeLoopStepOutcome::TxProcessed
+            | ProductionRuntimeBridgeLoopStepOutcome::TxEmpty
+            | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowConfig {
@@ -2727,7 +2907,10 @@ mod tests {
 
     use super::{
         bind_production_tx_ingress_sockets, macos_usbhost_adapter_info, macos_usbhost_endpoints,
-        plan_production_wfb_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+        plan_production_wfb_loop, run_production_bridge_loop,
+        spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+        ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+        ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
         ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
         ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
@@ -3195,6 +3378,142 @@ mod tests {
         assert_eq!(queued.report_index, 0);
         assert_eq!(queued.data, b"wfb-test");
         assert_eq!(queued.peer, sender.local_addr().expect("sender addr"));
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_drains_bounded_tx_bursts() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(0, 1, 2, 3);
+        let mut tx_remaining = 3u64;
+        let mut tx_in_burst = 0u32;
+        let mut max_burst_seen = 0u32;
+        let mut rx_polls = 0u32;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx if tx_remaining > 0 => {
+                        tx_remaining -= 1;
+                        tx_in_burst += 1;
+                        max_burst_seen = max_burst_seen.max(tx_in_burst);
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                    }
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { .. } => {
+                        rx_polls += 1;
+                        tx_in_burst = 0;
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::TxDatagramLimit
+        );
+        assert_eq!(outcome.tx_datagrams_processed, 3);
+        assert_eq!(max_burst_seen, 2);
+        assert!(rx_polls >= 1);
+        assert!(outcome.rx_polls >= 1);
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_stops_on_signal_before_work() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(0, 1, 8, 0);
+
+        let outcome = run_production_bridge_loop(
+            config,
+            || true,
+            |_step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                panic!("signal stop should avoid loop work")
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::Signal
+        );
+        assert_eq!(outcome.tx_polls, 0);
+        assert_eq!(outcome.rx_polls, 0);
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_keeps_duration_bounded_after_max_datagrams() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(5, 20, 8, 1);
+        let mut tx_processed = false;
+        let mut saw_rx_after_tx_limit = false;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx if !tx_processed => {
+                        tx_processed = true;
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                    }
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { .. } => {
+                        if tx_processed {
+                            saw_rx_after_tx_limit = true;
+                        }
+                        std::thread::sleep(Duration::from_millis(6));
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::DurationElapsed
+        );
+        assert_eq!(outcome.tx_datagrams_processed, 1);
+        assert!(saw_rx_after_tx_limit);
+        assert!(outcome.rx_polls >= 1);
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_clamps_rx_timeout_to_deadline() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(10, 1_000, 8, 0);
+        let mut observed_timeout = None;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => {
+                        observed_timeout = Some(timeout);
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
+                            ProductionRuntimeBridgeLoopStopReason::DurationElapsed,
+                        ))
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::DurationElapsed
+        );
+        assert!(
+            observed_timeout.expect("observed timeout") < Duration::from_secs(1),
+            "bounded run should clamp RX timeout to remaining duration"
+        );
     }
 
     #[test]
