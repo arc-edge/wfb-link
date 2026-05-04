@@ -581,6 +581,18 @@ showed a fallback-applied run still submitted `149/149` frames but recovered
 `0/80` Mac-to-Linux with 135 Linux decrypt failures. Fallback IQK is therefore a
 pre-TX failure state, not an experimental traffic profile.
 
+The first larger close-range gate after the fill-order correction passed:
+`/tmp/wfb-rfq-runtime-iqk-fill-2000-20260504-153130/rf-quality-report.json`
+used production `radio-run`, current-default TX power, and
+`rtl8812a-runtime-iqk`. Runtime IQK completed in sweep 2 with cleanup restored,
+0 fallback stages, and 20 selected IQC fill writes applied after cleanup. Linux
+`wfb_rx` recovered `1999/2000` marked payloads, logged zero decrypt failures,
+and matched the Linux baseline's `1999/2000` recovery with a `0.0` percentage
+point loss delta. Receiver RSSI telemetry was usable (`-21` to `-18` dBm
+average across antennas), but SNR remains zero-only in the Linux receiver
+reports, so this is close-range IQK correctness evidence rather than distance
+acceptance.
+
 Follow-up TXAGC correction: May 4 local production A/B shows the
 EFUSE-derived TX power override still needs receiver-gated soak evidence. With
 `TX_POWER_MODE=efuse-derived`, `/tmp/wfb-radio-run-duplex-default-hardened-20260504-145458`

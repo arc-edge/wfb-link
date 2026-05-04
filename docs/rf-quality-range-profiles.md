@@ -231,8 +231,12 @@ Runtime IQK validation on May 2, 2026:
   datagrams including the unmeasured warmup estimate, logged zero decrypt
   failures, verified clean Linux peer isolation before receiver start, stayed
   `baseline_comparable` / `within_margin`, and completed runtime IQK in sweep
-  1 with cleanup restored. This is the current hardened close-range gate for
-  the runtime-owned profile executor.
+  1 with cleanup restored. The newer post-cleanup-fill gate at
+  `/tmp/wfb-rfq-runtime-iqk-fill-2000-20260504-153130/rf-quality-report.json`
+  recovered `1999/2000`, matched the Linux baseline loss exactly, logged zero
+  decrypt failures, completed IQK in sweep 2, and applied 20 selected IQC fill
+  writes after cleanup. This is the current hardened close-range gate for the
+  runtime-owned profile executor.
 - No-warmup runtime-IQK profile evidence remains useful only for session
   acquisition debugging. The successful no-warmup A/B run at
   `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a2/rf-quality-report.json`
