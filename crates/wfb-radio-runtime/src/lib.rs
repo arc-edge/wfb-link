@@ -4,7 +4,18 @@
 //! production runtime, diagnostic harness, or future daemon must agree on
 //! without depending on `wfb-radio-diag`.
 
-use std::{error::Error, fmt, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    error::Error,
+    fmt, io,
+    net::{SocketAddr, UdpSocket},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use radio_core::{
     list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame,
@@ -18,6 +29,9 @@ use wfb_bridge::{RxForwardConfig, WfbChannelId};
 
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
+
+pub const PRODUCTION_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
+pub const PRODUCTION_TX_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub enum RuntimeUsbTransport {
     Libusb(Box<ClaimedUsbDevice>),
@@ -613,6 +627,157 @@ pub fn plan_production_wfb_loop(
         rx_mcs_index: config.rx_mcs_index,
         bandwidth_mhz: config.bandwidth.mhz() as u8,
     })
+}
+
+#[derive(Debug)]
+pub struct ProductionRuntimeTxIngressSocket {
+    pub bind_addr: SocketAddr,
+    pub socket: UdpSocket,
+    pub report_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionRuntimeQueuedDatagram {
+    pub report_index: usize,
+    pub peer: SocketAddr,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct ProductionRuntimeTxIngressReceiver {
+    pub receiver: mpsc::Receiver<ProductionRuntimeQueuedDatagram>,
+    stop: Arc<AtomicBool>,
+    handles: Vec<thread::JoinHandle<()>>,
+}
+
+impl Drop for ProductionRuntimeTxIngressReceiver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub fn bind_production_tx_ingress_sockets(
+    bind_addrs: &[SocketAddr],
+    receive_buffer_bytes: usize,
+) -> Result<Vec<ProductionRuntimeTxIngressSocket>, RuntimeRadioError> {
+    let mut sockets = Vec::with_capacity(bind_addrs.len());
+    for (report_index, bind_addr) in bind_addrs.iter().copied().enumerate() {
+        let socket = UdpSocket::bind(bind_addr).map_err(|error| {
+            RuntimeRadioError::new(
+                "udp_bind_failed",
+                format!("failed to bind TX ingress UDP socket {bind_addr}: {error}"),
+            )
+        })?;
+        configure_production_tx_ingress_socket(&socket, bind_addr, receive_buffer_bytes)?;
+        sockets.push(ProductionRuntimeTxIngressSocket {
+            bind_addr,
+            socket,
+            report_index,
+        });
+    }
+    Ok(sockets)
+}
+
+pub fn configure_production_tx_ingress_socket(
+    socket: &UdpSocket,
+    bind_addr: SocketAddr,
+    receive_buffer_bytes: usize,
+) -> Result<(), RuntimeRadioError> {
+    set_udp_receive_buffer(socket, receive_buffer_bytes).map_err(|error| {
+        RuntimeRadioError::new(
+            "udp_rcvbuf_config_failed",
+            format!(
+                "failed to configure {bind_addr} receive buffer to {receive_buffer_bytes} bytes: {error}"
+            ),
+        )
+    })
+}
+
+pub fn spawn_production_tx_ingress_receivers(
+    sockets: Vec<ProductionRuntimeTxIngressSocket>,
+    receive_timeout: Duration,
+) -> Result<ProductionRuntimeTxIngressReceiver, RuntimeRadioError> {
+    let (sender, receiver) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::with_capacity(sockets.len());
+
+    for tx_socket in sockets {
+        let bind_addr = tx_socket.bind_addr;
+        tx_socket
+            .socket
+            .set_read_timeout(Some(receive_timeout))
+            .map_err(|error| {
+                RuntimeRadioError::new(
+                    "udp_timeout_config_failed",
+                    format!("failed to configure {bind_addr} receive timeout: {error}"),
+                )
+            })?;
+        let sender = sender.clone();
+        let stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let mut buf = vec![0u8; u16::MAX as usize];
+            while !stop.load(Ordering::Relaxed) {
+                match tx_socket.socket.recv_from(&mut buf) {
+                    Ok((len, peer)) => {
+                        let queued = ProductionRuntimeQueuedDatagram {
+                            report_index: tx_socket.report_index,
+                            peer,
+                            data: buf[..len].to_vec(),
+                        };
+                        if sender.send(queued).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        handles.push(handle);
+    }
+    drop(sender);
+
+    Ok(ProductionRuntimeTxIngressReceiver {
+        receiver,
+        stop,
+        handles,
+    })
+}
+
+#[cfg(unix)]
+fn set_udp_receive_buffer(socket: &UdpSocket, bytes: usize) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let value: libc::c_int = bytes.try_into().unwrap_or(libc::c_int::MAX);
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn set_udp_receive_buffer(_socket: &UdpSocket, _bytes: usize) -> io::Result<()> {
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2547,7 +2712,11 @@ pub enum TxCalibrationClass {
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::RefCell, collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration,
+        cell::RefCell,
+        collections::BTreeMap,
+        net::{SocketAddr, UdpSocket},
+        path::PathBuf,
+        time::Duration,
     };
 
     use radio_core::{
@@ -2557,16 +2726,17 @@ mod tests {
     };
 
     use super::{
-        macos_usbhost_adapter_info, macos_usbhost_endpoints, plan_production_wfb_loop,
-        MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
-        ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
-        ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig,
-        ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder, Rtl8812auInitPhase,
-        RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError,
-        RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
-        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
-        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
+        bind_production_tx_ingress_sockets, macos_usbhost_adapter_info, macos_usbhost_endpoints,
+        plan_production_wfb_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+        ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+        ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
+        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
+        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
+        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+        RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
+        RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
+        TxCalibrationClass, TxCalibrationProfile, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
     #[derive(Debug, Default)]
@@ -2974,6 +3144,57 @@ mod tests {
         let error = plan_production_wfb_loop(&config).expect_err("missing link ID");
 
         assert_eq!(error.code, "missing_wfb_rx_forward_link_id");
+    }
+
+    #[test]
+    fn production_tx_ingress_binds_in_order() {
+        let bind_addrs = [
+            "127.0.0.1:0".parse::<SocketAddr>().expect("addr"),
+            "127.0.0.1:0".parse::<SocketAddr>().expect("addr"),
+        ];
+
+        let sockets =
+            bind_production_tx_ingress_sockets(&bind_addrs, PRODUCTION_TX_SOCKET_RCVBUF_BYTES)
+                .expect("bind sockets");
+
+        assert_eq!(sockets.len(), 2);
+        assert_eq!(sockets[0].report_index, 0);
+        assert_eq!(sockets[1].report_index, 1);
+        assert_eq!(sockets[0].bind_addr, bind_addrs[0]);
+        assert_eq!(sockets[1].bind_addr, bind_addrs[1]);
+    }
+
+    #[test]
+    fn production_tx_ingress_reports_bind_failure() {
+        let held = UdpSocket::bind("127.0.0.1:0").expect("held socket");
+        let addr = held.local_addr().expect("held addr");
+
+        let error = bind_production_tx_ingress_sockets(&[addr], PRODUCTION_TX_SOCKET_RCVBUF_BYTES)
+            .expect_err("duplicate bind should fail");
+
+        assert_eq!(error.code, "udp_bind_failed");
+    }
+
+    #[test]
+    fn production_tx_ingress_receiver_queues_datagrams() {
+        let bind_addr = "127.0.0.1:0".parse::<SocketAddr>().expect("addr");
+        let sockets =
+            bind_production_tx_ingress_sockets(&[bind_addr], PRODUCTION_TX_SOCKET_RCVBUF_BYTES)
+                .expect("bind sockets");
+        let target = sockets[0].socket.local_addr().expect("target addr");
+        let receiver = spawn_production_tx_ingress_receivers(sockets, Duration::from_millis(10))
+            .expect("spawn receiver");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("sender");
+        sender.send_to(b"wfb-test", target).expect("send datagram");
+
+        let queued = receiver
+            .receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("queued datagram");
+
+        assert_eq!(queued.report_index, 0);
+        assert_eq!(queued.data, b"wfb-test");
+        assert_eq!(queued.peer, sender.local_addr().expect("sender addr"));
     }
 
     #[test]

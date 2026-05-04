@@ -7,14 +7,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -37,18 +33,22 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowErrorReport,
-    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
-    ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
-    ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
-    Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-    RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
-    RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
-    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
-    TxCalibrationProfile as RuntimeTxCalibrationProfile,
+    bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
+    spawn_production_tx_ingress_receivers, MacosUsbHostConfig, ProductionRuntimeFlowConfig,
+    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
+    ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
+    ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
+    Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
+    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
+    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
+    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    TxCalibrationClass as RuntimeTxCalibrationClass,
+    TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
+    PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
 };
 
 #[derive(Debug, Parser)]
@@ -5991,8 +5991,6 @@ const DEFAULT_TX_STATUS_DELAY_MS: u64 = 50;
 const MAX_TX_STATUS_DELAY_MS: u64 = 60_000;
 const MAX_TX_STATUS_POLL_COUNT: u32 = 64;
 const MAX_TX_STATUS_TOTAL_POLL_MS: u64 = 60_000;
-const BRIDGE_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
-const BRIDGE_RUN_TX_RECEIVE_TIMEOUT_MS: u64 = 100;
 static BRIDGE_RUN_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const RTL8812_MAX_H2C_BOX_NUMS: u8 = 4;
 const RTL8812_MESSAGE_BOX_SIZE: u16 = 4;
@@ -25900,33 +25898,6 @@ fn bridge_tx_listen_failure(
     report
 }
 
-struct BridgeRunTxSocket {
-    bind_addr: SocketAddr,
-    socket: UdpSocket,
-    report_index: usize,
-}
-
-struct BridgeRunQueuedDatagram {
-    report_index: usize,
-    peer: SocketAddr,
-    data: Vec<u8>,
-}
-
-struct BridgeRunTxReceiver {
-    receiver: mpsc::Receiver<BridgeRunQueuedDatagram>,
-    stop: Arc<AtomicBool>,
-    handles: Vec<thread::JoinHandle<()>>,
-}
-
-impl Drop for BridgeRunTxReceiver {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for handle in self.handles.drain(..) {
-            let _ = handle.join();
-        }
-    }
-}
-
 #[cfg(unix)]
 extern "C" fn bridge_run_signal_handler(_signal: libc::c_int) {
     BRIDGE_RUN_STOP_REQUESTED.store(true, Ordering::SeqCst);
@@ -25953,42 +25924,12 @@ fn install_bridge_run_signal_handlers() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_udp_receive_buffer(socket: &UdpSocket, bytes: usize) -> std::io::Result<()> {
-    let value: libc::c_int = bytes.try_into().unwrap_or(libc::c_int::MAX);
-    let result = unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            (&value as *const libc::c_int).cast(),
-            std::mem::size_of_val(&value) as libc::socklen_t,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn set_udp_receive_buffer(_socket: &UdpSocket, _bytes: usize) -> std::io::Result<()> {
-    Ok(())
-}
-
 fn configure_bridge_tx_socket(
     socket: &UdpSocket,
     bind_addr: SocketAddr,
 ) -> std::result::Result<(), DiagnosticErrorReport> {
-    set_udp_receive_buffer(socket, BRIDGE_TX_SOCKET_RCVBUF_BYTES).map_err(|error| {
-        DiagnosticErrorReport {
-            code: "udp_rcvbuf_config_failed",
-            message: format!(
-                "failed to configure {bind_addr} receive buffer to {BRIDGE_TX_SOCKET_RCVBUF_BYTES} bytes: {error}"
-            ),
-        }
-    })
+    configure_production_tx_ingress_socket(socket, bind_addr, PRODUCTION_TX_SOCKET_RCVBUF_BYTES)
+        .map_err(runtime_radio_error)
 }
 
 fn bridge_run_bind_addrs(args: &BridgeRunArgs) -> Vec<SocketAddr> {
@@ -26000,79 +25941,17 @@ fn bridge_run_bind_addrs(args: &BridgeRunArgs) -> Vec<SocketAddr> {
 
 fn bridge_run_bind_tx_sockets(
     args: &BridgeRunArgs,
-) -> std::result::Result<Vec<BridgeRunTxSocket>, DiagnosticErrorReport> {
+) -> std::result::Result<Vec<ProductionRuntimeTxIngressSocket>, DiagnosticErrorReport> {
     let bind_addrs = bridge_run_bind_addrs(args);
-    let mut sockets = Vec::with_capacity(bind_addrs.len());
-    for (report_index, bind_addr) in bind_addrs.into_iter().enumerate() {
-        let socket = UdpSocket::bind(bind_addr).map_err(|error| DiagnosticErrorReport {
-            code: "udp_bind_failed",
-            message: format!("failed to bind {bind_addr}: {error}"),
-        })?;
-        configure_bridge_tx_socket(&socket, bind_addr)?;
-        sockets.push(BridgeRunTxSocket {
-            bind_addr,
-            socket,
-            report_index,
-        });
-    }
-    Ok(sockets)
+    bind_production_tx_ingress_sockets(&bind_addrs, PRODUCTION_TX_SOCKET_RCVBUF_BYTES)
+        .map_err(runtime_radio_error)
 }
 
 fn bridge_run_spawn_tx_receivers(
-    sockets: Vec<BridgeRunTxSocket>,
-) -> std::result::Result<BridgeRunTxReceiver, DiagnosticErrorReport> {
-    let (sender, receiver) = mpsc::channel();
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::with_capacity(sockets.len());
-
-    for tx_socket in sockets {
-        let bind_addr = tx_socket.bind_addr;
-        tx_socket
-            .socket
-            .set_read_timeout(Some(Duration::from_millis(
-                BRIDGE_RUN_TX_RECEIVE_TIMEOUT_MS,
-            )))
-            .map_err(|error| DiagnosticErrorReport {
-                code: "udp_timeout_config_failed",
-                message: format!("failed to configure {bind_addr} receive timeout: {error}"),
-            })?;
-        let sender = sender.clone();
-        let stop = Arc::clone(&stop);
-        let handle = thread::spawn(move || {
-            let mut buf = vec![0u8; u16::MAX as usize];
-            while !stop.load(Ordering::Relaxed) {
-                match tx_socket.socket.recv_from(&mut buf) {
-                    Ok((len, peer)) => {
-                        let queued = BridgeRunQueuedDatagram {
-                            report_index: tx_socket.report_index,
-                            peer,
-                            data: buf[..len].to_vec(),
-                        };
-                        if sender.send(queued).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        handles.push(handle);
-    }
-    drop(sender);
-
-    Ok(BridgeRunTxReceiver {
-        receiver,
-        stop,
-        handles,
-    })
+    sockets: Vec<ProductionRuntimeTxIngressSocket>,
+) -> std::result::Result<ProductionRuntimeTxIngressReceiver, DiagnosticErrorReport> {
+    spawn_production_tx_ingress_receivers(sockets, PRODUCTION_TX_RECEIVE_TIMEOUT)
+        .map_err(runtime_radio_error)
 }
 
 fn runtime_calibration_evidence_source_label(

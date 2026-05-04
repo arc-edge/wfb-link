@@ -593,6 +593,7 @@ name = "wfb-radio-runtime"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libc",
  "radio-core",
  "serde",
  "serde_json",
