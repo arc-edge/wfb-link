@@ -49,18 +49,15 @@ use wfb_radio_runtime::{
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
-    Rtl8812auRfPath, Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkBackupReport,
-    Rtl8812auRuntimeIqkCleanupReport, Rtl8812auRuntimeIqkIqcValue,
-    Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkPathReport,
-    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auRuntimeIqkStageReport,
-    Rtl8812auRuntimeIqkSweepPathSummaryReport, Rtl8812auRuntimeIqkSweepSummaryReport,
-    RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
-    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
-    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
-    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
-    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
-    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
-    TxCalibrationClass as RuntimeTxCalibrationClass,
+    Rtl8812auRfPath, Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkCalibrationReport,
+    Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
+    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auRuntimeIqkStageReport, RuntimeFlowRxTelemetry,
+    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
+    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
+    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
+    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
     PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
 };
@@ -3806,32 +3803,7 @@ struct TxIqkPageC1LatchReport {
     restored: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct TxRuntimeIqkCalibrationReport {
-    semantics: &'static str,
-    upstream_basis: &'static str,
-    mode: &'static str,
-    sweep_index: u8,
-    sweep_count: u8,
-    max_sweeps: u8,
-    sweep_summaries: Vec<TxRuntimeIqkSweepSummaryReport>,
-    status: &'static str,
-    cleanup_status: &'static str,
-    cleanup_failures: Vec<String>,
-    backup: Option<TxRuntimeIqkBackupReport>,
-    cleanup: Option<TxRuntimeIqkCleanupReport>,
-    paths: Vec<TxRuntimeIqkPathReport>,
-    affected_registers: Vec<RfCalibrationRegisterReadReport>,
-    before_iqk_registers: Vec<RfCalibrationRegisterReadReport>,
-    after_iqk_registers: Vec<RfCalibrationRegisterReadReport>,
-    counters: DiagnosticCounters,
-}
-
-type TxRuntimeIqkSweepSummaryReport = Rtl8812auRuntimeIqkSweepSummaryReport;
-type TxRuntimeIqkSweepPathSummaryReport = Rtl8812auRuntimeIqkSweepPathSummaryReport;
-type TxRuntimeIqkBackupReport = Rtl8812auRuntimeIqkBackupReport;
-type TxRuntimeIqkCleanupReport = Rtl8812auRuntimeIqkCleanupReport;
-type TxRuntimeIqkPathReport = Rtl8812auRuntimeIqkPathReport;
+type TxRuntimeIqkCalibrationReport = Rtl8812auRuntimeIqkCalibrationReport;
 type TxRuntimeIqkStageReport = Rtl8812auRuntimeIqkStageReport;
 type TxRuntimeIqkAttemptReport = Rtl8812auRuntimeIqkAttemptReport;
 type TxRuntimeIqkIqcValue = Rtl8812auRuntimeIqkIqcValue;
@@ -14382,7 +14354,6 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
 ];
 
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
-const RTL8812A_IQK_MAX_SWEEPS: u8 = 3;
 const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
 
 const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
@@ -15489,59 +15460,6 @@ fn rtl8812a_iqk_rx_fill_iqc_plan(
 }
 
 #[allow(dead_code)]
-fn run_rtl8812a_runtime_iqk_backup<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-) -> std::result::Result<TxRuntimeIqkBackupReport, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let backup =
-        wfb_radio_runtime::run_rtl8812au_runtime_iqk_backup(registers, &mut runtime_counters)
-            .map_err(runtime_radio_error)?;
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    Ok(backup)
-}
-
-#[allow(dead_code)]
-fn restore_rtl8812a_runtime_iqk_backup<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    backup: &TxRuntimeIqkBackupReport,
-) -> TxRuntimeIqkCleanupReport
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let cleanup = wfb_radio_runtime::restore_rtl8812au_runtime_iqk_backup(
-        registers,
-        &mut runtime_counters,
-        backup,
-    );
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    cleanup
-}
-
-fn apply_runtime_iqk_setup_plan<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    plan: &[TxRuntimeIqkSetupWritePlan],
-) -> std::result::Result<usize, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let result = wfb_radio_runtime::apply_rtl8812au_runtime_iqk_setup_plan(
-        registers,
-        &mut runtime_counters,
-        plan,
-    );
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    result.map_err(runtime_radio_error)
-}
-
-#[allow(dead_code)]
 fn rtl8812a_runtime_iqk_setup_plan(
     band: Band,
     rfe_type: u8,
@@ -15561,83 +15479,6 @@ fn rtl8812a_iqk_select_candidate(
     wfb_radio_runtime::rtl8812au_iqk_select_candidate(candidates)
 }
 
-#[allow(dead_code)]
-fn run_rtl8812a_runtime_iqk_tx_oneshot<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-) -> std::result::Result<(TxRuntimeIqkStageReport, TxRuntimeIqkStageReport), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let result =
-        wfb_radio_runtime::run_rtl8812au_runtime_iqk_tx_oneshot(registers, &mut runtime_counters);
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    result.map_err(runtime_radio_error)
-}
-
-#[allow(dead_code)]
-fn run_rtl8812a_runtime_iqk_rx_oneshot<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    tx_path_a: &TxRuntimeIqkStageReport,
-    tx_path_b: &TxRuntimeIqkStageReport,
-    rfe_type: u8,
-) -> std::result::Result<(TxRuntimeIqkStageReport, TxRuntimeIqkStageReport), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let result = wfb_radio_runtime::run_rtl8812au_runtime_iqk_rx_oneshot(
-        registers,
-        &mut runtime_counters,
-        tx_path_a,
-        tx_path_b,
-        rfe_type,
-    );
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    result.map_err(runtime_radio_error)
-}
-
-fn apply_rtl8812a_runtime_iqk_fill<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    path: TxPowerPathArg,
-    tx_stage: &mut TxRuntimeIqkStageReport,
-    rx_stage: &mut TxRuntimeIqkStageReport,
-) -> std::result::Result<usize, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let result = wfb_radio_runtime::apply_rtl8812au_runtime_iqk_fill(
-        registers,
-        &mut runtime_counters,
-        runtime_rf_path_from_tx_power_path(path)?,
-        tx_stage,
-        rx_stage,
-    );
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    result.map_err(runtime_radio_error)
-}
-
-fn runtime_iqk_report_status(
-    paths: &[TxRuntimeIqkPathReport],
-    cleanup_status: &str,
-) -> &'static str {
-    if cleanup_status != "restored" {
-        return "restore_failed";
-    }
-    if paths
-        .iter()
-        .all(|path| path.tx.status == "success" && path.rx.status == "success")
-    {
-        "completed"
-    } else {
-        "fallback_applied"
-    }
-}
-
 fn run_rtl8812a_runtime_iqk_calibration<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     channel: Channel,
@@ -15647,174 +15488,16 @@ fn run_rtl8812a_runtime_iqk_calibration<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let before_all_sweeps = *counters;
-    let mut sweep_summaries = Vec::new();
-    let mut last_report = None;
-
-    for sweep_index in 1..=RTL8812A_IQK_MAX_SWEEPS {
-        let mut report =
-            run_rtl8812a_runtime_iqk_calibration_sweep(registers, channel, rfe_type, counters)?;
-        sweep_summaries.push(runtime_iqk_sweep_summary(&report, sweep_index));
-        report.sweep_index = sweep_index;
-        report.sweep_count = sweep_index;
-        report.max_sweeps = RTL8812A_IQK_MAX_SWEEPS;
-        report.sweep_summaries = sweep_summaries.clone();
-        report.counters = diagnostic_counters_delta(before_all_sweeps, *counters);
-
-        if report.status == "completed" {
-            return Ok(report);
-        }
-        last_report = Some(report);
-    }
-
-    last_report.ok_or_else(|| DiagnosticErrorReport {
-        code: "rtl8812a_runtime_iqk_failed",
-        message: "runtime IQK did not execute any calibration sweeps".to_string(),
-    })
-}
-
-fn runtime_iqk_sweep_summary(
-    report: &TxRuntimeIqkCalibrationReport,
-    sweep_index: u8,
-) -> TxRuntimeIqkSweepSummaryReport {
-    let mut fallback_stage_count = 0;
-    let path_statuses = report
-        .paths
-        .iter()
-        .map(|path| {
-            if path.tx.fallback_used || path.tx.status != "success" {
-                fallback_stage_count += 1;
-            }
-            if path.rx.fallback_used || path.rx.status != "success" {
-                fallback_stage_count += 1;
-            }
-            TxRuntimeIqkSweepPathSummaryReport {
-                path_name: path.path_name,
-                tx_status: path.tx.status,
-                tx_retry_count: path.tx.retry_count,
-                tx_average_count: path.tx.average_count,
-                tx_fallback_used: path.tx.fallback_used,
-                tx_failure_label: path.tx.failure_label,
-                rx_status: path.rx.status,
-                rx_retry_count: path.rx.retry_count,
-                rx_average_count: path.rx.average_count,
-                rx_fallback_used: path.rx.fallback_used,
-                rx_failure_label: path.rx.failure_label,
-            }
-        })
-        .collect();
-
-    TxRuntimeIqkSweepSummaryReport {
-        sweep_index,
-        status: report.status,
-        cleanup_status: report.cleanup_status,
-        fallback_stage_count,
-        path_statuses,
-    }
-}
-
-fn run_rtl8812a_runtime_iqk_calibration_sweep<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    channel: Channel,
-    rfe_type: u8,
-    counters: &mut DiagnosticCounters,
-) -> std::result::Result<TxRuntimeIqkCalibrationReport, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let before_counters = *counters;
-    let before_iqk_registers =
-        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)?;
-    let backup = run_rtl8812a_runtime_iqk_backup(registers, counters)?;
-    let setup_plan =
-        rtl8812a_runtime_iqk_setup_plan(channel.band, rfe_type, channel.band == Band::Ghz5, false);
-
-    let result = (|| {
-        let _setup_writes = apply_runtime_iqk_setup_plan(registers, counters, &setup_plan)?;
-        let (mut tx_a, mut tx_b) = run_rtl8812a_runtime_iqk_tx_oneshot(registers, counters)?;
-        let (mut rx_a, mut rx_b) =
-            run_rtl8812a_runtime_iqk_rx_oneshot(registers, counters, &tx_a, &tx_b, rfe_type)?;
-        let fill_a = apply_rtl8812a_runtime_iqk_fill(
-            registers,
-            counters,
-            TxPowerPathArg::A,
-            &mut tx_a,
-            &mut rx_a,
-        )?;
-        let fill_b = apply_rtl8812a_runtime_iqk_fill(
-            registers,
-            counters,
-            TxPowerPathArg::B,
-            &mut tx_b,
-            &mut rx_b,
-        )?;
-        Ok::<_, DiagnosticErrorReport>((tx_a, rx_a, tx_b, rx_b, fill_a + fill_b))
-    })();
-
-    let cleanup = restore_rtl8812a_runtime_iqk_backup(registers, counters, &backup);
-    let after_iqk_registers =
-        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)
-            .unwrap_or_default();
-
-    let (tx_a, rx_a, tx_b, rx_b, fill_count) = match result {
-        Ok(stages) => stages,
-        Err(error) => {
-            if cleanup.status != "restored" {
-                return Err(DiagnosticErrorReport {
-                    code: error.code,
-                    message: format!(
-                        "{}; runtime IQK cleanup status={} failures={}",
-                        error.message,
-                        cleanup.status,
-                        cleanup.failures.join("; ")
-                    ),
-                });
-            }
-            return Err(error);
-        }
-    };
-
-    let paths = vec![
-        TxRuntimeIqkPathReport {
-            path: Rtl8812auRfPath::A,
-            path_name: "A",
-            tx: tx_a,
-            rx: rx_a,
-        },
-        TxRuntimeIqkPathReport {
-            path: Rtl8812auRfPath::B,
-            path_name: "B",
-            tx: tx_b,
-            rx: rx_b,
-        },
-    ];
-    let status = runtime_iqk_report_status(&paths, cleanup.status);
-    let cleanup_status = cleanup.status;
-    let cleanup_failures = cleanup.failures.clone();
-    let affected_registers =
-        rf_calibration_read32_group(registers, counters, RF_CALIBRATION_IQK_REGISTERS)
-            .unwrap_or_default();
-    let _ = fill_count;
-
-    Ok(TxRuntimeIqkCalibrationReport {
-        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected or fallback IQC values, and restores saved RF/BB state",
-        upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a, _iqk_tx_8812a, _iqk_tx_fill_iqc_8812a, and _iqk_rx_fill_iqc_8812a for RTL8812A",
-        mode: "runtime_iqk",
-        sweep_index: 1,
-        sweep_count: 1,
-        max_sweeps: 1,
-        sweep_summaries: Vec::new(),
-        status,
-        cleanup_status,
-        cleanup_failures,
-        backup: Some(backup),
-        cleanup: Some(cleanup),
-        paths,
-        affected_registers,
-        before_iqk_registers,
-        after_iqk_registers,
-        counters: diagnostic_counters_delta(before_counters, *counters),
-    })
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let report = wfb_radio_runtime::run_rtl8812au_runtime_iqk_calibration(
+        registers,
+        channel,
+        rfe_type,
+        &mut runtime_counters,
+    )
+    .map_err(runtime_radio_error)?;
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    Ok(report)
 }
 
 fn run_rtl8812a_iqk_probe<T>(

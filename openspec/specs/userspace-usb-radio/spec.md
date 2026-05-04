@@ -223,9 +223,16 @@ setup without making runtime IQK the default path.
 - **THEN** setup planning, setup-plan application, state backup/restore,
   candidate selection, one-shot outcome state, TX/RX one-shot execution, sweep
   summary generation, TX/RX IQC masked-write planning, and live IQC fill
-  application MUST come from runtime-owned helpers while sweep orchestration and
-  evidence formatting remain diagnostic-owned until full IQK execution is
-  migrated
+  application MUST come from runtime-owned helpers
+
+#### Scenario: Runtime library runs guarded IQK sweep
+- **WHEN** a diagnostic or production calibration caller requests guarded
+  runtime IQK for an initialized RTL8812AU adapter
+- **THEN** bounded sweep orchestration, setup application, TX/RX one-shot
+  execution, IQC fill application, cleanup handling, sweep summaries, affected
+  register readback, and USB counter deltas MUST come from runtime-owned
+  helpers while CLI authorization and diagnostic/RF-quality formatting remain
+  outside the runtime library
 
 #### Scenario: Runtime IQK restores saved state
 - **WHEN** runtime IQK exits after success or failure

@@ -2243,6 +2243,7 @@ const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_RX_PATH_JAGUAR: u16 = 0x0a07;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
 const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
+const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
 const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
 const REG_IQK_AFE_A_C60: u16 = 0x0c60;
 const REG_IQK_AFE_A_C64: u16 = 0x0c64;
@@ -2269,6 +2270,20 @@ const REG_IQK_TX_X_A_CD4: u16 = 0x0cd4;
 const REG_IQK_VDF_A_CE8: u16 = 0x0ce8;
 const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
 const REG_IQK_RX_IQC_B_JAGUAR: u16 = 0x0e10;
+const REG_FPGA0_IQK_JAGUAR: u16 = 0x0e28;
+const REG_TX_IQK_TONE_A_JAGUAR: u16 = 0x0e30;
+const REG_RX_IQK_TONE_A_JAGUAR: u16 = 0x0e34;
+const REG_TX_IQK_PI_A_JAGUAR: u16 = 0x0e38;
+const REG_RX_IQK_PI_A_JAGUAR: u16 = 0x0e3c;
+const REG_TX_IQK_JAGUAR: u16 = 0x0e40;
+const REG_RX_IQK_JAGUAR: u16 = 0x0e44;
+const REG_IQK_AGC_PTS_JAGUAR: u16 = 0x0e48;
+const REG_IQK_AGC_RSP_JAGUAR: u16 = 0x0e4c;
+const REG_TX_IQK_TONE_B_JAGUAR: u16 = 0x0e50;
+const REG_RX_IQK_TONE_B_JAGUAR: u16 = 0x0e54;
+const REG_TX_IQK_PI_B_JAGUAR: u16 = 0x0e58;
+const REG_RX_IQK_PI_B_JAGUAR: u16 = REG_IQK_AFE_B_E5C;
+const REG_IQK_AGC_CONT_JAGUAR: u16 = REG_IQK_AFE_B_E60;
 const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
 const REG_IQK_AFE_B_E60: u16 = 0x0e60;
 const REG_IQK_AFE_B_E64: u16 = 0x0e64;
@@ -2280,15 +2295,26 @@ const REG_IQK_RFE_SETTING_B_E8C: u16 = 0x0e8c;
 const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
 const REG_TX_BB_CTRL_B_JAGUAR: u16 = REG_RF_PATH_B_3WIRE;
 const REG_TX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0e94;
+const REG_TX_POWER_AFTER_IQK_A_JAGUAR: u16 = 0x0e9c;
+const REG_RX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0ea0;
+const REG_RX_POWER_BEFORE_IQK_A_2_JAGUAR: u16 = 0x0ea4;
+const REG_RX_POWER_AFTER_IQK_A_JAGUAR: u16 = 0x0ea8;
+const REG_RX_POWER_AFTER_IQK_A_2_JAGUAR: u16 = 0x0eac;
 const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RFE_INV_B_JAGUAR: u16 = 0x0eb4;
+const REG_TX_POWER_BEFORE_IQK_B_JAGUAR: u16 = REG_RFE_INV_B_JAGUAR;
 const REG_RFE_TIMING_B_JAGUAR: u16 = 0x0eb8;
+const REG_TX_POWER_AFTER_IQK_B_JAGUAR: u16 = 0x0ebc;
+const REG_RX_POWER_BEFORE_IQK_B_JAGUAR: u16 = 0x0ec0;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
 const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
 const REG_IQK_TX_CTRL_B_EC4: u16 = 0x0ec4;
+const REG_RX_POWER_BEFORE_IQK_B_2_JAGUAR: u16 = REG_IQK_TX_CTRL_B_EC4;
 const REG_IQK_TX_CTRL_B_EC8: u16 = 0x0ec8;
+const REG_RX_POWER_AFTER_IQK_B_JAGUAR: u16 = REG_IQK_TX_CTRL_B_EC8;
 const REG_IQK_TX_Y_B_ECC: u16 = 0x0ecc;
+const REG_RX_POWER_AFTER_IQK_B_2_JAGUAR: u16 = REG_IQK_TX_Y_B_ECC;
 const REG_IQK_TX_X_B_ED4: u16 = 0x0ed4;
 const REG_IQK_VDF_B_EE8: u16 = 0x0ee8;
 const REG_USB_HRPWM: u16 = 0xfe58;
@@ -2329,6 +2355,7 @@ const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
 const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
+const RTL8812A_IQK_MAX_SWEEPS: u8 = 3;
 const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
 const RTL8812A_IQK_RX_FAIL_MASK: u32 = 1 << 11;
 const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
@@ -2389,6 +2416,47 @@ const RTL8812A_IQK_AFE_BACKUP_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
 const RTL8812A_IQK_PAGE_C1_LATCH_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
     ("R_0xcb8_page_c1", REG_RFE_TIMING_A_JAGUAR),
     ("R_0xeb8_page_c1", REG_RFE_TIMING_B_JAGUAR),
+];
+
+const RTL8812A_IQK_RESULT_REGISTERS: &[Rtl8812auRegisterReadSpec] = &[
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1),
+    ("rA_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 4),
+    ("rA_RX_IQC_Latch_Jaguar", REG_IQK_RX_IQC_A_JAGUAR),
+    ("rB_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x200),
+    ("rB_IQK_Shadow_Jaguar", REG_OFDM0_XBAGCCORE1 + 0x204),
+    ("rB_RX_IQC_Latch_Jaguar", REG_IQK_RX_IQC_B_JAGUAR),
+    ("rFPGA0_IQK", REG_FPGA0_IQK_JAGUAR),
+    ("rTx_IQK_Tone_A", REG_TX_IQK_TONE_A_JAGUAR),
+    ("rRx_IQK_Tone_A", REG_RX_IQK_TONE_A_JAGUAR),
+    ("rTx_IQK_PI_A", REG_TX_IQK_PI_A_JAGUAR),
+    ("rRx_IQK_PI_A", REG_RX_IQK_PI_A_JAGUAR),
+    ("rTx_IQK", REG_TX_IQK_JAGUAR),
+    ("rRx_IQK", REG_RX_IQK_JAGUAR),
+    ("rIQK_AGC_Pts", REG_IQK_AGC_PTS_JAGUAR),
+    ("rIQK_AGC_Rsp", REG_IQK_AGC_RSP_JAGUAR),
+    ("rTx_IQK_Tone_B", REG_TX_IQK_TONE_B_JAGUAR),
+    ("rRx_IQK_Tone_B", REG_RX_IQK_TONE_B_JAGUAR),
+    ("rTx_IQK_PI_B", REG_TX_IQK_PI_B_JAGUAR),
+    ("rRx_IQK_PI_B", REG_RX_IQK_PI_B_JAGUAR),
+    ("rIQK_AGC_Cont", REG_IQK_AGC_CONT_JAGUAR),
+    ("rTx_Power_Before_IQK_A", REG_TX_POWER_BEFORE_IQK_A_JAGUAR),
+    ("rTx_Power_After_IQK_A", REG_TX_POWER_AFTER_IQK_A_JAGUAR),
+    ("rRx_Power_Before_IQK_A", REG_RX_POWER_BEFORE_IQK_A_JAGUAR),
+    (
+        "rRx_Power_Before_IQK_A_2",
+        REG_RX_POWER_BEFORE_IQK_A_2_JAGUAR,
+    ),
+    ("rRx_Power_After_IQK_A", REG_RX_POWER_AFTER_IQK_A_JAGUAR),
+    ("rRx_Power_After_IQK_A_2", REG_RX_POWER_AFTER_IQK_A_2_JAGUAR),
+    ("rTx_Power_Before_IQK_B", REG_TX_POWER_BEFORE_IQK_B_JAGUAR),
+    ("rTx_Power_After_IQK_B", REG_TX_POWER_AFTER_IQK_B_JAGUAR),
+    ("rRx_Power_Before_IQK_B", REG_RX_POWER_BEFORE_IQK_B_JAGUAR),
+    (
+        "rRx_Power_Before_IQK_B_2",
+        REG_RX_POWER_BEFORE_IQK_B_2_JAGUAR,
+    ),
+    ("rRx_Power_After_IQK_B", REG_RX_POWER_AFTER_IQK_B_JAGUAR),
+    ("rRx_Power_After_IQK_B_2", REG_RX_POWER_AFTER_IQK_B_2_JAGUAR),
 ];
 
 const RTL8812A_IQK_RF_BACKUP_OFFSETS: &[u32] = &[0x65, 0x8f, 0x00];
@@ -2531,6 +2599,27 @@ pub struct Rtl8812auRuntimeIqkCleanupReport {
     pub hssi_read_restored: Option<bool>,
     pub page_select_restored: Option<bool>,
     pub tx_pause_restored: Option<bool>,
+    pub counters: RuntimeRadioCounters,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRuntimeIqkCalibrationReport {
+    pub semantics: &'static str,
+    pub upstream_basis: &'static str,
+    pub mode: &'static str,
+    pub sweep_index: u8,
+    pub sweep_count: u8,
+    pub max_sweeps: u8,
+    pub sweep_summaries: Vec<Rtl8812auRuntimeIqkSweepSummaryReport>,
+    pub status: &'static str,
+    pub cleanup_status: &'static str,
+    pub cleanup_failures: Vec<String>,
+    pub backup: Option<Rtl8812auRuntimeIqkBackupReport>,
+    pub cleanup: Option<Rtl8812auRuntimeIqkCleanupReport>,
+    pub paths: Vec<Rtl8812auRuntimeIqkPathReport>,
+    pub affected_registers: Vec<Rtl8812auRegisterReadReport>,
+    pub before_iqk_registers: Vec<Rtl8812auRegisterReadReport>,
+    pub after_iqk_registers: Vec<Rtl8812auRegisterReadReport>,
     pub counters: RuntimeRadioCounters,
 }
 
@@ -5678,6 +5767,152 @@ where
     }
 }
 
+pub fn run_rtl8812au_runtime_iqk_calibration<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    channel: Channel,
+    rfe_type: u8,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRuntimeIqkCalibrationReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_all_sweeps = *counters;
+    let mut sweep_summaries = Vec::new();
+    let mut last_report = None;
+
+    for sweep_index in 1..=RTL8812A_IQK_MAX_SWEEPS {
+        let mut report =
+            run_rtl8812au_runtime_iqk_calibration_sweep(registers, channel, rfe_type, counters)?;
+        sweep_summaries.push(rtl8812au_runtime_iqk_sweep_summary(
+            &report.paths,
+            report.status,
+            report.cleanup_status,
+            sweep_index,
+        ));
+        report.sweep_index = sweep_index;
+        report.sweep_count = sweep_index;
+        report.max_sweeps = RTL8812A_IQK_MAX_SWEEPS;
+        report.sweep_summaries = sweep_summaries.clone();
+        report.counters = counters.saturating_sub(before_all_sweeps);
+
+        if report.status == "completed" {
+            return Ok(report);
+        }
+        last_report = Some(report);
+    }
+
+    last_report.ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_failed",
+            "runtime IQK did not execute any calibration sweeps",
+        )
+    })
+}
+
+fn run_rtl8812au_runtime_iqk_calibration_sweep<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    channel: Channel,
+    rfe_type: u8,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRuntimeIqkCalibrationReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let before_iqk_registers =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)?;
+    let backup = run_rtl8812au_runtime_iqk_backup(registers, counters)?;
+    let setup_plan =
+        rtl8812au_runtime_iqk_setup_plan(channel.band, rfe_type, channel.band == Band::Ghz5, false);
+
+    let result = (|| {
+        let _setup_writes =
+            apply_rtl8812au_runtime_iqk_setup_plan(registers, counters, &setup_plan)?;
+        let (mut tx_a, mut tx_b) = run_rtl8812au_runtime_iqk_tx_oneshot(registers, counters)?;
+        let (mut rx_a, mut rx_b) =
+            run_rtl8812au_runtime_iqk_rx_oneshot(registers, counters, &tx_a, &tx_b, rfe_type)?;
+        let fill_a = apply_rtl8812au_runtime_iqk_fill(
+            registers,
+            counters,
+            Rtl8812auRfPath::A,
+            &mut tx_a,
+            &mut rx_a,
+        )?;
+        let fill_b = apply_rtl8812au_runtime_iqk_fill(
+            registers,
+            counters,
+            Rtl8812auRfPath::B,
+            &mut tx_b,
+            &mut rx_b,
+        )?;
+        Ok::<_, RuntimeRadioError>((tx_a, rx_a, tx_b, rx_b, fill_a + fill_b))
+    })();
+
+    let cleanup = restore_rtl8812au_runtime_iqk_backup(registers, counters, &backup);
+    let after_iqk_registers =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)
+            .unwrap_or_default();
+
+    let (tx_a, rx_a, tx_b, rx_b, _fill_count) = match result {
+        Ok(stages) => stages,
+        Err(error) => {
+            if cleanup.status != "restored" {
+                return Err(RuntimeRadioError::new(
+                    error.code,
+                    format!(
+                        "{}; runtime IQK cleanup status={} failures={}",
+                        error.message,
+                        cleanup.status,
+                        cleanup.failures.join("; ")
+                    ),
+                ));
+            }
+            return Err(error);
+        }
+    };
+
+    let paths = vec![
+        Rtl8812auRuntimeIqkPathReport {
+            path: Rtl8812auRfPath::A,
+            path_name: "A",
+            tx: tx_a,
+            rx: rx_a,
+        },
+        Rtl8812auRuntimeIqkPathReport {
+            path: Rtl8812auRfPath::B,
+            path_name: "B",
+            tx: tx_b,
+            rx: rx_b,
+        },
+    ];
+    let status = rtl8812au_runtime_iqk_report_status(&paths, cleanup.status);
+    let cleanup_status = cleanup.status;
+    let cleanup_failures = cleanup.failures.clone();
+    let affected_registers =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)
+            .unwrap_or_default();
+
+    Ok(Rtl8812auRuntimeIqkCalibrationReport {
+        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected or fallback IQC values, and restores saved RF/BB state",
+        upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a, _iqk_tx_8812a, _iqk_tx_fill_iqc_8812a, and _iqk_rx_fill_iqc_8812a for RTL8812A",
+        mode: "runtime_iqk",
+        sweep_index: 1,
+        sweep_count: 1,
+        max_sweeps: 1,
+        sweep_summaries: Vec::new(),
+        status,
+        cleanup_status,
+        cleanup_failures,
+        backup: Some(backup),
+        cleanup: Some(cleanup),
+        paths,
+        affected_registers,
+        before_iqk_registers,
+        after_iqk_registers,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
 const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
     Rtl8812auRegisterWriteSpec {
         register_name: "rA_TxScale_Jaguar",
@@ -7529,6 +7764,57 @@ mod tests {
             *address == super::REG_RFE_PINMUX_A_JAGUAR
                 && bytes.as_slice() == 0x7777_7717_u32.to_le_bytes()
         }));
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_calibration_runs_sweep_and_reports_delta() {
+        let transport = MockTransport::default();
+        transport.insert_u8(super::REG_TXPAUSE, 0);
+        transport.insert_u32(super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_MODE_B_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_READ_A_JAGUAR, 0x000a_a000);
+        transport.insert_u32(super::REG_RF_PI_READ_B_JAGUAR, 0x000b_b000);
+        transport.insert_u32(
+            super::REG_IQK_RESULT_A_D00,
+            super::RTL8812A_IQK_READY_MASK | (0x130 << 16),
+        );
+        transport.insert_u32(
+            super::REG_IQK_RESULT_B_D40,
+            super::RTL8812A_IQK_READY_MASK | (0x131 << 16),
+        );
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let report = super::run_rtl8812au_runtime_iqk_calibration(
+            &registers,
+            Channel::from_number(36).expect("channel 36"),
+            3,
+            &mut counters,
+        )
+        .expect("runtime IQK calibration");
+
+        assert_eq!(report.mode, "runtime_iqk");
+        assert_eq!(report.status, "completed");
+        assert_eq!(report.cleanup_status, "restored");
+        assert_eq!(report.sweep_index, 1);
+        assert_eq!(report.sweep_count, 1);
+        assert_eq!(report.max_sweeps, 3);
+        assert_eq!(report.sweep_summaries.len(), 1);
+        assert_eq!(report.sweep_summaries[0].fallback_stage_count, 0);
+        assert_eq!(report.paths.len(), 2);
+        assert!(report.backup.is_some());
+        assert!(report.cleanup.is_some());
+        assert_eq!(
+            report.before_iqk_registers.len(),
+            super::RTL8812A_IQK_RESULT_REGISTERS.len()
+        );
+        assert_eq!(
+            report.affected_registers.len(),
+            super::RTL8812A_IQK_RESULT_REGISTERS.len()
+        );
+        assert!(report.counters.usb_control_reads > 0);
+        assert!(report.counters.usb_control_writes > 0);
+        assert_eq!(report.counters, counters);
     }
 
     #[test]
