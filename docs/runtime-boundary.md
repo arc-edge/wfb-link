@@ -118,3 +118,12 @@ with TX UDP ingress socket setup and receiver thread lifecycle owned by
 `ready`, 14/14 phases completed, and 5 RX frames with PHY status, valid RSSI,
 SNR, and derived noise. No TX datagrams were injected. Artifact:
 `/tmp/wfb-radio-run-tx-ingress-smoke.json` on the hardware Mac deploy checkout.
+
+After the `move-loop-executor-runtime` slice on May 4, 2026, the smoke was
+rerun with bridge-loop scheduling and stop conditions owned by
+`wfb-radio-runtime`. The run completed with `result=pass`,
+`stop_reason=duration_elapsed`, init readiness `ready`, 14/14 phases completed,
+and 5 RX frames with PHY status, valid RSSI, SNR, and derived noise. No TX
+datagrams were injected. Artifact:
+`/tmp/wfb-radio-run-loop-executor-smoke.json` on the hardware Mac deploy
+checkout.

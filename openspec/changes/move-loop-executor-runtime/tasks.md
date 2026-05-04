@@ -8,10 +8,10 @@
 
 - [x] 2.1 Refactor bridge-run to call the runtime loop executor with a single packet-processing callback.
 - [x] 2.2 Preserve existing bridge-run failure paths, metrics, TX status post-processing, and report stop reason labels.
-- [ ] 2.3 Keep `radio-run` hardware smoke behavior unchanged.
+- [x] 2.3 Keep `radio-run` hardware smoke behavior unchanged.
 
 ## 3. Verification
 
 - [x] 3.1 Update runtime boundary docs for loop scheduler ownership.
 - [x] 3.2 Run formatting, workspace tests, strict OpenSpec validation, and diff checks.
-- [ ] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.
+- [x] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.
