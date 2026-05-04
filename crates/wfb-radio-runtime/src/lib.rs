@@ -18,16 +18,17 @@ use std::{
 };
 
 use radio_core::{
-    build_tx_packet, list_usb_devices, parse_rx_packet,
+    build_tx_packet, frame_type, list_usb_devices, parse_rx_packet,
     rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
-    submit_tx_frame, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
+    submit_tx_frame, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo, FrameType,
     InterfaceInfo, ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
-    Rtl8812auTxSubmitError, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
+    Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
     UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 use wfb_bridge::{
-    parse_tx_datagram, RadiotapError, RxForwardConfig, TxCounters, TxDatagramError, WfbChannelId,
+    build_rx_forward_datagram, parse_tx_datagram, RadiotapError, RxCounters, RxForwardConfig,
+    TxCounters, TxDatagramError, WfbChannelId,
 };
 
 #[cfg(target_os = "macos")]
@@ -630,6 +631,188 @@ pub fn plan_production_wfb_loop(
         rx_mcs_index: config.rx_mcs_index,
         bandwidth_mhz: config.bandwidth.mhz() as u8,
     })
+}
+
+#[derive(Debug)]
+pub struct ProductionRuntimeRxForwardRuntime {
+    pub config: RxForwardConfig,
+    pub aggregator: Option<SocketAddr>,
+    socket: Option<UdpSocket>,
+    pub forwarded_bytes: u64,
+    pub counters: RxCounters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxForwardSnapshot {
+    pub config: RxForwardConfig,
+    pub aggregator: Option<SocketAddr>,
+    pub forwarded_bytes: u64,
+    pub counters: RxCounters,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxPacketTelemetry {
+    pub parsed_frames: u64,
+    pub phy_status_frames: u64,
+    pub rssi_valid_frames: u64,
+    pub snr_frames: u64,
+    pub noise_frames: u64,
+    pub dropped_packets: u64,
+    pub need_more_data: u64,
+    pub management_frames: u64,
+    pub control_frames: u64,
+    pub data_frames: u64,
+    pub extension_frames: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxPacketOutcome {
+    pub telemetry: ProductionRuntimeRxPacketTelemetry,
+    pub rx_forwards: Vec<ProductionRuntimeRxForwardSnapshot>,
+}
+
+pub fn create_production_rx_forward_runtimes(
+    plans: &[ProductionRuntimeRxForwardPlan],
+) -> Result<Vec<ProductionRuntimeRxForwardRuntime>, RuntimeRadioError> {
+    plans
+        .iter()
+        .map(|plan| {
+            let socket = match plan.aggregator {
+                Some(_) => Some(UdpSocket::bind("0.0.0.0:0").map_err(|error| {
+                    RuntimeRadioError::new(
+                        "rx_forward_socket_bind_failed",
+                        format!("failed to bind WFB RX forwarding UDP socket: {error}"),
+                    )
+                })?),
+                None => None,
+            };
+            Ok(ProductionRuntimeRxForwardRuntime {
+                config: plan.config,
+                aggregator: plan.aggregator,
+                socket,
+                forwarded_bytes: 0,
+                counters: RxCounters::default(),
+            })
+        })
+        .collect()
+}
+
+pub fn production_rx_forward_snapshots(
+    runtimes: &[ProductionRuntimeRxForwardRuntime],
+) -> Vec<ProductionRuntimeRxForwardSnapshot> {
+    runtimes
+        .iter()
+        .map(|runtime| ProductionRuntimeRxForwardSnapshot {
+            config: runtime.config,
+            aggregator: runtime.aggregator,
+            forwarded_bytes: runtime.forwarded_bytes,
+            counters: runtime.counters.clone(),
+        })
+        .collect()
+}
+
+pub fn process_production_rx_packet_outcomes(
+    packets: &[ParsedRxPacket],
+    rx_forwards: &mut [ProductionRuntimeRxForwardRuntime],
+) -> Result<ProductionRuntimeRxPacketOutcome, RuntimeRadioError> {
+    let mut telemetry = ProductionRuntimeRxPacketTelemetry::default();
+    for parsed in packets {
+        match parsed.outcome {
+            RxParseOutcome::Frame => {
+                let frame = parsed.frame.as_ref().expect("frame outcome includes frame");
+                telemetry.parsed_frames = telemetry.parsed_frames.saturating_add(1);
+                count_production_rx_metadata(&mut telemetry, frame);
+                count_production_rx_frame_type(&mut telemetry, &frame.data);
+                process_production_wfb_rx_forwards(rx_forwards, frame)?;
+            }
+            RxParseOutcome::Drop => {
+                telemetry.dropped_packets = telemetry.dropped_packets.saturating_add(1);
+            }
+            RxParseOutcome::NeedMoreData => {
+                telemetry.need_more_data = telemetry.need_more_data.saturating_add(1);
+            }
+        }
+    }
+    Ok(ProductionRuntimeRxPacketOutcome {
+        telemetry,
+        rx_forwards: production_rx_forward_snapshots(rx_forwards),
+    })
+}
+
+fn count_production_rx_metadata(
+    telemetry: &mut ProductionRuntimeRxPacketTelemetry,
+    frame: &RxFrame,
+) {
+    if frame.phy_status {
+        telemetry.phy_status_frames = telemetry.phy_status_frames.saturating_add(1);
+    }
+    if frame.rssi_dbm_valid {
+        telemetry.rssi_valid_frames = telemetry.rssi_valid_frames.saturating_add(1);
+    }
+    if frame.snr_db.is_some() {
+        telemetry.snr_frames = telemetry.snr_frames.saturating_add(1);
+    }
+    if frame.noise_dbm.is_some() {
+        telemetry.noise_frames = telemetry.noise_frames.saturating_add(1);
+    }
+}
+
+fn count_production_rx_frame_type(
+    telemetry: &mut ProductionRuntimeRxPacketTelemetry,
+    frame: &[u8],
+) {
+    match frame_type(frame) {
+        Ok(FrameType::Management) => {
+            telemetry.management_frames = telemetry.management_frames.saturating_add(1);
+        }
+        Ok(FrameType::Control) => {
+            telemetry.control_frames = telemetry.control_frames.saturating_add(1);
+        }
+        Ok(FrameType::Data) => {
+            telemetry.data_frames = telemetry.data_frames.saturating_add(1);
+        }
+        Ok(FrameType::Extension) => {
+            telemetry.extension_frames = telemetry.extension_frames.saturating_add(1);
+        }
+        Err(_) => {
+            telemetry.dropped_packets = telemetry.dropped_packets.saturating_add(1);
+        }
+    }
+}
+
+fn process_production_wfb_rx_forwards(
+    rx_forwards: &mut [ProductionRuntimeRxForwardRuntime],
+    frame: &RxFrame,
+) -> Result<(), RuntimeRadioError> {
+    for runtime in rx_forwards {
+        process_production_wfb_rx_forward(runtime, frame)?;
+    }
+    Ok(())
+}
+
+fn process_production_wfb_rx_forward(
+    runtime: &mut ProductionRuntimeRxForwardRuntime,
+    frame: &RxFrame,
+) -> Result<(), RuntimeRadioError> {
+    let Some(packet) = build_rx_forward_datagram(frame, runtime.config, &mut runtime.counters)
+    else {
+        return Ok(());
+    };
+    if let (Some(socket), Some(aggregator)) = (runtime.socket.as_ref(), runtime.aggregator) {
+        let bytes = socket.send_to(&packet, aggregator).map_err(|error| {
+            runtime.counters.send_failed = runtime.counters.send_failed.saturating_add(1);
+            RuntimeRadioError::new(
+                "rx_forward_send_failed",
+                format!("failed to send WFB RX datagram to {aggregator}: {error}"),
+            )
+        })?;
+        runtime.counters.forwarded = runtime.counters.forwarded.saturating_add(1);
+        runtime.forwarded_bytes = runtime.forwarded_bytes.saturating_add(bytes as u64);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3178,30 +3361,32 @@ mod tests {
 
     use radio_core::{
         rtl8812au::{Rtl8812auUsbTransport, TxQueue},
-        Bandwidth, Channel, DeviceSelector, Rtl8812auRegisterAccess, RxParseOutcome, TxOptions,
-        TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
+        Bandwidth, Channel, DeviceSelector, ParsedRxPacket, Rtl8812auRegisterAccess, RxFrame,
+        RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
     };
 
     use super::{
-        bind_production_tx_ingress_sockets, handle_production_bridge_tx_datagram,
-        macos_usbhost_adapter_info, macos_usbhost_endpoints, plan_production_wfb_loop,
-        run_production_bridge_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+        bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
+        handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
+        plan_production_wfb_loop, process_production_rx_packet_outcomes,
+        production_rx_forward_snapshots, run_production_bridge_loop,
+        spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
         ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
         ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
         ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
         ProductionRuntimeQueuedDatagram, ProductionRuntimeRxForwardConfig,
-        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
-        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
-        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        ProductionRuntimeRxForwardPlan, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
         RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
         RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
         RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
         TxCalibrationClass, TxCalibrationProfile, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
-    use wfb_bridge::TxCounters;
+    use wfb_bridge::{build_wfb_data_header, RxForwardConfig, TxCounters, WfbChannelId};
 
     #[derive(Debug, Default)]
     struct MockTransport {
@@ -3711,6 +3896,166 @@ mod tests {
             channel_bandwidth: Bandwidth::Mhz40,
             overrides: ProductionRuntimeBridgeTxOverrides::default(),
         }
+    }
+
+    fn runtime_rx_frame(data: Vec<u8>) -> RxFrame {
+        RxFrame {
+            data,
+            rssi_dbm: -47,
+            rssi_dbm_valid: true,
+            rssi_dbm_source: radio_core::RxRssiSource::PhyStatusFirstByte,
+            noise_dbm: Some(-92),
+            snr_db: Some(45),
+            snr_db_source: Some(radio_core::RxSnrSource::Rtl8812PhyStatusBestPath),
+            channel: Channel::from_number(36).expect("channel 36"),
+            phy_status: true,
+            driver_info_size: 8,
+            rx_shift: 0,
+            raw_phy_status: vec![63],
+            rx_rate_raw: 0x0d,
+            rx_rate: Some(radio_core::TxRate::Mcs(1)),
+            rx_bandwidth_raw: 0,
+            rx_bandwidth: Some(Bandwidth::Mhz20),
+            short_gi: false,
+            ldpc: false,
+            stbc: false,
+            crc_error: false,
+        }
+    }
+
+    fn runtime_wfb_frame(channel_id: WfbChannelId) -> RxFrame {
+        let mut data = Vec::from(build_wfb_data_header(channel_id, 0x0010));
+        data.extend_from_slice(b"runtime-rx");
+        runtime_rx_frame(data)
+    }
+
+    fn rx_forward_plan(
+        channel_id: WfbChannelId,
+        aggregator: Option<SocketAddr>,
+    ) -> ProductionRuntimeRxForwardPlan {
+        ProductionRuntimeRxForwardPlan {
+            config: RxForwardConfig {
+                channel_id,
+                wlan_idx: 0,
+                mcs_index: 1,
+                bandwidth_mhz: 20,
+            },
+            aggregator,
+        }
+    }
+
+    #[test]
+    fn production_rx_handler_counts_frame_drop_and_tail_outcomes() {
+        let packets = vec![
+            ParsedRxPacket {
+                consumed: 64,
+                outcome: RxParseOutcome::Frame,
+                frame: Some(runtime_rx_frame(vec![0x08; 24])),
+            },
+            ParsedRxPacket {
+                consumed: 32,
+                outcome: RxParseOutcome::Drop,
+                frame: None,
+            },
+            ParsedRxPacket {
+                consumed: 0,
+                outcome: RxParseOutcome::NeedMoreData,
+                frame: None,
+            },
+        ];
+        let mut forwards = Vec::new();
+
+        let outcome =
+            process_production_rx_packet_outcomes(&packets, &mut forwards).expect("rx outcomes");
+
+        assert_eq!(outcome.telemetry.parsed_frames, 1);
+        assert_eq!(outcome.telemetry.phy_status_frames, 1);
+        assert_eq!(outcome.telemetry.rssi_valid_frames, 1);
+        assert_eq!(outcome.telemetry.snr_frames, 1);
+        assert_eq!(outcome.telemetry.noise_frames, 1);
+        assert_eq!(outcome.telemetry.data_frames, 1);
+        assert_eq!(outcome.telemetry.dropped_packets, 1);
+        assert_eq!(outcome.telemetry.need_more_data, 1);
+        assert!(outcome.rx_forwards.is_empty());
+    }
+
+    #[test]
+    fn production_rx_handler_forwards_matching_wfb_frame_to_aggregator() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("receiver");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        let channel_id = WfbChannelId::new(0x000001, 0x23).expect("channel ID");
+        let plans = vec![rx_forward_plan(
+            channel_id,
+            Some(receiver.local_addr().unwrap()),
+        )];
+        let mut forwards = create_production_rx_forward_runtimes(&plans).expect("forwards");
+        let frame = runtime_wfb_frame(channel_id);
+        let packets = vec![ParsedRxPacket {
+            consumed: 64,
+            outcome: RxParseOutcome::Frame,
+            frame: Some(frame),
+        }];
+
+        let outcome =
+            process_production_rx_packet_outcomes(&packets, &mut forwards).expect("rx outcomes");
+
+        let mut buf = [0u8; 512];
+        let (bytes, _) = receiver.recv_from(&mut buf).expect("forwarded datagram");
+        assert!(bytes > b"runtime-rx".len());
+        assert_eq!(outcome.rx_forwards[0].counters.received, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.matched, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.forwarded, 1);
+        assert_eq!(outcome.rx_forwards[0].forwarded_bytes, bytes as u64);
+    }
+
+    #[test]
+    fn production_rx_handler_filters_without_aggregator_send() {
+        let channel_id = WfbChannelId::new(0x000001, 0x23).expect("channel ID");
+        let other_channel_id = WfbChannelId::new(0x000002, 0x23).expect("channel ID");
+        let plans = vec![rx_forward_plan(channel_id, None)];
+        let mut forwards = create_production_rx_forward_runtimes(&plans).expect("forwards");
+        let frame = runtime_wfb_frame(other_channel_id);
+        let packets = vec![ParsedRxPacket {
+            consumed: 64,
+            outcome: RxParseOutcome::Frame,
+            frame: Some(frame),
+        }];
+
+        let outcome =
+            process_production_rx_packet_outcomes(&packets, &mut forwards).expect("rx outcomes");
+
+        assert_eq!(outcome.telemetry.parsed_frames, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.received, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.filtered, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.forwarded, 0);
+        assert_eq!(outcome.rx_forwards[0].forwarded_bytes, 0);
+    }
+
+    #[test]
+    fn production_rx_handler_reports_forward_send_failure() {
+        let channel_id = WfbChannelId::new(0x000001, 0x23).expect("channel ID");
+        let plans = vec![rx_forward_plan(
+            channel_id,
+            Some("127.0.0.1:0".parse().expect("port zero")),
+        )];
+        let mut forwards = create_production_rx_forward_runtimes(&plans).expect("forwards");
+        let frame = runtime_wfb_frame(channel_id);
+        let packets = vec![ParsedRxPacket {
+            consumed: 64,
+            outcome: RxParseOutcome::Frame,
+            frame: Some(frame),
+        }];
+
+        let error = process_production_rx_packet_outcomes(&packets, &mut forwards)
+            .expect_err("port zero send should fail");
+
+        assert_eq!(error.code, "rx_forward_send_failed");
+        let snapshot = production_rx_forward_snapshots(&forwards);
+        assert_eq!(snapshot[0].counters.received, 1);
+        assert_eq!(snapshot[0].counters.matched, 1);
+        assert_eq!(snapshot[0].counters.send_failed, 1);
     }
 
     #[test]

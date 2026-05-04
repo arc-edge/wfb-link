@@ -34,8 +34,9 @@ use wfb_bridge::{
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
-    handle_production_bridge_tx_datagram, run_production_bridge_loop,
-    spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+    create_production_rx_forward_runtimes, handle_production_bridge_tx_datagram,
+    process_production_rx_packet_outcomes, production_rx_forward_snapshots,
+    run_production_bridge_loop, spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
     ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
@@ -43,6 +44,7 @@ use wfb_radio_runtime::{
     ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
     ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
+    ProductionRuntimeRxForwardPlan, ProductionRuntimeRxForwardSnapshot,
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
@@ -23248,6 +23250,44 @@ fn set_rx_wfb_forward_reports(report: &mut RxFixtureReport, runtimes: Vec<RxWfbF
     report.wfb_forwards = reports;
 }
 
+fn set_rx_wfb_forward_reports_from_runtime(
+    report: &mut RxFixtureReport,
+    snapshots: Vec<ProductionRuntimeRxForwardSnapshot>,
+) {
+    let reports: Vec<RxWfbForwardReport> = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let channel_id = snapshot.config.channel_id;
+            RxWfbForwardReport {
+                link_id: channel_id.link_id,
+                link_id_hex: format_value(channel_id.link_id, 6),
+                radio_port: channel_id.radio_port,
+                radio_port_hex: format_value(channel_id.radio_port, 2),
+                aggregator: snapshot.aggregator,
+                wlan_idx: snapshot.config.wlan_idx,
+                mcs_index: snapshot.config.mcs_index,
+                bandwidth_mhz: snapshot.config.bandwidth_mhz,
+                forwarded_bytes: snapshot.forwarded_bytes,
+                counters: snapshot.counters,
+            }
+        })
+        .collect();
+    report.wfb_forward = reports.first().cloned();
+    report.wfb_forwards = reports;
+}
+
+fn bridge_run_runtime_forward_plans(
+    configs: &[RxScanWfbForwardConfig],
+) -> Vec<ProductionRuntimeRxForwardPlan> {
+    configs
+        .iter()
+        .map(|config| ProductionRuntimeRxForwardPlan {
+            config: config.config,
+            aggregator: config.aggregator,
+        })
+        .collect()
+}
+
 fn process_rx_buffer(
     report: &mut RxFixtureReport,
     pcap: &mut Option<PcapWriter<File>>,
@@ -23330,6 +23370,66 @@ fn process_rx_packet_outcomes(
             RxParseOutcome::NeedMoreData => {
                 report.need_more_data += 1;
             }
+        }
+    }
+    Ok(())
+}
+
+fn apply_runtime_rx_packet_telemetry(
+    report: &mut RxFixtureReport,
+    telemetry: wfb_radio_runtime::ProductionRuntimeRxPacketTelemetry,
+) {
+    report.parsed_frames = report.parsed_frames.saturating_add(telemetry.parsed_frames);
+    report.phy_status_frames = report
+        .phy_status_frames
+        .saturating_add(telemetry.phy_status_frames);
+    report.rssi_valid_frames = report
+        .rssi_valid_frames
+        .saturating_add(telemetry.rssi_valid_frames);
+    report.snr_frames = report.snr_frames.saturating_add(telemetry.snr_frames);
+    report.noise_frames = report.noise_frames.saturating_add(telemetry.noise_frames);
+    report.dropped_packets = report
+        .dropped_packets
+        .saturating_add(telemetry.dropped_packets);
+    report.need_more_data = report
+        .need_more_data
+        .saturating_add(telemetry.need_more_data);
+    report.management_frames = report
+        .management_frames
+        .saturating_add(telemetry.management_frames);
+    report.control_frames = report
+        .control_frames
+        .saturating_add(telemetry.control_frames);
+    report.data_frames = report.data_frames.saturating_add(telemetry.data_frames);
+    report.extension_frames = report
+        .extension_frames
+        .saturating_add(telemetry.extension_frames);
+}
+
+fn write_rx_packet_side_outputs(
+    report: &mut RxFixtureReport,
+    pcap: &mut Option<PcapWriter<File>>,
+    frame_jsonl: &mut Option<File>,
+    channel: Channel,
+    packets: &[radio_core::ParsedRxPacket],
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    for parsed in packets {
+        if parsed.outcome != RxParseOutcome::Frame {
+            continue;
+        }
+        let frame = parsed.frame.as_ref().expect("frame outcome includes frame");
+        if let Some(writer) = pcap.as_mut() {
+            writer
+                .write_frame(SystemTime::now(), &frame.data)
+                .map_err(|error| DiagnosticErrorReport {
+                    code: "pcap_packet_write_failed",
+                    message: format!("failed to write PCAP packet: {error}"),
+                })?;
+            report.pcap_frames_written += 1;
+        }
+        if let Some(writer) = frame_jsonl.as_mut() {
+            write_rx_frame_record(writer, channel, frame)?;
+            report.frame_records_written += 1;
         }
     }
     Ok(())
@@ -26826,14 +26926,18 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             );
         }
     };
-    let mut wfb_forwards = match create_wfb_forwards(wfb_forward_configs) {
+    let rx_forward_plans = bridge_run_runtime_forward_plans(&wfb_forward_configs);
+    let mut wfb_forwards = match create_production_rx_forward_runtimes(&rx_forward_plans) {
         Ok(runtimes) => runtimes,
         Err(error) => {
             return bridge_run_failure(
                 report,
                 "rx_forward",
                 "failed to create WFB RX forwarding socket",
-                error,
+                DiagnosticErrorReport {
+                    code: error.code,
+                    message: error.message,
+                },
             );
         }
     };
@@ -26983,11 +27087,33 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                                 report.rx.buffers_read += 1;
                                 report.rx.bulk_bytes += read.bytes_read as u64;
                                 debug_assert_eq!(read.endpoint, bulk_in);
-                                if let Err(error) = process_rx_packet_outcomes(
+                                match process_production_rx_packet_outcomes(
+                                    &read.packets,
+                                    &mut wfb_forwards,
+                                ) {
+                                    Ok(outcome) => {
+                                        apply_runtime_rx_packet_telemetry(
+                                            &mut report.rx,
+                                            outcome.telemetry,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        return Err(BridgeRunLoopFailure {
+                                            phase_id: "bridge_rx",
+                                            phase_detail: "bridge run RX buffer processing failed",
+                                            error: DiagnosticErrorReport {
+                                                code: error.code,
+                                                message: error.message,
+                                            },
+                                            attach_tx_status: false,
+                                            set_runtime_metrics: false,
+                                        });
+                                    }
+                                }
+                                if let Err(error) = write_rx_packet_side_outputs(
                                     &mut report.rx,
                                     &mut pcap,
                                     &mut frame_jsonl,
-                                    &mut wfb_forwards,
                                     channel,
                                     &read.packets,
                                 ) {
@@ -27070,7 +27196,10 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
             error,
         );
     }
-    set_rx_wfb_forward_reports(&mut report.rx, wfb_forwards);
+    set_rx_wfb_forward_reports_from_runtime(
+        &mut report.rx,
+        production_rx_forward_snapshots(&wfb_forwards),
+    );
     if tx_status.is_some() {
         let registers = Rtl8812auRegisterAccess::new(&session.transport);
         tx_status_probe_post(&registers, &mut tx_status);
