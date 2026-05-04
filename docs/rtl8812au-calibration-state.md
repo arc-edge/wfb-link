@@ -593,6 +593,16 @@ average across antennas), but SNR remains zero-only in the Linux receiver
 reports, so this is close-range IQK correctness evidence rather than distance
 acceptance.
 
+The paired current-default comparator at
+`/tmp/wfb-rfq-current-default-2000-20260504-153545/rf-quality-report.json`
+used the same local 6 ft production flow without runtime IQK. It recovered
+`2000/2000` marked payloads, logged zero decrypt failures, and stayed within
+the Linux-baseline margin with a `-0.05` percentage point loss delta against
+the baseline's `1999/2000` recovery. That A/B keeps runtime IQK classified as a
+safe and corrected experimental profile, not a close-range improvement over
+captured/default calibration yet. The value of IQK still needs to be measured
+under controlled distance, attenuation, or poorer-SNR geometry.
+
 Follow-up TXAGC correction: May 4 local production A/B shows the
 EFUSE-derived TX power override still needs receiver-gated soak evidence. With
 `TX_POWER_MODE=efuse-derived`, `/tmp/wfb-radio-run-duplex-default-hardened-20260504-145458`
