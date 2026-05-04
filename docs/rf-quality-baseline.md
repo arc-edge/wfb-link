@@ -109,11 +109,12 @@ The Mac ready marker is written after adapter init and calibration setup,
 immediately before the receive loop. The default Mac command remains
 `bridge-tx-listen`, and `MAC_RADIO_COMMAND=radio-run` can now opt into the
 production command path while preserving the same ready-marker wait and
-datagram evidence flow. Because runtime-owned TX-power control is not ported
-yet, `radio-run` automation uses `TX_POWER_MODE=current-default`; EFUSE-derived
-TXAGC gates still use `bridge-tx-listen`. The runner waits up to
-`BRIDGE_READY_WAIT_SECONDS` for that marker before starting Linux traffic,
-which avoids classifying startup races as RF loss.
+datagram evidence flow. `radio-run` now carries RF-quality TX-power arguments
+through the production adapter, so `TX_POWER_MODE=efuse-derived` uses
+runtime-owned EFUSE TXAGC planning and live register writes for the production
+command path. The runner waits up to `BRIDGE_READY_WAIT_SECONDS` for that
+marker before starting Linux traffic, which avoids classifying startup races as
+RF loss.
 The Linux peer also writes `${REMOTE_PREFIX}-channel-state.json` after the
 controlled channel-set step. It records whether `iw` and sudo were available,
 the requested channel/bandwidth, the observed `iw dev IFACE info` channel and
@@ -439,6 +440,18 @@ One earlier current-default run
 with decrypt failures after missing the WFB session; the immediate short control
 and full rerun recovered normally, so keep session/decrypt fields in the gate
 instead of treating that artifact as RF loss.
+
+After TX-power planning/execution moved into `wfb-radio-runtime`, a short
+production-command smoke verified that `radio-run` carries
+`TX_POWER_MODE=efuse-derived` through the same RF-quality harness:
+`/tmp/wfb-rfq-radio-run-efuse-smoke-b1/rf-quality-report.json` recovered
+`80/80` measured payloads, submitted `149/150` total WFB datagrams including
+warmup within the short-run tolerance, reported zero decrypt failures, verified
+channel 36 / 20 MHz, and emitted production `tx_power_control` evidence for 22
+runtime-owned EFUSE-derived TXAGC writes across paths A/B. The run is not a
+replacement for the 2000-payload non-regression gate; its comparison is
+intentionally invalid because the payload count differs from the baseline
+fixture.
 
 After moving LCK execution into `wfb-radio-runtime`,
 `/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json` reran the LCK

@@ -125,7 +125,6 @@ RADIO_PORT=${RADIO_PORT:-0}
 RADIO_PORT_HEX=${RADIO_PORT_HEX:-0x00}
 TX_RATE=${TX_RATE:-mcs1}
 TX_PROFILE=${TX_PROFILE:-linux-monitor}
-TX_POWER_MODE_WAS_SET=${TX_POWER_MODE+x}
 TX_POWER_MODE=${TX_POWER_MODE:-efuse-derived}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
@@ -155,12 +154,6 @@ BRIDGE_IDLE_TIMEOUT_MS=${BRIDGE_IDLE_TIMEOUT_MS:-60000}
 BRIDGE_WAIT_SECONDS=${BRIDGE_WAIT_SECONDS:-140}
 MAC_RADIO_COMMAND=${MAC_RADIO_COMMAND:-bridge-tx-listen}
 RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-$((BRIDGE_WAIT_SECONDS * 1000))}
-if [[ "$MAC_RADIO_COMMAND" == "radio-run" && -z "$TX_POWER_MODE_WAS_SET" ]]; then
-  TX_POWER_MODE=current-default
-fi
-if [[ "$MAC_RADIO_COMMAND" == "radio-run" && "$TX_POWER_MODE" != "current-default" ]]; then
-  die "MAC_RADIO_COMMAND=radio-run does not apply diagnostic TX power control yet; set TX_POWER_MODE=current-default or use bridge-tx-listen"
-fi
 
 IFACE=${IFACE:-wfb0}
 WFB_SERVICE=${WFB_SERVICE:-arc-wfb-link-1}
@@ -459,6 +452,16 @@ case "$TX_CALIBRATION_PROFILE" in
     write_auth_arg=--i-understand-this-writes-registers
     ;;
 esac
+tx_power_args=()
+if [[ "$TX_POWER_MODE" != "current-default" ]]; then
+  tx_power_args+=(--tx-power-mode "$TX_POWER_MODE")
+  if [[ "$TX_POWER_MODE" == "efuse-derived" ]]; then
+    tx_power_args+=(
+      --tx-power-efuse-report "$EFUSE_REPORT"
+      --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE"
+    )
+  fi
+fi
 case "$MAC_RADIO_COMMAND" in
   bridge-tx-listen)
     nohup cargo run -p wfb-radio-diag -- --json \
@@ -473,9 +476,7 @@ case "$MAC_RADIO_COMMAND" in
       --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
       --max-datagrams "$MAX_DATAGRAMS" \
       --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
-      --tx-power-mode "$TX_POWER_MODE" \
-      --tx-power-efuse-report "$EFUSE_REPORT" \
-      --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE" \
+      "${tx_power_args[@]}" \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
@@ -493,6 +494,7 @@ case "$MAC_RADIO_COMMAND" in
       --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
       --max-datagrams "$MAX_DATAGRAMS" \
       --duration-ms "$RADIO_RUN_DURATION_MS" \
+      "${tx_power_args[@]}" \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \

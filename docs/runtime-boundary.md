@@ -21,6 +21,9 @@
 - Runtime-owned TX calibration profile execution for production-relevant
   targeted parity, LCK, and guarded runtime IQK profiles. Diagnostic code still
   adapts the report and owns the read-only IQK probe marker.
+- Runtime-owned RTL8812AU TX-power helpers for manual TXAGC programming and
+  guarded EFUSE-derived per-rate TXAGC planning/execution. Diagnostic code
+  still owns CLI parsing and EFUSE report/logical-map file loading.
 - Runtime-owned RTL8812AU IQK setup-plan generation and live application,
   backup/restore execution, candidate selection, one-shot stage outcome state,
   TX/RX one-shot execution, live IQC fill application, sweep summaries,
@@ -65,8 +68,8 @@
 `wfb-radio-diag radio-run` is the first production cutover entry point. It
 accepts the operational full-flow settings only: adapter selection, channel,
 bandwidth, firmware path, TX UDP bind addresses, optional WFB RX forwarding,
-runtime bounds, calibration profile, macOS USBHost backend settings, and the
-explicit TX/register-write acknowledgements.
+runtime bounds, TX-power mode/source, calibration profile, macOS USBHost
+backend settings, and the explicit TX/register-write acknowledgements.
 
 `radio-run` always maps into `wfb-radio-runtime::ProductionRuntimeFlowConfig`
 and validates that config before USB open. The command does not expose
@@ -80,9 +83,9 @@ loop. Its emitted JSON is `ProductionRuntimeFlowReport` from
 
 The active cutover has moved production WFB loop planning, TX ingress socket
 threads, bridge-loop scheduling, queued TX datagram handling, parsed RX packet
-accounting, and WFB RX forwarding into runtime ownership. PCAP/JSONL output and
-diagnostic report mutation still live in the diagnostic adapter while the
-boundary shifts.
+accounting, WFB RX forwarding, and TX-power register programming into runtime
+ownership. PCAP/JSONL output, EFUSE source file loading, and diagnostic report
+mutation still live in the diagnostic adapter while the boundary shifts.
 
 RF-quality automation can now opt into `MAC_RADIO_COMMAND=radio-run` so the
 receiver-backed close-range harness can exercise the production command path.
@@ -94,8 +97,8 @@ receiver-backed calibration evidence.
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
 - TX calibration CLI authorization, the read-only IQK probe marker, diagnostic
   evidence formatting, and RF-quality automation while parity is still being
-  hardened. Targeted parity, LCK execution, and runtime IQK execution now live
-  behind a runtime-owned calibration profile API.
+  hardened. Targeted parity, LCK execution, runtime IQK execution, and TX-power
+  register execution now live behind runtime-owned APIs.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -266,3 +269,16 @@ It did prove the production command path against the Linux peer: `radio-run`
 submitted `149/150` total WFB datagrams including warmup, Linux recovered
 `80/80` measured payloads, decrypt errors were zero, peer isolation was clean,
 and channel 36 / 20 MHz was verified.
+
+After moving TX-power execution into `wfb-radio-runtime`, the production
+RF-quality path was rerun with `MAC_RADIO_COMMAND=radio-run` and
+`TX_POWER_MODE=efuse-derived` at
+`/tmp/wfb-rfq-radio-run-efuse-smoke-b1/rf-quality-report.json`. It remained a
+short smoke, so the 2000-payload Linux-baseline comparison is intentionally
+invalid, but the flow passed: Linux recovered `80/80` measured payloads,
+`radio-run` submitted `149/150` total WFB datagrams including warmup within the
+short-run tolerance, decrypt errors were zero, peer isolation was clean, and
+channel 36 / 20 MHz was verified. The production report now includes
+`tx_power_control` evidence for the runtime-owned EFUSE plan: 22 TXAGC writes,
+programmed paths A/B, selected path `both`, and the `linux_ch36_ht20` safety
+profile.

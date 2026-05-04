@@ -13,7 +13,7 @@ The system SHALL provide a single operator-facing command that orchestrates the 
 
 #### Scenario: Production radio command is selected
 - **WHEN** the operator selects the production `radio-run` Mac command for an automated close-range run
-- **THEN** the command MUST start `radio-run` with runtime WFB TX ingress settings, wait for the same ready marker before Linux traffic, and generate datagram evidence from the production report's nested TX counters
+- **THEN** the command MUST start `radio-run` with runtime WFB TX ingress settings and the selected TX-power mode/source, wait for the same ready marker before Linux traffic, and generate datagram evidence from the production report's nested TX counters
 
 #### Scenario: Close-range automation run rejects missing settings
 - **WHEN** required host, repository, firmware, key, or network settings are missing

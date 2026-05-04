@@ -15,6 +15,17 @@ The system SHALL expose calibration profile policy from a reusable runtime libra
 - **WHEN** a caller selects the runtime RTL8812A IQK profile
 - **THEN** the runtime library marks the profile as requiring live register write authorization
 
+### Requirement: Runtime TX Power Control
+The runtime library SHALL provide RTL8812AU TX-power planning and register execution for production callers.
+
+#### Scenario: EFUSE-derived TX power planned
+- **WHEN** a caller supplies the decoded RTL8812AU EFUSE TX-power region, channel, bandwidth, RF path set, and safety profile
+- **THEN** the runtime library computes the guarded per-rate TXAGC writes without depending on diagnostic report types
+
+#### Scenario: TX power writes executed
+- **WHEN** a caller applies manual or EFUSE-derived TX power through a live RTL8812AU register transport
+- **THEN** the runtime library writes the selected TXAGC registers and returns report-neutral register write evidence and counter deltas
+
 ### Requirement: Diagnostic Commands Use Runtime Policy
 Diagnostic commands SHALL call the runtime library for stable calibration policy while retaining diagnostic-only CLI parsing and hardware execution code.
 

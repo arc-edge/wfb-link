@@ -34,6 +34,16 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
 
+mod tx_power;
+pub use tx_power::{
+    plan_rtl8812au_efuse_tx_power, rtl8812au_tx_power_agc_registers, rtl8812au_tx_power_agc_value,
+    run_rtl8812au_efuse_tx_power, run_rtl8812au_manual_tx_power, Rtl8812auTxPowerAgcRegister,
+    Rtl8812auTxPowerChannelGroupReport, Rtl8812auTxPowerControlMode, Rtl8812auTxPowerControlReport,
+    Rtl8812auTxPowerDerivedLaneReport, Rtl8812auTxPowerDerivedWriteReport,
+    Rtl8812auTxPowerEfusePlanReport, Rtl8812auTxPowerEfuseSourceReport,
+    Rtl8812auTxPowerSafetyProfile,
+};
+
 pub const PRODUCTION_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 pub const PRODUCTION_TX_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -1532,6 +1542,7 @@ pub struct ProductionRuntimeFlowReport {
     pub calibration_profile: TxCalibrationProfile,
     pub calibration_class: TxCalibrationClass,
     pub calibration_evidence_source: RuntimeTxCalibrationEvidenceSource,
+    pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
@@ -1566,6 +1577,7 @@ impl ProductionRuntimeFlowReport {
             calibration_profile: config.calibration_profile,
             calibration_class,
             calibration_evidence_source,
+            tx_power_control: None,
             tx_calibration_profile: None,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init: ProductionRuntimeInitTelemetry::default(),
@@ -2262,6 +2274,18 @@ const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
 const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
 const REG_IQK_TX_POWER_CTRL_A_C94: u16 = 0x0c94;
 const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
+const REG_TX_AGC_A_CCK_JAGUAR: u16 = 0x0c20;
+const REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR: u16 = 0x0c24;
+const REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR: u16 = 0x0c28;
+const REG_TX_AGC_A_MCS3_MCS0_JAGUAR: u16 = 0x0c2c;
+const REG_TX_AGC_A_MCS7_MCS4_JAGUAR: u16 = 0x0c30;
+const REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0c34;
+const REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0c38;
+const REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR: u16 = 0x0c3c;
+const REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0c40;
+const REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0c44;
+const REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0c48;
+const REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0c4c;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
 const REG_RFE_INV_A_JAGUAR: u16 = 0x0cb4;
 const REG_RFE_TIMING_A_JAGUAR: u16 = 0x0cb8;
@@ -2286,6 +2310,18 @@ const REG_RX_IQK_TONE_B_JAGUAR: u16 = 0x0e54;
 const REG_TX_IQK_PI_B_JAGUAR: u16 = 0x0e58;
 const REG_RX_IQK_PI_B_JAGUAR: u16 = REG_IQK_AFE_B_E5C;
 const REG_IQK_AGC_CONT_JAGUAR: u16 = REG_IQK_AFE_B_E60;
+const REG_TX_AGC_B_CCK_JAGUAR: u16 = 0x0e20;
+const REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR: u16 = 0x0e24;
+const REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR: u16 = 0x0e28;
+const REG_TX_AGC_B_MCS3_MCS0_JAGUAR: u16 = 0x0e2c;
+const REG_TX_AGC_B_MCS7_MCS4_JAGUAR: u16 = 0x0e30;
+const REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0e34;
+const REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0e38;
+const REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR: u16 = 0x0e3c;
+const REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0e40;
+const REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0e44;
+const REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0e48;
+const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
 const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
 const REG_IQK_AFE_B_E60: u16 = 0x0e60;
 const REG_IQK_AFE_B_E64: u16 = 0x0e64;
@@ -2323,6 +2359,9 @@ const REG_USB_HRPWM: u16 = 0xfe58;
 
 const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
 const RTL8812AU_EFUSE_LOGICAL_MAP_LEN: usize = 512;
+pub const RTL8812AU_EFUSE_TX_POWER_START: usize = 0x10;
+pub const RTL8812AU_EFUSE_TX_POWER_LEN: usize = 84;
+pub const RTL8812AU_TX_POWER_INDEX_MAX: u8 = 0x3f;
 const RTL8812AU_EFUSE_MAX_SECTION: u8 = 64;
 const RTL8812AU_EFUSE_MAC_OFFSET: usize = 0x0d7;
 const EFUSE_ACCESS_ON_JAGUAR: u8 = 0x69;
@@ -7521,6 +7560,221 @@ mod tests {
         assert_eq!(counters.usb_control_writes, 6);
     }
 
+    fn decode_hex_fixture(input: &str) -> Vec<u8> {
+        let hex: Vec<u8> = input
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        assert_eq!(hex.len() % 2, 0, "fixture hex must have byte pairs");
+        hex.chunks(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).expect("high hex nibble");
+                let low = (pair[1] as char).to_digit(16).expect("low hex nibble");
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
+    fn awus036ach_ch36_tx_power_fixture() -> Vec<u8> {
+        decode_hex_fixture(include_str!(
+            "../../../fixtures/rf-quality/awus036ach-ch36-efuse-tx-power.hex"
+        ))
+    }
+
+    fn tx_power_plan_value(plan: &super::Rtl8812auTxPowerEfusePlanReport, address: u16) -> u32 {
+        plan.writes
+            .iter()
+            .find(|write| write.address == address)
+            .map(|write| write.value)
+            .unwrap_or_else(|| panic!("missing TXAGC plan write for 0x{address:04x}"))
+    }
+
+    fn tx_power_plan_lane(
+        plan: &super::Rtl8812auTxPowerEfusePlanReport,
+        address: u16,
+        lane: u8,
+    ) -> &super::Rtl8812auTxPowerDerivedLaneReport {
+        plan.writes
+            .iter()
+            .find(|write| write.address == address)
+            .and_then(|write| write.lanes.iter().find(|entry| entry.lane == lane))
+            .unwrap_or_else(|| panic!("missing TXAGC lane {lane} for 0x{address:04x}"))
+    }
+
+    #[test]
+    fn rtl8812au_tx_power_agc_registers_select_path_sets() {
+        let path_a = super::rtl8812au_tx_power_agc_registers(super::Rtl8812auRfPath::A);
+        let path_b = super::rtl8812au_tx_power_agc_registers(super::Rtl8812auRfPath::B);
+        let both = super::rtl8812au_tx_power_agc_registers(super::Rtl8812auRfPath::Both);
+
+        assert_eq!(super::rtl8812au_tx_power_agc_value(0x1a), 0x1a1a_1a1a);
+        assert_eq!(path_a.len(), 12);
+        assert_eq!(path_b.len(), 12);
+        assert_eq!(both.len(), 24);
+        assert!(path_a.contains(&("rA_TxAGC_CCK", super::REG_TX_AGC_A_CCK_JAGUAR)));
+        assert!(path_b.contains(&("rB_TxAGC_CCK", super::REG_TX_AGC_B_CCK_JAGUAR)));
+        assert!(both.contains(&(
+            "rA_TxAGC_OFDM18_OFDM6",
+            super::REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR
+        )));
+        assert!(both.contains(&(
+            "rB_TxAGC_OFDM18_OFDM6",
+            super::REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR
+        )));
+    }
+
+    #[test]
+    fn rtl8812au_efuse_tx_power_plan_matches_linux_ch36_ht20_txagc() {
+        let plan = super::plan_rtl8812au_efuse_tx_power(
+            &awus036ach_ch36_tx_power_fixture(),
+            Channel::from_number(36).expect("channel 36"),
+            Bandwidth::Mhz20,
+            super::Rtl8812auRfPath::Both,
+            super::Rtl8812auTxPowerSafetyProfile::LinuxCh36Ht20,
+            super::RTL8812AU_TX_POWER_INDEX_MAX,
+        )
+        .expect("TX power plan");
+
+        assert_eq!(plan.channel_group.group, 0);
+        assert_eq!(
+            plan.programmed_paths,
+            vec![super::Rtl8812auRfPath::A, super::Rtl8812auRfPath::B]
+        );
+        assert_eq!(plan.writes.len(), 22);
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR),
+            0x1b1b_1b1b
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR),
+            0x1b1b_1b1b
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_MCS3_MCS0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_MCS7_MCS4_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR),
+            0x1717_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR),
+            0x1515_1717
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR),
+            0x1515_1515
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR),
+            0x1d1d_1d1d
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR),
+            0x1d1d_1d1d
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_MCS3_MCS0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_MCS7_MCS4_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR),
+            0x1c1c_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR),
+            0x1a1a_1c1c
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR),
+            0x1a1a_1a1a
+        );
+        assert_eq!(
+            tx_power_plan_value(&plan, super::REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR),
+            0x1a1a_1a1a
+        );
+
+        let lane = tx_power_plan_lane(&plan, super::REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR, 0);
+        assert_eq!(lane.efuse_base_value, 0x29);
+        assert_eq!(lane.efuse_diff_value, -2);
+        assert_eq!(lane.by_rate_offset, 14);
+        assert_eq!(lane.unclamped_index, 0x35);
+        assert_eq!(lane.clamp_max_index, 0x1b);
+        assert_eq!(lane.final_index, 0x1b);
+        assert!(lane.clamped);
+    }
+
+    #[test]
+    fn rtl8812au_efuse_tx_power_plan_rejects_2ghz_until_ported() {
+        let error = super::plan_rtl8812au_efuse_tx_power(
+            &awus036ach_ch36_tx_power_fixture(),
+            Channel::from_number(6).expect("channel 6"),
+            Bandwidth::Mhz20,
+            super::Rtl8812auRfPath::Both,
+            super::Rtl8812auTxPowerSafetyProfile::LinuxCh36Ht20,
+            super::RTL8812AU_TX_POWER_INDEX_MAX,
+        )
+        .expect_err("2 GHz unsupported");
+        assert_eq!(error.code, "tx_power_efuse_band_unsupported");
+    }
+
+    #[test]
+    fn rtl8812au_tx_power_execution_writes_runtime_reports() {
+        let transport = MockTransport::default();
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let writes = super::run_rtl8812au_manual_tx_power(
+            &registers,
+            &mut counters,
+            super::Rtl8812auRfPath::A,
+            0x1a,
+        )
+        .expect("manual TX power writes");
+
+        assert_eq!(writes.len(), 12);
+        assert_eq!(writes[0].register_name, "rA_TxAGC_CCK");
+        assert_eq!(writes[0].written, 0x1a1a_1a1a);
+        assert_eq!(counters.usb_control_reads, 24);
+        assert_eq!(counters.usb_control_writes, 12);
+    }
+
     #[test]
     fn rtl8812au_runtime_iqk_tx_fill_iqc_plan_matches_upstream_masks() {
         let plan =
@@ -8949,6 +9203,7 @@ mod tests {
             calibration_evidence_source: config
                 .calibration_profile
                 .evidence_source(config.captured_tail_applied),
+            tx_power_control: None,
             tx_calibration_profile: None,
             receiver_backed_validation_required: false,
             init: Default::default(),

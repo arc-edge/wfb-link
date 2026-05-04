@@ -35,10 +35,11 @@ handling.
 
 #### Scenario: Production flow starts
 - **WHEN** a caller starts the production runtime flow with a supported adapter
-  selector, channel, bandwidth, WFB UDP settings, calibration profile, and
-  required authorization
+  selector, channel, bandwidth, WFB UDP settings, TX-power policy,
+  calibration profile, and required authorization
 - **THEN** the command opens the adapter through runtime open policy,
-  initializes it through runtime same-session init, and performs RX/TX through
+  initializes it through runtime same-session init, applies runtime-owned
+  TX-power register programming when requested, and performs RX/TX through
   `RuntimeRadioSession`
 
 #### Scenario: Production flow starts TX ingress
@@ -65,8 +66,8 @@ handling.
 - **WHEN** the production runtime flow is built
 - **THEN** it MUST NOT depend on diagnostic command argument structs or
   diagnostic report structs for radio initialization, RX/TX loop planning, TX
-  ingress setup, loop scheduling, TX datagram handling, RX packet handling, or
-  emitted production reports
+  ingress setup, loop scheduling, TX-power register programming, TX datagram
+  handling, RX packet handling, or emitted production reports
 
 #### Scenario: Production flow rejects diagnostic register experiments
 - **WHEN** a caller starts `runtime-flow` or `radio-run` with diagnostic-only

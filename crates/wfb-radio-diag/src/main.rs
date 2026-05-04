@@ -35,10 +35,11 @@ use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
     create_production_rx_forward_runtimes, handle_production_bridge_tx_datagram,
-    process_production_rx_packet_outcomes, production_rx_forward_snapshots,
-    run_production_bridge_loop, run_rtl8812au_tx_calibration_profile,
-    spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
-    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    plan_rtl8812au_efuse_tx_power, process_production_rx_packet_outcomes,
+    production_rx_forward_snapshots, rtl8812au_tx_power_agc_value, run_production_bridge_loop,
+    run_rtl8812au_efuse_tx_power, run_rtl8812au_manual_tx_power,
+    run_rtl8812au_tx_calibration_profile, spawn_production_tx_ingress_receivers,
+    MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
@@ -50,7 +51,9 @@ use wfb_radio_runtime::{
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
     Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport, Rtl8812auRuntimeIqkMaskedBbWritePlan,
-    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auTxCalibrationProfileReport, RuntimeFlowRxTelemetry,
+    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auTxCalibrationProfileReport,
+    Rtl8812auTxPowerControlMode, Rtl8812auTxPowerControlReport, Rtl8812auTxPowerEfusePlanReport,
+    Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile, RuntimeFlowRxTelemetry,
     RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
     RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
     RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
@@ -62,7 +65,8 @@ use wfb_radio_runtime::{
 };
 #[cfg(test)]
 use wfb_radio_runtime::{
-    Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkStageReport,
+    rtl8812au_tx_power_agc_registers, Rtl8812auRuntimeIqkAttemptReport,
+    Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkStageReport,
 };
 
 #[derive(Debug, Parser)]
@@ -1626,6 +1630,9 @@ struct RadioRunArgs {
 
     #[command(flatten)]
     macos_usbhost: MacosUsbHostArgs,
+
+    #[command(flatten)]
+    tx_power: TxPowerControlArgs,
 
     #[command(flatten)]
     tx_calibration: TxCalibrationProfileArgs,
@@ -3588,6 +3595,7 @@ struct RuntimeFlowReport {
     calibration_profile: TxCalibrationProfileArg,
     calibration_class: RuntimeTxCalibrationClass,
     calibration_evidence_source: &'static str,
+    tx_power_control: Option<TxPowerControlReport>,
     tx_calibration_profile: Option<TxCalibrationProfileReport>,
     receiver_backed_validation_required: bool,
     init_readiness: &'static str,
@@ -3757,8 +3765,8 @@ struct TxPowerControlReport {
     repeated_value: Option<u32>,
     repeated_value_hex: Option<String>,
     efuse_source: Option<TxPowerEfuseSourceReport>,
-    efuse_plan: Option<TxPowerEfusePlanReport>,
-    writes: Vec<BridgeTxBenchRegisterClearReport>,
+    efuse_plan: Option<Rtl8812auTxPowerEfusePlanReport>,
+    writes: Vec<Rtl8812auRegisterWriteReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3856,6 +3864,7 @@ struct TxPowerEfuseSourceReport {
     non_ff_bytes: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct TxPowerEfusePlanReport {
     algorithm: &'static str,
@@ -3871,6 +3880,7 @@ struct TxPowerEfusePlanReport {
     writes: Vec<TxPowerDerivedWriteReport>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct TxPowerChannelGroupReport {
     band: &'static str,
@@ -3878,6 +3888,7 @@ struct TxPowerChannelGroupReport {
     group_name: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum TxPowerRfPath {
@@ -3885,6 +3896,7 @@ enum TxPowerRfPath {
     B,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct TxPowerDerivedWriteReport {
     name: &'static str,
@@ -3896,6 +3908,7 @@ struct TxPowerDerivedWriteReport {
     lanes: Vec<TxPowerDerivedLaneReport>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 struct TxPowerDerivedLaneReport {
     lane: u8,
@@ -14592,64 +14605,13 @@ where
     )
 }
 
-type TxPowerAgcRegister = (&'static str, u16);
-
-const TX_POWER_AGC_PATH_A_REGISTERS: &[TxPowerAgcRegister] = &[
-    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR),
-    ("rA_TxAGC_OFDM18_OFDM6", REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR),
-    ("rA_TxAGC_OFDM54_OFDM24", REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR),
-    ("rA_TxAGC_MCS3_MCS0", REG_TX_AGC_A_MCS3_MCS0_JAGUAR),
-    ("rA_TxAGC_MCS7_MCS4", REG_TX_AGC_A_MCS7_MCS4_JAGUAR),
-    ("rA_TxAGC_NSS1_7_NSS1_4", REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR),
-    (
-        "rA_TxAGC_NSS1_11_NSS1_8",
-        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
-    ),
-    ("rA_TxAGC_NSS1_3_NSS1_0", REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR),
-    ("rA_TxAGC_NSS2_3_NSS2_0", REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR),
-    ("rA_TxAGC_NSS2_7_NSS2_4", REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR),
-    (
-        "rA_TxAGC_NSS2_11_NSS2_8",
-        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
-    ),
-    ("rA_TxAGC_NSS3_3_NSS3_0", REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR),
-];
-
-const TX_POWER_AGC_PATH_B_REGISTERS: &[TxPowerAgcRegister] = &[
-    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR),
-    ("rB_TxAGC_OFDM18_OFDM6", REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR),
-    ("rB_TxAGC_OFDM54_OFDM24", REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR),
-    ("rB_TxAGC_MCS3_MCS0", REG_TX_AGC_B_MCS3_MCS0_JAGUAR),
-    ("rB_TxAGC_MCS7_MCS4", REG_TX_AGC_B_MCS7_MCS4_JAGUAR),
-    ("rB_TxAGC_NSS1_7_NSS1_4", REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR),
-    (
-        "rB_TxAGC_NSS1_11_NSS1_8",
-        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
-    ),
-    ("rB_TxAGC_NSS1_3_NSS1_0", REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR),
-    ("rB_TxAGC_NSS2_3_NSS2_0", REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR),
-    ("rB_TxAGC_NSS2_7_NSS2_4", REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR),
-    (
-        "rB_TxAGC_NSS2_11_NSS2_8",
-        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
-    ),
-    ("rB_TxAGC_NSS3_3_NSS3_0", REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR),
-];
-
 fn tx_power_agc_value(index: u8) -> u32 {
-    u32::from(index) * 0x0101_0101
+    rtl8812au_tx_power_agc_value(index)
 }
 
-fn tx_power_agc_registers(path: TxPowerPathArg) -> Vec<TxPowerAgcRegister> {
-    match path {
-        TxPowerPathArg::A => TX_POWER_AGC_PATH_A_REGISTERS.to_vec(),
-        TxPowerPathArg::B => TX_POWER_AGC_PATH_B_REGISTERS.to_vec(),
-        TxPowerPathArg::Both => TX_POWER_AGC_PATH_A_REGISTERS
-            .iter()
-            .chain(TX_POWER_AGC_PATH_B_REGISTERS.iter())
-            .copied()
-            .collect(),
-    }
+#[cfg(test)]
+fn tx_power_agc_registers(path: TxPowerPathArg) -> Vec<(&'static str, u16)> {
+    rtl8812au_tx_power_agc_registers(runtime_tx_power_path(path))
 }
 
 #[derive(Debug)]
@@ -14658,6 +14620,7 @@ struct TxPowerEfuseSource {
     tx_power_data: Vec<u8>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum TxPowerRateFamily {
     Ofdm,
@@ -14665,6 +14628,7 @@ enum TxPowerRateFamily {
     Vht,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct TxPowerRateLaneSpec {
     lane: u8,
@@ -14675,6 +14639,7 @@ struct TxPowerRateLaneSpec {
     by_rate_offset: i8,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct TxPowerEfuseRegisterSpec {
     name: &'static str,
@@ -14683,6 +14648,7 @@ struct TxPowerEfuseRegisterSpec {
     lanes: Vec<TxPowerRateLaneSpec>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct TxPowerEfuseDiff {
     kind: &'static str,
@@ -14691,6 +14657,7 @@ struct TxPowerEfuseDiff {
     value: i8,
 }
 
+#[cfg(test)]
 fn tx_power_lanes(
     entries: &[(u8, &'static str, &'static str, TxPowerRateFamily, u8, i8)],
 ) -> Vec<TxPowerRateLaneSpec> {
@@ -14709,6 +14676,7 @@ fn tx_power_lanes(
         .collect()
 }
 
+#[cfg(test)]
 fn tx_power_efuse_register_specs(path: TxPowerPathArg) -> Vec<TxPowerEfuseRegisterSpec> {
     let mut specs = Vec::new();
     if matches!(path, TxPowerPathArg::A | TxPowerPathArg::Both) {
@@ -14720,6 +14688,7 @@ fn tx_power_efuse_register_specs(path: TxPowerPathArg) -> Vec<TxPowerEfuseRegist
     specs
 }
 
+#[cfg(test)]
 fn tx_power_efuse_path_register_specs(path: TxPowerRfPath) -> Vec<TxPowerEfuseRegisterSpec> {
     let (
         ofdm_low,
@@ -14923,6 +14892,23 @@ fn tx_power_control_requested(args: &TxPowerControlArgs) -> bool {
     args.tx_power_index.is_some() || args.tx_power_mode.is_some()
 }
 
+fn runtime_tx_power_path(path: TxPowerPathArg) -> Rtl8812auRfPath {
+    match path {
+        TxPowerPathArg::A => Rtl8812auRfPath::A,
+        TxPowerPathArg::B => Rtl8812auRfPath::B,
+        TxPowerPathArg::Both => Rtl8812auRfPath::Both,
+    }
+}
+
+fn runtime_tx_power_safety_profile(
+    profile: TxPowerSafetyProfileArg,
+) -> Rtl8812auTxPowerSafetyProfile {
+    match profile {
+        TxPowerSafetyProfileArg::MaxIndex => Rtl8812auTxPowerSafetyProfile::MaxIndex,
+        TxPowerSafetyProfileArg::LinuxCh36Ht20 => Rtl8812auTxPowerSafetyProfile::LinuxCh36Ht20,
+    }
+}
+
 fn resolve_tx_power_control_mode(
     args: &TxPowerControlArgs,
 ) -> std::result::Result<Option<TxPowerControlModeArg>, DiagnosticErrorReport> {
@@ -15038,6 +15024,7 @@ fn load_tx_power_efuse_source(
     }
 }
 
+#[cfg(test)]
 fn tx_power_5g_channel_group(channel: u8) -> Option<u8> {
     match channel {
         15..=42 => Some(0),
@@ -15058,6 +15045,7 @@ fn tx_power_5g_channel_group(channel: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
 fn tx_power_5g_path_offset(path: TxPowerRfPath) -> usize {
     match path {
         TxPowerRfPath::A => 18,
@@ -15065,6 +15053,7 @@ fn tx_power_5g_path_offset(path: TxPowerRfPath) -> usize {
     }
 }
 
+#[cfg(test)]
 fn tx_power_sign_extend_4bit(value: u8) -> i8 {
     let nibble = value & 0x0f;
     if nibble & 0x08 != 0 {
@@ -15074,6 +15063,7 @@ fn tx_power_sign_extend_4bit(value: u8) -> i8 {
     }
 }
 
+#[cfg(test)]
 fn tx_power_diff_from_byte(
     data: &[u8],
     offset: usize,
@@ -15095,6 +15085,7 @@ fn tx_power_diff_from_byte(
     })
 }
 
+#[cfg(test)]
 fn tx_power_efuse_5g_diff(
     data: &[u8],
     path: TxPowerRfPath,
@@ -15156,6 +15147,7 @@ fn tx_power_efuse_5g_diff(
     }
 }
 
+#[cfg(test)]
 fn tx_power_safety_clamp(
     profile: TxPowerSafetyProfileArg,
     max_index: u8,
@@ -15184,6 +15176,7 @@ fn tx_power_safety_clamp(
     profile_max.min(max_index)
 }
 
+#[cfg(test)]
 fn plan_efuse_tx_power(
     tx_power_data: &[u8],
     channel: Channel,
@@ -15328,12 +15321,15 @@ where
                 });
             };
             let value = tx_power_agc_value(index);
-            let mut writes = Vec::new();
-            for (name, address) in tx_power_agc_registers(args.tx_power_path) {
-                writes.push(bridge_tx_bench_write32_register(
-                    registers, name, address, value, counters,
-                )?);
-            }
+            let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+            let writes = run_rtl8812au_manual_tx_power(
+                registers,
+                &mut runtime_counters,
+                runtime_tx_power_path(args.tx_power_path),
+                index,
+            )
+            .map_err(runtime_radio_error)?;
+            *counters = diagnostic_counters_from_runtime(runtime_counters);
 
             Ok(Some(TxPowerControlReport {
                 semantics: "explicit diagnostic TXAGC manual override; writes the selected index to every byte lane of each selected per-rate TX power register after init and before TX",
@@ -15351,24 +15347,19 @@ where
         }
         TxPowerControlModeArg::EfuseDerived => {
             let source = load_tx_power_efuse_source(args)?;
-            let plan = plan_efuse_tx_power(
+            let plan = plan_rtl8812au_efuse_tx_power(
                 &source.tx_power_data,
                 channel,
                 bandwidth,
-                args.tx_power_path,
-                args.tx_power_safety_profile,
+                runtime_tx_power_path(args.tx_power_path),
+                runtime_tx_power_safety_profile(args.tx_power_safety_profile),
                 args.tx_power_max_index,
-            )?;
-            let mut writes = Vec::new();
-            for write in &plan.writes {
-                writes.push(bridge_tx_bench_write32_register(
-                    registers,
-                    write.name,
-                    write.address,
-                    write.value,
-                    counters,
-                )?);
-            }
+            )
+            .map_err(runtime_radio_error)?;
+            let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+            let writes = run_rtl8812au_efuse_tx_power(registers, &mut runtime_counters, &plan)
+                .map_err(runtime_radio_error)?;
+            *counters = diagnostic_counters_from_runtime(runtime_counters);
             Ok(Some(TxPowerControlReport {
                 semantics: "explicit guarded EFUSE-derived TXAGC programming; computes per-path/per-rate indexes from the EFUSE TX-power region, default PHY_REG_PG by-rate offsets, and the selected safety clamp",
                 mode,
@@ -23394,7 +23385,7 @@ fn radio_run_bridge_args(
             type_apa: 0x0000,
             crystal_cap: 0x20,
             rfe_type: DEFAULT_RFE_TYPE,
-            tx_power: TxPowerControlArgs::default(),
+            tx_power: args.tx_power.clone(),
             tx_calibration: args.tx_calibration.clone(),
             clear_txdma_status_before_tx: false,
             txdma_status_clear_value: 0,
@@ -23462,6 +23453,46 @@ fn tx_calibration_profile_report_into_runtime(
     }
 }
 
+fn tx_power_control_mode_into_runtime(mode: TxPowerControlModeArg) -> Rtl8812auTxPowerControlMode {
+    match mode {
+        TxPowerControlModeArg::ManualIndex => Rtl8812auTxPowerControlMode::ManualIndex,
+        TxPowerControlModeArg::EfuseDerived => Rtl8812auTxPowerControlMode::EfuseDerived,
+    }
+}
+
+fn tx_power_efuse_source_report_into_runtime(
+    report: TxPowerEfuseSourceReport,
+) -> Rtl8812auTxPowerEfuseSourceReport {
+    Rtl8812auTxPowerEfuseSourceReport {
+        source_kind: report.source_kind,
+        source_path: report.source_path,
+        tx_power_start_offset: report.tx_power_start_offset,
+        tx_power_length: report.tx_power_length,
+        tx_power_data_hex: report.tx_power_data_hex,
+        non_ff_bytes: report.non_ff_bytes,
+    }
+}
+
+fn tx_power_control_report_into_runtime(
+    report: TxPowerControlReport,
+) -> Rtl8812auTxPowerControlReport {
+    Rtl8812auTxPowerControlReport {
+        semantics: report.semantics,
+        mode: tx_power_control_mode_into_runtime(report.mode),
+        manual_index: report.manual_index,
+        manual_index_hex: report.manual_index_hex,
+        path: runtime_tx_power_path(report.path),
+        register_count: report.register_count,
+        repeated_value: report.repeated_value,
+        repeated_value_hex: report.repeated_value_hex,
+        efuse_source: report
+            .efuse_source
+            .map(tx_power_efuse_source_report_into_runtime),
+        efuse_plan: report.efuse_plan,
+        writes: report.writes,
+    }
+}
+
 fn production_report_from_runtime_flow(
     config: &ProductionRuntimeFlowConfig,
     report: RuntimeFlowReport,
@@ -23484,6 +23515,9 @@ fn production_report_from_runtime_flow(
         calibration_evidence_source: config
             .calibration_profile
             .evidence_source(config.captured_tail_applied),
+        tx_power_control: report
+            .tx_power_control
+            .map(tx_power_control_report_into_runtime),
         tx_calibration_profile: report
             .tx_calibration_profile
             .map(tx_calibration_profile_report_into_runtime),
@@ -23527,6 +23561,7 @@ fn radio_run_failure_report(
         calibration_profile: runtime_profile,
         calibration_class: runtime_profile.before_tx_class(captured_tail_applied),
         calibration_evidence_source: runtime_profile.evidence_source(captured_tail_applied),
+        tx_power_control: None,
         tx_calibration_profile: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init: ProductionRuntimeInitTelemetry::default(),
@@ -23635,6 +23670,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
         calibration_profile: profile,
         calibration_class,
         calibration_evidence_source,
+        tx_power_control: bridge.tx_power_control,
         tx_calibration_profile: bridge.tx_calibration_profile,
         receiver_backed_validation_required,
         init_readiness,
@@ -23743,6 +23779,7 @@ fn runtime_flow_failure_report(
         calibration_evidence_source: runtime_calibration_evidence_source_label(
             runtime_profile.evidence_source(captured_tail_applied),
         ),
+        tx_power_control: None,
         tx_calibration_profile: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init_readiness: "not_started",
@@ -37425,9 +37462,18 @@ u8 array_mp_8812a_fw_nic[] = {
         let mut args = rf_quality_report_args();
         args.expected_payloads = Some(100);
         args.recovered_payloads = None;
+        args.tx_power_mode = RfQualityTxPowerMode::EfuseDerived;
         let mac_report = serde_json::json!({
             "command": "radio-run",
             "result": "pass",
+            "tx_power_control": {
+                "mode": "efuse_derived",
+                "register_count": 22,
+                "efuse_plan": {
+                    "safety_profile": "linux_ch36_ht20",
+                    "programmed_paths": ["a", "b"]
+                }
+            },
             "tx": {
                 "datagrams_received": 150,
                 "submitted_frames": 149,
@@ -37458,6 +37504,25 @@ u8 array_mp_8812a_fw_nic[] = {
             rf_quality_macos_report(&args, Some(&mac_report), None, Some(&receiver_evidence));
 
         assert_eq!(macos.command.as_deref(), Some("radio-run"));
+        assert_eq!(macos.tx_power.mode, RfQualityTxPowerMode::EfuseDerived);
+        assert_eq!(
+            macos
+                .tx_power
+                .control_report
+                .as_ref()
+                .and_then(|report| report.get("register_count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(22)
+        );
+        assert_eq!(
+            macos
+                .tx_power
+                .control_report
+                .as_ref()
+                .and_then(|report| report.pointer("/efuse_plan/safety_profile"))
+                .and_then(serde_json::Value::as_str),
+            Some("linux_ch36_ht20")
+        );
         assert_eq!(macos.wfb_outcome.expected_datagrams, Some(150));
         assert_eq!(macos.wfb_outcome.observed_datagrams, Some(150));
         assert_eq!(macos.wfb_outcome.submitted_datagrams, Some(149));
@@ -40304,6 +40369,47 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         );
         assert!(config.tx_authorized);
         config.validate().expect("valid production config");
+    }
+
+    #[test]
+    fn radio_run_preserves_tx_power_args_for_bridge_adapter() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--bandwidth",
+            "20",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--tx-power-mode",
+            "efuse-derived",
+            "--tx-power-efuse-report",
+            "/tmp/wfb-efuse.json",
+            "--tx-power-safety-profile",
+            "linux-ch36-ht20",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+        let config = radio_run_runtime_config(&args).expect("runtime config");
+        let validation = config.validate().expect("runtime validation");
+        let bridge = radio_run_bridge_args(&args, &validation.wfb_loop);
+
+        assert_eq!(
+            bridge.tx.tx_power.tx_power_mode,
+            Some(TxPowerControlModeArg::EfuseDerived)
+        );
+        assert_eq!(
+            bridge.tx.tx_power.tx_power_efuse_report.as_deref(),
+            Some(Path::new("/tmp/wfb-efuse.json"))
+        );
+        assert_eq!(
+            bridge.tx.tx_power.tx_power_safety_profile,
+            TxPowerSafetyProfileArg::LinuxCh36Ht20
+        );
     }
 
     #[test]
