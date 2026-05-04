@@ -84,6 +84,11 @@ accounting, and WFB RX forwarding into runtime ownership. PCAP/JSONL output and
 diagnostic report mutation still live in the diagnostic adapter while the
 boundary shifts.
 
+RF-quality automation can now opt into `MAC_RADIO_COMMAND=radio-run` so the
+receiver-backed close-range harness can exercise the production command path.
+Bridge mode remains the default until the production command has matching
+receiver-backed calibration evidence.
+
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
@@ -251,3 +256,13 @@ zero TX failures or drops. Artifacts:
 `/tmp/wfb-prod-radio-smoke-20260504-001308/radio-run-rx-only.json` and
 `/tmp/wfb-prod-radio-smoke-20260504-001308/radio-run-tx-positive.json` on the
 hardware Mac deploy checkout.
+
+After adding `MAC_RADIO_COMMAND=radio-run` to the RF-quality automation, a
+receiver-backed smoke ran through the production command at
+`/tmp/wfb-rfq-radio-run-smoke-a1/rf-quality-report.json`. It used
+`TX_POWER_MODE=current-default`, `SOURCE_WARMUP_PAYLOADS=20`, and 80 measured
+payloads, so it is not baseline-comparable to the 2000-payload Linux fixture.
+It did prove the production command path against the Linux peer: `radio-run`
+submitted `149/150` total WFB datagrams including warmup, Linux recovered
+`80/80` measured payloads, decrypt errors were zero, peer isolation was clean,
+and channel 36 / 20 MHz was verified.

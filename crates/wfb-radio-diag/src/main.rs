@@ -3588,6 +3588,7 @@ struct RuntimeFlowReport {
     calibration_profile: TxCalibrationProfileArg,
     calibration_class: RuntimeTxCalibrationClass,
     calibration_evidence_source: &'static str,
+    tx_calibration_profile: Option<TxCalibrationProfileReport>,
     receiver_backed_validation_required: bool,
     init_readiness: &'static str,
     init_phase_count: usize,
@@ -23445,6 +23446,22 @@ fn production_runtime_init_readiness(readiness: &str) -> ProductionRuntimeInitRe
     }
 }
 
+fn tx_calibration_profile_report_into_runtime(
+    report: TxCalibrationProfileReport,
+) -> Rtl8812auTxCalibrationProfileReport {
+    Rtl8812auTxCalibrationProfileReport {
+        semantics: report.semantics,
+        upstream_basis: report.upstream_basis,
+        profile: RuntimeTxCalibrationProfile::from(report.profile),
+        channel: report.channel,
+        bandwidth_mhz: report.bandwidth_mhz,
+        register_count: report.register_count,
+        writes: report.writes,
+        lck: report.lck,
+        runtime_iqk: report.runtime_iqk,
+    }
+}
+
 fn production_report_from_runtime_flow(
     config: &ProductionRuntimeFlowConfig,
     report: RuntimeFlowReport,
@@ -23467,6 +23484,9 @@ fn production_report_from_runtime_flow(
         calibration_evidence_source: config
             .calibration_profile
             .evidence_source(config.captured_tail_applied),
+        tx_calibration_profile: report
+            .tx_calibration_profile
+            .map(tx_calibration_profile_report_into_runtime),
         receiver_backed_validation_required: report.receiver_backed_validation_required,
         init: ProductionRuntimeInitTelemetry {
             readiness: production_runtime_init_readiness(report.init_readiness),
@@ -23507,6 +23527,7 @@ fn radio_run_failure_report(
         calibration_profile: runtime_profile,
         calibration_class: runtime_profile.before_tx_class(captured_tail_applied),
         calibration_evidence_source: runtime_profile.evidence_source(captured_tail_applied),
+        tx_calibration_profile: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init: ProductionRuntimeInitTelemetry::default(),
         rx: RuntimeFlowRxTelemetry::default(),
@@ -23614,6 +23635,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
         calibration_profile: profile,
         calibration_class,
         calibration_evidence_source,
+        tx_calibration_profile: bridge.tx_calibration_profile,
         receiver_backed_validation_required,
         init_readiness,
         init_phase_count,
@@ -23721,6 +23743,7 @@ fn runtime_flow_failure_report(
         calibration_evidence_source: runtime_calibration_evidence_source_label(
             runtime_profile.evidence_source(captured_tail_applied),
         ),
+        tx_calibration_profile: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init_readiness: "not_started",
         init_phase_count: 0,
@@ -28590,7 +28613,7 @@ fn rf_quality_wfb_outcome(
     mac_report: Option<&serde_json::Value>,
     receiver_evidence: Option<&serde_json::Value>,
 ) -> RfQualityWfbOutcomeReport {
-    let expected_datagrams = args.expected_payloads.and_then(|payloads| {
+    let measured_expected_datagrams = args.expected_payloads.and_then(|payloads| {
         (args.fec_k > 0).then(|| {
             (payloads
                 .saturating_mul(u64::from(args.fec_n))
@@ -28598,6 +28621,9 @@ fn rf_quality_wfb_outcome(
                 / u64::from(args.fec_k)
         })
     });
+    let expected_datagrams = receiver_evidence
+        .and_then(|value| rf_quality_json_u64(value, &["theoretical_total_datagrams"]))
+        .or(measured_expected_datagrams);
     let Some(value) = mac_report else {
         return RfQualityWfbOutcomeReport {
             expected_datagrams,
@@ -28638,9 +28664,11 @@ fn rf_quality_wfb_outcome(
         };
     };
     let submitted_datagrams = rf_quality_json_u64(value, &["submit_counters", "submitted"])
-        .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"]));
-    let observed_datagrams =
-        rf_quality_json_u64(value, &["datagrams_received"]).or(submitted_datagrams);
+        .or_else(|| rf_quality_json_u64(value, &["bridge_counters", "injected"]))
+        .or_else(|| rf_quality_json_u64(value, &["tx", "submitted_frames"]));
+    let observed_datagrams = rf_quality_json_u64(value, &["datagrams_received"])
+        .or_else(|| rf_quality_json_u64(value, &["tx", "datagrams_received"]))
+        .or(submitted_datagrams);
     let datagram_shortfall = expected_datagrams
         .zip(observed_datagrams)
         .map(|(expected, observed)| expected as i64 - observed as i64);
@@ -28687,12 +28715,14 @@ fn rf_quality_wfb_outcome(
         submitted_datagrams,
         recovered_payloads: args
             .recovered_payloads
+            .or_else(|| rf_quality_json_u64(value, &["rx", "forwarded_payloads"]))
             .or_else(|| rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "forwarded"]))
             .or_else(|| {
                 rf_quality_json_u64(value, &["rx", "wfb_forwards", "0", "counters", "forwarded"])
             })
             .or_else(|| rf_quality_json_u64(value, &["recovered_payloads"])),
         dropped_datagrams: rf_quality_json_u64(value, &["bridge_counters", "dropped"])
+            .or_else(|| rf_quality_json_u64(value, &["tx", "dropped_datagrams"]))
             .or_else(|| rf_quality_json_u64(value, &["rx", "dropped_packets"])),
         malformed_datagrams: rf_quality_json_u64(value, &["bridge_counters", "malformed"]).or_else(
             || rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"]),
@@ -37387,6 +37417,59 @@ u8 array_mp_8812a_fw_nic[] = {
         assert_eq!(
             summary.fallback_stages[0].failure_label.as_deref(),
             Some("rx_iqk_failed_flag")
+        );
+    }
+
+    #[test]
+    fn rf_quality_wfb_outcome_accepts_radio_run_tx_counters() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = None;
+        let mac_report = serde_json::json!({
+            "command": "radio-run",
+            "result": "pass",
+            "tx": {
+                "datagrams_received": 150,
+                "submitted_frames": 149,
+                "dropped_datagrams": 1,
+                "failed_submissions": 0
+            },
+            "rx": {
+                "forwarded_payloads": 100,
+                "dropped_packets": 2
+            },
+            "tx_calibration_profile": {
+                "profile": "rtl8812a_runtime_iqk",
+                "runtime_iqk": {
+                    "status": "completed",
+                    "cleanup_status": "restored",
+                    "sweep_index": 1,
+                    "sweep_count": 1,
+                    "max_sweeps": 3,
+                    "paths": []
+                }
+            }
+        });
+
+        let receiver_evidence = serde_json::json!({
+            "theoretical_total_datagrams": 150
+        });
+        let macos =
+            rf_quality_macos_report(&args, Some(&mac_report), None, Some(&receiver_evidence));
+
+        assert_eq!(macos.command.as_deref(), Some("radio-run"));
+        assert_eq!(macos.wfb_outcome.expected_datagrams, Some(150));
+        assert_eq!(macos.wfb_outcome.observed_datagrams, Some(150));
+        assert_eq!(macos.wfb_outcome.submitted_datagrams, Some(149));
+        assert_eq!(macos.wfb_outcome.recovered_payloads, Some(100));
+        assert_eq!(macos.wfb_outcome.dropped_datagrams, Some(1));
+        assert_eq!(
+            macos
+                .calibration
+                .runtime_iqk_summary
+                .as_ref()
+                .map(|summary| summary.risk),
+            Some(RfQualityRuntimeIqkRiskStatus::Completed)
         );
     }
 

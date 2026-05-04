@@ -105,11 +105,15 @@ evidence.
 The restore JSON records the post-run service action, service state, and WFB
 process matches after the controlled sender/receiver processes are stopped, so
 cleanup failures are visible in machine-readable run evidence.
-The bridge ready marker is written by `bridge-tx-listen` after adapter init,
-TX-power/calibration setup, and the pre-TX calibration probe, immediately
-before the receive loop. The runner waits up to `BRIDGE_READY_WAIT_SECONDS`
-for that marker before starting Linux traffic, which avoids classifying bridge
-startup races as RF loss.
+The Mac ready marker is written after adapter init and calibration setup,
+immediately before the receive loop. The default Mac command remains
+`bridge-tx-listen`, and `MAC_RADIO_COMMAND=radio-run` can now opt into the
+production command path while preserving the same ready-marker wait and
+datagram evidence flow. Because runtime-owned TX-power control is not ported
+yet, `radio-run` automation uses `TX_POWER_MODE=current-default`; EFUSE-derived
+TXAGC gates still use `bridge-tx-listen`. The runner waits up to
+`BRIDGE_READY_WAIT_SECONDS` for that marker before starting Linux traffic,
+which avoids classifying startup races as RF loss.
 The Linux peer also writes `${REMOTE_PREFIX}-channel-state.json` after the
 controlled channel-set step. It records whether `iw` and sudo were available,
 the requested channel/bandwidth, the observed `iw dev IFACE info` channel and

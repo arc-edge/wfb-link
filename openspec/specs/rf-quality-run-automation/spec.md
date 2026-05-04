@@ -11,6 +11,10 @@ The system SHALL provide a single operator-facing command that orchestrates the 
 - **WHEN** the operator invokes the automation command with the required host, channel, payload, and report settings
 - **THEN** the command starts the Mac-side relay and bridge listener, waits for the bridge ready marker, prepares the Linux WFB peer, runs the Linux sender and receiver, and records the produced artifact paths
 
+#### Scenario: Production radio command is selected
+- **WHEN** the operator selects the production `radio-run` Mac command for an automated close-range run
+- **THEN** the command MUST start `radio-run` with runtime WFB TX ingress settings, wait for the same ready marker before Linux traffic, and generate datagram evidence from the production report's nested TX counters
+
 #### Scenario: Close-range automation run rejects missing settings
 - **WHEN** required host, repository, firmware, key, or network settings are missing
 - **THEN** the command fails before starting RF transmission and reports the missing setting

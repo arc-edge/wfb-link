@@ -1532,6 +1532,7 @@ pub struct ProductionRuntimeFlowReport {
     pub calibration_profile: TxCalibrationProfile,
     pub calibration_class: TxCalibrationClass,
     pub calibration_evidence_source: RuntimeTxCalibrationEvidenceSource,
+    pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
     pub rx: RuntimeFlowRxTelemetry,
@@ -1565,6 +1566,7 @@ impl ProductionRuntimeFlowReport {
             calibration_profile: config.calibration_profile,
             calibration_class,
             calibration_evidence_source,
+            tx_calibration_profile: None,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init: ProductionRuntimeInitTelemetry::default(),
             rx: RuntimeFlowRxTelemetry::default(),
@@ -8947,6 +8949,7 @@ mod tests {
             calibration_evidence_source: config
                 .calibration_profile
                 .evidence_source(config.captured_tail_applied),
+            tx_calibration_profile: None,
             receiver_backed_validation_required: false,
             init: Default::default(),
             rx: RuntimeFlowRxTelemetry::default(),

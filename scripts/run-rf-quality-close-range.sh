@@ -13,6 +13,7 @@ Configuration is via environment variables. Common overrides:
   HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net
   HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
   HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
+  MAC_RADIO_COMMAND=bridge-tx-listen
   LINUX_HOST=drone-2f389.local
   LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LINUX_REQUIRE_IW=0
@@ -124,6 +125,7 @@ RADIO_PORT=${RADIO_PORT:-0}
 RADIO_PORT_HEX=${RADIO_PORT_HEX:-0x00}
 TX_RATE=${TX_RATE:-mcs1}
 TX_PROFILE=${TX_PROFILE:-linux-monitor}
+TX_POWER_MODE_WAS_SET=${TX_POWER_MODE+x}
 TX_POWER_MODE=${TX_POWER_MODE:-efuse-derived}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
@@ -151,6 +153,14 @@ BRIDGE_READY_WAIT_SECONDS=${BRIDGE_READY_WAIT_SECONDS:-90}
 BRIDGE_START_DELAY=${BRIDGE_START_DELAY:-0}
 BRIDGE_IDLE_TIMEOUT_MS=${BRIDGE_IDLE_TIMEOUT_MS:-60000}
 BRIDGE_WAIT_SECONDS=${BRIDGE_WAIT_SECONDS:-140}
+MAC_RADIO_COMMAND=${MAC_RADIO_COMMAND:-bridge-tx-listen}
+RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-$((BRIDGE_WAIT_SECONDS * 1000))}
+if [[ "$MAC_RADIO_COMMAND" == "radio-run" && -z "$TX_POWER_MODE_WAS_SET" ]]; then
+  TX_POWER_MODE=current-default
+fi
+if [[ "$MAC_RADIO_COMMAND" == "radio-run" && "$TX_POWER_MODE" != "current-default" ]]; then
+  die "MAC_RADIO_COMMAND=radio-run does not apply diagnostic TX power control yet; set TX_POWER_MODE=current-default or use bridge-tx-listen"
+fi
 
 IFACE=${IFACE:-wfb0}
 WFB_SERVICE=${WFB_SERVICE:-arc-wfb-link-1}
@@ -200,7 +210,7 @@ export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEE
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
-export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_READY_WAIT_SECONDS BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS
+export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_READY_WAIT_SECONDS BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
 export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO HW_DEPLOY HW_DEPLOY_PATH ALLOW_DEPLOY_OVER_WORKTREE
 
@@ -262,7 +272,8 @@ keys = [
     "TX_POWER_SAFETY_PROFILE", "TX_CALIBRATION_PROFILE", "CALIBRATION_MODE", "PROFILE_KIND",
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
     "BRIDGE_BIND_PORT", "BRIDGE_READY_WAIT_SECONDS", "BRIDGE_START_DELAY",
-    "BRIDGE_IDLE_TIMEOUT_MS", "BRIDGE_WAIT_SECONDS", "IFACE", "WFB_SERVICE", "WFB_KEY",
+    "BRIDGE_IDLE_TIMEOUT_MS", "BRIDGE_WAIT_SECONDS", "MAC_RADIO_COMMAND",
+    "RADIO_RUN_DURATION_MS", "IFACE", "WFB_SERVICE", "WFB_KEY",
     "LINUX_SOURCE_PORT", "LINUX_RX_PORT", "FIRMWARE", "EFUSE_REPORT",
     "LINUX_BASELINE", "SYNC_HW_REPO", "HW_DEPLOY", "HW_DEPLOY_PATH",
     "ALLOW_DEPLOY_OVER_WORKTREE",
@@ -288,10 +299,11 @@ Configuration written to:
 
 Hardware Mac:
   HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
+  MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS=$RADIO_RUN_DURATION_MS
   TX_POWER_MODE=$TX_POWER_MODE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
   $(if [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   ssh $(quote "$HW_MAC_HOST") '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
-  ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... bridge-tx-listen --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
+  ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... $MAC_RADIO_COMMAND --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
   ssh $(quote "$HW_MAC_HOST") '<wait up to ${BRIDGE_READY_WAIT_SECONDS}s for ${REMOTE_PREFIX}-bridge-ready.json before Linux traffic>'
 
 Linux peer through hardware Mac:
@@ -427,8 +439,8 @@ MAC_RELAY
 
 start_bridge() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
-  log "starting hardware-Mac bridge listener"
+  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
+  log "starting hardware-Mac $MAC_RADIO_COMMAND listener"
   ssh "$HW_MAC_HOST" "$remote_cmd" <<'MAC_BRIDGE'
 set -euo pipefail
 repo=$HW_REPO_PATH
@@ -447,25 +459,50 @@ case "$TX_CALIBRATION_PROFILE" in
     write_auth_arg=--i-understand-this-writes-registers
     ;;
 esac
-nohup cargo run -p wfb-radio-diag -- --json \
-  --report "${REMOTE_PREFIX}-listen.json" \
-  bridge-tx-listen \
-  --macos-usbhost \
-  --vid 0x0bda --pid 0x8812 \
-  --init-before-tx \
-  --firmware "$FIRMWARE" \
-  --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
-  --bind "${BRIDGE_BIND_HOST}:${BRIDGE_BIND_PORT}" \
-  --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
-  --max-datagrams "$MAX_DATAGRAMS" \
-  --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
-  --tx-power-mode "$TX_POWER_MODE" \
-  --tx-power-efuse-report "$EFUSE_REPORT" \
-  --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE" \
-  --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-  --i-understand-this-transmits \
-  ${write_auth_arg:+"$write_auth_arg"} \
-  > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
+case "$MAC_RADIO_COMMAND" in
+  bridge-tx-listen)
+    nohup cargo run -p wfb-radio-diag -- --json \
+      --report "${REMOTE_PREFIX}-listen.json" \
+      bridge-tx-listen \
+      --macos-usbhost \
+      --vid 0x0bda --pid 0x8812 \
+      --init-before-tx \
+      --firmware "$FIRMWARE" \
+      --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
+      --bind "${BRIDGE_BIND_HOST}:${BRIDGE_BIND_PORT}" \
+      --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
+      --max-datagrams "$MAX_DATAGRAMS" \
+      --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
+      --tx-power-mode "$TX_POWER_MODE" \
+      --tx-power-efuse-report "$EFUSE_REPORT" \
+      --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE" \
+      --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+      --i-understand-this-transmits \
+      ${write_auth_arg:+"$write_auth_arg"} \
+      > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
+    ;;
+  radio-run)
+    nohup cargo run -p wfb-radio-diag -- --json \
+      --report "${REMOTE_PREFIX}-listen.json" \
+      radio-run \
+      --macos-usbhost \
+      --vid 0x0bda --pid 0x8812 \
+      --firmware "$FIRMWARE" \
+      --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
+      --bind "${BRIDGE_BIND_HOST}:${BRIDGE_BIND_PORT}" \
+      --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
+      --max-datagrams "$MAX_DATAGRAMS" \
+      --duration-ms "$RADIO_RUN_DURATION_MS" \
+      --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+      --i-understand-this-transmits \
+      ${write_auth_arg:+"$write_auth_arg"} \
+      > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
+    ;;
+  *)
+    echo "unsupported MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND" >&2
+    exit 2
+    ;;
+esac
 pid=$!
 echo "$pid" > "${REMOTE_PREFIX}-bridge.pid"
 sleep 2
@@ -1388,10 +1425,15 @@ def env_int(name):
 
 submit = mac_report.get("submit_counters") or {}
 bridge = mac_report.get("bridge_counters") or {}
+tx = mac_report.get("tx") or {}
 submitted = submit.get("submitted")
 if submitted is None:
     submitted = bridge.get("injected")
+if submitted is None:
+    submitted = tx.get("submitted_frames")
 observed = mac_report.get("datagrams_received")
+if observed is None:
+    observed = tx.get("datagrams_received")
 if observed is None:
     observed = submitted
 

@@ -82,6 +82,7 @@ handling.
 #### Scenario: Production flow reports readiness
 - **WHEN** initialization completes
 - **THEN** the production runtime flow reports adapter identity, channel,
-  bandwidth, calibration class, init phase status, runtime-owned RX/TX flow
-  counters, RX metadata coverage counters, USB counters, and last error state
-  through production-facing telemetry
+  bandwidth, calibration class, selected calibration profile evidence when a
+  profile executes, init phase status, runtime-owned RX/TX flow counters, RX
+  metadata coverage counters, USB counters, and last error state through
+  production-facing telemetry
