@@ -15523,61 +15523,6 @@ where
     cleanup
 }
 
-fn apply_runtime_iqk_masked_bb_write<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    write: &TxRuntimeIqkMaskedBbWritePlan,
-    error_code: &'static str,
-) -> std::result::Result<BridgeTxBenchRegisterMaskedWriteReport, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let before = read32_with_counter(registers, counters, write.address).map_err(|error| {
-        DiagnosticErrorReport {
-            code: error_code,
-            message: format!("{} pre-masked read failed: {error}", write.register_name),
-        }
-    })?;
-    let shifted = if write.mask == 0 {
-        0
-    } else {
-        (write.data << write.mask.trailing_zeros()) & write.mask
-    };
-    let written = (before & !write.mask) | shifted;
-    write32_with_counter(registers, counters, write.address, written).map_err(|error| {
-        DiagnosticErrorReport {
-            code: error_code,
-            message: format!("{} masked write failed: {error}", write.register_name),
-        }
-    })?;
-    let after = read32_with_counter(registers, counters, write.address).map_err(|error| {
-        DiagnosticErrorReport {
-            code: error_code,
-            message: format!("{} post-masked read failed: {error}", write.register_name),
-        }
-    })?;
-    Ok(BridgeTxBenchRegisterMaskedWriteReport {
-        register_name: write.register_name,
-        address: write.address,
-        address_hex: write.address_hex.clone(),
-        width: "u32",
-        mask: write.mask,
-        mask_hex: write.mask_hex.clone(),
-        before,
-        before_hex: format_value(before, 8),
-        written,
-        written_hex: format_value(written, 8),
-        after,
-        after_hex: format_value(after, 8),
-        changed: before != after,
-        counters: DiagnosticCounters {
-            usb_control_reads: 2,
-            usb_control_writes: 1,
-            ..DiagnosticCounters::default()
-        },
-    })
-}
-
 fn apply_runtime_iqk_setup_plan<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
@@ -15654,13 +15599,6 @@ where
     result.map_err(runtime_radio_error)
 }
 
-fn runtime_iqk_stage_iqc_or_fallback(stage: &TxRuntimeIqkStageReport) -> TxRuntimeIqkIqcValue {
-    stage
-        .selected_iqc
-        .clone()
-        .unwrap_or_else(|| runtime_iqk_iqc_value(0x200, 0))
-}
-
 fn apply_rtl8812a_runtime_iqk_fill<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
@@ -15671,22 +15609,16 @@ fn apply_rtl8812a_runtime_iqk_fill<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let tx_iqc = runtime_iqk_stage_iqc_or_fallback(tx_stage);
-    let rx_iqc = runtime_iqk_stage_iqc_or_fallback(rx_stage);
-    let tx_plan = rtl8812a_iqk_tx_fill_iqc_plan(path, tx_iqc.x, tx_iqc.y, false)?;
-    let rx_plan = rtl8812a_iqk_rx_fill_iqc_plan(path, rx_iqc.x, rx_iqc.y)?;
-    for write in tx_plan.iter().chain(rx_plan.iter()) {
-        apply_runtime_iqk_masked_bb_write(
-            registers,
-            counters,
-            write,
-            "rtl8812a_runtime_iqk_fill_failed",
-        )?;
-    }
-    let applied = tx_plan.len() + rx_plan.len();
-    tx_stage.fill_plan = tx_plan;
-    rx_stage.fill_plan = rx_plan;
-    Ok(applied)
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result = wfb_radio_runtime::apply_rtl8812au_runtime_iqk_fill(
+        registers,
+        &mut runtime_counters,
+        runtime_rf_path_from_tx_power_path(path)?,
+        tx_stage,
+        rx_stage,
+    );
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result.map_err(runtime_radio_error)
 }
 
 fn runtime_iqk_report_status(

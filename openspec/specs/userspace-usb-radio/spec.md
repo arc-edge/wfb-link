@@ -222,9 +222,9 @@ setup without making runtime IQK the default path.
   path A or path B
 - **THEN** setup planning, setup-plan application, state backup/restore,
   candidate selection, one-shot outcome state, TX/RX one-shot execution, sweep
-  summary generation, and TX/RX IQC masked-write planning MUST come from
-  runtime-owned helpers while live IQC fill application, sweep orchestration,
-  and evidence formatting remain diagnostic-owned until full IQK execution is
+  summary generation, TX/RX IQC masked-write planning, and live IQC fill
+  application MUST come from runtime-owned helpers while sweep orchestration and
+  evidence formatting remain diagnostic-owned until full IQK execution is
   migrated
 
 #### Scenario: Runtime IQK restores saved state

@@ -4677,6 +4677,62 @@ pub fn rtl8812au_iqk_rx_fill_iqc_plan(
     ])
 }
 
+fn apply_runtime_iqk_masked_bb_write<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    write: &Rtl8812auRuntimeIqkMaskedBbWritePlan,
+    error_code: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    bb_set_bb_reg(
+        registers,
+        counters,
+        write.address,
+        write.mask,
+        write.data,
+        write.register_name,
+    )
+    .map_err(|error| {
+        RuntimeRadioError::new(
+            error_code,
+            format!(
+                "{} masked write failed: {}",
+                write.register_name, error.message
+            ),
+        )
+    })
+}
+
+pub fn apply_rtl8812au_runtime_iqk_fill<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+    tx_stage: &mut Rtl8812auRuntimeIqkStageReport,
+    rx_stage: &mut Rtl8812auRuntimeIqkStageReport,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let tx_iqc = rtl8812au_runtime_iqk_stage_iqc_or_fallback(tx_stage);
+    let rx_iqc = rtl8812au_runtime_iqk_stage_iqc_or_fallback(rx_stage);
+    let tx_plan = rtl8812au_iqk_tx_fill_iqc_plan(path, tx_iqc.x, tx_iqc.y, false)?;
+    let rx_plan = rtl8812au_iqk_rx_fill_iqc_plan(path, rx_iqc.x, rx_iqc.y)?;
+    for write in tx_plan.iter().chain(rx_plan.iter()) {
+        apply_runtime_iqk_masked_bb_write(
+            registers,
+            counters,
+            write,
+            "rtl8812a_runtime_iqk_fill_failed",
+        )?;
+    }
+    let applied = tx_plan.len() + rx_plan.len();
+    tx_stage.fill_plan = tx_plan;
+    rx_stage.fill_plan = rx_plan;
+    Ok(applied)
+}
+
 fn rtl8812au_runtime_iqk_setup_write8_plan(
     phase: &'static str,
     register_name: &'static str,
@@ -7214,6 +7270,53 @@ mod tests {
         assert!(
             super::rtl8812au_iqk_rx_fill_iqc_plan(super::Rtl8812auRfPath::Both, 0x200, 0).is_err()
         );
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_fill_applies_live_masked_writes() {
+        let transport = MockTransport::default();
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+        let mut tx_stage = super::Rtl8812auRuntimeIqkStageReport {
+            stage: "tx",
+            status: "success",
+            ready: Some(true),
+            failed: Some(false),
+            retry_count: 0,
+            average_count: 2,
+            delay_count_max: Some(0),
+            attempts: Vec::new(),
+            candidates: Vec::new(),
+            selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x2aa, 0x155)),
+            fallback_used: false,
+            failure_label: None,
+            fill_plan: Vec::new(),
+        };
+        let mut rx_stage = super::Rtl8812auRuntimeIqkStageReport {
+            stage: "rx",
+            selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x20, 0x10)),
+            ..tx_stage.clone()
+        };
+
+        let applied = super::apply_rtl8812au_runtime_iqk_fill(
+            &registers,
+            &mut counters,
+            super::Rtl8812auRfPath::A,
+            &mut tx_stage,
+            &mut rx_stage,
+        )
+        .expect("runtime IQK fill");
+
+        assert_eq!(applied, 10);
+        assert_eq!(tx_stage.fill_plan.len(), 7);
+        assert_eq!(rx_stage.fill_plan.len(), 3);
+        assert_eq!(counters.usb_control_reads, 10);
+        assert_eq!(counters.usb_control_writes, 10);
+        assert!(transport.writes().iter().any(|(address, _)| {
+            *address == super::REG_IQK_TX_Y_A_CCC
+                || *address == super::REG_IQK_TX_X_A_CD4
+                || *address == super::REG_IQK_RX_IQC_A_JAGUAR
+        }));
     }
 
     #[test]
