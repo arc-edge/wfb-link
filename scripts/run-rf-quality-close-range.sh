@@ -7,14 +7,18 @@ usage() {
 Usage: scripts/run-rf-quality-close-range.sh [--dry-run] [--skip-report] [--out-dir DIR]
 
 Runs the accepted close-range channel 36 HT20 RF-quality workflow across:
-  local checkout -> hardware Mac -> Linux WFB peer
+  local checkout -> hardware Mac (local or remote) -> Linux WFB peer
 
 Configuration is via environment variables. Common overrides:
   HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net
+  LOCAL_HW=1                 # run the hardware-Mac side on this checkout
+  HW_MAC_HOST=local          # shorthand for LOCAL_HW=1
   HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
   HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
   MAC_RADIO_COMMAND=bridge-tx-listen
   LINUX_HOST=drone-2f389.local
+  LINUX_SSH_JUMP=rownd@rownds-macbook-pro.tail5c793f.ts.net
+  LINUX_SSH_NESTED=1         # use "ssh jump ssh linux" instead of ProxyJump
   LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LINUX_REQUIRE_IW=0
   LINUX_REQUIRE_PEER_ISOLATION=1 LINUX_PEER_SETTLE_SECONDS=2
@@ -87,11 +91,23 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
 
 HW_MAC_HOST=${HW_MAC_HOST:-rownd@rownds-macbook-pro.tail5c793f.ts.net}
+LOCAL_HW=${LOCAL_HW:-0}
+case "$HW_MAC_HOST" in
+  local|localhost|127.0.0.1)
+    LOCAL_HW=1
+    HW_MAC_HOST=local
+    ;;
+esac
+HW_REPO_PATH_WAS_SET=${HW_REPO_PATH+x}
 HW_REPO_PATH=${HW_REPO_PATH:-}
-if [[ -z "$HW_REPO_PATH" ]]; then
+if [[ "$LOCAL_HW" == "1" && -z "${HW_REPO_PATH_WAS_SET:-}" ]]; then
+  HW_REPO_PATH=$REPO_ROOT
+elif [[ -z "$HW_REPO_PATH" ]]; then
   HW_REPO_PATH='projects/arc/wfb-mac-radio-agent'
 fi
 LINUX_HOST=${LINUX_HOST:-drone-2f389.local}
+LINUX_SSH_JUMP=${LINUX_SSH_JUMP:-}
+LINUX_SSH_NESTED=${LINUX_SSH_NESTED:-0}
 LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 LINUX_REQUIRE_IW=${LINUX_REQUIRE_IW:-0}
 LINUX_REQUIRE_PEER_ISOLATION=${LINUX_REQUIRE_PEER_ISOLATION:-1}
@@ -184,7 +200,9 @@ fi
 
 if (( DRY_RUN == 0 )); then
   require_command ssh
-  require_command scp
+  if [[ "$LOCAL_HW" != "1" ]]; then
+    require_command scp
+  fi
   require_command python3
   require_command cargo
   if [[ "$HW_DEPLOY" == "1" ]]; then
@@ -198,7 +216,7 @@ OUT_DIR=$(cd "$OUT_DIR" && pwd)
 MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 : >"$MISSING_ARTIFACTS"
 
-export RUN_ID HW_MAC_HOST HW_REPO_PATH LINUX_HOST MAC_LAN_IP REMOTE_PREFIX
+export RUN_ID HW_MAC_HOST LOCAL_HW HW_REPO_PATH LINUX_HOST LINUX_SSH_JUMP LINUX_SSH_NESTED MAC_LAN_IP REMOTE_PREFIX
 export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
@@ -218,6 +236,11 @@ normalize_remote_path_for_guard() {
 
 deploy_hw_repo() {
   local repo_guard deploy_guard remote_cmd rsync_target
+  if [[ "$LOCAL_HW" == "1" ]]; then
+    log "LOCAL_HW=1; using local checkout as hardware-Mac repo: $HW_REPO_PATH"
+    return 0
+  fi
+
   repo_guard=$(normalize_remote_path_for_guard "$HW_REPO_PATH")
   deploy_guard=$(normalize_remote_path_for_guard "$HW_DEPLOY_PATH")
   if [[ "$repo_guard" == "$deploy_guard" && "$ALLOW_DEPLOY_OVER_WORKTREE" != "1" ]]; then
@@ -256,7 +279,7 @@ import os
 import sys
 
 keys = [
-    "RUN_ID", "HW_MAC_HOST", "HW_REPO_PATH", "LINUX_HOST", "MAC_LAN_IP",
+    "RUN_ID", "HW_MAC_HOST", "LOCAL_HW", "HW_REPO_PATH", "LINUX_HOST", "LINUX_SSH_JUMP", "LINUX_SSH_NESTED", "MAC_LAN_IP",
     "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "LINUX_REQUIRE_PEER_ISOLATION", "LINUX_PEER_SETTLE_SECONDS", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
     "EXPECTED_PAYLOADS", "SOURCE_WARMUP_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "THEORETICAL_WARMUP_DATAGRAMS", "THEORETICAL_TOTAL_DATAGRAMS",
     "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
@@ -291,22 +314,22 @@ Configuration written to:
   $OUT_DIR/run-config.json
 
 Hardware Mac:
-  HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
+  LOCAL_HW=$LOCAL_HW HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
   MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS=$RADIO_RUN_DURATION_MS
   TX_POWER_MODE=$TX_POWER_MODE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
-  $(if [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
-  ssh $(quote "$HW_MAC_HOST") '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
-  ssh $(quote "$HW_MAC_HOST") '<cd $dry_bridge_path && cargo run ... $MAC_RADIO_COMMAND --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
-  ssh $(quote "$HW_MAC_HOST") '<wait up to ${BRIDGE_READY_WAIT_SECONDS}s for ${REMOTE_PREFIX}-bridge-ready.json before Linux traffic>'
+  $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'run relay/radio locally from %s\n' "$dry_bridge_path"; elif [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
+  $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
+  $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<cd $dry_bridge_path && cargo run ... $MAC_RADIO_COMMAND --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
+  $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<wait up to ${BRIDGE_READY_WAIT_SECONDS}s for ${REMOTE_PREFIX}-bridge-ready.json before Linux traffic>'
 
-Linux peer through hardware Mac:
+Linux peer:
   LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
   LINUX_REQUIRE_PEER_ISOLATION=$LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS=$LINUX_PEER_SETTLE_SECONDS
-  ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $SOURCE_WARMUP_PAYLOADS warmup payloads and $EXPECTED_PAYLOADS measured payloads>'
+  $(if [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then printf 'ssh %s ssh %s' "$(quote "$LINUX_SSH_JUMP")" "$(quote "$LINUX_HOST")"; elif [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" ]]; then printf 'ssh -J %s %s' "$(quote "$LINUX_SSH_JUMP")" "$(quote "$LINUX_HOST")"; elif [[ "$LOCAL_HW" == "1" ]]; then printf 'ssh %s' "$(quote "$LINUX_HOST")"; else printf 'ssh %s ssh %s' "$(quote "$HW_MAC_HOST")" "$(quote "$LINUX_HOST")"; fi) '<preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $SOURCE_WARMUP_PAYLOADS warmup payloads and $EXPECTED_PAYLOADS measured payloads>'
 
 Local collection:
-  scp hardware Mac reports from $REMOTE_PREFIX-*
-  stream Linux artifacts through nested ssh via $HW_MAC_HOST
+  $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'copy local hardware reports from %s-*' "$REMOTE_PREFIX"; else printf 'scp hardware Mac reports from %s-*' "$REMOTE_PREFIX"; fi)
+  $(if [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then printf 'stream Linux artifacts through nested jump via %s' "$LINUX_SSH_JUMP"; elif [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" ]]; then printf 'stream Linux artifacts through ProxyJump via %s' "$LINUX_SSH_JUMP"; elif [[ "$LOCAL_HW" == "1" ]]; then printf 'stream Linux artifacts through direct ssh'; else printf 'stream Linux artifacts through nested ssh via %s' "$HW_MAC_HOST"; fi)
   cargo run -p wfb-radio-diag -- --json --report $OUT_DIR/rf-quality-report.json rf-quality-report ...
 EOF
 }
@@ -330,27 +353,41 @@ STARTED_BRIDGE=0
 STARTED_LINUX=0
 CLEANUP_ACTIVE=0
 
-ssh_hw() {
-  ssh "$HW_MAC_HOST" "$@"
+hw_exec() {
+  local cmd=$1
+  if [[ "$LOCAL_HW" == "1" ]]; then
+    bash -lc "$cmd"
+  else
+    ssh "$HW_MAC_HOST" "$cmd"
+  fi
 }
 
-ssh_linux_via_hw() {
-  local inner
-  inner="$1"
-  ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $inner"
+linux_exec() {
+  local inner=$1
+  if [[ "$LOCAL_HW" == "1" ]]; then
+    if [[ -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then
+      ssh "$LINUX_SSH_JUMP" "ssh $(quote "$LINUX_HOST") $inner"
+    elif [[ -n "$LINUX_SSH_JUMP" ]]; then
+      ssh -J "$LINUX_SSH_JUMP" "$LINUX_HOST" "$inner"
+    else
+      ssh "$LINUX_HOST" "$inner"
+    fi
+  else
+    ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $inner"
+  fi
 }
 
 stop_hw_pid_file() {
   local pid_file=$1
   local label=$2
-  ssh "$HW_MAC_HOST" "pid_file=$(quote "$pid_file"); label=$(quote "$label"); if [[ -f \"\$pid_file\" ]]; then pid=\$(cat \"\$pid_file\" 2>/dev/null || true); if [[ -n \"\$pid\" ]]; then kill \"\$pid\" >/dev/null 2>&1 || true; fi; fi" \
+  hw_exec "pid_file=$(quote "$pid_file"); label=$(quote "$label"); if [[ -f \"\$pid_file\" ]]; then pid=\$(cat \"\$pid_file\" 2>/dev/null || true); if [[ -n \"\$pid\" ]]; then kill \"\$pid\" >/dev/null 2>&1 || true; fi; fi" \
     >"$OUT_DIR/cleanup-$label.log" 2>&1 || true
 }
 
 restore_linux_peer() {
   local remote_cmd
   remote_cmd="$(env_assignments WFB_SERVICE LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT IFACE LINUX_REMOTE_PATH) bash -s"
-  ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" >"$OUT_DIR/cleanup-linux-restore.log" 2>&1 <<'LINUX_RESTORE' || true
+  linux_exec "$remote_cmd" >"$OUT_DIR/cleanup-linux-restore.log" 2>&1 <<'LINUX_RESTORE' || true
 set +e
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 resolve_cmd() {
@@ -395,7 +432,7 @@ start_relay() {
   local remote_cmd
   remote_cmd="$(env_assignments REMOTE_PREFIX RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT) bash -s"
   log "starting hardware-Mac UDP relay"
-  ssh "$HW_MAC_HOST" "$remote_cmd" <<'MAC_RELAY'
+  hw_exec "$remote_cmd" <<'MAC_RELAY'
 set -euo pipefail
 cat > "${REMOTE_PREFIX}-relay.py" <<'PY'
 import socket
@@ -434,7 +471,7 @@ start_bridge() {
   local remote_cmd
   remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
   log "starting hardware-Mac $MAC_RADIO_COMMAND listener"
-  ssh "$HW_MAC_HOST" "$remote_cmd" <<'MAC_BRIDGE'
+  hw_exec "$remote_cmd" <<'MAC_BRIDGE'
 set -euo pipefail
 repo=$HW_REPO_PATH
 case "$repo" in
@@ -476,7 +513,7 @@ case "$MAC_RADIO_COMMAND" in
       --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
       --max-datagrams "$MAX_DATAGRAMS" \
       --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
-      "${tx_power_args[@]}" \
+      ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
@@ -494,7 +531,7 @@ case "$MAC_RADIO_COMMAND" in
       --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
       --max-datagrams "$MAX_DATAGRAMS" \
       --duration-ms "$RADIO_RUN_DURATION_MS" \
-      "${tx_power_args[@]}" \
+      ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
@@ -517,7 +554,7 @@ wait_for_bridge_ready() {
   local remote_cmd
   remote_cmd="$(env_assignments REMOTE_PREFIX BRIDGE_READY_WAIT_SECONDS) bash -s"
   log "waiting for bridge ready marker"
-  ssh "$HW_MAC_HOST" "$remote_cmd" >"$OUT_DIR/bridge-ready-wait.log" 2>&1 <<'MAC_WAIT_READY'
+  hw_exec "$remote_cmd" >"$OUT_DIR/bridge-ready-wait.log" 2>&1 <<'MAC_WAIT_READY'
 set -euo pipefail
 ready_file="${REMOTE_PREFIX}-bridge-ready.json"
 pid_file="${REMOTE_PREFIX}-bridge.pid"
@@ -544,9 +581,17 @@ MAC_WAIT_READY
 run_linux_peer() {
   local remote_cmd
   remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS) bash -s"
-  log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
+  if [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then
+    log "running Linux peer sender/receiver through nested jump $LINUX_SSH_JUMP -> $LINUX_HOST"
+  elif [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" ]]; then
+    log "running Linux peer sender/receiver through ProxyJump $LINUX_SSH_JUMP -> $LINUX_HOST"
+  elif [[ "$LOCAL_HW" == "1" ]]; then
+    log "running Linux peer sender/receiver through direct ssh -> $LINUX_HOST"
+  else
+    log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
+  fi
   STARTED_LINUX=1
-  ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" <<'LINUX_RUN'
+  linux_exec "$remote_cmd" <<'LINUX_RUN'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 
@@ -1276,7 +1321,7 @@ wait_for_bridge() {
   local remote_cmd
   remote_cmd="$(env_assignments REMOTE_PREFIX BRIDGE_WAIT_SECONDS) bash -s"
   log "waiting for bridge listener to finish"
-  if ! ssh "$HW_MAC_HOST" "$remote_cmd" >"$OUT_DIR/bridge-wait.log" 2>&1 <<'MAC_WAIT'
+  if ! hw_exec "$remote_cmd" >"$OUT_DIR/bridge-wait.log" 2>&1 <<'MAC_WAIT'
 set -euo pipefail
 pid_file="${REMOTE_PREFIX}-bridge.pid"
 if [[ ! -f "$pid_file" ]]; then
@@ -1303,17 +1348,22 @@ MAC_WAIT
 copy_hw_artifact() {
   local remote_path=$1
   local name=${2:-$(basename "$remote_path")}
-  if scp -q "$HW_MAC_HOST:$remote_path" "$OUT_DIR/$name" >/dev/null 2>&1; then
+  if [[ "$LOCAL_HW" == "1" ]]; then
+    if cp "$remote_path" "$OUT_DIR/$name" >/dev/null 2>&1; then
+      log "collected local hardware artifact: $name"
+      return 0
+    fi
+  elif scp -q "$HW_MAC_HOST:$remote_path" "$OUT_DIR/$name" >/dev/null 2>&1; then
     log "collected hardware Mac artifact: $name"
-  else
-    printf 'hardware-mac:%s\n' "$remote_path" >>"$MISSING_ARTIFACTS"
+    return 0
   fi
+  printf 'hardware-mac:%s\n' "$remote_path" >>"$MISSING_ARTIFACTS"
 }
 
 copy_linux_artifact() {
   local remote_path=$1
   local name=${2:-$(basename "$remote_path")}
-  if ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") cat $(quote "$remote_path")" >"$OUT_DIR/$name" 2>/dev/null; then
+  if linux_exec "cat $(quote "$remote_path")" >"$OUT_DIR/$name" 2>/dev/null; then
     log "collected Linux artifact: $name"
   else
     rm -f "$OUT_DIR/$name"

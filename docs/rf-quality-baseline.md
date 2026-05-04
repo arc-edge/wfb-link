@@ -453,6 +453,30 @@ replacement for the 2000-payload non-regression gate; its comparison is
 intentionally invalid because the payload count differs from the baseline
 fixture.
 
+After moving the AWUS036ACH to this Mac on May 4, 2026, local USBHost smoke
+tests passed before running receiver-backed RF checks: the RX-only
+`radio-run` smoke passed at `/tmp/wfb-local-radio-smoke-20260504-114912`
+with 65 RSSI/SNR/noise-bearing frames, and the TX-positive EFUSE smoke passed
+with 64 submitted datagrams, 64 USB bulk-out writes, and zero TX failures.
+The RF-quality runner now supports this topology with `LOCAL_HW=1` or
+`HW_MAC_HOST=local`; when the Linux receiver is only reachable from the old
+rownd bench Mac, use `LINUX_SSH_JUMP=...` and `LINUX_SSH_NESTED=1`.
+
+The local-adapter close-range RF evidence split cleanly by offered packet
+rate. At the default `PAYLOAD_INTERVAL_SEC=0.0005`, full-count sustained
+`radio-run` tests submitted every datagram but degraded at the receiver:
+`/tmp/wfb-rfq-local-radio-run-efuse-sustained-a1` recovered `809/2000` with
+2006 decrypt failures, and
+`/tmp/wfb-rfq-local-radio-run-current-default-sustained-a2` recovered
+`832/2000` with 2237 decrypt failures. The same topology recovered normally
+when paced at `PAYLOAD_INTERVAL_SEC=0.002`:
+`/tmp/wfb-rfq-local-radio-run-current-default-paced2000-a1` recovered
+`1999/2000` with zero decrypt failures, and
+`/tmp/wfb-rfq-local-radio-run-efuse-paced2000-a1` recovered `1990/2000`
+with zero decrypt failures. Treat the default-rate failures as pacing,
+backpressure, or relay-topology evidence rather than EFUSE TXAGC evidence
+until a direct local drone link removes the rownd UDP relay from the path.
+
 After moving LCK execution into `wfb-radio-runtime`,
 `/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json` reran the LCK
 profile and recovered `1981/2000`, submitted `3000/3000`, reported zero decrypt
