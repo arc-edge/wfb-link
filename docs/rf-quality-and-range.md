@@ -24,8 +24,20 @@ afterward:
 
 ```sh
 sudo -n docker stop arc-wfb-link-1
+sudo -n nmcli dev set wfb0 managed no
+sudo -n nmcli dev set p2p-dev-wfb0 managed no
+sudo -n ip link set wfb0 down
+sudo -n iw dev wfb0 set type monitor
+sudo -n ip link set wfb0 up
 sudo -n iw dev wfb0 set channel 36 HT20
 ```
+
+The runner applies the same hardening by default with
+`LINUX_NM_UNMANAGE_IFACE=1` and `LINUX_FORCE_MONITOR=1`. This prevents
+NetworkManager scan bursts and catches cases where `wfb0` falls back to
+`type managed` after the normal WFB service is stopped. The generated
+`channel-state.json` records NetworkManager, monitor-mode, channel, and
+bandwidth evidence.
 
 Restore:
 

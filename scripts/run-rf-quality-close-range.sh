@@ -22,6 +22,7 @@ Configuration is via environment variables. Common overrides:
   LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LINUX_REQUIRE_IW=0
   LINUX_REQUIRE_PEER_ISOLATION=1 LINUX_PEER_SETTLE_SECONDS=2
+  LINUX_NM_UNMANAGE_IFACE=1 LINUX_FORCE_MONITOR=1
   MAC_LAN_IP=10.42.0.162
   FIRMWARE=/tmp/rtl8812aefw.bin
   EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json
@@ -112,6 +113,8 @@ LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:
 LINUX_REQUIRE_IW=${LINUX_REQUIRE_IW:-0}
 LINUX_REQUIRE_PEER_ISOLATION=${LINUX_REQUIRE_PEER_ISOLATION:-1}
 LINUX_PEER_SETTLE_SECONDS=${LINUX_PEER_SETTLE_SECONDS:-2}
+LINUX_NM_UNMANAGE_IFACE=${LINUX_NM_UNMANAGE_IFACE:-1}
+LINUX_FORCE_MONITOR=${LINUX_FORCE_MONITOR:-1}
 MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-rfq-auto-$RUN_ID}
 SYNC_HW_REPO=${SYNC_HW_REPO:-0}
@@ -217,7 +220,7 @@ MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 : >"$MISSING_ARTIFACTS"
 
 export RUN_ID HW_MAC_HOST LOCAL_HW HW_REPO_PATH LINUX_HOST LINUX_SSH_JUMP LINUX_SSH_NESTED MAC_LAN_IP REMOTE_PREFIX
-export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
+export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS LINUX_NM_UNMANAGE_IFACE LINUX_FORCE_MONITOR
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
@@ -280,7 +283,8 @@ import sys
 
 keys = [
     "RUN_ID", "HW_MAC_HOST", "LOCAL_HW", "HW_REPO_PATH", "LINUX_HOST", "LINUX_SSH_JUMP", "LINUX_SSH_NESTED", "MAC_LAN_IP",
-    "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "LINUX_REQUIRE_PEER_ISOLATION", "LINUX_PEER_SETTLE_SECONDS", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
+    "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "LINUX_REQUIRE_PEER_ISOLATION", "LINUX_PEER_SETTLE_SECONDS",
+    "LINUX_NM_UNMANAGE_IFACE", "LINUX_FORCE_MONITOR", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
     "EXPECTED_PAYLOADS", "SOURCE_WARMUP_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "THEORETICAL_WARMUP_DATAGRAMS", "THEORETICAL_TOTAL_DATAGRAMS",
     "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
     "RX_STARTUP_SECONDS", "TX_STARTUP_SECONDS",
@@ -325,6 +329,7 @@ Hardware Mac:
 Linux peer:
   LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
   LINUX_REQUIRE_PEER_ISOLATION=$LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS=$LINUX_PEER_SETTLE_SECONDS
+  LINUX_NM_UNMANAGE_IFACE=$LINUX_NM_UNMANAGE_IFACE LINUX_FORCE_MONITOR=$LINUX_FORCE_MONITOR
   $(if [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then printf 'ssh %s ssh %s' "$(quote "$LINUX_SSH_JUMP")" "$(quote "$LINUX_HOST")"; elif [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" ]]; then printf 'ssh -J %s %s' "$(quote "$LINUX_SSH_JUMP")" "$(quote "$LINUX_HOST")"; elif [[ "$LOCAL_HW" == "1" ]]; then printf 'ssh %s' "$(quote "$LINUX_HOST")"; else printf 'ssh %s ssh %s' "$(quote "$HW_MAC_HOST")" "$(quote "$LINUX_HOST")"; fi) '<preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $SOURCE_WARMUP_PAYLOADS warmup payloads and $EXPECTED_PAYLOADS measured payloads>'
 
 Local collection:
@@ -580,7 +585,7 @@ MAC_WAIT_READY
 
 run_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS LINUX_NM_UNMANAGE_IFACE LINUX_FORCE_MONITOR) bash -s"
   if [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" && "$LINUX_SSH_NESTED" == "1" ]]; then
     log "running Linux peer sender/receiver through nested jump $LINUX_SSH_JUMP -> $LINUX_HOST"
   elif [[ "$LOCAL_HW" == "1" && -n "$LINUX_SSH_JUMP" ]]; then
@@ -634,6 +639,7 @@ PKILL_BIN=$(resolve_cmd pkill || true)
 PS_BIN=$(resolve_cmd ps || true)
 GREP_BIN=$(resolve_cmd grep || true)
 DATE_BIN=$(resolve_cmd date || true)
+NMCLI_BIN=$(resolve_cmd nmcli || true)
 
 capture_wfb_process_matches() {
   if [[ -z "${PS_BIN:-}" || -z "${GREP_BIN:-}" ]]; then
@@ -659,6 +665,7 @@ missing_optional=()
 [[ -n "$PS_BIN" ]] || missing_optional+=(ps)
 [[ -n "$GREP_BIN" ]] || missing_optional+=(grep)
 [[ -n "$DATE_BIN" ]] || missing_optional+=(date)
+[[ -n "$NMCLI_BIN" ]] || missing_optional+=(nmcli)
 
 sudo_noninteractive=unknown
 iface_status=unknown
@@ -724,6 +731,8 @@ fi
   printf 'linux_require_iw=%s\n' "$LINUX_REQUIRE_IW"
   printf 'linux_require_peer_isolation=%s\n' "$LINUX_REQUIRE_PEER_ISOLATION"
   printf 'linux_peer_settle_seconds=%s\n' "$LINUX_PEER_SETTLE_SECONDS"
+  printf 'linux_nm_unmanage_iface=%s\n' "$LINUX_NM_UNMANAGE_IFACE"
+  printf 'linux_force_monitor=%s\n' "$LINUX_FORCE_MONITOR"
   printf 'python3=%s\n' "${PYTHON3_BIN:-MISSING}"
   printf 'sudo=%s\n' "${SUDO_BIN:-MISSING}"
   printf 'timeout=%s\n' "${TIMEOUT_BIN:-MISSING}"
@@ -737,6 +746,7 @@ fi
   printf 'ps=%s\n' "${PS_BIN:-MISSING}"
   printf 'grep=%s\n' "${GREP_BIN:-MISSING}"
   printf 'date=%s\n' "${DATE_BIN:-MISSING}"
+  printf 'nmcli=%s\n' "${NMCLI_BIN:-MISSING}"
   printf 'sudo_noninteractive=%s\n' "$sudo_noninteractive"
   printf 'iface_status=%s\n' "$iface_status"
   printf 'wfb_key_status=%s\n' "$wfb_key_status"
@@ -751,8 +761,8 @@ if [[ -n "$PYTHON3_BIN" ]]; then
   export preflight_status preflight_degraded
   export sudo_noninteractive iface_status wfb_key_status docker_service_state
   export preflight_process_matches LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
-  export PYTHON3_BIN SUDO_BIN TIMEOUT_BIN WFB_RX_BIN WFB_TX_BIN DOCKER_BIN IW_BIN IP_BIN TCPDUMP_BIN PKILL_BIN PS_BIN GREP_BIN DATE_BIN
-  export LINUX_REMOTE_PATH LINUX_REQUIRE_IW IFACE WFB_KEY WFB_SERVICE
+  export PYTHON3_BIN SUDO_BIN TIMEOUT_BIN WFB_RX_BIN WFB_TX_BIN DOCKER_BIN IW_BIN IP_BIN TCPDUMP_BIN PKILL_BIN PS_BIN GREP_BIN DATE_BIN NMCLI_BIN
+  export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_NM_UNMANAGE_IFACE LINUX_FORCE_MONITOR IFACE WFB_KEY WFB_SERVICE
   "$PYTHON3_BIN" - "$preflight_json" "${missing_required[*]:-}" "${missing_optional[*]:-}" "${policy_blockers[*]:-}" <<'PY'
 import json
 import os
@@ -772,6 +782,7 @@ commands = {
     "ps": os.environ.get("PS_BIN") or None,
     "grep": os.environ.get("GREP_BIN") or None,
     "date": os.environ.get("DATE_BIN") or None,
+    "nmcli": os.environ.get("NMCLI_BIN") or None,
 }
 missing_required = [name for name in sys.argv[2].split() if name]
 missing_optional = [name for name in sys.argv[3].split() if name]
@@ -783,6 +794,8 @@ report = {
     "linux_require_iw": os.environ.get("LINUX_REQUIRE_IW", "") == "1",
     "linux_require_peer_isolation": os.environ.get("LINUX_REQUIRE_PEER_ISOLATION", "") == "1",
     "linux_peer_settle_seconds": float(os.environ.get("LINUX_PEER_SETTLE_SECONDS", "0") or 0),
+    "linux_nm_unmanage_iface": os.environ.get("LINUX_NM_UNMANAGE_IFACE", "") == "1",
+    "linux_force_monitor": os.environ.get("LINUX_FORCE_MONITOR", "") == "1",
     "interface": os.environ.get("IFACE", ""),
     "wfb_key": os.environ.get("WFB_KEY", ""),
     "wfb_service": os.environ.get("WFB_SERVICE", ""),
@@ -901,6 +914,10 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
 
 channel_set_status=skipped
 channel_iw_info=""
+nm_unmanage_status=skipped
+monitor_set_status=skipped
+link_down_status=skipped
+link_up_status=skipped
 peer_isolation_status=unknown
 peer_process_matches_before_stop=""
 peer_process_matches_after_stop=""
@@ -942,6 +959,49 @@ peer_process_matches_after_stop=""
   if [[ "$LINUX_REQUIRE_PEER_ISOLATION" == "1" && "$peer_isolation_status" != "ok" ]]; then
     echo "peer isolation required but status=$peer_isolation_status"
   fi
+  if [[ "$LINUX_NM_UNMANAGE_IFACE" == "1" ]]; then
+    if [[ -n "$SUDO_BIN" && -n "$NMCLI_BIN" ]]; then
+      if "$SUDO_BIN" -n "$NMCLI_BIN" dev set "$IFACE" managed no; then
+        nm_unmanage_status=ok
+      else
+        nm_unmanage_status=failed
+      fi
+      "$SUDO_BIN" -n "$NMCLI_BIN" dev set "p2p-dev-${IFACE}" managed no >/dev/null 2>&1 || true
+    else
+      nm_unmanage_status=skipped_nmcli_or_sudo_missing
+      echo "nmcli or sudo unavailable; skipped NetworkManager unmanaged guard"
+    fi
+  else
+    nm_unmanage_status=disabled
+  fi
+  printf 'nm_unmanage_status=%s\n' "$nm_unmanage_status"
+  if [[ "$LINUX_FORCE_MONITOR" == "1" ]]; then
+    if [[ -n "$SUDO_BIN" && -n "$IW_BIN" && -n "$IP_BIN" ]]; then
+      if "$SUDO_BIN" -n "$IP_BIN" link set "$IFACE" down; then
+        link_down_status=ok
+      else
+        link_down_status=failed
+      fi
+      if "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set type monitor; then
+        monitor_set_status=ok
+      else
+        monitor_set_status=failed
+      fi
+      if "$SUDO_BIN" -n "$IP_BIN" link set "$IFACE" up; then
+        link_up_status=ok
+      else
+        link_up_status=failed
+      fi
+    else
+      monitor_set_status=skipped_iw_ip_or_sudo_missing
+      echo "iw, ip, or sudo unavailable; skipped monitor-mode guard"
+    fi
+  else
+    monitor_set_status=disabled
+  fi
+  printf 'link_down_status=%s\n' "$link_down_status"
+  printf 'monitor_set_status=%s\n' "$monitor_set_status"
+  printf 'link_up_status=%s\n' "$link_up_status"
   if [[ -n "$SUDO_BIN" && -n "$IW_BIN" ]]; then
     if "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"; then
       channel_set_status=ok
@@ -963,6 +1023,7 @@ peer_process_matches_after_stop=""
 
 if [[ -n "$PYTHON3_BIN" ]]; then
   export channel_set_status channel_iw_info CHANNEL BANDWIDTH_MHZ IFACE IW_BIN SUDO_BIN
+  export nm_unmanage_status monitor_set_status link_down_status link_up_status LINUX_NM_UNMANAGE_IFACE LINUX_FORCE_MONITOR
   export peer_isolation_status peer_process_matches_before_stop peer_process_matches_after_stop LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
   "$PYTHON3_BIN" - "$channel_state_json" <<'PY'
 import json
@@ -976,6 +1037,10 @@ iw_info = os.environ.get("channel_iw_info", "")
 observed_channel = None
 observed_frequency_mhz = None
 observed_width_mhz = None
+observed_type = None
+type_match = re.search(r"^\s*type\s+(\S+)", iw_info, re.MULTILINE)
+if type_match:
+    observed_type = type_match.group(1)
 match = re.search(r"channel\s+(\d+)\s+\((\d+)\s+MHz\),\s+width:\s*(\d+)\s+MHz", iw_info)
 if match:
     observed_channel = int(match.group(1))
@@ -983,8 +1048,14 @@ if match:
     observed_width_mhz = int(match.group(3))
 
 set_status = os.environ.get("channel_set_status", "unknown")
+force_monitor = os.environ.get("LINUX_FORCE_MONITOR", "") == "1"
+monitor_set_status = os.environ.get("monitor_set_status", "unknown")
 if set_status.startswith("skipped"):
     verify_status = "skipped"
+elif force_monitor and monitor_set_status != "ok":
+    verify_status = "monitor_set_failed"
+elif force_monitor and observed_type != "monitor":
+    verify_status = "monitor_mismatch"
 elif set_status != "ok":
     verify_status = "set_failed"
 elif observed_channel is None or observed_width_mhz is None:
@@ -1000,7 +1071,14 @@ report = {
     "requested_channel": requested_channel,
     "requested_bandwidth_mhz": requested_bandwidth_mhz,
     "set_status": set_status,
+    "nm_unmanage_status": os.environ.get("nm_unmanage_status", "unknown"),
+    "nm_unmanage_requested": os.environ.get("LINUX_NM_UNMANAGE_IFACE", "") == "1",
+    "monitor_set_status": monitor_set_status,
+    "monitor_force_requested": force_monitor,
+    "link_down_status": os.environ.get("link_down_status", "unknown"),
+    "link_up_status": os.environ.get("link_up_status", "unknown"),
     "verify_status": verify_status,
+    "observed_type": observed_type,
     "observed_channel": observed_channel,
     "observed_frequency_mhz": observed_frequency_mhz,
     "observed_width_mhz": observed_width_mhz,

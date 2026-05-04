@@ -477,6 +477,27 @@ with zero decrypt failures. Treat the default-rate failures as pacing,
 backpressure, or relay-topology evidence rather than EFUSE TXAGC evidence
 until a direct local drone link removes the rownd UDP relay from the path.
 
+After the drone became directly reachable from this Mac, the close-range runner
+was hardened to mark `wfb0` unmanaged in NetworkManager and force it back to
+monitor mode before pinning the channel. The channel-state evidence now records
+`nm_unmanage_status`, `monitor_set_status`, `observed_type`, and channel/width
+verification. This was needed because an early channel-161 smoke captured a
+NetworkManager-like scan burst across 2.4 GHz and 5 GHz even though the preflight
+channel check had passed.
+
+With the adapter moved from roughly 1 ft to roughly 6 ft from the Linux peer,
+the direct local channel-36 check is healthy:
+`/tmp/wfb-rfq-local-direct-ch36-peerhard-efuse-full-a1/rf-quality-report.json`
+recovered `1993/2000`, logged zero decrypt failures, verified channel 36 / 20
+MHz with `wfb0` in monitor mode, stayed `baseline_comparable` / `matched` /
+`within_margin`, and reported usable receiver RSSI evidence. The paired
+runtime-IQK A/B artifact
+`/tmp/wfb-rfq-local-direct-ch36-peerhard-runtime-iqk-full-a1/rf-quality-report.json`
+recovered `1942/2000` with 638 decrypt failures and is
+`degraded_comparison` / `outside_margin`. Keep the current-default/EFUSE profile
+as the local production gate for this geometry; do not promote runtime IQK from
+this A/B result.
+
 After moving LCK execution into `wfb-radio-runtime`,
 `/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json` reran the LCK
 profile and recovered `1981/2000`, submitted `3000/3000`, reported zero decrypt
