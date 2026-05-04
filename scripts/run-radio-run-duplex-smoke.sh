@@ -194,6 +194,81 @@ start_radio() {
   RADIO_PID=$!
 }
 
+write_radio_startup_failure_summary() {
+  local reason=$1
+  local radio_exit_status=${2:-}
+  log "writing startup failure summary"
+  python3 - "$OUT_DIR" "$reason" "$radio_exit_status" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+run = Path(sys.argv[1])
+reason = sys.argv[2]
+radio_exit_status = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
+
+def load(path):
+    try:
+        return json.loads(path.read_text())
+    except Exception as exc:
+        return {"error": str(exc), "path": str(path)}
+
+def tail(path, limit=120):
+    try:
+        return path.read_text(errors="replace").splitlines()[-limit:]
+    except Exception:
+        return []
+
+report = load(run / "radio-run.json")
+calibration = report.get("tx_calibration_profile") or {}
+runtime_iqk = calibration.get("runtime_iqk") or {}
+require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
+calibration_success_required = require_calibration_success in {"1", "true", "yes"}
+if require_calibration_success == "auto":
+    calibration_success_required = report.get("calibration_profile") == "rtl8812a_runtime_iqk"
+
+failures = [reason]
+if isinstance(report, dict) and report.get("error"):
+    failures.append(f"radio_report_error={report.get('error')}")
+elif report.get("result") not in {None, "pass"}:
+    failures.append(f"radio_result={report.get('result')}")
+if calibration_success_required and runtime_iqk.get("status") not in {"completed", "success"}:
+    failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
+if calibration_success_required and runtime_iqk.get("cleanup_status") != "restored":
+    failures.append(f"runtime_iqk_cleanup_status={runtime_iqk.get('cleanup_status')}")
+if calibration_success_required and runtime_iqk.get("selected_iqc_fill_applied") is not True:
+    failures.append(
+        f"runtime_iqk_selected_iqc_fill_applied={runtime_iqk.get('selected_iqc_fill_applied')}"
+    )
+
+summary = {
+    "smoke_result": "fail",
+    "failures": failures,
+    "startup_failure_reason": reason,
+    "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
+    "radio_result": report.get("result"),
+    "stop_reason": report.get("stop_reason"),
+    "calibration": {
+        "profile": report.get("calibration_profile"),
+        "class": report.get("calibration_class"),
+        "evidence_source": report.get("calibration_evidence_source"),
+        "receiver_backed_validation_required": report.get("receiver_backed_validation_required"),
+        "runtime_iqk_status": runtime_iqk.get("status"),
+        "runtime_iqk_cleanup_status": runtime_iqk.get("cleanup_status"),
+        "runtime_iqk_sweep_index": runtime_iqk.get("sweep_index"),
+        "runtime_iqk_sweep_count": runtime_iqk.get("sweep_count"),
+        "runtime_iqk_selected_iqc_fill_applied": runtime_iqk.get("selected_iqc_fill_applied"),
+        "runtime_iqk_selected_iqc_fill_register_count": runtime_iqk.get("selected_iqc_fill_register_count"),
+        "calibration_success_required": calibration_success_required,
+    },
+    "radio_log_tail": tail(run / "radio-run.log"),
+}
+(run / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+}
+
 wait_for_radio_ready() {
   log "waiting for radio ready marker"
   for _ in $(seq 1 "$RADIO_READY_WAIT_SECONDS"); do
@@ -202,13 +277,22 @@ wait_for_radio_ready() {
       return 0
     fi
     if ! kill -0 "$RADIO_PID" >/dev/null 2>&1; then
+      local radio_status=0
+      wait "$RADIO_PID" || radio_status=$?
+      RADIO_PID=
       tail -120 "$OUT_DIR/radio-run.log" >&2 || true
-      die "radio-run exited before ready"
+      write_radio_startup_failure_summary "radio_run_exited_before_ready" "$radio_status" || true
+      die "radio-run exited before ready; summary written to $OUT_DIR/summary.json"
     fi
     sleep 1
   done
+  local radio_status=0
+  kill "$RADIO_PID" >/dev/null 2>&1 || true
+  wait "$RADIO_PID" || radio_status=$?
+  RADIO_PID=
   tail -120 "$OUT_DIR/radio-run.log" >&2 || true
-  die "radio ready marker timed out"
+  write_radio_startup_failure_summary "radio_ready_marker_timed_out" "$radio_status" || true
+  die "radio ready marker timed out; summary written to $OUT_DIR/summary.json"
 }
 
 run_peer_traffic() {
@@ -422,6 +506,12 @@ if l2m_decrypt_failures > max_l2m_decrypt_failures:
     failures.append(f"l2m_decrypt_failures={l2m_decrypt_failures}>{max_l2m_decrypt_failures}")
 if calibration_success_required and runtime_iqk.get("status") not in {"completed", "success"}:
     failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
+if calibration_success_required and runtime_iqk.get("cleanup_status") != "restored":
+    failures.append(f"runtime_iqk_cleanup_status={runtime_iqk.get('cleanup_status')}")
+if calibration_success_required and runtime_iqk.get("selected_iqc_fill_applied") is not True:
+    failures.append(
+        f"runtime_iqk_selected_iqc_fill_applied={runtime_iqk.get('selected_iqc_fill_applied')}"
+    )
 summary = {
     "smoke_result": "fail" if failures else "pass",
     "failures": failures,
@@ -441,6 +531,8 @@ summary = {
         "runtime_iqk_sweep_index": runtime_iqk.get("sweep_index"),
         "runtime_iqk_sweep_count": runtime_iqk.get("sweep_count"),
         "runtime_iqk_fallback_stage_count": last_sweep_summary.get("fallback_stage_count"),
+        "runtime_iqk_selected_iqc_fill_applied": runtime_iqk.get("selected_iqc_fill_applied"),
+        "runtime_iqk_selected_iqc_fill_register_count": runtime_iqk.get("selected_iqc_fill_register_count"),
         "calibration_success_required": calibration_success_required,
     },
     "m2l_min_unique": m2l_min_unique,
@@ -485,8 +577,16 @@ if ! run_peer_traffic; then
   collect_peer_artifacts || true
   die "Linux peer traffic failed; partial artifacts copied to $OUT_DIR/peer"
 fi
-wait "$RADIO_PID"
-RADIO_PID=
+radio_status=0
+if wait "$RADIO_PID"; then
+  RADIO_PID=
+else
+  radio_status=$?
+  RADIO_PID=
+  collect_peer_artifacts || true
+  write_summary || true
+  die "radio-run exited with status $radio_status; summary written to $OUT_DIR/summary.json"
+fi
 collect_peer_artifacts
 write_summary
 trap - EXIT INT TERM
