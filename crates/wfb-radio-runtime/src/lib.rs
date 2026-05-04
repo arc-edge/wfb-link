@@ -2545,6 +2545,20 @@ pub struct Rtl8812auRuntimeIqkIqcValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkRawCandidateReport {
+    pub x_raw: u32,
+    pub x_raw_hex: String,
+    pub y_raw: u32,
+    pub y_raw_hex: String,
+    pub x_field: u32,
+    pub x_field_hex: String,
+    pub y_field: u32,
+    pub y_field_hex: String,
+    pub x_signed: i32,
+    pub y_signed: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Rtl8812auRuntimeIqkMaskedBbWritePlan {
     pub register_name: &'static str,
     pub address: u16,
@@ -2564,6 +2578,7 @@ pub struct Rtl8812auRuntimeIqkAttemptReport {
     pub delay_count: Option<u8>,
     pub status_raw: Option<u32>,
     pub status_raw_hex: Option<String>,
+    pub raw_candidate: Option<Rtl8812auRuntimeIqkRawCandidateReport>,
     pub candidate: Option<Rtl8812auRuntimeIqkIqcValue>,
     pub label: Option<&'static str>,
 }
@@ -2581,6 +2596,7 @@ pub struct Rtl8812auRuntimeIqkStageReport {
     pub candidates: Vec<Rtl8812auRuntimeIqkIqcValue>,
     pub selected_iqc: Option<Rtl8812auRuntimeIqkIqcValue>,
     pub fallback_used: bool,
+    pub fallback_iqc: Option<Rtl8812auRuntimeIqkIqcValue>,
     pub failure_label: Option<&'static str>,
     pub fill_plan: Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>,
 }
@@ -2645,6 +2661,16 @@ pub struct Rtl8812auRuntimeIqkCleanupReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auRuntimeIqkPreSweepStateReport {
+    pub bb_agc_state_pre_iqk: Rtl8812auRegisterReadReport,
+    pub ofdmccken_pre_iqk: Option<Rtl8812auRegisterReadReport>,
+    pub cca_on_sec_pre_iqk: Option<Rtl8812auRegisterReadReport>,
+    pub rf_mode_path_a_pre_iqk: Option<Rtl8812auRfSerialReadReport>,
+    pub rf_mode_path_b_pre_iqk: Option<Rtl8812auRfSerialReadReport>,
+    pub txagc_registers_pre_iqk: Vec<Rtl8812auRegisterReadReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Rtl8812auRuntimeIqkCalibrationReport {
     pub semantics: &'static str,
     pub upstream_basis: &'static str,
@@ -2657,6 +2683,7 @@ pub struct Rtl8812auRuntimeIqkCalibrationReport {
     pub cleanup_status: &'static str,
     pub cleanup_failures: Vec<String>,
     pub backup: Option<Rtl8812auRuntimeIqkBackupReport>,
+    pub pre_sweep_state: Option<Rtl8812auRuntimeIqkPreSweepStateReport>,
     pub cleanup: Option<Rtl8812auRuntimeIqkCleanupReport>,
     pub paths: Vec<Rtl8812auRuntimeIqkPathReport>,
     pub affected_registers: Vec<Rtl8812auRegisterReadReport>,
@@ -3070,6 +3097,26 @@ fn rtl8812au_iqk_signed_to_component(value: i32) -> u32 {
     (value & 0x0000_07ff) as u32
 }
 
+fn rtl8812au_runtime_iqk_raw_candidate_report(
+    x_raw: u32,
+    y_raw: u32,
+) -> Rtl8812auRuntimeIqkRawCandidateReport {
+    let x_field = bb_masked_field(x_raw, RTL8812A_IQK_RESULT_FIELD_MASK);
+    let y_field = bb_masked_field(y_raw, RTL8812A_IQK_RESULT_FIELD_MASK);
+    Rtl8812auRuntimeIqkRawCandidateReport {
+        x_raw,
+        x_raw_hex: format_register_value(x_raw, 8),
+        y_raw,
+        y_raw_hex: format_register_value(y_raw, 8),
+        x_field,
+        x_field_hex: format_register_value(x_field, 3),
+        y_field,
+        y_field_hex: format_register_value(y_field, 3),
+        x_signed: rtl8812au_iqk_component_to_signed(x_field),
+        y_signed: rtl8812au_iqk_component_to_signed(y_field),
+    }
+}
+
 pub fn rtl8812au_iqk_select_candidate(
     candidates: &[Rtl8812auRuntimeIqkIqcValue],
 ) -> Option<Rtl8812auRuntimeIqkIqcValue> {
@@ -3154,6 +3201,7 @@ impl Rtl8812auRuntimeIqkOneShotPathState {
         failed: Option<bool>,
         delay_count: Option<u8>,
         status_raw: Option<u32>,
+        raw_candidate: Option<Rtl8812auRuntimeIqkRawCandidateReport>,
         candidate: Option<Rtl8812auRuntimeIqkIqcValue>,
         label: Option<&'static str>,
     ) {
@@ -3165,6 +3213,7 @@ impl Rtl8812auRuntimeIqkOneShotPathState {
             delay_count,
             status_raw,
             status_raw_hex: status_raw.map(|value| format_register_value(value, 8)),
+            raw_candidate,
             candidate,
             label,
         });
@@ -3183,19 +3232,21 @@ impl Rtl8812auRuntimeIqkOneShotPathState {
         fallback_iqc: Rtl8812auRuntimeIqkIqcValue,
         fill_plan: Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>,
     ) -> Rtl8812auRuntimeIqkStageReport {
-        let (status, selected_iqc, fallback_used, failure_label) = if self.finished {
-            ("success", self.selected_iqc, false, None)
-        } else {
-            (
-                "failed",
-                Some(fallback_iqc),
-                true,
-                Some(
-                    self.failure_label
-                        .unwrap_or("iqk_candidate_selection_failed"),
-                ),
-            )
-        };
+        let (status, selected_iqc, fallback_used, fallback_iqc_report, failure_label) =
+            if self.finished {
+                ("success", self.selected_iqc, false, None, None)
+            } else {
+                (
+                    "failed",
+                    Some(fallback_iqc.clone()),
+                    true,
+                    Some(fallback_iqc),
+                    Some(
+                        self.failure_label
+                            .unwrap_or("iqk_candidate_selection_failed"),
+                    ),
+                )
+            };
         Rtl8812auRuntimeIqkStageReport {
             stage,
             status,
@@ -3208,6 +3259,7 @@ impl Rtl8812auRuntimeIqkOneShotPathState {
             candidates: self.candidates,
             selected_iqc,
             fallback_used,
+            fallback_iqc: fallback_iqc_report,
             failure_label,
             fill_plan,
         }
@@ -3231,6 +3283,7 @@ pub fn rtl8812au_runtime_iqk_skipped_stage_report(
         candidates: Vec::new(),
         selected_iqc: Some(rtl8812au_runtime_iqk_iqc_value(0x200, 0)),
         fallback_used: true,
+        fallback_iqc: Some(rtl8812au_runtime_iqk_iqc_value(0x200, 0)),
         failure_label: Some(label),
         fill_plan,
     }
@@ -3384,6 +3437,74 @@ where
     )
 }
 
+fn rtl8812au_runtime_iqk_rf_backup_value(
+    reports: &[Rtl8812auRfSerialReadReport],
+    rf_offset: u32,
+) -> Option<Rtl8812auRfSerialReadReport> {
+    reports
+        .iter()
+        .find(|report| report.rf_offset == rf_offset)
+        .cloned()
+}
+
+fn rtl8812au_runtime_iqk_register_backup_value(
+    reports: &[Rtl8812auRegisterReadReport],
+    address: u16,
+) -> Option<Rtl8812auRegisterReadReport> {
+    reports
+        .iter()
+        .find(|report| report.address == address)
+        .cloned()
+}
+
+fn rtl8812au_runtime_iqk_pre_sweep_state<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    backup: &Rtl8812auRuntimeIqkBackupReport,
+) -> Result<Rtl8812auRuntimeIqkPreSweepStateReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut txagc_registers_pre_iqk = Vec::new();
+    for (register_name, address) in rtl8812au_tx_power_agc_registers(Rtl8812auRfPath::Both) {
+        let value = runtime_iqk_read32(
+            registers,
+            counters,
+            register_name,
+            address,
+            "rtl8812a_runtime_iqk_pre_sweep_state_failed",
+        )?;
+        txagc_registers_pre_iqk.push(register_read_report(
+            register_name,
+            address,
+            "u32",
+            value,
+            8,
+        ));
+    }
+
+    Ok(Rtl8812auRuntimeIqkPreSweepStateReport {
+        bb_agc_state_pre_iqk: backup.page_select_register.clone(),
+        ofdmccken_pre_iqk: rtl8812au_runtime_iqk_register_backup_value(
+            &backup.macbb_backup,
+            REG_OFDMCCKEN_JAGUAR,
+        ),
+        cca_on_sec_pre_iqk: rtl8812au_runtime_iqk_register_backup_value(
+            &backup.macbb_backup,
+            REG_CCA_ON_SEC_JAGUAR,
+        ),
+        rf_mode_path_a_pre_iqk: rtl8812au_runtime_iqk_rf_backup_value(
+            &backup.rf_backup_path_a,
+            0x00,
+        ),
+        rf_mode_path_b_pre_iqk: rtl8812au_runtime_iqk_rf_backup_value(
+            &backup.rf_backup_path_b,
+            0x00,
+        ),
+        txagc_registers_pre_iqk,
+    })
+}
+
 fn runtime_iqk_capture_tx_candidate<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut RuntimeRadioCounters,
@@ -3392,7 +3513,13 @@ fn runtime_iqk_capture_tx_candidate<T>(
     latch_register: u16,
     result_register_name: &'static str,
     result_register: u16,
-) -> Result<Rtl8812auRuntimeIqkIqcValue, RuntimeRadioError>
+) -> Result<
+    (
+        Rtl8812auRuntimeIqkIqcValue,
+        Rtl8812auRuntimeIqkRawCandidateReport,
+    ),
+    RuntimeRadioError,
+>
 where
     T: Rtl8812auUsbTransport,
 {
@@ -3426,17 +3553,15 @@ where
         result_register,
         "rtl8812a_runtime_iqk_tx_failed",
     )?;
-    let candidate = rtl8812au_runtime_iqk_iqc_value(
-        bb_masked_field(tx_x_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
-        bb_masked_field(tx_y_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
-    );
+    let raw_candidate = rtl8812au_runtime_iqk_raw_candidate_report(tx_x_raw, tx_y_raw);
+    let candidate = rtl8812au_runtime_iqk_iqc_value(raw_candidate.x_field, raw_candidate.y_field);
     if candidate.x == 0 && candidate.y == 0 {
         return Err(RuntimeRadioError::new(
             "rtl8812a_runtime_iqk_tx_failed",
             format!("path {path_name} TX IQK produced a zero TX_X/TX_Y candidate"),
         ));
     }
-    Ok(candidate)
+    Ok((candidate, raw_candidate))
 }
 
 fn apply_rf_mask(original: u32, bitmask: u32, data: u32) -> u32 {
@@ -3512,7 +3637,13 @@ fn runtime_iqk_capture_rx_candidate<T>(
     latch_register: u16,
     result_register_name: &'static str,
     result_register: u16,
-) -> Result<Rtl8812auRuntimeIqkIqcValue, RuntimeRadioError>
+) -> Result<
+    (
+        Rtl8812auRuntimeIqkIqcValue,
+        Rtl8812auRuntimeIqkRawCandidateReport,
+    ),
+    RuntimeRadioError,
+>
 where
     T: Rtl8812auUsbTransport,
 {
@@ -3546,9 +3677,10 @@ where
         result_register,
         "rtl8812a_runtime_iqk_rx_failed",
     )?;
-    Ok(rtl8812au_runtime_iqk_iqc_value(
-        bb_masked_field(rx_x_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
-        bb_masked_field(rx_y_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
+    let raw_candidate = rtl8812au_runtime_iqk_raw_candidate_report(rx_x_raw, rx_y_raw);
+    Ok((
+        rtl8812au_runtime_iqk_iqc_value(raw_candidate.x_field, raw_candidate.y_field),
+        raw_candidate,
     ))
 }
 
@@ -3671,11 +3803,12 @@ where
                         Some(delay_count),
                         Some(value),
                         None,
+                        None,
                         Some("tx_iqk_failed_flag"),
                     );
                     path_a.note_retry("tx_iqk_failed_flag");
                 } else {
-                    let candidate = runtime_iqk_capture_tx_candidate(
+                    let (candidate, raw_candidate) = runtime_iqk_capture_tx_candidate(
                         registers,
                         counters,
                         "A",
@@ -3689,6 +3822,7 @@ where
                         Some(failed),
                         Some(delay_count),
                         Some(value),
+                        Some(raw_candidate),
                         Some(candidate.clone()),
                         None,
                     );
@@ -3712,11 +3846,12 @@ where
                         Some(delay_count),
                         Some(value),
                         None,
+                        None,
                         Some("tx_iqk_failed_flag"),
                     );
                     path_b.note_retry("tx_iqk_failed_flag");
                 } else {
-                    let candidate = runtime_iqk_capture_tx_candidate(
+                    let (candidate, raw_candidate) = runtime_iqk_capture_tx_candidate(
                         registers,
                         counters,
                         "B",
@@ -3730,6 +3865,7 @@ where
                         Some(failed),
                         Some(delay_count),
                         Some(value),
+                        Some(raw_candidate),
                         Some(candidate.clone()),
                         None,
                     );
@@ -3744,6 +3880,7 @@ where
                     Some(delay_count),
                     None,
                     None,
+                    None,
                     Some("tx_iqk_not_ready"),
                 );
                 path_a.note_retry("tx_iqk_not_ready");
@@ -3753,6 +3890,7 @@ where
                     path_b.ready(),
                     None,
                     Some(delay_count),
+                    None,
                     None,
                     None,
                     Some("tx_iqk_not_ready"),
@@ -4201,11 +4339,12 @@ where
                         Some(delay_count),
                         Some(value),
                         None,
+                        None,
                         Some("rx_iqk_failed_flag"),
                     );
                     path_a.note_retry("rx_iqk_failed_flag");
                 } else {
-                    let candidate = runtime_iqk_capture_rx_candidate(
+                    let (candidate, raw_candidate) = runtime_iqk_capture_rx_candidate(
                         registers,
                         counters,
                         "R_0xcb8",
@@ -4218,6 +4357,7 @@ where
                         Some(failed),
                         Some(delay_count),
                         Some(value),
+                        Some(raw_candidate),
                         Some(candidate.clone()),
                         None,
                     );
@@ -4241,11 +4381,12 @@ where
                         Some(delay_count),
                         Some(value),
                         None,
+                        None,
                         Some("rx_iqk_failed_flag"),
                     );
                     path_b.note_retry("rx_iqk_failed_flag");
                 } else {
-                    let candidate = runtime_iqk_capture_rx_candidate(
+                    let (candidate, raw_candidate) = runtime_iqk_capture_rx_candidate(
                         registers,
                         counters,
                         "R_0xeb8",
@@ -4258,6 +4399,7 @@ where
                         Some(failed),
                         Some(delay_count),
                         Some(value),
+                        Some(raw_candidate),
                         Some(candidate.clone()),
                         None,
                     );
@@ -4272,6 +4414,7 @@ where
                     Some(delay_count),
                     None,
                     None,
+                    None,
                     Some("rx_iqk_not_ready"),
                 );
                 path_a.note_retry("rx_iqk_not_ready");
@@ -4281,6 +4424,7 @@ where
                     path_b.ready(),
                     None,
                     Some(delay_count),
+                    None,
                     None,
                     None,
                     Some("rx_iqk_not_ready"),
@@ -5885,6 +6029,7 @@ where
     let before_iqk_registers =
         rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)?;
     let backup = run_rtl8812au_runtime_iqk_backup(registers, counters)?;
+    let pre_sweep_state = rtl8812au_runtime_iqk_pre_sweep_state(registers, counters, &backup)?;
     let setup_plan =
         rtl8812au_runtime_iqk_setup_plan(channel.band, rfe_type, channel.band == Band::Ghz5, false);
 
@@ -5977,6 +6122,7 @@ where
         cleanup_status,
         cleanup_failures,
         backup: Some(backup),
+        pre_sweep_state: Some(pre_sweep_state),
         cleanup: Some(cleanup),
         paths,
         affected_registers,
@@ -7883,6 +8029,7 @@ mod tests {
             candidates: Vec::new(),
             selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x2aa, 0x155)),
             fallback_used: false,
+            fallback_iqc: None,
             failure_label: None,
             fill_plan: Vec::new(),
         };
@@ -7954,6 +8101,7 @@ mod tests {
             state.failed(),
             Some(21),
             Some(0x0000_1000),
+            None,
             None,
             Some("tx_iqk_not_ready"),
         );
@@ -8030,6 +8178,15 @@ mod tests {
             path_a.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
             Some((0x120, 0x120))
         );
+        assert_eq!(
+            path_a.attempts[0].raw_candidate.as_ref().map(|raw| (
+                raw.x_field,
+                raw.y_field,
+                raw.x_signed,
+                raw.y_signed
+            )),
+            Some((0x120, 0x120, 0x120, 0x120))
+        );
         assert_eq!(path_b.status, "success");
         assert_eq!(path_b.average_count, 2);
         assert_eq!(
@@ -8086,6 +8243,7 @@ mod tests {
             candidates: Vec::new(),
             selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x120, 0x020)),
             fallback_used: false,
+            fallback_iqc: None,
             failure_label: None,
             fill_plan: Vec::new(),
         };
@@ -8103,6 +8261,13 @@ mod tests {
         assert_eq!(rx_a.average_count, 2);
         assert_eq!(
             rx_a.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
+            Some((0x130, 0x130))
+        );
+        assert_eq!(
+            rx_a.attempts[0]
+                .raw_candidate
+                .as_ref()
+                .map(|raw| (raw.x_field, raw.y_field)),
             Some((0x130, 0x130))
         );
         assert_eq!(rx_b.status, "success");
@@ -8169,6 +8334,16 @@ mod tests {
         assert_eq!(report.sweep_summaries[0].fallback_stage_count, 0);
         assert_eq!(report.paths.len(), 2);
         assert!(report.backup.is_some());
+        assert!(report.pre_sweep_state.is_some());
+        assert_eq!(
+            report
+                .pre_sweep_state
+                .as_ref()
+                .expect("pre-sweep state")
+                .txagc_registers_pre_iqk
+                .len(),
+            super::rtl8812au_tx_power_agc_registers(super::Rtl8812auRfPath::Both).len()
+        );
         assert!(report.cleanup.is_some());
         assert_eq!(
             report.before_iqk_registers.len(),

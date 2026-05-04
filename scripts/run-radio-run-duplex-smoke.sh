@@ -174,7 +174,7 @@ start_radio() {
     --max-datagrams 0 \
     "${tx_power_args[@]}" \
     --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-    "${write_auth_arg[@]}" \
+    ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
     --wfb-link-id "$LINK_ID" \
     --wfb-radio-port "$L2M_RADIO_PORT" \
     --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
@@ -346,6 +346,8 @@ rx = report.get("rx") or {}
 tx = report.get("tx") or {}
 calibration = report.get("tx_calibration_profile") or {}
 runtime_iqk = calibration.get("runtime_iqk") or {}
+sweep_summaries = runtime_iqk.get("sweep_summaries") or []
+last_sweep_summary = sweep_summaries[-1] if sweep_summaries else {}
 rx_forwards = rx.get("rx_forwards") or []
 radio_rx_forwarded = sum(
     ((forward.get("counters") or {}).get("forwarded") or 0)
@@ -391,7 +393,9 @@ summary = {
         "receiver_backed_validation_required": report.get("receiver_backed_validation_required"),
         "runtime_iqk_status": runtime_iqk.get("status"),
         "runtime_iqk_cleanup_status": runtime_iqk.get("cleanup_status"),
-        "runtime_iqk_fallback_stage_count": runtime_iqk.get("fallback_stage_count"),
+        "runtime_iqk_sweep_index": runtime_iqk.get("sweep_index"),
+        "runtime_iqk_sweep_count": runtime_iqk.get("sweep_count"),
+        "runtime_iqk_fallback_stage_count": last_sweep_summary.get("fallback_stage_count"),
         "calibration_success_required": calibration_success_required,
     },
     "m2l_min_unique": m2l_min_unique,

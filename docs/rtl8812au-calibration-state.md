@@ -308,8 +308,12 @@ Reports label this under `tx_calibration_profile.runtime_iqk` with:
 - `sweep_index`, `sweep_count`, `max_sweeps`, and `sweep_summaries` for the
   bounded retry wrapper around the Linux-derived IQK sweep;
 - per-path `tx` and `rx` stage status, retry count, max ready-poll delay,
-  per-attempt ready/fail/raw-result evidence, candidates, selected IQC value,
-  fallback flag, and fill plan;
+  per-attempt ready/fail/status evidence, raw candidate register readbacks,
+  signed 11-bit candidate components, candidates, selected IQC value, fallback
+  flag, fallback IQC value, and fill plan;
+- `pre_sweep_state`, including `REG_AGC_TABLE_JAGUAR`,
+  `REG_OFDMCCKEN_JAGUAR`, `REG_CCA_ON_SEC_JAGUAR`, RF `0x00` mode readback
+  for both paths, and all TXAGC registers immediately before the IQK setup;
 - `backup` and `cleanup` evidence, including restore counts and
   `cleanup_status`;
 - `before_iqk_registers`, `after_iqk_registers`, and final affected IQK
@@ -407,6 +411,24 @@ Hardware validation on May 2, 2026:
   path A selected `0x1fc/0x006` after five retries and path B selected
   `0x1fb/0x003` after one retry. This proves the signed candidate-selection fix
   can carry through to final RX IQC fill in the sustained WFB flow.
+- Local production-flow evidence on May 4, 2026 adds the current attached-Mac
+  bench state. `/tmp/wfb-radio-run-duplex-iqk-evidence-20260504-143429`
+  completed runtime IQK in sweep 2 with cleanup restored and selected-sweep
+  `fallback_stage_count=0`, but strict receiver-backed counters still failed
+  (`72/80` Mac-to-Linux, `69/80` Linux-to-Mac). The report includes raw
+  candidates such as path-A TX `0x1fc/0x7fc`, path-A RX `0x1fa/0x000`, path-B
+  TX `0x1f8/0x7fa`, and path-B RX `0x1fc/0x003`, plus pre-sweep TXAGC
+  evidence.
+- A Linux peer driver-reload usbmon baseline at
+  `/tmp/wfb-linux-iqk-driver-reload-20260504-143841` captured 7,607 RTL8812AU
+  register writes and 442 unique final registers. It shows the Linux driver
+  writing the static IQK final-state registers (`0x0c58/0x0e58 =
+  0x30000c1c`, `0x0c5c/0x0e5c = 0x00000058`) and RFE pinmux transitions
+  (`0x54337717` during channel work, final `0x54337770`), but it did not show
+  the same dynamic page-C1 TX/RX IQC fill sequence currently used by the
+  runtime-IQK profile. Until that gap is reconciled against the exact upstream
+  driver path, runtime IQK should remain opt-in and receiver-gated rather than
+  long-distance production default.
 
 ## Standalone IQK Diagnostic
 

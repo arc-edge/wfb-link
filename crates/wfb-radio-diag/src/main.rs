@@ -3743,6 +3743,18 @@ struct BridgeTxBenchReport {
     notes: Vec<&'static str>,
 }
 
+const TXAGC_REAPPLY_NOTE: &str = "TXAGC power control reapplied after TX calibration profile";
+
+fn replace_notes_preserving_txagc_reapply(
+    notes: &mut Vec<&'static str>,
+    mut replacement: Vec<&'static str>,
+) {
+    if notes.contains(&TXAGC_REAPPLY_NOTE) && !replacement.contains(&TXAGC_REAPPLY_NOTE) {
+        replacement.push(TXAGC_REAPPLY_NOTE);
+    }
+    *notes = replacement;
+}
+
 #[derive(Debug, Serialize)]
 struct BridgeTxBenchLocalMacReport {
     register_name: &'static str,
@@ -22722,6 +22734,31 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
+    if tx_power_control_requested(&args.tx_power) {
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_power_control(
+            &registers,
+            &args.tx_power,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_listen_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge TX listener TXAGC power control failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_calibration_profile_requested(&args.tx_calibration) {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -22748,7 +22785,9 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         }
     }
 
-    if tx_power_control_requested(&args.tx_power) {
+    if tx_power_control_requested(&args.tx_power)
+        && tx_calibration_profile_requested(&args.tx_calibration)
+    {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match apply_tx_power_control(
@@ -22760,13 +22799,14 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
+                report.notes.push(TXAGC_REAPPLY_NOTE);
             }
             Err(error) => {
                 report.counters = pre_tx_counters;
                 return bridge_tx_listen_failure(
                     report,
-                    "tx_power_control",
-                    "bridge TX listener TXAGC power control failed before the TX loop",
+                    "tx_power_control_reapply",
+                    "bridge TX listener TXAGC power control reapply failed after calibration",
                     error,
                 );
             }
@@ -23107,17 +23147,20 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         detail: "received bounded UDP datagrams and submitted them through live radio TX",
     });
     report.phases = phases;
-    report.notes = if args.init_before_tx {
-        vec![
-            "live bridge TX listener ran same-session RTL8812AU init before accepting datagrams",
-            "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
-        ]
-    } else {
-        vec![
-            "live bridge TX listener assumes the adapter has already completed init on the requested channel",
-            "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
-        ]
-    };
+    replace_notes_preserving_txagc_reapply(
+        &mut report.notes,
+        if args.init_before_tx {
+            vec![
+                "live bridge TX listener ran same-session RTL8812AU init before accepting datagrams",
+                "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+            ]
+        } else {
+            vec![
+                "live bridge TX listener assumes the adapter has already completed init on the requested channel",
+                "UDP datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+            ]
+        },
+    );
     report
 }
 
@@ -24103,6 +24146,31 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
+    if tx_power_control_requested(&args.tx.tx_power) {
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
+            .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
+        match apply_tx_power_control(
+            &registers,
+            &args.tx.tx_power,
+            channel,
+            args.tx.bandwidth,
+            &mut pre_counters,
+        ) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_counters;
+                return bridge_run_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge run TXAGC power control failed before RX/TX loops",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_calibration_profile_requested(&args.tx.tx_calibration) {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
@@ -24129,7 +24197,9 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         }
     }
 
-    if tx_power_control_requested(&args.tx.tx_power) {
+    if tx_power_control_requested(&args.tx.tx_power)
+        && tx_calibration_profile_requested(&args.tx.tx_calibration)
+    {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.tx.init_timeout_ms));
         match apply_tx_power_control(
@@ -24141,13 +24211,14 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
+                report.notes.push(TXAGC_REAPPLY_NOTE);
             }
             Err(error) => {
                 report.counters = pre_counters;
                 return bridge_run_failure(
                     report,
-                    "tx_power_control",
-                    "bridge run TXAGC power control failed before RX/TX loops",
+                    "tx_power_control_reapply",
+                    "bridge run TXAGC power control reapply failed after calibration",
                     error,
                 );
             }
@@ -24550,10 +24621,13 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         },
     ]);
     report.phases = phases;
-    report.notes = vec![
-        "bridge-run uses one retained radio session for same-session init, RX, and TX",
-        "TX input is drained by socket receiver thread(s) while the main loop interleaves queued TX with bulk-IN RX reads",
-    ];
+    replace_notes_preserving_txagc_reapply(
+        &mut report.notes,
+        vec![
+            "bridge-run uses one retained radio session for same-session init, RX, and TX",
+            "TX input is drained by socket receiver thread(s) while the main loop interleaves queued TX with bulk-IN RX reads",
+        ],
+    );
     report
 }
 
@@ -27282,6 +27356,31 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
+    if tx_power_control_requested(&args.tx_power) {
+        let registers = Rtl8812auRegisterAccess::new(&session.transport)
+            .with_timeout(Duration::from_millis(args.init_timeout_ms));
+        match apply_tx_power_control(
+            &registers,
+            &args.tx_power,
+            channel,
+            args.bandwidth,
+            &mut pre_tx_counters,
+        ) {
+            Ok(tx_power_report) => {
+                report.tx_power_control = tx_power_report;
+            }
+            Err(error) => {
+                report.counters = pre_tx_counters;
+                return bridge_tx_bench_failure(
+                    report,
+                    "tx_power_control",
+                    "bridge TX benchmark TXAGC power control failed before the TX loop",
+                    error,
+                );
+            }
+        }
+    }
+
     if tx_calibration_profile_requested(&args.tx_calibration) {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
@@ -27308,7 +27407,9 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         }
     }
 
-    if tx_power_control_requested(&args.tx_power) {
+    if tx_power_control_requested(&args.tx_power)
+        && tx_calibration_profile_requested(&args.tx_calibration)
+    {
         let registers = Rtl8812auRegisterAccess::new(&session.transport)
             .with_timeout(Duration::from_millis(args.init_timeout_ms));
         match apply_tx_power_control(
@@ -27320,13 +27421,14 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         ) {
             Ok(tx_power_report) => {
                 report.tx_power_control = tx_power_report;
+                report.notes.push(TXAGC_REAPPLY_NOTE);
             }
             Err(error) => {
                 report.counters = pre_tx_counters;
                 return bridge_tx_bench_failure(
                     report,
-                    "tx_power_control",
-                    "bridge TX benchmark TXAGC power control failed before the TX loop",
+                    "tx_power_control_reapply",
+                    "bridge TX benchmark TXAGC power control reapply failed after calibration",
                     error,
                 );
             }
@@ -27508,27 +27610,30 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         bridge_tx_bench_has_post_tx_register_mutation(&args),
         claim_detail,
     );
-    report.notes = if args.init_before_tx && args.packet_hex.is_some() {
-        vec![
-            "live bridge TX benchmark initialized the adapter and submitted exact descriptor-prefixed USB TX packets over one retained USB session",
-            "packet override bypassed bridge descriptor construction; no receiver confirmation was attempted",
-        ]
-    } else if args.init_before_tx {
-        vec![
-            "live bridge TX benchmark initialized the adapter and submitted synthetic WFB datagrams over one retained USB session",
-            "no receiver confirmation was attempted; RF packet loss still requires an independent Linux peer",
-        ]
-    } else if args.packet_hex.is_some() {
-        vec![
-            "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
-            "exact descriptor-prefixed USB TX packets were submitted; bridge parse and descriptor construction were bypassed",
-        ]
-    } else {
-        vec![
-            "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
-            "synthetic WFB datagrams were submitted through the radio backend; no receiver confirmation was attempted",
-        ]
-    };
+    replace_notes_preserving_txagc_reapply(
+        &mut report.notes,
+        if args.init_before_tx && args.packet_hex.is_some() {
+            vec![
+                "live bridge TX benchmark initialized the adapter and submitted exact descriptor-prefixed USB TX packets over one retained USB session",
+                "packet override bypassed bridge descriptor construction; no receiver confirmation was attempted",
+            ]
+        } else if args.init_before_tx {
+            vec![
+                "live bridge TX benchmark initialized the adapter and submitted synthetic WFB datagrams over one retained USB session",
+                "no receiver confirmation was attempted; RF packet loss still requires an independent Linux peer",
+            ]
+        } else if args.packet_hex.is_some() {
+            vec![
+                "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
+                "exact descriptor-prefixed USB TX packets were submitted; bridge parse and descriptor construction were bypassed",
+            ]
+        } else {
+            vec![
+                "live bridge TX benchmark assumes the adapter has already completed init on the requested channel",
+                "synthetic WFB datagrams were submitted through the radio backend; no receiver confirmation was attempted",
+            ]
+        },
+    );
     report
 }
 
@@ -40891,6 +40996,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 delay_count: Some(21),
                 status_raw: Some(RTL8812A_IQK_TX_FAIL_MASK),
                 status_raw_hex: Some(format_value(RTL8812A_IQK_TX_FAIL_MASK, 8)),
+                raw_candidate: None,
                 candidate: None,
                 label: Some("tx_iqk_not_ready"),
             }],
@@ -40902,6 +41008,12 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 y_hex: format_value(0_u32, 3),
             }),
             fallback_used: true,
+            fallback_iqc: Some(TxRuntimeIqkIqcValue {
+                x: 0x200,
+                x_hex: format_value(0x200_u32, 3),
+                y: 0,
+                y_hex: format_value(0_u32, 3),
+            }),
             failure_label: Some("tx_iqk_not_ready"),
             fill_plan: rtl8812a_iqk_tx_fill_iqc_plan(TxPowerPathArg::A, 0x200, 0, false)
                 .expect("fallback fill plan"),
