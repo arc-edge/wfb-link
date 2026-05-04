@@ -49,17 +49,20 @@ use wfb_radio_runtime::{
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
-    Rtl8812auRfPath, Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkCalibrationReport,
-    Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
-    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auRuntimeIqkStageReport, RuntimeFlowRxTelemetry,
-    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
-    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+    Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport, Rtl8812auRuntimeIqkMaskedBbWritePlan,
+    Rtl8812auRuntimeIqkSetupWritePlan, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+    RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
+    RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
     RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
     RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
     RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
     RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
     PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+};
+#[cfg(test)]
+use wfb_radio_runtime::{
+    Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkStageReport,
 };
 
 #[derive(Debug, Parser)]
@@ -3804,8 +3807,11 @@ struct TxIqkPageC1LatchReport {
 }
 
 type TxRuntimeIqkCalibrationReport = Rtl8812auRuntimeIqkCalibrationReport;
+#[cfg(test)]
 type TxRuntimeIqkStageReport = Rtl8812auRuntimeIqkStageReport;
+#[cfg(test)]
 type TxRuntimeIqkAttemptReport = Rtl8812auRuntimeIqkAttemptReport;
+#[cfg(test)]
 type TxRuntimeIqkIqcValue = Rtl8812auRuntimeIqkIqcValue;
 type TxRuntimeIqkMaskedBbWritePlan = Rtl8812auRuntimeIqkMaskedBbWritePlan;
 type TxRuntimeIqkSetupWritePlan = Rtl8812auRuntimeIqkSetupWritePlan;
@@ -5704,8 +5710,11 @@ const REG_TX_PWR_TRAIN_A_JAGUAR: u16 = 0x0c54;
 const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
 #[allow(dead_code)]
 const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
+#[cfg(test)]
 const REG_IQK_TX_TONE_A_C80: u16 = 0x0c80;
+#[cfg(test)]
 const REG_IQK_RFE_SETTING_A_C88: u16 = 0x0c88;
+#[cfg(test)]
 const REG_IQK_RFE_SETTING_A_C8C: u16 = 0x0c8c;
 const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
 const REG_IQK_AFE_A_C60: u16 = 0x0c60;
@@ -5744,6 +5753,7 @@ const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
 const REG_TX_PWR_OFFSET_B_JAGUAR: u16 = 0x0e50;
 #[allow(dead_code)]
 const REG_IQK_RX_IQC_B_JAGUAR: u16 = 0x0e10;
+#[cfg(test)]
 const REG_IQK_RX_TONE_B_E84: u16 = 0x0e84;
 const REG_FPGA0_IQK_JAGUAR: u16 = 0x0e28;
 const REG_TX_IQK_TONE_A_JAGUAR: u16 = 0x0e30;
@@ -14354,6 +14364,7 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
 ];
 
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
+#[cfg(test)]
 const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
 
 const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
@@ -15469,10 +15480,12 @@ fn rtl8812a_runtime_iqk_setup_plan(
     wfb_radio_runtime::rtl8812au_runtime_iqk_setup_plan(band, rfe_type, ext_pa_5g, ext_pa_2g)
 }
 
+#[cfg(test)]
 fn runtime_iqk_iqc_value(x: u32, y: u32) -> TxRuntimeIqkIqcValue {
     wfb_radio_runtime::rtl8812au_runtime_iqk_iqc_value(x, y)
 }
 
+#[cfg(test)]
 fn rtl8812a_iqk_select_candidate(
     candidates: &[TxRuntimeIqkIqcValue],
 ) -> Option<TxRuntimeIqkIqcValue> {
