@@ -23071,7 +23071,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         phases.push(DiagnosticPhase {
             id: "tx_calibration_profile",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit targeted calibration profile before the TX loop",
+            detail: "applied explicit TX calibration profile before the TX loop",
         });
     }
     if report.rf_calibration_pre_tx.is_some() {
@@ -24447,7 +24447,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         phases.push(DiagnosticPhase {
             id: "tx_calibration_profile",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit targeted calibration profile before RX/TX loops",
+            detail: "applied explicit TX calibration profile before RX/TX loops",
         });
     }
     if report.rf_calibration_pre_tx.is_some() {
@@ -27592,7 +27592,7 @@ fn bridge_tx_bench_pass_phases(
         phases.push(DiagnosticPhase {
             id: "tx_calibration_profile",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "applied explicit targeted calibration profile before the TX loop",
+            detail: "applied explicit TX calibration profile before the TX loop",
         });
     }
     if rf_calibration_probe {
@@ -29212,11 +29212,15 @@ fn rf_quality_outcome_comparison(
         .zip(linux_side.as_ref().and_then(|side| side.throughput_mbps))
         .and_then(|(macos, linux)| (linux > 0.0).then_some(macos / linux));
     let receiver_metadata_status = rf_quality_receiver_metadata_status(&macos.wfb_outcome);
+    let peer_isolation_failure = rf_quality_peer_isolation_failure(&macos.wfb_outcome);
+    let receiver_decrypt_failure = rf_quality_receiver_decrypt_failure(&macos.wfb_outcome);
     let acceptance_margin = rf_quality_outcome_acceptance_margin(
         &macos_side,
         linux_side.as_ref(),
         throughput_ratio_macos_to_linux,
         receiver_metadata_status,
+        peer_isolation_failure,
+        receiver_decrypt_failure,
     );
 
     RfQualityOutcomeComparisonReport {
@@ -29233,6 +29237,8 @@ fn rf_quality_outcome_acceptance_margin(
     linux_baseline: Option<&RfQualityOutcomeSideReport>,
     throughput_ratio_macos_to_linux: Option<f64>,
     receiver_metadata_status: &'static str,
+    peer_isolation_failure: Option<&'static str>,
+    receiver_decrypt_failure: Option<&'static str>,
 ) -> RfQualityOutcomeAcceptanceMarginReport {
     let Some(linux_baseline) = linux_baseline else {
         return RfQualityOutcomeAcceptanceMarginReport {
@@ -29268,6 +29274,12 @@ fn rf_quality_outcome_acceptance_margin(
     if loss_delta_percent_points > RF_QUALITY_MAX_LOSS_DELTA_PERCENT_POINTS {
         failures.push("macOS payload loss exceeds Linux baseline by more than the allowed margin");
     }
+    if let Some(failure) = peer_isolation_failure {
+        failures.push(failure);
+    }
+    if let Some(failure) = receiver_decrypt_failure {
+        failures.push(failure);
+    }
 
     RfQualityOutcomeAcceptanceMarginReport {
         status: if failures.is_empty() {
@@ -29283,6 +29295,36 @@ fn rf_quality_outcome_acceptance_margin(
         throughput_evaluated: false,
         receiver_metadata_status,
         failures,
+    }
+}
+
+fn rf_quality_receiver_decrypt_failure(
+    wfb_outcome: &RfQualityWfbOutcomeReport,
+) -> Option<&'static str> {
+    if wfb_outcome
+        .receiver_unable_decrypt_count
+        .is_some_and(|count| count > 0)
+    {
+        Some("Linux receiver reported WFB decrypt errors during the run")
+    } else {
+        None
+    }
+}
+
+fn rf_quality_peer_isolation_failure(
+    wfb_outcome: &RfQualityWfbOutcomeReport,
+) -> Option<&'static str> {
+    let channel_state = wfb_outcome.channel_state.as_ref()?;
+    let required =
+        rf_quality_json_bool(channel_state, &["peer_isolation_required"]).unwrap_or(false);
+    if !required {
+        return None;
+    }
+    let status = rf_quality_json_string(channel_state, &["peer_isolation_status"]);
+    if status.as_deref() == Some("ok") {
+        None
+    } else {
+        Some("Linux peer isolation was required but not verified clean before receiver start")
     }
 }
 
@@ -37556,6 +37598,123 @@ u8 array_mp_8812a_fw_nic[] = {
                 .acceptance_margin
                 .loss_delta_percent_points,
             Some(10.0)
+        );
+        assert_eq!(
+            acceptance.status,
+            RfQualityAcceptanceStatus::DegradedComparison
+        );
+    }
+
+    #[test]
+    fn rf_quality_outcome_margin_flags_required_peer_isolation_failure() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = Some(100);
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let mut macos = rf_quality_macos_report(&args, None, None, None);
+        macos.wfb_outcome.channel_state = Some(serde_json::json!({
+            "verify_status": "verified",
+            "peer_isolation_required": true,
+            "peer_isolation_status": "residual_processes",
+            "peer_process_match_count_after_stop": 1,
+        }));
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000001),
+                link_id_hex: Some("0x000001".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(3),
+            },
+            payload_len: Some(1024),
+            source_payloads: Some(100),
+            recovered_payloads: Some(100),
+            submitted_datagrams: Some(300),
+            throughput_mbps: None,
+            receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+        let acceptance = rf_quality_acceptance(
+            DiagnosticResult::Pass,
+            &comparison,
+            &rf_quality_profile_gate_report(&args, &profile, None),
+        );
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Matched);
+        assert_eq!(
+            comparison.outcome.acceptance_margin.status,
+            RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin
+        );
+        assert_eq!(
+            comparison.outcome.acceptance_margin.failures,
+            vec!["Linux peer isolation was required but not verified clean before receiver start"]
+        );
+        assert_eq!(
+            acceptance.status,
+            RfQualityAcceptanceStatus::DegradedComparison
+        );
+    }
+
+    #[test]
+    fn rf_quality_outcome_margin_flags_receiver_decrypt_errors() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = Some(100);
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let mut macos = rf_quality_macos_report(&args, None, None, None);
+        macos.wfb_outcome.receiver_unable_decrypt_count = Some(1);
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000001),
+                link_id_hex: Some("0x000001".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(3),
+            },
+            payload_len: Some(1024),
+            source_payloads: Some(100),
+            recovered_payloads: Some(100),
+            submitted_datagrams: Some(300),
+            throughput_mbps: None,
+            receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+        let acceptance = rf_quality_acceptance(
+            DiagnosticResult::Pass,
+            &comparison,
+            &rf_quality_profile_gate_report(&args, &profile, None),
+        );
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Matched);
+        assert_eq!(
+            comparison.outcome.acceptance_margin.status,
+            RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin
+        );
+        assert_eq!(
+            comparison.outcome.acceptance_margin.failures,
+            vec!["Linux receiver reported WFB decrypt errors during the run"]
         );
         assert_eq!(
             acceptance.status,

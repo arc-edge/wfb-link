@@ -22,9 +22,24 @@ The system SHALL control the Linux WFB peer in a bounded and reversible way duri
 - **WHEN** an automated run begins
 - **THEN** the command stops the configured WFB service container, pins the monitor interface to the requested channel and bandwidth, starts bounded `tcpdump`, `wfb_rx`, and `wfb_tx` processes, and records setup output
 
+#### Scenario: Linux peer isolation is required
+- **WHEN** peer-isolation policy is enabled for an automated run
+- **THEN** the command MUST record WFB peer processes before service shutdown, wait for the configured settle interval after service shutdown and stale-process cleanup, verify that no `arc-wfb-link`, `wfb_rx`, or `wfb_tx` processes remain before starting measured receiver traffic, and fail before RF traffic if residual processes are still present
+
 #### Scenario: Linux peer is restored
 - **WHEN** an automated run finishes or fails after Linux setup begins
 - **THEN** the command attempts to stop test processes, restart the configured WFB service container, and record service restore output
+
+### Requirement: Measured Payload Warmup
+The system SHALL support unmeasured source-payload warmup before marked payload accounting so receiver session acquisition does not distort RF-quality results.
+
+#### Scenario: Warmup payloads are configured
+- **WHEN** an automated run configures nonzero source warmup payloads
+- **THEN** the command MUST send warmup payloads before marked payloads, exclude warmup markers from recovered-payload accounting, increase the expected total WFB datagram budget by the warmup FEC estimate, and record warmup payload/datagram counts in the run evidence
+
+#### Scenario: Warmup is disabled
+- **WHEN** an automated run sets source warmup payloads to zero
+- **THEN** the command MUST preserve first-session acquisition evidence and allow receiver decrypt errors to mark the generated RF-quality report outside the production acceptance margin
 
 ### Requirement: Artifact Collection
 The system SHALL collect Mac and Linux run artifacts into a timestamped local output directory.
@@ -80,6 +95,10 @@ The system SHALL perform a Linux peer command preflight before starting automate
 #### Scenario: Optional command is missing
 - **WHEN** an optional Linux command such as `iw`, `tcpdump`, `docker`, `ip`, or `ps` is unavailable
 - **THEN** the automation MUST record the missing command and either skip the dependent step or fail according to the configured policy
+
+#### Scenario: Peer isolation evidence command is missing
+- **WHEN** peer isolation is required and `ps` or `grep` is unavailable on the Linux peer
+- **THEN** the automation MUST fail before RF transmission and record `peer_isolation_requires_ps_and_grep` in the preflight policy blockers
 
 ### Requirement: Linux Peer Channel Evidence
 The system SHALL record Linux peer channel-state evidence whenever the required tools are available, and SHALL mark the run degraded when channel-setting evidence is unavailable but the run policy allows continuing.

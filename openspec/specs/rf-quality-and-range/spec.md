@@ -92,6 +92,14 @@ The system SHALL classify RF-quality production readiness using Linux peer prefl
 - **WHEN** a run lacks channel-state evidence, uses stop-gap calibration, or only has fallback RSSI metadata
 - **THEN** the RF-quality report MUST keep the run usable for bench diagnostics but MUST NOT classify it as long-distance production-ready
 
+#### Scenario: Linux peer isolation is not clean
+- **WHEN** a receiver-backed run records required Linux peer isolation and the peer-isolation status is not `ok`
+- **THEN** the RF-quality report MUST mark the outcome outside the production acceptance margin so decrypt errors or competing WFB traffic cannot be mistaken for RF loss
+
+#### Scenario: Receiver decrypt errors are present
+- **WHEN** a receiver-backed run records one or more Linux `wfb_rx` unable-decrypt events
+- **THEN** the RF-quality report MUST mark the outcome outside the production acceptance margin even if marked payload recovery is otherwise near the close-range baseline
+
 #### Scenario: Targeted parity is used
 - **WHEN** a run uses targeted Linux-parity calibration overrides
 - **THEN** the report MUST identify the profile and affected registers and MUST keep full IQK/LCK validation listed as remaining work unless the full routines have been ported and validated

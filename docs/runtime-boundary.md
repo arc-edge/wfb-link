@@ -167,6 +167,22 @@ and runtime IQK completed in sweep 2 with cleanup restored and both TX/RX paths
 successful without fallback. This confirms the runtime-owned sweep preserves
 the prior close-range behavior.
 
+After moving TX calibration profile execution itself behind the runtime API,
+the profile path was first checked with the no-warmup A/B artifact at
+`/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a2/rf-quality-report.json`.
+That run completed as `baseline_comparable` / `matched` / `within_margin`,
+recovered `1984/2000`, logged zero decrypt failures, verified channel 36 / 20
+MHz, and completed runtime IQK in sweep 1 with cleanup restored. Later
+no-warmup reruns showed decrypt-heavy startup failures even with clean Linux
+peer isolation, so the current hardened profile-executor gate is
+`/tmp/wfb-rfq-runtime-iqk-peeriso-warmup-a1/rf-quality-report.json`: it used
+`SOURCE_WARMUP_PAYLOADS=400`, recovered `1993/2000` measured payloads, logged
+zero decrypt failures, verified channel 36 / 20 MHz, recorded clean peer
+isolation, and completed runtime IQK in sweep 1 with cleanup restored. The
+diagnostic binary still owns CLI authorization and report formatting, but
+targeted parity, LCK, and runtime IQK execution now share the runtime-owned
+profile executor.
+
 ## Latest Runtime-Flow Smoke
 
 On May 3, 2026, a short hardware-Mac `runtime-flow --macos-usbhost` smoke on

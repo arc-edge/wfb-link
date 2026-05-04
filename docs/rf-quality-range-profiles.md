@@ -224,6 +224,37 @@ Runtime IQK validation on May 2, 2026:
   recovered `1996/2000`. This validates moving the guarded IQK sweep/report
   into `wfb-radio-runtime`; it still does not replace stepped or outdoor
   evidence for long-distance acceptance.
+- Runtime-owned calibration profile executor gate:
+  `/tmp/wfb-rfq-runtime-iqk-peeriso-warmup-a1/rf-quality-report.json`
+  recovered `1993/2000` measured payloads with
+  `SOURCE_WARMUP_PAYLOADS=400`, observed/submitted `3599/3600` total WFB
+  datagrams including the unmeasured warmup estimate, logged zero decrypt
+  failures, verified clean Linux peer isolation before receiver start, stayed
+  `baseline_comparable` / `within_margin`, and completed runtime IQK in sweep
+  1 with cleanup restored. This is the current hardened close-range gate for
+  the runtime-owned profile executor.
+- No-warmup runtime-IQK profile evidence remains useful only for session
+  acquisition debugging. The successful no-warmup A/B run at
+  `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a2/rf-quality-report.json`
+  recovered `1984/2000`, observed/submitted `2999/3000` WFB datagrams under
+  the one-datagram short-run tolerance, logged zero decrypt failures, stayed
+  `baseline_comparable` / `within_margin`, and completed runtime IQK in sweep 1
+  with cleanup restored. The earlier
+  `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a1/rf-quality-report.json`
+  run logged `2191` decrypt failures and recovered only `377/2000`; the later
+  peer-isolated no-warmup run at
+  `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-peeriso-a1/rf-quality-report.json`
+  still logged `2142` decrypt failures and recovered only `425/2000`. Those
+  rejected runs show the failure is not residual Linux WFB traffic alone; the
+  measured gate now uses an unmeasured warmup to let the receiver acquire the
+  WFB session before marked payload accounting starts.
+- Linux peer-isolation smoke:
+  `/tmp/wfb-rfq-peer-isolation-smoke-a1/rf-quality-report.json` is not a
+  baseline-comparable reference because it used 80 payloads, but it verified
+  that the runner now records six pre-stop WFB service processes, zero
+  residual WFB processes after the settle interval, `peer_isolation_status=ok`,
+  verified channel 36 / 20 MHz, and `80/80` recovered with zero decrypt
+  failures.
 
 Telemetry-gated default rerun on May 2, 2026:
 

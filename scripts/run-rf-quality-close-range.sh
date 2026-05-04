@@ -16,11 +16,12 @@ Configuration is via environment variables. Common overrides:
   LINUX_HOST=drone-2f389.local
   LINUX_REMOTE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LINUX_REQUIRE_IW=0
+  LINUX_REQUIRE_PEER_ISOLATION=1 LINUX_PEER_SETTLE_SECONDS=2
   MAC_LAN_IP=10.42.0.162
   FIRMWARE=/tmp/rtl8812aefw.bin
   EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json
   EXPECTED_PAYLOADS=2000 PAYLOAD_LEN=1000 CHANNEL=36 BANDWIDTH_MHZ=20
-  SOURCE_WARMUP_PAYLOADS=0
+  SOURCE_WARMUP_PAYLOADS=400
 
 Use --dry-run to print the remote command plan without claiming USB or
 transmitting RF.
@@ -92,6 +93,8 @@ fi
 LINUX_HOST=${LINUX_HOST:-drone-2f389.local}
 LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 LINUX_REQUIRE_IW=${LINUX_REQUIRE_IW:-0}
+LINUX_REQUIRE_PEER_ISOLATION=${LINUX_REQUIRE_PEER_ISOLATION:-1}
+LINUX_PEER_SETTLE_SECONDS=${LINUX_PEER_SETTLE_SECONDS:-2}
 MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-rfq-auto-$RUN_ID}
 SYNC_HW_REPO=${SYNC_HW_REPO:-0}
@@ -104,7 +107,7 @@ BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
 FEC_K=${FEC_K:-8}
 FEC_N=${FEC_N:-12}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-2000}
-SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-0}
+SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-400}
 THEORETICAL_MAX_DATAGRAMS=${THEORETICAL_MAX_DATAGRAMS:-$(((EXPECTED_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))}
 THEORETICAL_WARMUP_DATAGRAMS=$(((SOURCE_WARMUP_PAYLOADS * FEC_N + FEC_K - 1) / FEC_K))
 THEORETICAL_TOTAL_DATAGRAMS=${THEORETICAL_TOTAL_DATAGRAMS:-$((THEORETICAL_MAX_DATAGRAMS + THEORETICAL_WARMUP_DATAGRAMS))}
@@ -193,7 +196,7 @@ MISSING_ARTIFACTS="$OUT_DIR/missing-artifacts.txt"
 : >"$MISSING_ARTIFACTS"
 
 export RUN_ID HW_MAC_HOST HW_REPO_PATH LINUX_HOST MAC_LAN_IP REMOTE_PREFIX
-export LINUX_REMOTE_PATH LINUX_REQUIRE_IW
+export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
@@ -251,7 +254,7 @@ import sys
 
 keys = [
     "RUN_ID", "HW_MAC_HOST", "HW_REPO_PATH", "LINUX_HOST", "MAC_LAN_IP",
-    "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
+    "REMOTE_PREFIX", "LINUX_REMOTE_PATH", "LINUX_REQUIRE_IW", "LINUX_REQUIRE_PEER_ISOLATION", "LINUX_PEER_SETTLE_SECONDS", "CHANNEL", "BANDWIDTH_MHZ", "FEC_K", "FEC_N",
     "EXPECTED_PAYLOADS", "SOURCE_WARMUP_PAYLOADS", "THEORETICAL_MAX_DATAGRAMS", "THEORETICAL_WARMUP_DATAGRAMS", "THEORETICAL_TOTAL_DATAGRAMS",
     "MAX_DATAGRAMS", "DATAGRAM_SHORTFALL_TOLERANCE", "PAYLOAD_LEN", "PAYLOAD_MARKER",
     "RX_STARTUP_SECONDS", "TX_STARTUP_SECONDS",
@@ -293,6 +296,7 @@ Hardware Mac:
 
 Linux peer through hardware Mac:
   LINUX_REMOTE_PATH=$LINUX_REMOTE_PATH LINUX_REQUIRE_IW=$LINUX_REQUIRE_IW
+  LINUX_REQUIRE_PEER_ISOLATION=$LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS=$LINUX_PEER_SETTLE_SECONDS
   ssh $(quote "$HW_MAC_HOST") 'ssh $(quote "$LINUX_HOST") <preflight commands; stop $WFB_SERVICE if docker exists; set channel with iw if available; start tcpdump/wfb_rx/wfb_tx; generate $SOURCE_WARMUP_PAYLOADS warmup payloads and $EXPECTED_PAYLOADS measured payloads>'
 
 Local collection:
@@ -500,7 +504,7 @@ MAC_WAIT_READY
 
 run_linux_peer() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX IFACE CHANNEL BANDWIDTH_MHZ WFB_SERVICE WFB_KEY LINK_ID RADIO_PORT FEC_K FEC_N LINUX_SOURCE_PORT LINUX_RX_PORT MAC_LAN_IP RELAY_PORT EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS) bash -s"
   log "running Linux peer sender/receiver through $HW_MAC_HOST -> $LINUX_HOST"
   STARTED_LINUX=1
   ssh "$HW_MAC_HOST" "ssh $(quote "$LINUX_HOST") $remote_cmd" <<'LINUX_RUN'
@@ -547,6 +551,15 @@ PS_BIN=$(resolve_cmd ps || true)
 GREP_BIN=$(resolve_cmd grep || true)
 DATE_BIN=$(resolve_cmd date || true)
 
+capture_wfb_process_matches() {
+  if [[ -z "${PS_BIN:-}" || -z "${GREP_BIN:-}" ]]; then
+    return 0
+  fi
+  "$PS_BIN" -eo pid,user,comm,args \
+    | "$GREP_BIN" -E '(^|[[:space:]/])(arc-wfb-link|wfb_rx|wfb_tx)([[:space:]]|$)' \
+    | "$GREP_BIN" -v grep || true
+}
+
 missing_required=()
 [[ -n "$PYTHON3_BIN" ]] || missing_required+=(python3)
 [[ -n "$SUDO_BIN" ]] || missing_required+=(sudo)
@@ -567,6 +580,7 @@ sudo_noninteractive=unknown
 iface_status=unknown
 wfb_key_status=unknown
 docker_service_state=unknown
+preflight_process_matches=""
 policy_blockers=()
 
 if [[ -n "$SUDO_BIN" ]]; then
@@ -601,10 +615,17 @@ if [[ -n "$SUDO_BIN" && "$sudo_noninteractive" == "ok" && -n "$DOCKER_BIN" ]]; t
   [[ -n "$docker_service_state" ]] || docker_service_state=not_found
 fi
 
+if [[ -n "$PS_BIN" && -n "$GREP_BIN" ]]; then
+  preflight_process_matches=$(capture_wfb_process_matches)
+fi
+
 preflight_status=ok
 preflight_degraded=0
 if (( ${#missing_required[@]} > 0 || ${#policy_blockers[@]} > 0 )); then
   preflight_status=blocked
+elif [[ "$LINUX_REQUIRE_PEER_ISOLATION" == "1" && ( -z "$PS_BIN" || -z "$GREP_BIN" ) ]]; then
+  preflight_status=blocked
+  policy_blockers+=(peer_isolation_requires_ps_and_grep)
 elif [[ -z "$IW_BIN" && "$LINUX_REQUIRE_IW" == "1" ]]; then
   preflight_status=blocked
   policy_blockers+=(iw_required_but_missing)
@@ -617,6 +638,8 @@ fi
   printf 'status=%s\n' "$preflight_status"
   printf 'linux_remote_path=%s\n' "$LINUX_REMOTE_PATH"
   printf 'linux_require_iw=%s\n' "$LINUX_REQUIRE_IW"
+  printf 'linux_require_peer_isolation=%s\n' "$LINUX_REQUIRE_PEER_ISOLATION"
+  printf 'linux_peer_settle_seconds=%s\n' "$LINUX_PEER_SETTLE_SECONDS"
   printf 'python3=%s\n' "${PYTHON3_BIN:-MISSING}"
   printf 'sudo=%s\n' "${SUDO_BIN:-MISSING}"
   printf 'timeout=%s\n' "${TIMEOUT_BIN:-MISSING}"
@@ -634,6 +657,7 @@ fi
   printf 'iface_status=%s\n' "$iface_status"
   printf 'wfb_key_status=%s\n' "$wfb_key_status"
   printf 'docker_service_state=%s\n' "$docker_service_state"
+  printf 'preflight_wfb_process_matches=%s\n' "${preflight_process_matches:-}"
   printf 'missing_required=%s\n' "${missing_required[*]:-}"
   printf 'missing_optional=%s\n' "${missing_optional[*]:-}"
   printf 'policy_blockers=%s\n' "${policy_blockers[*]:-}"
@@ -642,6 +666,7 @@ fi
 if [[ -n "$PYTHON3_BIN" ]]; then
   export preflight_status preflight_degraded
   export sudo_noninteractive iface_status wfb_key_status docker_service_state
+  export preflight_process_matches LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
   export PYTHON3_BIN SUDO_BIN TIMEOUT_BIN WFB_RX_BIN WFB_TX_BIN DOCKER_BIN IW_BIN IP_BIN TCPDUMP_BIN PKILL_BIN PS_BIN GREP_BIN DATE_BIN
   export LINUX_REMOTE_PATH LINUX_REQUIRE_IW IFACE WFB_KEY WFB_SERVICE
   "$PYTHON3_BIN" - "$preflight_json" "${missing_required[*]:-}" "${missing_optional[*]:-}" "${policy_blockers[*]:-}" <<'PY'
@@ -672,6 +697,8 @@ report = {
     "degraded": os.environ["preflight_degraded"] == "1",
     "linux_remote_path": os.environ.get("LINUX_REMOTE_PATH", ""),
     "linux_require_iw": os.environ.get("LINUX_REQUIRE_IW", "") == "1",
+    "linux_require_peer_isolation": os.environ.get("LINUX_REQUIRE_PEER_ISOLATION", "") == "1",
+    "linux_peer_settle_seconds": float(os.environ.get("LINUX_PEER_SETTLE_SECONDS", "0") or 0),
     "interface": os.environ.get("IFACE", ""),
     "wfb_key": os.environ.get("WFB_KEY", ""),
     "wfb_service": os.environ.get("WFB_SERVICE", ""),
@@ -680,6 +707,10 @@ report = {
     "iface_status": os.environ.get("iface_status"),
     "wfb_key_status": os.environ.get("wfb_key_status"),
     "docker_service_state": os.environ.get("docker_service_state"),
+    "preflight_wfb_process_match_count": len([line for line in os.environ.get("preflight_process_matches", "").splitlines() if line.strip()]),
+    "preflight_wfb_process_matches": [
+        line for line in os.environ.get("preflight_process_matches", "").splitlines() if line.strip()
+    ],
     "missing_required": missing_required,
     "missing_optional": missing_optional,
     "policy_blockers": policy_blockers,
@@ -786,9 +817,19 @@ rm -f "${REMOTE_PREFIX}"-{setup,restore,summary,counter,source,rx,tx,tcpdump}.lo
 
 channel_set_status=skipped
 channel_iw_info=""
+peer_isolation_status=unknown
+peer_process_matches_before_stop=""
+peer_process_matches_after_stop=""
 {
   if [[ -n "$DATE_BIN" ]]; then "$DATE_BIN"; else date; fi
   cat "$preflight_log"
+  if [[ -n "$PS_BIN" && -n "$GREP_BIN" ]]; then
+    peer_process_matches_before_stop=$(capture_wfb_process_matches)
+    printf 'peer_process_matches_before_stop:\n%s\n' "${peer_process_matches_before_stop:-<none>}"
+  else
+    peer_isolation_status=unverified
+    echo "ps or grep unavailable; skipped peer process isolation check"
+  fi
   if [[ -n "$SUDO_BIN" && -n "$DOCKER_BIN" ]]; then
     "$SUDO_BIN" -n "$DOCKER_BIN" stop "$WFB_SERVICE" || true
   else
@@ -800,6 +841,22 @@ channel_iw_info=""
     "$SUDO_BIN" -n "$PKILL_BIN" -f "tcpdump -i ${IFACE} .*${REMOTE_PREFIX}-rf.pcap" >/dev/null 2>&1 || true
   else
     echo "sudo or pkill unavailable; skipped stale test process cleanup"
+  fi
+  if [[ -n "$PS_BIN" && -n "$GREP_BIN" ]]; then
+    if [[ "${LINUX_PEER_SETTLE_SECONDS:-0}" != "0" ]]; then
+      sleep "$LINUX_PEER_SETTLE_SECONDS"
+    fi
+    peer_process_matches_after_stop=$(capture_wfb_process_matches)
+    printf 'peer_process_matches_after_stop:\n%s\n' "${peer_process_matches_after_stop:-<none>}"
+    if [[ -z "$peer_process_matches_after_stop" ]]; then
+      peer_isolation_status=ok
+    else
+      peer_isolation_status=residual_processes
+    fi
+  fi
+  printf 'peer_isolation_status=%s\n' "$peer_isolation_status"
+  if [[ "$LINUX_REQUIRE_PEER_ISOLATION" == "1" && "$peer_isolation_status" != "ok" ]]; then
+    echo "peer isolation required but status=$peer_isolation_status"
   fi
   if [[ -n "$SUDO_BIN" && -n "$IW_BIN" ]]; then
     if "$SUDO_BIN" -n "$IW_BIN" dev "$IFACE" set channel "$CHANNEL" "$iw_bandwidth"; then
@@ -822,6 +879,7 @@ channel_iw_info=""
 
 if [[ -n "$PYTHON3_BIN" ]]; then
   export channel_set_status channel_iw_info CHANNEL BANDWIDTH_MHZ IFACE IW_BIN SUDO_BIN
+  export peer_isolation_status peer_process_matches_before_stop peer_process_matches_after_stop LINUX_REQUIRE_PEER_ISOLATION LINUX_PEER_SETTLE_SECONDS
   "$PYTHON3_BIN" - "$channel_state_json" <<'PY'
 import json
 import os
@@ -865,11 +923,30 @@ report = {
     "iw_available": bool(os.environ.get("IW_BIN")),
     "sudo_available": bool(os.environ.get("SUDO_BIN")),
     "iw_info": iw_info.splitlines(),
+    "peer_isolation_status": os.environ.get("peer_isolation_status", "unknown"),
+    "peer_isolation_required": os.environ.get("LINUX_REQUIRE_PEER_ISOLATION", "") == "1",
+    "peer_settle_seconds": float(os.environ.get("LINUX_PEER_SETTLE_SECONDS", "0") or 0),
+    "peer_process_match_count_before_stop": len([
+        line for line in os.environ.get("peer_process_matches_before_stop", "").splitlines() if line.strip()
+    ]),
+    "peer_process_matches_before_stop": [
+        line for line in os.environ.get("peer_process_matches_before_stop", "").splitlines() if line.strip()
+    ],
+    "peer_process_match_count_after_stop": len([
+        line for line in os.environ.get("peer_process_matches_after_stop", "").splitlines() if line.strip()
+    ]),
+    "peer_process_matches_after_stop": [
+        line for line in os.environ.get("peer_process_matches_after_stop", "").splitlines() if line.strip()
+    ],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2, sort_keys=True)
     fh.write("\n")
 PY
+fi
+
+if [[ "$LINUX_REQUIRE_PEER_ISOLATION" == "1" && "$peer_isolation_status" != "ok" ]]; then
+  exit 2
 fi
 
 "$PYTHON3_BIN" - "$counter_json" "$LINUX_RX_PORT" "$EXPECTED_PAYLOADS" "$PAYLOAD_MARKER" "$COUNTER_SECONDS" <<'PY' &

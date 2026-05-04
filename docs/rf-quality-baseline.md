@@ -85,6 +85,23 @@ Set `LINUX_REQUIRE_IW=1` to fail before RF if the runner cannot set and verify
 the Linux interface channel. The preflight JSON records `sudo_noninteractive`,
 `iface_status`, `wfb_key_status`, and `docker_service_state` so failed field
 runs can distinguish missing peer prerequisites from RF loss.
+By default the runner also requires Linux peer isolation before measured
+traffic starts:
+
+```sh
+LINUX_REQUIRE_PEER_ISOLATION=1
+LINUX_PEER_SETTLE_SECONDS=2
+```
+
+With isolation required, `ps` and `grep` become required evidence tools. The
+setup phase records `arc-wfb-link`, `wfb_rx`, and `wfb_tx` process matches
+before service shutdown, waits for the settle interval after Docker stop and
+stale-process cleanup, then fails before RF if any of those processes remain.
+The channel-state JSON embeds `peer_isolation_status`,
+`peer_process_matches_before_stop`, and
+`peer_process_matches_after_stop`. This prevents a competing WFB transmitter or
+stale receiver from turning into misleading decrypt-error or packet-loss
+evidence.
 The restore JSON records the post-run service action, service state, and WFB
 process matches after the controlled sender/receiver processes are stopped, so
 cleanup failures are visible in machine-readable run evidence.
@@ -104,6 +121,10 @@ channel drift is visible without scraping `setup.log`.
 New-format outdoor gates reject a close-range report when
 `channel_state.verify_status` is present and not `verified`, or when observed
 frequency/width differs from the promoted profile.
+The same report path treats required peer isolation as part of the production
+margin: if `peer_isolation_required=true` and `peer_isolation_status` is not
+`ok`, the report marks the receiver-backed outcome outside margin instead of
+accepting the payload result as clean RF evidence.
 Validation smoke:
 `/tmp/wfb-rfq-channel-state-smoke-a1/rf-quality-report.json` recovered
 `80/80`, submitted `120/120`, collected an empty `missing-artifacts.txt`, and
@@ -216,6 +237,33 @@ failures, verified channel 36 / 20 MHz, and passed as
 `baseline_comparable` / `matched` / `within_margin`. The runtime-IQK run
 completed in sweep 2 with cleanup restored and no per-path fallback.
 
+After moving TX calibration profile execution itself behind the runtime API,
+`/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a2/rf-quality-report.json`
+validated the same `rtl8812a-runtime-iqk` profile path with the diagnostic
+command reduced to report adaptation. That no-warmup run recovered
+`1984/2000`, logged zero decrypt failures, completed runtime IQK in sweep 1,
+and passed within margin. Two other no-warmup runtime-IQK profile runs are
+rejected evidence: `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a1` logged
+`2191` decrypt failures and
+`/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-peeriso-a1` logged `2142`
+decrypt failures even though peer isolation was clean. The failure pattern is
+WFB session acquisition, not residual peer traffic.
+
+The accepted hardened profile-executor artifact is
+`/tmp/wfb-rfq-runtime-iqk-peeriso-warmup-a1/rf-quality-report.json`. It used
+`SOURCE_WARMUP_PAYLOADS=400`, recovered `1993/2000` marked payloads, logged
+zero decrypt failures, verified channel 36 / 20 MHz, recorded
+`peer_isolation_status=ok`, completed runtime IQK in sweep 1 with cleanup
+restored, and passed as `baseline_comparable` / `matched` / `within_margin`.
+
+The peer-isolation smoke after this hardening is
+`/tmp/wfb-rfq-peer-isolation-smoke-a1/rf-quality-report.json`. It is an
+80-payload orchestration smoke, not a baseline-comparable reference, but it
+verified the new evidence fields against the real peer: six running WFB service
+processes were recorded before stop, zero remained after the settle interval,
+`peer_isolation_status=ok`, channel 36 / 20 MHz was verified, and the receiver
+recovered `80/80` with zero decrypt failures.
+
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
 present. Use `risk`, `completed`, `cleanup_restored`, `sweep_count`,
@@ -237,11 +285,11 @@ This does not make a failed bridge artifact disappear; it preserves the
 expected-versus-observed datagram evidence so the RF-quality envelope can still
 be interpreted when receiver recovery is complete.
 
-For session-acquisition debugging, the runner can send unmeasured source
-payloads before the marked payload sequence:
+For session acquisition, the runner sends unmeasured source payloads before the
+marked payload sequence. The current default is:
 
 ```sh
-SOURCE_WARMUP_PAYLOADS=120
+SOURCE_WARMUP_PAYLOADS=400
 ```
 
 Warmup payloads use the same WFB TX path but do not carry `PAYLOAD_MARKER`, so
@@ -249,6 +297,10 @@ the receiver counter does not count them as recovered test payloads. The runner
 raises `MAX_DATAGRAMS` by the warmup FEC estimate and records
 `source_warmup_payloads`, `theoretical_warmup_datagrams`, and
 `theoretical_total_datagrams` in `datagram-evidence.json`.
+Set `SOURCE_WARMUP_PAYLOADS=0` only when deliberately testing first-session
+acquisition. Runtime-IQK no-warmup runs have shown decrypt-heavy startup
+failures even with clean peer isolation; the warmup default keeps the measured
+payload window focused on steady-state RF behavior.
 
 The runner also records `${REMOTE_PREFIX}-receiver-health.json` and lifts the
 same health into `datagram-evidence.json`. `rf-quality-report` exposes this
@@ -259,6 +311,11 @@ under `macos.wfb_outcome` as:
 - `receiver_unable_decrypt_count`
 - `receiver_total_datagrams`
 - `receiver_evidence`
+
+Any nonzero `receiver_unable_decrypt_count` now marks the receiver-backed
+outcome outside the production acceptance margin. With peer isolation and
+warmup enabled, decrypt errors are treated as evidence of session acquisition
+failure or corrupt WFB frames, not as acceptable close-range noise.
 
 When `wfb_rx` emits `RX_ANT` lines, the runner also parses them into
 `receiver_evidence.receiver_health.rx_antenna_reports` and
