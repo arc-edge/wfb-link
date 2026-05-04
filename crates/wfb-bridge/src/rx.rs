@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use radio_core::{RxFrame, TxRate};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -10,7 +11,7 @@ use crate::{
     frame::{extract_wfb_payload, WfbChannelId, WfbFrameError},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RxForwardConfig {
     pub channel_id: WfbChannelId,
     pub wlan_idx: u8,

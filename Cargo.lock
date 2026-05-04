@@ -596,6 +596,7 @@ dependencies = [
  "radio-core",
  "serde",
  "serde_json",
+ "wfb-bridge",
 ]
 
 [[package]]

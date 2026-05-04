@@ -14,6 +14,7 @@ use radio_core::{
     UsbError,
 };
 use serde::Serialize;
+use wfb_bridge::{RxForwardConfig, WfbChannelId};
 
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
@@ -484,6 +485,136 @@ pub struct ProductionRuntimeRxForwardConfig {
     pub aggregator: Option<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimePrimaryRxForwardConfig {
+    pub link_id: Option<u32>,
+    pub radio_port: Option<u8>,
+    pub aggregator: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxForwardPlan {
+    pub config: RxForwardConfig,
+    pub aggregator: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeWfbLoopConfig {
+    pub bind_addr: SocketAddr,
+    pub tx_binds: Vec<SocketAddr>,
+    pub rx_timeout_ms: u64,
+    pub tx_burst_limit: u32,
+    pub max_datagrams: u32,
+    pub bandwidth: Bandwidth,
+    pub primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig,
+    pub rx_forwards: Vec<ProductionRuntimeRxForwardConfig>,
+    pub rx_wlan_idx: u8,
+    pub rx_mcs_index: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeWfbLoopPlan {
+    pub tx_bind_addrs: Vec<SocketAddr>,
+    pub rx_forwards: Vec<ProductionRuntimeRxForwardPlan>,
+    pub rx_timeout_ms: u64,
+    pub tx_burst_limit: u32,
+    pub max_datagrams: u32,
+    pub rx_wlan_idx: u8,
+    pub rx_mcs_index: u8,
+    pub bandwidth_mhz: u8,
+}
+
+pub fn plan_production_wfb_loop(
+    config: &ProductionRuntimeWfbLoopConfig,
+) -> Result<ProductionRuntimeWfbLoopPlan, RuntimeRadioError> {
+    if config.rx_timeout_ms == 0 {
+        return Err(RuntimeRadioError::new(
+            "invalid_rx_timeout",
+            "production WFB loop requires rx_timeout_ms greater than zero",
+        ));
+    }
+    if config.tx_burst_limit == 0 {
+        return Err(RuntimeRadioError::new(
+            "invalid_tx_burst_limit",
+            "production WFB loop requires tx_burst_limit greater than zero",
+        ));
+    }
+
+    let mut tx_bind_addrs = Vec::with_capacity(config.tx_binds.len() + 1);
+    tx_bind_addrs.push(config.bind_addr);
+    tx_bind_addrs.extend(config.tx_binds.iter().copied());
+
+    let mut rx_forwards = Vec::with_capacity(config.rx_forwards.len() + 1);
+    match (
+        config.primary_rx_forward.link_id,
+        config.primary_rx_forward.radio_port,
+        config.primary_rx_forward.aggregator,
+    ) {
+        (None, None, None) => {}
+        (None, None, Some(_)) => {
+            return Err(RuntimeRadioError::new(
+                "missing_wfb_rx_filter",
+                "production RX aggregator requires WFB link ID and radio port",
+            ));
+        }
+        (Some(_), None, _) | (None, Some(_), _) => {
+            return Err(RuntimeRadioError::new(
+                "incomplete_wfb_rx_filter",
+                "production RX forwarding requires WFB link ID and radio port together",
+            ));
+        }
+        (Some(link_id), Some(radio_port), aggregator) => {
+            let channel_id = WfbChannelId::new(link_id, radio_port).map_err(|error| {
+                RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
+            })?;
+            rx_forwards.push(ProductionRuntimeRxForwardPlan {
+                config: RxForwardConfig {
+                    channel_id,
+                    wlan_idx: config.rx_wlan_idx,
+                    mcs_index: config.rx_mcs_index,
+                    bandwidth_mhz: config.bandwidth.mhz() as u8,
+                },
+                aggregator,
+            });
+        }
+    }
+    for forward in &config.rx_forwards {
+        let link_id = forward.link_id.ok_or_else(|| {
+            RuntimeRadioError::new(
+                "missing_wfb_rx_forward_link_id",
+                "production RX forward target requires a WFB link ID",
+            )
+        })?;
+        let channel_id = WfbChannelId::new(link_id, forward.radio_port).map_err(|error| {
+            RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
+        })?;
+        rx_forwards.push(ProductionRuntimeRxForwardPlan {
+            config: RxForwardConfig {
+                channel_id,
+                wlan_idx: config.rx_wlan_idx,
+                mcs_index: config.rx_mcs_index,
+                bandwidth_mhz: config.bandwidth.mhz() as u8,
+            },
+            aggregator: forward.aggregator,
+        });
+    }
+
+    Ok(ProductionRuntimeWfbLoopPlan {
+        tx_bind_addrs,
+        rx_forwards,
+        rx_timeout_ms: config.rx_timeout_ms,
+        tx_burst_limit: config.tx_burst_limit,
+        max_datagrams: config.max_datagrams,
+        rx_wlan_idx: config.rx_wlan_idx,
+        rx_mcs_index: config.rx_mcs_index,
+        bandwidth_mhz: config.bandwidth.mhz() as u8,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowConfig {
@@ -502,6 +633,7 @@ pub struct ProductionRuntimeFlowConfig {
     pub live_register_write_authorized: bool,
     pub calibration_profile: TxCalibrationProfile,
     pub captured_tail_applied: bool,
+    pub primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig,
     pub rx_forwards: Vec<ProductionRuntimeRxForwardConfig>,
     pub rx_wlan_idx: u8,
     pub rx_mcs_index: u8,
@@ -511,12 +643,28 @@ impl ProductionRuntimeFlowConfig {
     pub fn validate(&self) -> Result<ProductionRuntimeFlowValidation, RuntimeRadioError> {
         validate_production_runtime_flow_config(self)
     }
+
+    pub fn wfb_loop_config(&self) -> ProductionRuntimeWfbLoopConfig {
+        ProductionRuntimeWfbLoopConfig {
+            bind_addr: self.bind_addr,
+            tx_binds: self.tx_binds.clone(),
+            rx_timeout_ms: self.rx_timeout_ms,
+            tx_burst_limit: self.tx_burst_limit,
+            max_datagrams: self.max_datagrams,
+            bandwidth: self.bandwidth,
+            primary_rx_forward: self.primary_rx_forward,
+            rx_forwards: self.rx_forwards.clone(),
+            rx_wlan_idx: self.rx_wlan_idx,
+            rx_mcs_index: self.rx_mcs_index,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowValidation {
     pub calibration: RuntimeTxCalibrationDecision,
+    pub wfb_loop: ProductionRuntimeWfbLoopPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -651,22 +799,11 @@ pub fn validate_production_runtime_flow_config(
             ),
         ));
     }
+    let wfb_loop = plan_production_wfb_loop(&config.wfb_loop_config())?;
     if config.firmware.is_none() {
         return Err(RuntimeRadioError::new(
             "missing_firmware",
             "production radio run requires an RTL8812A firmware image path",
-        ));
-    }
-    if config.rx_timeout_ms == 0 {
-        return Err(RuntimeRadioError::new(
-            "invalid_rx_timeout",
-            "production radio run requires rx_timeout_ms greater than zero",
-        ));
-    }
-    if config.tx_burst_limit == 0 {
-        return Err(RuntimeRadioError::new(
-            "invalid_tx_burst_limit",
-            "production radio run requires tx_burst_limit greater than zero",
         ));
     }
     if !config.tx_authorized {
@@ -680,7 +817,10 @@ pub fn validate_production_runtime_flow_config(
         config.captured_tail_applied,
         config.live_register_write_authorized,
     )?;
-    Ok(ProductionRuntimeFlowValidation { calibration })
+    Ok(ProductionRuntimeFlowValidation {
+        calibration,
+        wfb_loop,
+    })
 }
 
 pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
@@ -2417,15 +2557,16 @@ mod tests {
     };
 
     use super::{
-        macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
-        ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig, Rtl8812auInitOrder,
-        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
-        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-        RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
-        RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
-        RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
-        TxCalibrationClass, TxCalibrationProfile,
+        macos_usbhost_adapter_info, macos_usbhost_endpoints, plan_production_wfb_loop,
+        MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
+        ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
+        ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig,
+        ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder, Rtl8812auInitPhase,
+        RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError,
+        RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
+        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
+        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
     };
 
     #[derive(Debug, Default)]
@@ -2702,6 +2843,11 @@ mod tests {
             live_register_write_authorized: false,
             calibration_profile: TxCalibrationProfile::CurrentDefault,
             captured_tail_applied: true,
+            primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig {
+                link_id: Some(0x00123456),
+                radio_port: Some(0x23),
+                aggregator: Some("127.0.0.1:5603".parse().expect("primary aggregator")),
+            },
             rx_forwards: vec![ProductionRuntimeRxForwardConfig {
                 link_id: Some(7669206),
                 radio_port: 0,
@@ -2726,6 +2872,16 @@ mod tests {
             RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
         );
         assert!(!validation.calibration.requires_live_write_authorization);
+        assert_eq!(validation.wfb_loop.tx_bind_addrs.len(), 2);
+        assert_eq!(validation.wfb_loop.rx_forwards.len(), 2);
+        assert_eq!(
+            validation.wfb_loop.rx_forwards[0].config.channel_id.link_id,
+            0x00123456
+        );
+        assert_eq!(
+            validation.wfb_loop.rx_forwards[1].config.channel_id.link_id,
+            7669206
+        );
     }
 
     #[test]
@@ -2757,6 +2913,67 @@ mod tests {
         let error = config.validate().expect_err("invalid tx burst");
 
         assert_eq!(error.code, "invalid_tx_burst_limit");
+    }
+
+    fn production_wfb_loop_config() -> ProductionRuntimeWfbLoopConfig {
+        production_runtime_flow_config().wfb_loop_config()
+    }
+
+    #[test]
+    fn production_wfb_loop_plan_accepts_self_contained_forward_target() {
+        let mut config = production_wfb_loop_config();
+        config.primary_rx_forward = ProductionRuntimePrimaryRxForwardConfig {
+            link_id: None,
+            radio_port: None,
+            aggregator: None,
+        };
+        config.rx_forwards = vec![ProductionRuntimeRxForwardConfig {
+            link_id: Some(0x00010203),
+            radio_port: 0x45,
+            aggregator: Some("127.0.0.1:5604".parse().expect("aggregator")),
+        }];
+
+        let plan = plan_production_wfb_loop(&config).expect("loop plan");
+
+        assert_eq!(plan.tx_bind_addrs.len(), 2);
+        assert_eq!(plan.rx_forwards.len(), 1);
+        assert_eq!(plan.rx_forwards[0].config.channel_id.link_id, 0x00010203);
+        assert_eq!(plan.rx_forwards[0].config.channel_id.radio_port, 0x45);
+        assert_eq!(plan.rx_forwards[0].config.bandwidth_mhz, 20);
+    }
+
+    #[test]
+    fn production_wfb_loop_plan_rejects_aggregator_without_filter() {
+        let mut config = production_wfb_loop_config();
+        config.primary_rx_forward = ProductionRuntimePrimaryRxForwardConfig {
+            link_id: None,
+            radio_port: None,
+            aggregator: Some("127.0.0.1:5604".parse().expect("aggregator")),
+        };
+        config.rx_forwards.clear();
+
+        let error = plan_production_wfb_loop(&config).expect_err("missing filter");
+
+        assert_eq!(error.code, "missing_wfb_rx_filter");
+    }
+
+    #[test]
+    fn production_wfb_loop_plan_rejects_defaulted_target_without_global_link() {
+        let mut config = production_wfb_loop_config();
+        config.primary_rx_forward = ProductionRuntimePrimaryRxForwardConfig {
+            link_id: None,
+            radio_port: None,
+            aggregator: None,
+        };
+        config.rx_forwards = vec![ProductionRuntimeRxForwardConfig {
+            link_id: None,
+            radio_port: 0x23,
+            aggregator: Some("127.0.0.1:5604".parse().expect("aggregator")),
+        }];
+
+        let error = plan_production_wfb_loop(&config).expect_err("missing link ID");
+
+        assert_eq!(error.code, "missing_wfb_rx_forward_link_id");
     }
 
     #[test]

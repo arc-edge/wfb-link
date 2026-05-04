@@ -39,7 +39,8 @@ use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
     MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowErrorReport,
     ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
-    ProductionRuntimeInitTelemetry, ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig,
+    ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
+    ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
     Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
     RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
     RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
@@ -26110,7 +26111,6 @@ fn radio_run_runtime_config(
             format!("invalid runtime channel: {error}"),
         )
     })?;
-    radio_run_validate_wfb_forward_args(args)?;
     let usb = if args.macos_usbhost.enabled {
         ProductionRuntimeUsbConfig::macos_usbhost(
             args.adapter.selector(),
@@ -26120,23 +26120,15 @@ fn radio_run_runtime_config(
         ProductionRuntimeUsbConfig::libusb(args.adapter.selector())
     };
     let captured_tail_applied = should_apply_captured_tx_bringup_tail(channel, args.bandwidth);
-    let mut rx_forwards = Vec::new();
-    if let Some(radio_port) = args.wfb_radio_port {
-        rx_forwards.push(ProductionRuntimeRxForwardConfig {
-            link_id: args.wfb_link_id,
-            radio_port,
-            aggregator: args.rx_aggregator,
-        });
-    }
-    rx_forwards.extend(
-        args.rx_forwards
-            .iter()
-            .map(|forward| ProductionRuntimeRxForwardConfig {
-                link_id: forward.link_id.or(args.wfb_link_id),
-                radio_port: forward.radio_port,
-                aggregator: Some(forward.aggregator),
-            }),
-    );
+    let rx_forwards = args
+        .rx_forwards
+        .iter()
+        .map(|forward| ProductionRuntimeRxForwardConfig {
+            link_id: forward.link_id.or(args.wfb_link_id),
+            radio_port: forward.radio_port,
+            aggregator: Some(forward.aggregator),
+        })
+        .collect();
 
     Ok(ProductionRuntimeFlowConfig {
         usb,
@@ -26156,50 +26148,21 @@ fn radio_run_runtime_config(
             args.tx_calibration.tx_calibration_profile,
         ),
         captured_tail_applied,
+        primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig {
+            link_id: args.wfb_link_id,
+            radio_port: args.wfb_radio_port,
+            aggregator: args.rx_aggregator,
+        },
         rx_forwards,
         rx_wlan_idx: args.rx_wlan_idx,
         rx_mcs_index: args.rx_mcs_index,
     })
 }
 
-fn radio_run_validate_wfb_forward_args(
+fn radio_run_bridge_args(
     args: &RadioRunArgs,
-) -> std::result::Result<(), RuntimeRadioError> {
-    match (args.wfb_link_id, args.wfb_radio_port, args.rx_aggregator) {
-        (None, None, None) => {}
-        (None, None, Some(_)) => {
-            return Err(RuntimeRadioError::new(
-                "missing_wfb_rx_filter",
-                "--rx-aggregator requires --wfb-link-id and --wfb-radio-port",
-            ));
-        }
-        (Some(_), None, _) | (None, Some(_), _) => {
-            return Err(RuntimeRadioError::new(
-                "incomplete_wfb_rx_filter",
-                "--wfb-link-id and --wfb-radio-port must be supplied together",
-            ));
-        }
-        (Some(link_id), Some(radio_port), _) => {
-            WfbChannelId::new(link_id, radio_port).map_err(|error| {
-                RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
-            })?;
-        }
-    }
-    for forward in &args.rx_forwards {
-        let link_id = forward.link_id.or(args.wfb_link_id).ok_or_else(|| {
-            RuntimeRadioError::new(
-                "missing_wfb_rx_forward_link_id",
-                "--rx-forward RADIO_PORT=HOST:PORT requires --wfb-link-id; use LINK_ID:RADIO_PORT=HOST:PORT to make it self-contained",
-            )
-        })?;
-        WfbChannelId::new(link_id, forward.radio_port).map_err(|error| {
-            RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
-        })?;
-    }
-    Ok(())
-}
-
-fn radio_run_bridge_args(args: &RadioRunArgs) -> BridgeRunArgs {
+    loop_plan: &ProductionRuntimeWfbLoopPlan,
+) -> BridgeRunArgs {
     BridgeRunArgs {
         tx: BridgeTxListenArgs {
             adapter: args.adapter.clone(),
@@ -26241,10 +26204,10 @@ fn radio_run_bridge_args(args: &RadioRunArgs) -> BridgeRunArgs {
             pre_tx_rmw32: Vec::new(),
             pre_tx_rf_write: Vec::new(),
         },
-        tx_binds: args.tx_binds.clone(),
+        tx_binds: loop_plan.tx_bind_addrs.iter().skip(1).copied().collect(),
         duration_ms: args.duration_ms,
-        rx_timeout_ms: args.rx_timeout_ms,
-        tx_burst_limit: args.tx_burst_limit,
+        rx_timeout_ms: loop_plan.rx_timeout_ms,
+        tx_burst_limit: loop_plan.tx_burst_limit,
         wfb_link_id: args.wfb_link_id,
         wfb_radio_port: args.wfb_radio_port,
         rx_aggregator: args.rx_aggregator,
@@ -26360,12 +26323,13 @@ fn radio_run_report(args: RadioRunArgs) -> ProductionRuntimeFlowReport {
         Ok(config) => config,
         Err(error) => return radio_run_failure_report(&args, None, error),
     };
-    if let Err(error) = config.validate() {
-        return ProductionRuntimeFlowReport::not_started(&config, error);
-    }
+    let validation = match config.validate() {
+        Ok(validation) => validation,
+        Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
+    };
 
     let runtime_flow = runtime_flow_report(RuntimeFlowArgs {
-        bridge: radio_run_bridge_args(&args),
+        bridge: radio_run_bridge_args(&args, &validation.wfb_loop),
     });
     production_report_from_runtime_flow(&config, runtime_flow)
 }
@@ -42941,6 +42905,35 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(
             report.error.as_ref().map(|error| error.code),
             Some("missing_wfb_rx_filter")
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.counters.usb_control_reads, 0);
+    }
+
+    #[test]
+    fn radio_run_rejects_defaulted_rx_forward_without_global_link_before_usb() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--rx-forward",
+            "0x23=127.0.0.1:5602",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let report = radio_run_report(args);
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_wfb_rx_forward_link_id")
         );
         assert!(report.adapter.is_none());
         assert_eq!(report.counters.usb_control_reads, 0);
