@@ -37,9 +37,12 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 use wfb_radio_runtime::macos_usbhost;
 use wfb_radio_runtime::{
-    MacosUsbHostConfig, Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry,
-    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
-    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+    MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowErrorReport,
+    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
+    ProductionRuntimeInitTelemetry, ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig,
+    Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+    RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
+    RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
     RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
     RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
     RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
@@ -139,6 +142,8 @@ enum Command {
     BridgeTxListen(BridgeTxListenArgs),
     /// Run bounded WFB RX forwarding and TX injection in one retained radio session.
     BridgeRun(BridgeRunArgs),
+    /// Run the production WFB radio runtime without diagnostic register experiments.
+    RadioRun(RadioRunArgs),
     /// Run the production-facing WFB runtime flow with runtime-shaped telemetry.
     RuntimeFlow(RuntimeFlowArgs),
     /// Generate WFB distributor-style datagrams and submit a bounded TX throughput burst.
@@ -1552,6 +1557,90 @@ struct BridgeRunArgs {
 }
 
 #[derive(Debug, Parser, Clone)]
+struct RadioRunArgs {
+    #[command(flatten)]
+    adapter: AdapterArgs,
+
+    /// Channel to run the WFB radio on.
+    #[arg(long)]
+    channel: u8,
+
+    /// Channel bandwidth used for init, RX parsing metadata, and TX descriptors.
+    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
+    bandwidth: Bandwidth,
+
+    /// RTL8812A firmware image path.
+    #[arg(long)]
+    firmware: PathBuf,
+
+    /// UDP address to bind for WFB distributor/injector datagrams.
+    #[arg(long, default_value = "127.0.0.1:5600")]
+    bind: SocketAddr,
+
+    /// Additional UDP addresses to bind for WFB distributor/injector datagrams.
+    #[arg(long = "tx-bind", value_name = "ADDR")]
+    tx_binds: Vec<SocketAddr>,
+
+    /// Bounded production runtime in milliseconds after init completes; 0 runs without a time bound.
+    #[arg(long, default_value_t = 10000)]
+    duration_ms: u64,
+
+    /// Per bulk-IN read timeout while interleaving RX and TX.
+    #[arg(long, default_value_t = 20)]
+    rx_timeout_ms: u64,
+
+    /// Maximum TX datagrams to drain before returning to one bulk-IN RX read.
+    #[arg(long, default_value_t = 8)]
+    tx_burst_limit: u32,
+
+    /// Maximum datagrams to receive before exiting; 0 is unlimited.
+    #[arg(long, default_value_t = 0)]
+    max_datagrams: u32,
+
+    /// Write this JSON marker after init/calibration and immediately before runtime loops.
+    #[arg(long, value_name = "PATH")]
+    ready_file: Option<PathBuf>,
+
+    /// Required acknowledgement for live RF TX submission.
+    #[arg(long)]
+    i_understand_this_transmits: bool,
+
+    /// Required acknowledgement for runtime calibration profiles that write RF/BB registers.
+    #[arg(long)]
+    i_understand_this_writes_registers: bool,
+
+    #[command(flatten)]
+    macos_usbhost: MacosUsbHostArgs,
+
+    #[command(flatten)]
+    tx_calibration: TxCalibrationProfileArgs,
+
+    /// WFB link ID to match and optionally forward during RX.
+    #[arg(long, value_parser = parse_u32)]
+    wfb_link_id: Option<u32>,
+
+    /// WFB radio port to match and optionally forward during RX.
+    #[arg(long, value_parser = parse_u8)]
+    wfb_radio_port: Option<u8>,
+
+    /// UDP aggregator address for matching WFB RX forwarding.
+    #[arg(long)]
+    rx_aggregator: Option<SocketAddr>,
+
+    /// Additional WFB RX forwarding target as LINK_ID:RADIO_PORT=HOST:PORT or RADIO_PORT=HOST:PORT with --wfb-link-id.
+    #[arg(long = "rx-forward", value_name = "LINK_ID:RADIO_PORT=HOST:PORT", value_parser = parse_bridge_run_rx_forward_arg)]
+    rx_forwards: Vec<BridgeRunRxForwardArg>,
+
+    /// WFB forwarding WLAN index metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_wlan_idx: u8,
+
+    /// WFB forwarding MCS metadata.
+    #[arg(long, default_value_t = 0)]
+    rx_mcs_index: u8,
+}
+
+#[derive(Debug, Parser, Clone)]
 struct RuntimeFlowArgs {
     #[command(flatten)]
     bridge: BridgeRunArgs,
@@ -2740,6 +2829,16 @@ fn main() -> Result<()> {
             }
             if let Some(code) = report.result.exit_code() {
                 std::process::exit(code);
+            }
+        }
+        Command::RadioRun(args) => {
+            let report = radio_run_report(args);
+            emit_report(&report, emit_json, report_path.as_deref())?;
+            if !emit_json {
+                print_radio_run_human(&report);
+            }
+            if report.result == ProductionRuntimeFlowResult::Fail {
+                std::process::exit(1);
             }
         }
         Command::RuntimeFlow(args) => {
@@ -25990,6 +26089,287 @@ fn runtime_calibration_evidence_source_label(
     }
 }
 
+fn rtl8812a_mac_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c")
+}
+
+fn rtl8812a_bb_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c")
+}
+
+fn rtl8812a_rf_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c")
+}
+
+fn radio_run_runtime_config(
+    args: &RadioRunArgs,
+) -> std::result::Result<ProductionRuntimeFlowConfig, RuntimeRadioError> {
+    let channel = Channel::from_number(args.channel).map_err(|error| {
+        RuntimeRadioError::new(
+            "invalid_channel",
+            format!("invalid runtime channel: {error}"),
+        )
+    })?;
+    radio_run_validate_wfb_forward_args(args)?;
+    let usb = if args.macos_usbhost.enabled {
+        ProductionRuntimeUsbConfig::macos_usbhost(
+            args.adapter.selector(),
+            macos_usbhost_config(&args.macos_usbhost),
+        )
+    } else {
+        ProductionRuntimeUsbConfig::libusb(args.adapter.selector())
+    };
+    let captured_tail_applied = should_apply_captured_tx_bringup_tail(channel, args.bandwidth);
+    let mut rx_forwards = Vec::new();
+    if let Some(radio_port) = args.wfb_radio_port {
+        rx_forwards.push(ProductionRuntimeRxForwardConfig {
+            link_id: args.wfb_link_id,
+            radio_port,
+            aggregator: args.rx_aggregator,
+        });
+    }
+    rx_forwards.extend(
+        args.rx_forwards
+            .iter()
+            .map(|forward| ProductionRuntimeRxForwardConfig {
+                link_id: forward.link_id.or(args.wfb_link_id),
+                radio_port: forward.radio_port,
+                aggregator: Some(forward.aggregator),
+            }),
+    );
+
+    Ok(ProductionRuntimeFlowConfig {
+        usb,
+        channel,
+        bandwidth: args.bandwidth,
+        firmware: Some(args.firmware.clone()),
+        bind_addr: args.bind,
+        tx_binds: args.tx_binds.clone(),
+        duration_ms: args.duration_ms,
+        rx_timeout_ms: args.rx_timeout_ms,
+        tx_burst_limit: args.tx_burst_limit,
+        max_datagrams: args.max_datagrams,
+        ready_file: args.ready_file.clone(),
+        tx_authorized: args.i_understand_this_transmits,
+        live_register_write_authorized: args.i_understand_this_writes_registers,
+        calibration_profile: RuntimeTxCalibrationProfile::from(
+            args.tx_calibration.tx_calibration_profile,
+        ),
+        captured_tail_applied,
+        rx_forwards,
+        rx_wlan_idx: args.rx_wlan_idx,
+        rx_mcs_index: args.rx_mcs_index,
+    })
+}
+
+fn radio_run_validate_wfb_forward_args(
+    args: &RadioRunArgs,
+) -> std::result::Result<(), RuntimeRadioError> {
+    match (args.wfb_link_id, args.wfb_radio_port, args.rx_aggregator) {
+        (None, None, None) => {}
+        (None, None, Some(_)) => {
+            return Err(RuntimeRadioError::new(
+                "missing_wfb_rx_filter",
+                "--rx-aggregator requires --wfb-link-id and --wfb-radio-port",
+            ));
+        }
+        (Some(_), None, _) | (None, Some(_), _) => {
+            return Err(RuntimeRadioError::new(
+                "incomplete_wfb_rx_filter",
+                "--wfb-link-id and --wfb-radio-port must be supplied together",
+            ));
+        }
+        (Some(link_id), Some(radio_port), _) => {
+            WfbChannelId::new(link_id, radio_port).map_err(|error| {
+                RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
+            })?;
+        }
+    }
+    for forward in &args.rx_forwards {
+        let link_id = forward.link_id.or(args.wfb_link_id).ok_or_else(|| {
+            RuntimeRadioError::new(
+                "missing_wfb_rx_forward_link_id",
+                "--rx-forward RADIO_PORT=HOST:PORT requires --wfb-link-id; use LINK_ID:RADIO_PORT=HOST:PORT to make it self-contained",
+            )
+        })?;
+        WfbChannelId::new(link_id, forward.radio_port).map_err(|error| {
+            RuntimeRadioError::new("invalid_wfb_rx_channel_id", error.to_string())
+        })?;
+    }
+    Ok(())
+}
+
+fn radio_run_bridge_args(args: &RadioRunArgs) -> BridgeRunArgs {
+    BridgeRunArgs {
+        tx: BridgeTxListenArgs {
+            adapter: args.adapter.clone(),
+            channel: args.channel,
+            bandwidth: args.bandwidth,
+            bind: args.bind,
+            ready_file: args.ready_file.clone(),
+            max_datagrams: args.max_datagrams,
+            idle_timeout_ms: 3000,
+            i_understand_this_transmits: args.i_understand_this_transmits,
+            i_understand_this_writes_registers: args.i_understand_this_writes_registers,
+            macos_usbhost: args.macos_usbhost,
+            tx_overrides: BridgeTxOverrideArgs::default(),
+            tx_status: TxStatusProbeArgs::default(),
+            init_before_tx: true,
+            firmware: Some(args.firmware.clone()),
+            init_timeout_ms: 500,
+            mac_source: rtl8812a_mac_source_default(),
+            bb_source: rtl8812a_bb_source_default(),
+            rf_source: rtl8812a_rf_source_default(),
+            cut_version: 0x00,
+            package_type: 0x00,
+            support_interface: 0x02,
+            support_platform: 0x00,
+            board_type: 0xd8,
+            type_glna: 0x0000,
+            type_gpa: 0x0000,
+            type_alna: 0x0000,
+            type_apa: 0x0000,
+            crystal_cap: 0x20,
+            rfe_type: DEFAULT_RFE_TYPE,
+            tx_power: TxPowerControlArgs::default(),
+            tx_calibration: args.tx_calibration.clone(),
+            clear_txdma_status_before_tx: false,
+            txdma_status_clear_value: 0,
+            pre_tx_write8: Vec::new(),
+            pre_tx_write16: Vec::new(),
+            pre_tx_write32: Vec::new(),
+            pre_tx_rmw32: Vec::new(),
+            pre_tx_rf_write: Vec::new(),
+        },
+        tx_binds: args.tx_binds.clone(),
+        duration_ms: args.duration_ms,
+        rx_timeout_ms: args.rx_timeout_ms,
+        tx_burst_limit: args.tx_burst_limit,
+        wfb_link_id: args.wfb_link_id,
+        wfb_radio_port: args.wfb_radio_port,
+        rx_aggregator: args.rx_aggregator,
+        rx_forwards: args.rx_forwards.clone(),
+        rx_wlan_idx: args.rx_wlan_idx,
+        rx_mcs_index: args.rx_mcs_index,
+        rx_pcap: None,
+        rx_frame_jsonl: None,
+    }
+}
+
+fn production_error_from_diagnostic(
+    error: Option<DiagnosticErrorReport>,
+) -> Option<ProductionRuntimeFlowErrorReport> {
+    error.map(|error| ProductionRuntimeFlowErrorReport {
+        code: error.code,
+        message: error.message,
+        timeout: false,
+    })
+}
+
+fn production_runtime_result(result: DiagnosticResult) -> ProductionRuntimeFlowResult {
+    match result {
+        DiagnosticResult::Pass => ProductionRuntimeFlowResult::Pass,
+        DiagnosticResult::Fail | DiagnosticResult::NotImplemented => {
+            ProductionRuntimeFlowResult::Fail
+        }
+    }
+}
+
+fn production_runtime_init_readiness(readiness: &str) -> ProductionRuntimeInitReadiness {
+    match readiness {
+        "ready" => ProductionRuntimeInitReadiness::Ready,
+        "failed" => ProductionRuntimeInitReadiness::Failed,
+        _ => ProductionRuntimeInitReadiness::NotStarted,
+    }
+}
+
+fn production_report_from_runtime_flow(
+    config: &ProductionRuntimeFlowConfig,
+    report: RuntimeFlowReport,
+) -> ProductionRuntimeFlowReport {
+    ProductionRuntimeFlowReport {
+        schema_version: 1,
+        command: "radio-run",
+        selector: report.selector,
+        adapter: report.adapter,
+        endpoints: report.endpoints,
+        channel: report.channel,
+        bandwidth: report.bandwidth,
+        duration_ms: report.duration_ms,
+        ready_file: report.ready_file,
+        stop_reason: report.stop_reason,
+        bulk_in_endpoint: report.bulk_in_endpoint,
+        bulk_out_endpoint: report.bulk_out_endpoint,
+        calibration_profile: RuntimeTxCalibrationProfile::from(report.calibration_profile),
+        calibration_class: report.calibration_class,
+        calibration_evidence_source: config
+            .calibration_profile
+            .evidence_source(config.captured_tail_applied),
+        receiver_backed_validation_required: report.receiver_backed_validation_required,
+        init: ProductionRuntimeInitTelemetry {
+            readiness: production_runtime_init_readiness(report.init_readiness),
+            phase_count: report.init_phase_count,
+            completed_phase_count: report.init_completed_phase_count,
+        },
+        rx: report.rx,
+        tx: report.tx,
+        counters: runtime_radio_counters_from_diagnostic(report.counters),
+        result: production_runtime_result(report.result),
+        error: production_error_from_diagnostic(report.error),
+    }
+}
+
+fn radio_run_failure_report(
+    args: &RadioRunArgs,
+    channel: Option<Channel>,
+    error: RuntimeRadioError,
+) -> ProductionRuntimeFlowReport {
+    let runtime_profile =
+        RuntimeTxCalibrationProfile::from(args.tx_calibration.tx_calibration_profile);
+    let captured_tail_applied = channel
+        .map(|channel| should_apply_captured_tx_bringup_tail(channel, args.bandwidth))
+        .unwrap_or(false);
+    ProductionRuntimeFlowReport {
+        schema_version: 1,
+        command: "radio-run",
+        selector: args.adapter.selector(),
+        adapter: None,
+        endpoints: None,
+        channel,
+        bandwidth: args.bandwidth,
+        duration_ms: args.duration_ms,
+        ready_file: args.ready_file.clone(),
+        stop_reason: "not_started",
+        bulk_in_endpoint: None,
+        bulk_out_endpoint: None,
+        calibration_profile: runtime_profile,
+        calibration_class: runtime_profile.before_tx_class(captured_tail_applied),
+        calibration_evidence_source: runtime_profile.evidence_source(captured_tail_applied),
+        receiver_backed_validation_required: !runtime_profile.is_default(),
+        init: ProductionRuntimeInitTelemetry::default(),
+        rx: RuntimeFlowRxTelemetry::default(),
+        tx: RuntimeFlowTxTelemetry::default(),
+        counters: RuntimeRadioCounters::default(),
+        result: ProductionRuntimeFlowResult::Fail,
+        error: Some(error.into()),
+    }
+}
+
+fn radio_run_report(args: RadioRunArgs) -> ProductionRuntimeFlowReport {
+    let config = match radio_run_runtime_config(&args) {
+        Ok(config) => config,
+        Err(error) => return radio_run_failure_report(&args, None, error),
+    };
+    if let Err(error) = config.validate() {
+        return ProductionRuntimeFlowReport::not_started(&config, error);
+    }
+
+    let runtime_flow = runtime_flow_report(RuntimeFlowArgs {
+        bridge: radio_run_bridge_args(&args),
+    });
+    production_report_from_runtime_flow(&config, runtime_flow)
+}
+
 fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
     if let Some(error) = runtime_flow_reject_diagnostic_only_options(&args) {
         return runtime_flow_failure_report(
@@ -36962,6 +37342,59 @@ fn print_runtime_flow_human(report: &RuntimeFlowReport) {
     }
 }
 
+fn print_radio_run_human(report: &ProductionRuntimeFlowReport) {
+    println!("{}: {}", report.command, report.result.as_str());
+    if let Some(adapter) = &report.adapter {
+        println!(
+            "Adapter: {} {} bus={} address={} speed={}",
+            adapter.vid_hex, adapter.pid_hex, adapter.bus, adapter.address, adapter.speed
+        );
+    }
+    if let Some(channel) = report.channel {
+        println!(
+            "Channel: {} {} MHz {:?} {:?}",
+            channel.number, channel.frequency_mhz, channel.band, report.bandwidth
+        );
+    }
+    println!(
+        "Init: readiness={:?} phases={}/{} calibration={} class={:?} evidence={:?} receiver_validation_required={}",
+        report.init.readiness,
+        report.init.completed_phase_count,
+        report.init.phase_count,
+        report.calibration_profile.name(),
+        report.calibration_class,
+        report.calibration_evidence_source,
+        report.receiver_backed_validation_required
+    );
+    println!(
+        "RX: buffers={} timeouts={} frames={} phy_status={} rssi_valid={} snr={} noise={} forwarded={} dropped={}",
+        report.rx.buffers_read,
+        report.rx.read_timeouts,
+        report.rx.parsed_frames,
+        report.rx.phy_status_frames,
+        report.rx.rssi_valid_frames,
+        report.rx.snr_frames,
+        report.rx.noise_frames,
+        report.rx.forwarded_payloads,
+        report.rx.dropped_packets
+    );
+    println!(
+        "TX: datagrams={} submitted={} failed={} dropped={} bytes={}",
+        report.tx.datagrams_received,
+        report.tx.submitted_frames,
+        report.tx.failed_submissions,
+        report.tx.dropped_datagrams,
+        report.tx.bytes_written
+    );
+    println!("Stop reason: {}", report.stop_reason);
+    if let Some(path) = &report.ready_file {
+        println!("Ready file: {}", path.display());
+    }
+    if let Some(error) = &report.error {
+        println!("Error: {} - {}", error.code, error.message);
+    }
+}
+
 fn print_bridge_tx_bench_human(report: &BridgeTxBenchReport) {
     println!("{}: {}", report.command, report.result.as_str());
     println!("Platform: {} {}", report.platform.os, report.platform.arch);
@@ -42354,6 +42787,163 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn radio_run_cli_exposes_production_command() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--duration-ms",
+            "1",
+            "--ready-file",
+            "/tmp/radio-run-ready.json",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse radio-run");
+
+        match cli.command {
+            Command::RadioRun(args) => {
+                assert_eq!(args.channel, 36);
+                assert_eq!(args.duration_ms, 1);
+                assert_eq!(
+                    args.ready_file.as_deref(),
+                    Some(Path::new("/tmp/radio-run-ready.json"))
+                );
+                assert_eq!(args.firmware, PathBuf::from("/tmp/rtl8812a_fw.bin"));
+                assert!(args.i_understand_this_transmits);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn radio_run_cli_omits_diagnostic_register_experiments() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let radio_run = command
+            .find_subcommand_mut("radio-run")
+            .expect("radio-run command");
+        let help = radio_run.render_long_help().to_string();
+
+        for flag in [
+            "--pre-tx-write8",
+            "--pre-tx-write16",
+            "--pre-tx-write32",
+            "--pre-tx-rmw32",
+            "--pre-tx-rf-write",
+            "--tx-status",
+            "--clear-txdma-status-before-tx",
+        ] {
+            assert!(!help.contains(flag), "radio-run leaked {flag}");
+        }
+    }
+
+    #[test]
+    fn radio_run_maps_cli_to_runtime_owned_config() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--bandwidth",
+            "20",
+            "--duration-ms",
+            "25",
+            "--rx-timeout-ms",
+            "10",
+            "--tx-burst-limit",
+            "4",
+            "--max-datagrams",
+            "2",
+            "--tx-bind",
+            "127.0.0.1:5601",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let config = radio_run_runtime_config(&args).expect("runtime config");
+
+        assert_eq!(config.channel.number, 36);
+        assert_eq!(config.duration_ms, 25);
+        assert_eq!(config.rx_timeout_ms, 10);
+        assert_eq!(config.tx_burst_limit, 4);
+        assert_eq!(config.max_datagrams, 2);
+        assert_eq!(
+            config.tx_binds,
+            vec!["127.0.0.1:5601".parse::<SocketAddr>().unwrap()]
+        );
+        assert!(config.tx_authorized);
+        config.validate().expect("valid production config");
+    }
+
+    #[test]
+    fn radio_run_rejects_missing_tx_authorization_before_usb() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+        ])
+        .expect("parse radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let report = radio_run_report(args);
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_tx_authorization")
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.counters.usb_control_reads, 0);
+        assert_eq!(
+            report.init.readiness,
+            ProductionRuntimeInitReadiness::NotStarted
+        );
+    }
+
+    #[test]
+    fn radio_run_rejects_incomplete_rx_forward_before_usb() {
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--channel",
+            "36",
+            "--firmware",
+            "/tmp/rtl8812a_fw.bin",
+            "--rx-aggregator",
+            "127.0.0.1:5602",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let report = radio_run_report(args);
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_wfb_rx_filter")
+        );
+        assert!(report.adapter.is_none());
+        assert_eq!(report.counters.usb_control_reads, 0);
     }
 
     #[test]

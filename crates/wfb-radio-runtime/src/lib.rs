@@ -4,7 +4,7 @@
 //! production runtime, diagnostic harness, or future daemon must agree on
 //! without depending on `wfb-radio-diag`.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 use radio_core::{
     list_usb_devices, parse_rx_packet, rtl8812au::Rtl8812auUsbTransport, submit_tx_frame,
@@ -205,6 +205,91 @@ impl RuntimeUsbOpenConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeUsbBackend {
+    Libusb,
+    MacosUsbHost,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionMacosUsbHostConfig {
+    pub configuration_value: u8,
+    pub interface_number: u8,
+    pub bulk_in_endpoint: u8,
+    pub bulk_out_endpoint: u8,
+    pub bulk_out_endpoint_count: usize,
+    pub poll_attempts: u32,
+    pub poll_delay_ms: u64,
+}
+
+impl From<MacosUsbHostConfig> for ProductionMacosUsbHostConfig {
+    fn from(config: MacosUsbHostConfig) -> Self {
+        Self {
+            configuration_value: config.configuration_value,
+            interface_number: config.interface_number,
+            bulk_in_endpoint: config.bulk_in_endpoint,
+            bulk_out_endpoint: config.bulk_out_endpoint,
+            bulk_out_endpoint_count: config.bulk_out_endpoint_count,
+            poll_attempts: config.poll_attempts,
+            poll_delay_ms: u64::try_from(config.poll_delay.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+impl From<ProductionMacosUsbHostConfig> for MacosUsbHostConfig {
+    fn from(config: ProductionMacosUsbHostConfig) -> Self {
+        Self {
+            configuration_value: config.configuration_value,
+            interface_number: config.interface_number,
+            bulk_in_endpoint: config.bulk_in_endpoint,
+            bulk_out_endpoint: config.bulk_out_endpoint,
+            bulk_out_endpoint_count: config.bulk_out_endpoint_count,
+            poll_attempts: config.poll_attempts,
+            poll_delay: Duration::from_millis(config.poll_delay_ms),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeUsbConfig {
+    pub selector: DeviceSelector,
+    pub backend: ProductionRuntimeUsbBackend,
+    pub macos_usbhost: Option<ProductionMacosUsbHostConfig>,
+}
+
+impl ProductionRuntimeUsbConfig {
+    pub fn libusb(selector: DeviceSelector) -> Self {
+        Self {
+            selector,
+            backend: ProductionRuntimeUsbBackend::Libusb,
+            macos_usbhost: None,
+        }
+    }
+
+    pub fn macos_usbhost(selector: DeviceSelector, config: MacosUsbHostConfig) -> Self {
+        Self {
+            selector,
+            backend: ProductionRuntimeUsbBackend::MacosUsbHost,
+            macos_usbhost: Some(config.into()),
+        }
+    }
+
+    pub fn to_runtime_open_config(self) -> RuntimeUsbOpenConfig {
+        match self.backend {
+            ProductionRuntimeUsbBackend::Libusb => RuntimeUsbOpenConfig::libusb(self.selector),
+            ProductionRuntimeUsbBackend::MacosUsbHost => RuntimeUsbOpenConfig::macos_usbhost(
+                self.selector,
+                self.macos_usbhost
+                    .map(MacosUsbHostConfig::from)
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+}
+
 pub fn select_libusb_supported_adapter(
     selector: DeviceSelector,
 ) -> Result<UsbDeviceInfo, RuntimeTransportError> {
@@ -341,6 +426,24 @@ impl fmt::Display for RuntimeRadioError {
 
 impl Error for RuntimeRadioError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeFlowErrorReport {
+    pub code: &'static str,
+    pub message: String,
+    pub timeout: bool,
+}
+
+impl From<RuntimeRadioError> for ProductionRuntimeFlowErrorReport {
+    fn from(error: RuntimeRadioError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            timeout: error.timeout,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRxRead {
     pub endpoint: u8,
@@ -371,6 +474,213 @@ pub struct RuntimeFlowTxTelemetry {
     pub failed_submissions: u64,
     pub dropped_datagrams: u64,
     pub bytes_written: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxForwardConfig {
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
+    pub aggregator: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeFlowConfig {
+    pub usb: ProductionRuntimeUsbConfig,
+    pub channel: Channel,
+    pub bandwidth: Bandwidth,
+    pub firmware: Option<PathBuf>,
+    pub bind_addr: SocketAddr,
+    pub tx_binds: Vec<SocketAddr>,
+    pub duration_ms: u64,
+    pub rx_timeout_ms: u64,
+    pub tx_burst_limit: u32,
+    pub max_datagrams: u32,
+    pub ready_file: Option<PathBuf>,
+    pub tx_authorized: bool,
+    pub live_register_write_authorized: bool,
+    pub calibration_profile: TxCalibrationProfile,
+    pub captured_tail_applied: bool,
+    pub rx_forwards: Vec<ProductionRuntimeRxForwardConfig>,
+    pub rx_wlan_idx: u8,
+    pub rx_mcs_index: u8,
+}
+
+impl ProductionRuntimeFlowConfig {
+    pub fn validate(&self) -> Result<ProductionRuntimeFlowValidation, RuntimeRadioError> {
+        validate_production_runtime_flow_config(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeFlowValidation {
+    pub calibration: RuntimeTxCalibrationDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeInitReadiness {
+    NotStarted,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeInitTelemetry {
+    pub readiness: ProductionRuntimeInitReadiness,
+    pub phase_count: usize,
+    pub completed_phase_count: usize,
+}
+
+impl Default for ProductionRuntimeInitTelemetry {
+    fn default() -> Self {
+        Self {
+            readiness: ProductionRuntimeInitReadiness::NotStarted,
+            phase_count: 0,
+            completed_phase_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeFlowResult {
+    Pass,
+    Fail,
+}
+
+impl ProductionRuntimeFlowResult {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeFlowReport {
+    pub schema_version: u8,
+    pub command: &'static str,
+    pub selector: DeviceSelector,
+    pub adapter: Option<UsbDeviceInfo>,
+    pub endpoints: Option<UsbEndpoints>,
+    pub channel: Option<Channel>,
+    pub bandwidth: Bandwidth,
+    pub duration_ms: u64,
+    pub ready_file: Option<PathBuf>,
+    pub stop_reason: &'static str,
+    pub bulk_in_endpoint: Option<u8>,
+    pub bulk_out_endpoint: Option<u8>,
+    pub calibration_profile: TxCalibrationProfile,
+    pub calibration_class: TxCalibrationClass,
+    pub calibration_evidence_source: RuntimeTxCalibrationEvidenceSource,
+    pub receiver_backed_validation_required: bool,
+    pub init: ProductionRuntimeInitTelemetry,
+    pub rx: RuntimeFlowRxTelemetry,
+    pub tx: RuntimeFlowTxTelemetry,
+    pub counters: RuntimeRadioCounters,
+    pub result: ProductionRuntimeFlowResult,
+    pub error: Option<ProductionRuntimeFlowErrorReport>,
+}
+
+impl ProductionRuntimeFlowReport {
+    pub fn not_started(config: &ProductionRuntimeFlowConfig, error: RuntimeRadioError) -> Self {
+        let calibration_class = config
+            .calibration_profile
+            .before_tx_class(config.captured_tail_applied);
+        let calibration_evidence_source = config
+            .calibration_profile
+            .evidence_source(config.captured_tail_applied);
+        Self {
+            schema_version: 1,
+            command: "radio-run",
+            selector: config.usb.selector,
+            adapter: None,
+            endpoints: None,
+            channel: Some(config.channel),
+            bandwidth: config.bandwidth,
+            duration_ms: config.duration_ms,
+            ready_file: config.ready_file.clone(),
+            stop_reason: "not_started",
+            bulk_in_endpoint: None,
+            bulk_out_endpoint: None,
+            calibration_profile: config.calibration_profile,
+            calibration_class,
+            calibration_evidence_source,
+            receiver_backed_validation_required: !config.calibration_profile.is_default(),
+            init: ProductionRuntimeInitTelemetry::default(),
+            rx: RuntimeFlowRxTelemetry::default(),
+            tx: RuntimeFlowTxTelemetry::default(),
+            counters: RuntimeRadioCounters::default(),
+            result: ProductionRuntimeFlowResult::Fail,
+            error: Some(error.into()),
+        }
+    }
+}
+
+pub fn validate_production_runtime_flow_config(
+    config: &ProductionRuntimeFlowConfig,
+) -> Result<ProductionRuntimeFlowValidation, RuntimeRadioError> {
+    let supported_channel = Channel::from_number(config.channel.number).map_err(|error| {
+        RuntimeRadioError::new(
+            "invalid_channel",
+            format!("invalid runtime channel: {error}"),
+        )
+    })?;
+    if supported_channel != config.channel {
+        return Err(RuntimeRadioError::new(
+            "invalid_channel",
+            format!(
+                "channel {} metadata does not match supported channel table",
+                config.channel.number
+            ),
+        ));
+    }
+    if !config.channel.supports_bandwidth(config.bandwidth) {
+        return Err(RuntimeRadioError::new(
+            "unsupported_bandwidth",
+            format!(
+                "channel {} does not support {} MHz bandwidth",
+                config.channel.number,
+                config.bandwidth.mhz()
+            ),
+        ));
+    }
+    if config.firmware.is_none() {
+        return Err(RuntimeRadioError::new(
+            "missing_firmware",
+            "production radio run requires an RTL8812A firmware image path",
+        ));
+    }
+    if config.rx_timeout_ms == 0 {
+        return Err(RuntimeRadioError::new(
+            "invalid_rx_timeout",
+            "production radio run requires rx_timeout_ms greater than zero",
+        ));
+    }
+    if config.tx_burst_limit == 0 {
+        return Err(RuntimeRadioError::new(
+            "invalid_tx_burst_limit",
+            "production radio run requires tx_burst_limit greater than zero",
+        ));
+    }
+    if !config.tx_authorized {
+        return Err(RuntimeRadioError::new(
+            "missing_tx_authorization",
+            "production radio run requires explicit RF transmit authorization",
+        ));
+    }
+
+    let calibration = config.calibration_profile.calibration_decision(
+        config.captured_tail_applied,
+        config.live_register_write_authorized,
+    )?;
+    Ok(ProductionRuntimeFlowValidation { calibration })
 }
 
 pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
@@ -2096,17 +2406,22 @@ pub enum TxCalibrationClass {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap, time::Duration};
+    use std::{
+        cell::RefCell, collections::BTreeMap, net::SocketAddr, path::PathBuf, time::Duration,
+    };
 
     use radio_core::{
-        rtl8812au::Rtl8812auUsbTransport, Bandwidth, Channel, Rtl8812auRegisterAccess,
-        RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbError,
+        rtl8812au::Rtl8812auUsbTransport, Bandwidth, Channel, DeviceSelector,
+        Rtl8812auRegisterAccess, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
+        UsbError,
     };
 
     use super::{
         macos_usbhost_adapter_info, macos_usbhost_endpoints, MacosUsbHostConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+        ProductionRuntimeRxForwardConfig, ProductionRuntimeUsbConfig, Rtl8812auInitOrder,
+        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
+        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
         RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
         RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
         RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
@@ -2368,6 +2683,126 @@ mod tests {
         assert_eq!(RuntimeFlowRxTelemetry::default().buffers_read, 0);
         assert_eq!(RuntimeFlowRxTelemetry::default().snr_frames, 0);
         assert_eq!(RuntimeFlowTxTelemetry::default().submitted_frames, 0);
+    }
+
+    fn production_runtime_flow_config() -> ProductionRuntimeFlowConfig {
+        ProductionRuntimeFlowConfig {
+            usb: ProductionRuntimeUsbConfig::libusb(DeviceSelector::default()),
+            channel: Channel::from_number(36).expect("channel 36"),
+            bandwidth: Bandwidth::Mhz20,
+            firmware: Some(PathBuf::from("/tmp/rtl8812a_fw.bin")),
+            bind_addr: "127.0.0.1:5600".parse::<SocketAddr>().expect("bind addr"),
+            tx_binds: vec!["127.0.0.1:5601".parse().expect("tx bind")],
+            duration_ms: 10_000,
+            rx_timeout_ms: 20,
+            tx_burst_limit: 8,
+            max_datagrams: 0,
+            ready_file: Some(PathBuf::from("/tmp/radio-run-ready.json")),
+            tx_authorized: true,
+            live_register_write_authorized: false,
+            calibration_profile: TxCalibrationProfile::CurrentDefault,
+            captured_tail_applied: true,
+            rx_forwards: vec![ProductionRuntimeRxForwardConfig {
+                link_id: Some(7669206),
+                radio_port: 0,
+                aggregator: Some("127.0.0.1:5602".parse().expect("aggregator")),
+            }],
+            rx_wlan_idx: 0,
+            rx_mcs_index: 1,
+        }
+    }
+
+    #[test]
+    fn production_runtime_flow_config_validates_before_usb() {
+        let config = production_runtime_flow_config();
+        let validation = config.validate().expect("valid production flow");
+
+        assert_eq!(
+            validation.calibration.profile,
+            TxCalibrationProfile::CurrentDefault
+        );
+        assert_eq!(
+            validation.calibration.evidence_source,
+            RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
+        );
+        assert!(!validation.calibration.requires_live_write_authorization);
+    }
+
+    #[test]
+    fn production_runtime_flow_config_rejects_missing_authorization_before_usb() {
+        let mut config = production_runtime_flow_config();
+        config.tx_authorized = false;
+
+        let error = config.validate().expect_err("missing tx auth");
+
+        assert_eq!(error.code, "missing_tx_authorization");
+    }
+
+    #[test]
+    fn production_runtime_flow_config_rejects_live_calibration_without_write_authorization() {
+        let mut config = production_runtime_flow_config();
+        config.calibration_profile = TxCalibrationProfile::Rtl8812aRuntimeIqk;
+        config.live_register_write_authorized = false;
+
+        let error = config.validate().expect_err("missing write auth");
+
+        assert_eq!(error.code, "missing_write_authorization");
+    }
+
+    #[test]
+    fn production_runtime_flow_config_rejects_invalid_bounds_before_usb() {
+        let mut config = production_runtime_flow_config();
+        config.tx_burst_limit = 0;
+
+        let error = config.validate().expect_err("invalid tx burst");
+
+        assert_eq!(error.code, "invalid_tx_burst_limit");
+    }
+
+    #[test]
+    fn production_runtime_types_serialize_without_diagnostic_register_fields() {
+        let config = production_runtime_flow_config();
+        let report = ProductionRuntimeFlowReport {
+            schema_version: 1,
+            command: "radio-run",
+            selector: config.usb.selector,
+            adapter: None,
+            endpoints: None,
+            channel: Some(config.channel),
+            bandwidth: config.bandwidth,
+            duration_ms: config.duration_ms,
+            ready_file: config.ready_file.clone(),
+            stop_reason: "duration_elapsed",
+            bulk_in_endpoint: Some(0x81),
+            bulk_out_endpoint: Some(0x02),
+            calibration_profile: config.calibration_profile,
+            calibration_class: config
+                .calibration_profile
+                .before_tx_class(config.captured_tail_applied),
+            calibration_evidence_source: config
+                .calibration_profile
+                .evidence_source(config.captured_tail_applied),
+            receiver_backed_validation_required: false,
+            init: Default::default(),
+            rx: RuntimeFlowRxTelemetry::default(),
+            tx: RuntimeFlowTxTelemetry::default(),
+            counters: RuntimeRadioCounters::default(),
+            result: ProductionRuntimeFlowResult::Pass,
+            error: None,
+        };
+        let config_json = serde_json::to_string(&config).expect("config JSON");
+        let report_json = serde_json::to_string(&report).expect("report JSON");
+        for field in [
+            "pre_tx_write",
+            "pre_tx_rmw",
+            "pre_tx_rf_write",
+            "tx_status",
+            "clear_txdma_status",
+            "txdma_status_clear",
+        ] {
+            assert!(!config_json.contains(field), "config leaked {field}");
+            assert!(!report_json.contains(field), "report leaked {field}");
+        }
     }
 
     #[test]

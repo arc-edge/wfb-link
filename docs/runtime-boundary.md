@@ -22,6 +22,28 @@
 - Runtime-owned full-flow RX/TX telemetry structs used by the production-shaped
   `runtime-flow` report, including RX metadata coverage counters for PHY status,
   valid RSSI, SNR, and derived noise.
+- Runtime-owned production WFB flow configuration, validation, report, init
+  readiness, error, and USB-selection snapshot types. These are used by the
+  production `radio-run` command and are serializable without diagnostic-only
+  register experiment fields.
+
+## Production Command
+
+`wfb-radio-diag radio-run` is the first production cutover entry point. It
+accepts the operational full-flow settings only: adapter selection, channel,
+bandwidth, firmware path, TX UDP bind addresses, optional WFB RX forwarding,
+runtime bounds, calibration profile, macOS USBHost backend settings, and the
+explicit TX/register-write acknowledgements.
+
+`radio-run` always maps into `wfb-radio-runtime::ProductionRuntimeFlowConfig`
+and validates that config before USB open. The command does not expose
+diagnostic register pokes, TX status probes, TXDMA-clear experiments, PCAP, or
+raw frame JSONL capture. Those remain available through diagnostic commands.
+
+During this cutover slice, `radio-run` still executes by adapting the validated
+runtime-owned config into the existing hardware-proven `runtime-flow`/bridge
+loop. Its emitted JSON is `ProductionRuntimeFlowReport` from
+`wfb-radio-runtime`, not the diagnostic `RuntimeFlowReport`.
 
 ## Still Diagnostic-Owned
 
@@ -29,14 +51,16 @@
 - Runtime IQK/LCK register orchestration and evidence reports while parity is still being hardened.
 - WFB bridge loop orchestration, socket setup, ready-marker file writing,
   PCAP/JSONL output, and RF-quality automation.
-- CLI parsing and human-facing diagnostic reports.
+- CLI parsing and human-facing diagnostic reports, except for the thin
+  production `radio-run` command adapter.
 - Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
 
 ## Migration Order
 
 1. Move full RTL8812AU init phase execution behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
 2. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
-3. Define a smaller production bridge binary or API surface that wraps the runtime session without diagnostic-only report machinery.
+3. Move full bridge-loop execution into `wfb-radio-runtime` so `radio-run` no
+   longer adapts through diagnostic bridge internals.
 4. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
    `wfb-radio-runtime`; RX/TX flow counters and adapter-side RSSI/SNR/noise
