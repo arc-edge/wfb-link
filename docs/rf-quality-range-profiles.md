@@ -502,18 +502,19 @@ HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net \
 HW_DEPLOY=1 \
 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy \
 MAC_LAN_IP=10.42.0.162 \
+LINUX_LAN_IP=10.42.0.1 \
 LINUX_HOST=pi@drone-2f389.local \
 PROFILE_SET=short \
 REPEATS=1 \
 EXPECTED_PAYLOADS=80 \
-SOURCE_WARMUP_PAYLOADS=20 \
+SOURCE_WARMUP_PAYLOADS=100 \
 scripts/run-radio-run-profile-matrix.sh
 ```
 
 `PROFILE_SET=short` currently covers the default `8/12` MCS1 profile,
-symmetric `4/12` MCS1 at a 20 ms source interval, and the best observed indoor
-short-smoke candidate: M2L `4/12` MCS1 plus L2M `3/12` MCS2 at 20 ms.
-`PROFILE_SET=range` adds one lower-overhead reverse-link candidate. For
+symmetric `4/12` MCS1 at a 20 ms source interval, and the current accepted
+short-range sustained candidate: M2L `4/12` MCS1 plus L2M `3/12` MCS2 at
+20 ms. `PROFILE_SET=range` adds one lower-overhead reverse-link candidate. For
 operator-defined experiments, set `PROFILE_FILE` to a pipe-delimited list:
 
 ```text
@@ -526,12 +527,36 @@ The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
 reports no dropped datagrams or failed submissions.
 
 Remote hardware currently requires the hardware Mac to reach the Linux peer
-over SSH and UDP. On May 4, 2026, after the adapter moved back to
-`rownds-macbook-pro`, the remote Mac could not resolve `drone-2f389.local` and
-could not reach `192.168.122.77`; the matrix failed fast with
-`linux_peer_preparation_failed` at
-`/tmp/wfb-radio-profile-matrix-remote-peerfail-20260504-181200`. This is a peer
-network/topology blocker, not a radio result.
+over SSH and UDP, and `LINUX_LAN_IP` must be the peer address reachable from
+that hardware Mac. In the current remote-Mac topology, the Linux peer is
+`10.42.0.1` on `wlan1`; using `192.168.122.77` caused Linux-to-Mac forwarding
+to report `0/80` despite a working RF direction.
+
+On May 4, 2026, after local reachability was restored, the remote matrix
+accepted the asymmetric short-range sustained profile only after increasing
+unmeasured source warmup to 100 payloads:
+
+- Short matrix with `LINUX_LAN_IP=10.42.0.1` and 20 warmup:
+  `/tmp/wfb-radio-profile-matrix-remote-short-lanfix-20260504-184012`.
+  Baseline `8/12` recovered M2L `80/80` and L2M `64/80`; symmetric `4/12`
+  recovered M2L `80/80` and L2M `52/80` with 73 reverse-link decrypt failures;
+  asymmetric M2L `4/12` MCS1 plus L2M `3/12` MCS2 recovered `80/80` and
+  `79/80` with zero decrypt failures.
+- Sustained 200-payload asymmetric run with 20 warmup passed once at
+  `/tmp/wfb-radio-profile-matrix-remote-asym-200-20260504-184452`, then failed
+  one of two repeats at
+  `/tmp/wfb-radio-profile-matrix-remote-asym-200-repeat2-20260504-184700`.
+  The failed repeat recovered L2M `172/200` with missing measured sequences
+  `0..27`, matching startup acquisition rather than steady-state loss.
+- Sustained 200-payload asymmetric run with 100 warmup passed two of two
+  repeats at
+  `/tmp/wfb-radio-profile-matrix-remote-asym-200-warm100-repeat2-20260504-185114`:
+  both directions recovered `200/200`, decrypt failures were zero, TX drops and
+  failed submissions were zero, and Mac-side average SNR was about `11 dB`.
+
+This accepts the asymmetric profile as the current short-range production smoke
+default. It does not overturn the earlier 100 ft result, where the same profile
+failed a 200-payload acceptance gate.
 
 ## Acceptance Margins
 

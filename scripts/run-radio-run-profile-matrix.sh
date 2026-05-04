@@ -16,10 +16,11 @@ Common configuration:
   HW_DEPLOY=1                # rsync local checkout to HW_DEPLOY_PATH first
   HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
   LINUX_HOST=pi@drone-2f389.local
+  LINUX_LAN_IP=10.42.0.1    # Linux peer LAN IP visible to remote hardware Mac
   MAC_LAN_IP=10.42.0.162     # remote Mac LAN IP visible to Linux peer
   PROFILE_SET=short          # short, range, or minimal
   REPEATS=1
-  EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
+  EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
   MATRIX_OUT_DIR=/tmp/wfb-radio-profile-matrix
 
 Set PROFILE_FILE to a pipe-delimited profile list:
@@ -100,11 +101,12 @@ if [[ "$LOCAL_HW" == "1" ]]; then
 fi
 
 LINUX_HOST=${LINUX_HOST:-pi@drone-2f389.local}
-LINUX_LAN_IP=${LINUX_LAN_IP:-192.168.122.77}
 LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 if [[ "$LOCAL_HW" == "1" ]]; then
+  LINUX_LAN_IP=${LINUX_LAN_IP:-192.168.122.77}
   MAC_LAN_IP=${MAC_LAN_IP:-192.168.122.84}
 else
+  LINUX_LAN_IP=${LINUX_LAN_IP:-10.42.0.1}
   MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 fi
 
@@ -115,7 +117,7 @@ TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
-SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
+SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 COUNTER_SECONDS=${COUNTER_SECONDS:-55}
 PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-40}
@@ -176,14 +178,14 @@ EOF
       cat <<'EOF'
 baseline-8x12-mcs1|Default production smoke profile|8|12|8|12|1|1|0.003|95|95
 symmetric-4x12-mcs1-20ms|Symmetric stronger FEC and slower source cadence|4|12|4|12|1|1|0.020|95|90
-asym-4x12-3x12-mcs2-20ms|Best observed indoor 100 ft short-smoke candidate|4|12|3|12|1|2|0.020|95|90
+asym-4x12-3x12-mcs2-20ms|Accepted short-range sustained candidate with warmup|4|12|3|12|1|2|0.020|95|90
 EOF
       ;;
     range)
       cat <<'EOF'
 baseline-8x12-mcs1|Default production smoke profile|8|12|8|12|1|1|0.003|95|95
 symmetric-4x12-mcs1-20ms|Symmetric stronger FEC and slower source cadence|4|12|4|12|1|1|0.020|95|90
-asym-4x12-3x12-mcs2-20ms|Best observed indoor 100 ft short-smoke candidate|4|12|3|12|1|2|0.020|95|90
+asym-4x12-3x12-mcs2-20ms|Accepted short-range sustained candidate with warmup|4|12|3|12|1|2|0.020|95|90
 asym-4x12-4x10-mcs2-20ms|Lower-overhead reverse MCS2 candidate|4|12|4|10|1|2|0.020|95|85
 EOF
       ;;
@@ -198,7 +200,7 @@ deploy_remote_repo() {
     return
   fi
   log "syncing checkout to $HW_MAC_HOST:$HW_DEPLOY_PATH"
-  ssh "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "mkdir -p $(quote "$HW_DEPLOY_PATH")"
+  ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "mkdir -p $(quote "$HW_DEPLOY_PATH")"
   local rsync_args=(-az --exclude target --exclude .git)
   if [[ "$HW_DEPLOY_DELETE" == "1" ]]; then
     rsync_args+=(--delete)
@@ -223,19 +225,22 @@ from pathlib import Path
 
 keys = [
     "profile_name", "profile_description", "repeat_index", "out_dir",
-    "remote_out_dir", "local_hw", "hw_mac_host", "linux_host", "mac_lan_ip",
+    "remote_out_dir", "local_hw", "hw_mac_host", "linux_host",
+    "linux_lan_ip", "mac_lan_ip",
     "channel", "bandwidth_mhz", "tx_power_mode", "tx_calibration_profile",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
     "l2m_mcs", "payload_interval_sec", "expected_payloads",
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
-    "l2m_min_unique", "counter_seconds", "radio_run_duration_ms",
+    "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
+    "radio_run_duration_ms",
 ]
 data = {key: os.environ.get(key.upper(), os.environ.get(key)) for key in keys}
 for key in [
     "repeat_index", "channel", "bandwidth_mhz", "m2l_fec_k", "m2l_fec_n",
     "l2m_fec_k", "l2m_fec_n", "m2l_mcs", "l2m_mcs", "expected_payloads",
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
-    "l2m_min_unique", "counter_seconds", "radio_run_duration_ms",
+    "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
+    "radio_run_duration_ms",
 ]:
     if data.get(key) is not None:
         data[key] = int(data[key])
@@ -290,11 +295,11 @@ run_one_profile() {
   M2L_MIN_UNIQUE=$m2l_min_unique
   L2M_MIN_UNIQUE=$l2m_min_unique
   export PROFILE_NAME PROFILE_DESCRIPTION REPEAT_INDEX OUT_DIR REMOTE_OUT_DIR
-  export LOCAL_HW HW_MAC_HOST LINUX_HOST MAC_LAN_IP CHANNEL BANDWIDTH_MHZ
+  export LOCAL_HW HW_MAC_HOST LINUX_HOST LINUX_LAN_IP MAC_LAN_IP CHANNEL BANDWIDTH_MHZ
   export TX_POWER_MODE TX_CALIBRATION_PROFILE M2L_FEC_K M2L_FEC_N L2M_FEC_K
   export L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
-  export COUNTER_SECONDS RADIO_RUN_DURATION_MS
+  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
   log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs} interval=${payload_interval_sec}s"
@@ -316,21 +321,21 @@ run_one_profile() {
       CHANNEL="$CHANNEL" \
       BANDWIDTH_MHZ="$BANDWIDTH_MHZ" \
       LINK_ID="$LINK_ID" \
-	      WFB_CLI_LINK_ID="$WFB_CLI_LINK_ID" \
-	      M2L_RADIO_PORT="$M2L_RADIO_PORT" \
-	      L2M_RADIO_PORT="$L2M_RADIO_PORT" \
-	      M2L_FEC_K="$M2L_FEC_K" \
-	      M2L_FEC_N="$M2L_FEC_N" \
-	      L2M_FEC_K="$L2M_FEC_K" \
-	      L2M_FEC_N="$L2M_FEC_N" \
-	      M2L_MCS="$M2L_MCS" \
-	      L2M_MCS="$L2M_MCS" \
+      WFB_CLI_LINK_ID="$WFB_CLI_LINK_ID" \
+      M2L_RADIO_PORT="$M2L_RADIO_PORT" \
+      L2M_RADIO_PORT="$L2M_RADIO_PORT" \
+      M2L_FEC_K="$M2L_FEC_K" \
+      M2L_FEC_N="$M2L_FEC_N" \
+      L2M_FEC_K="$L2M_FEC_K" \
+      L2M_FEC_N="$L2M_FEC_N" \
+      M2L_MCS="$M2L_MCS" \
+      L2M_MCS="$L2M_MCS" \
       EXPECTED_PAYLOADS="$EXPECTED_PAYLOADS" \
       SOURCE_WARMUP_PAYLOADS="$SOURCE_WARMUP_PAYLOADS" \
       PAYLOAD_LEN="$PAYLOAD_LEN" \
-	      PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
-	      M2L_MIN_UNIQUE="$M2L_MIN_UNIQUE" \
-	      L2M_MIN_UNIQUE="$L2M_MIN_UNIQUE" \
+      PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
+      M2L_MIN_UNIQUE="$M2L_MIN_UNIQUE" \
+      L2M_MIN_UNIQUE="$L2M_MIN_UNIQUE" \
       COUNTER_SECONDS="$COUNTER_SECONDS" \
       PEER_WAIT_SECONDS="$PEER_WAIT_SECONDS" \
       RADIO_RUN_DURATION_MS="$RADIO_RUN_DURATION_MS" \
@@ -354,11 +359,11 @@ run_one_profile() {
       WFB_KEY="$WFB_KEY" \
       scripts/run-radio-run-duplex-smoke.sh
     status=$?
-	  else
-	    local remote_cmd
-	    OUT_DIR=$remote_run_dir
-	    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
-    ssh "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
+  else
+    local remote_cmd
+    OUT_DIR=$remote_run_dir
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
     mkdir -p "$local_run_dir/remote-copy"
@@ -366,6 +371,7 @@ run_one_profile() {
   fi
   set -e
   write_run_status "$local_run_dir/matrix-run-status.json" "$status"
+  return 0
 }
 
 write_matrix_summary() {
@@ -406,6 +412,9 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "smoke_result": summary.get("smoke_result", "missing"),
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
         "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
+        "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
+        "linux_lan_ip": meta.get("linux_lan_ip"),
+        "mac_lan_ip": meta.get("mac_lan_ip"),
         "m2l_unique": int(m2l.get("unique_sequences") or 0),
         "l2m_unique": int(l2m.get("unique_sequences") or 0),
         "m2l_decrypt_failures": int(dec.get("m2l_decrypt_failures") or 0),
