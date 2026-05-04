@@ -563,6 +563,24 @@ and recovered `75/80` Mac-to-Linux plus `77/80` Linux-to-Mac. Runtime IQK is
 still receiver-gated, but fallback/completed sweeps no longer leave the radio in
 the byte-corrupting TX state seen before this restore fix.
 
+Third correction: selected IQC fill now runs after destructive IQK setup cleanup,
+not before it. The expanded cleanup set includes page-C1 fill latches, so filling
+before cleanup made completed runtime IQK safe but mostly inert. The runtime
+report now exposes `selected_iqc_fill_applied` and
+`selected_iqc_fill_register_count`; a direct gated run at
+`/tmp/wfb-radio-run-iqk-gate-20260504-152621.json` completed in sweep 2 and
+applied 20 post-cleanup fill writes. A receiver-backed pass at
+`/tmp/wfb-radio-run-duplex-iqk-fill-passcheck-20260504-152638` completed IQK in
+sweep 1, applied the fill, logged zero decrypt failures, and recovered `77/80`
+Mac-to-Linux plus `80/80` Linux-to-Mac on the current 6 ft bench.
+
+Runtime IQK also now fails closed before live TX when cleanup is not restored,
+when all sweeps end in fallback, or when selected IQC fill was not applied. This
+is required because `/tmp/wfb-radio-run-duplex-iqk-fill-after-restore-20260504-152042`
+showed a fallback-applied run still submitted `149/149` frames but recovered
+`0/80` Mac-to-Linux with 135 Linux decrypt failures. Fallback IQK is therefore a
+pre-TX failure state, not an experimental traffic profile.
+
 Follow-up TXAGC correction: May 4 local production A/B shows the
 EFUSE-derived TX power override still needs receiver-gated soak evidence. With
 `TX_POWER_MODE=efuse-derived`, `/tmp/wfb-radio-run-duplex-default-hardened-20260504-145458`

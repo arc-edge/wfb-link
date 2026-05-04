@@ -15797,6 +15797,39 @@ where
     )))
 }
 
+fn validate_tx_calibration_profile_ready_for_tx(
+    profile: &TxCalibrationProfileReport,
+) -> std::result::Result<(), DiagnosticErrorReport> {
+    let Some(iqk) = profile.runtime_iqk.as_ref() else {
+        return Ok(());
+    };
+    if iqk.cleanup_status != "restored" {
+        return Err(DiagnosticErrorReport {
+            code: "runtime_iqk_cleanup_not_restored",
+            message: format!(
+                "runtime IQK cleanup status is {}; refusing live TX",
+                iqk.cleanup_status
+            ),
+        });
+    }
+    if iqk.status != "completed" {
+        return Err(DiagnosticErrorReport {
+            code: "runtime_iqk_not_completed",
+            message: format!(
+                "runtime IQK status is {} after {}/{} sweeps; refusing live TX because fallback IQK has produced receiver decrypt failures on hardware",
+                iqk.status, iqk.sweep_count, iqk.max_sweeps
+            ),
+        });
+    }
+    if !iqk.selected_iqc_fill_applied {
+        return Err(DiagnosticErrorReport {
+            code: "runtime_iqk_fill_not_applied",
+            message: "runtime IQK completed but selected IQC fill was not applied after cleanup; refusing live TX".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn data_secondary_channel_setting(
     channel: Channel,
     bandwidth: Bandwidth,
@@ -22772,6 +22805,17 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         ) {
             Ok(profile_report) => {
                 report.tx_calibration_profile = profile_report;
+                if let Some(profile) = report.tx_calibration_profile.as_ref() {
+                    if let Err(error) = validate_tx_calibration_profile_ready_for_tx(profile) {
+                        report.counters = pre_tx_counters;
+                        return bridge_tx_listen_failure(
+                            report,
+                            error.code,
+                            "bridge TX listener calibration profile is not safe for live TX",
+                            error,
+                        );
+                    }
+                }
             }
             Err(error) => {
                 report.counters = pre_tx_counters;
@@ -24184,6 +24228,17 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         ) {
             Ok(profile_report) => {
                 report.tx_calibration_profile = profile_report;
+                if let Some(profile) = report.tx_calibration_profile.as_ref() {
+                    if let Err(error) = validate_tx_calibration_profile_ready_for_tx(profile) {
+                        report.counters = pre_counters;
+                        return bridge_run_failure(
+                            report,
+                            error.code,
+                            "bridge run calibration profile is not safe for live TX",
+                            error,
+                        );
+                    }
+                }
             }
             Err(error) => {
                 report.counters = pre_counters;
@@ -27394,6 +27449,17 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
         ) {
             Ok(profile_report) => {
                 report.tx_calibration_profile = profile_report;
+                if let Some(profile) = report.tx_calibration_profile.as_ref() {
+                    if let Err(error) = validate_tx_calibration_profile_ready_for_tx(profile) {
+                        report.counters = pre_tx_counters;
+                        return bridge_tx_bench_failure(
+                            report,
+                            error.code,
+                            "bridge TX benchmark calibration profile is not safe for live TX",
+                            error,
+                        );
+                    }
+                }
             }
             Err(error) => {
                 report.counters = pre_tx_counters;
@@ -34370,10 +34436,12 @@ fn print_tx_calibration_profile_human(profile: &TxCalibrationProfileReport) {
     }
     if let Some(iqk) = profile.runtime_iqk.as_ref() {
         println!(
-            "  Runtime IQK: mode={} status={} cleanup={} paths={} counters={:?}",
+            "  Runtime IQK: mode={} status={} cleanup={} fill_applied={} fill_registers={} paths={} counters={:?}",
             iqk.mode,
             iqk.status,
             iqk.cleanup_status,
+            iqk.selected_iqc_fill_applied,
+            iqk.selected_iqc_fill_register_count,
             iqk.paths.len(),
             iqk.counters
         );
@@ -40540,6 +40608,67 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             ),
             RfQualityCalibrationMode::Unknown
         );
+    }
+
+    fn runtime_iqk_profile_report(
+        status: &'static str,
+        cleanup_status: &'static str,
+        fill_applied: bool,
+    ) -> TxCalibrationProfileReport {
+        TxCalibrationProfileReport {
+            semantics: "test",
+            upstream_basis: "test",
+            profile: TxCalibrationProfileArg::Rtl8812aRuntimeIqk,
+            channel: 36,
+            bandwidth_mhz: 20,
+            register_count: 0,
+            writes: Vec::new(),
+            lck: None,
+            iqk: None,
+            runtime_iqk: Some(Rtl8812auRuntimeIqkCalibrationReport {
+                semantics: "test",
+                upstream_basis: "test",
+                mode: "runtime_iqk",
+                sweep_index: 3,
+                sweep_count: 3,
+                max_sweeps: 3,
+                sweep_summaries: Vec::new(),
+                status,
+                cleanup_status,
+                cleanup_failures: Vec::new(),
+                backup: None,
+                pre_sweep_state: None,
+                cleanup: None,
+                selected_iqc_fill_applied: fill_applied,
+                selected_iqc_fill_register_count: if fill_applied { 20 } else { 0 },
+                paths: Vec::new(),
+                affected_registers: Vec::new(),
+                before_iqk_registers: Vec::new(),
+                after_iqk_registers: Vec::new(),
+                counters: RuntimeRadioCounters::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn runtime_iqk_ready_gate_rejects_unsafe_live_tx_states() {
+        let fallback = runtime_iqk_profile_report("fallback_applied", "restored", false);
+        let error =
+            validate_tx_calibration_profile_ready_for_tx(&fallback).expect_err("fallback rejected");
+        assert_eq!(error.code, "runtime_iqk_not_completed");
+
+        let no_fill = runtime_iqk_profile_report("completed", "restored", false);
+        let error =
+            validate_tx_calibration_profile_ready_for_tx(&no_fill).expect_err("fill rejected");
+        assert_eq!(error.code, "runtime_iqk_fill_not_applied");
+
+        let cleanup_failed = runtime_iqk_profile_report("completed", "restore_failed", true);
+        let error = validate_tx_calibration_profile_ready_for_tx(&cleanup_failed)
+            .expect_err("cleanup rejected");
+        assert_eq!(error.code, "runtime_iqk_cleanup_not_restored");
+
+        let completed = runtime_iqk_profile_report("completed", "restored", true);
+        validate_tx_calibration_profile_ready_for_tx(&completed).expect("completed runtime IQK");
     }
 
     #[test]

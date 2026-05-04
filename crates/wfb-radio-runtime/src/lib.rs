@@ -2717,6 +2717,8 @@ pub struct Rtl8812auRuntimeIqkCalibrationReport {
     pub backup: Option<Rtl8812auRuntimeIqkBackupReport>,
     pub pre_sweep_state: Option<Rtl8812auRuntimeIqkPreSweepStateReport>,
     pub cleanup: Option<Rtl8812auRuntimeIqkCleanupReport>,
+    pub selected_iqc_fill_applied: bool,
+    pub selected_iqc_fill_register_count: usize,
     pub paths: Vec<Rtl8812auRuntimeIqkPathReport>,
     pub affected_registers: Vec<Rtl8812auRegisterReadReport>,
     pub before_iqk_registers: Vec<Rtl8812auRegisterReadReport>,
@@ -3785,6 +3787,8 @@ where
         )?;
 
         let mut delay_count = 0;
+        let mut path_a_status_raw = None;
+        let mut path_b_status_raw = None;
         loop {
             if !path_a.is_finished() {
                 let value = runtime_iqk_read32(
@@ -3794,6 +3798,7 @@ where
                     REG_IQK_RESULT_A_D00,
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
+                path_a_status_raw = Some(value);
                 path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
             if !path_b.is_finished() {
@@ -3804,6 +3809,7 @@ where
                     REG_IQK_RESULT_B_D40,
                     "rtl8812a_runtime_iqk_tx_failed",
                 )?;
+                path_b_status_raw = Some(value);
                 path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
             let path_a_ready = path_a.is_finished() || path_a.ready().unwrap_or(false);
@@ -3910,7 +3916,7 @@ where
                     path_a.ready(),
                     None,
                     Some(delay_count),
-                    None,
+                    path_a_status_raw,
                     None,
                     None,
                     Some("tx_iqk_not_ready"),
@@ -3922,7 +3928,7 @@ where
                     path_b.ready(),
                     None,
                     Some(delay_count),
-                    None,
+                    path_b_status_raw,
                     None,
                     None,
                     Some("tx_iqk_not_ready"),
@@ -4319,6 +4325,8 @@ where
         }
 
         let mut delay_count = 0;
+        let mut path_a_status_raw = None;
+        let mut path_b_status_raw = None;
         loop {
             if !path_a.is_finished() && tx_a_iqc.is_some() {
                 let value = runtime_iqk_read32(
@@ -4328,6 +4336,7 @@ where
                     REG_IQK_RESULT_A_D00,
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
+                path_a_status_raw = Some(value);
                 path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
             if !path_b.is_finished() && tx_b_iqc.is_some() {
@@ -4338,6 +4347,7 @@ where
                     REG_IQK_RESULT_B_D40,
                     "rtl8812a_runtime_iqk_rx_failed",
                 )?;
+                path_b_status_raw = Some(value);
                 path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
             }
             let path_a_ready =
@@ -4444,7 +4454,7 @@ where
                     path_a.ready(),
                     None,
                     Some(delay_count),
-                    None,
+                    path_a_status_raw,
                     None,
                     None,
                     Some("rx_iqk_not_ready"),
@@ -4456,7 +4466,7 @@ where
                     path_b.ready(),
                     None,
                     Some(delay_count),
-                    None,
+                    path_b_status_raw,
                     None,
                     None,
                     Some("rx_iqk_not_ready"),
@@ -6059,42 +6069,15 @@ where
     let result = (|| {
         let _setup_writes =
             apply_rtl8812au_runtime_iqk_setup_plan(registers, counters, &setup_plan)?;
-        let (mut tx_a, mut tx_b) = run_rtl8812au_runtime_iqk_tx_oneshot(registers, counters)?;
-        let (mut rx_a, mut rx_b) =
+        let (tx_a, tx_b) = run_rtl8812au_runtime_iqk_tx_oneshot(registers, counters)?;
+        let (rx_a, rx_b) =
             run_rtl8812au_runtime_iqk_rx_oneshot(registers, counters, &tx_a, &tx_b, rfe_type)?;
-        let can_fill = rtl8812au_runtime_iqk_path_can_fill(&tx_a, &rx_a)
-            && rtl8812au_runtime_iqk_path_can_fill(&tx_b, &rx_b);
-        let fill_a = if can_fill {
-            apply_rtl8812au_runtime_iqk_fill(
-                registers,
-                counters,
-                Rtl8812auRfPath::A,
-                &mut tx_a,
-                &mut rx_a,
-            )?
-        } else {
-            0
-        };
-        let fill_b = if can_fill {
-            apply_rtl8812au_runtime_iqk_fill(
-                registers,
-                counters,
-                Rtl8812auRfPath::B,
-                &mut tx_b,
-                &mut rx_b,
-            )?
-        } else {
-            0
-        };
-        Ok::<_, RuntimeRadioError>((tx_a, rx_a, tx_b, rx_b, fill_a + fill_b))
+        Ok::<_, RuntimeRadioError>((tx_a, rx_a, tx_b, rx_b))
     })();
 
     let cleanup = restore_rtl8812au_runtime_iqk_backup(registers, counters, &backup);
-    let after_iqk_registers =
-        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)
-            .unwrap_or_default();
 
-    let (tx_a, rx_a, tx_b, rx_b, _fill_count) = match result {
+    let (mut tx_a, mut rx_a, mut tx_b, mut rx_b) = match result {
         Ok(stages) => stages,
         Err(error) => {
             if cleanup.status != "restored" {
@@ -6111,6 +6094,33 @@ where
             return Err(error);
         }
     };
+
+    let can_fill = cleanup.status == "restored"
+        && rtl8812au_runtime_iqk_path_can_fill(&tx_a, &rx_a)
+        && rtl8812au_runtime_iqk_path_can_fill(&tx_b, &rx_b);
+    let selected_iqc_fill_register_count = if can_fill {
+        let fill_a = apply_rtl8812au_runtime_iqk_fill(
+            registers,
+            counters,
+            Rtl8812auRfPath::A,
+            &mut tx_a,
+            &mut rx_a,
+        )?;
+        let fill_b = apply_rtl8812au_runtime_iqk_fill(
+            registers,
+            counters,
+            Rtl8812auRfPath::B,
+            &mut tx_b,
+            &mut rx_b,
+        )?;
+        fill_a + fill_b
+    } else {
+        0
+    };
+    let selected_iqc_fill_applied = selected_iqc_fill_register_count > 0;
+    let after_iqk_registers =
+        rtl8812au_iqk_read32_group(registers, counters, RTL8812A_IQK_RESULT_REGISTERS)
+            .unwrap_or_default();
 
     let paths = vec![
         Rtl8812auRuntimeIqkPathReport {
@@ -6134,7 +6144,7 @@ where
             .unwrap_or_default();
 
     Ok(Rtl8812auRuntimeIqkCalibrationReport {
-        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected IQC values only when every TX/RX path completed, and restores saved RF/BB state",
+        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, restores destructive RF/BB setup state, then fills selected IQC values only when every TX/RX path completed",
         upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a, _iqk_tx_8812a, _iqk_tx_fill_iqc_8812a, and _iqk_rx_fill_iqc_8812a for RTL8812A",
         mode: "runtime_iqk",
         sweep_index: 1,
@@ -6147,6 +6157,8 @@ where
         backup: Some(backup),
         pre_sweep_state: Some(pre_sweep_state),
         cleanup: Some(cleanup),
+        selected_iqc_fill_applied,
+        selected_iqc_fill_register_count,
         paths,
         affected_registers,
         before_iqk_registers,
@@ -6530,7 +6542,7 @@ where
             let register_count =
                 usize::try_from(runtime_iqk.counters.usb_control_writes).unwrap_or(usize::MAX);
             Ok(Some(Rtl8812auTxCalibrationProfileReport {
-                semantics: "explicit guarded RTL8812A runtime IQK calibration profile; runs bounded Linux-derived TX/RX IQK and restores saved RF/BB state before live TX",
+                semantics: "explicit guarded RTL8812A runtime IQK calibration profile; runs bounded Linux-derived TX/RX IQK, restores destructive setup state, then applies the selected IQC fill before live TX",
                 upstream_basis: "aircrack-ng RTL8812A _phy_iq_calibrate_8812a runtime IQK sequence",
                 profile,
                 channel: channel.number,
@@ -8356,6 +8368,8 @@ mod tests {
         assert_eq!(report.sweep_summaries.len(), 1);
         assert_eq!(report.sweep_summaries[0].fallback_stage_count, 0);
         assert_eq!(report.paths.len(), 2);
+        assert!(report.selected_iqc_fill_applied);
+        assert_eq!(report.selected_iqc_fill_register_count, 20);
         assert!(report.backup.is_some());
         assert!(report.pre_sweep_state.is_some());
         assert_eq!(
@@ -8379,6 +8393,42 @@ mod tests {
         assert!(report.counters.usb_control_reads > 0);
         assert!(report.counters.usb_control_writes > 0);
         assert_eq!(report.counters, counters);
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_TX_Y_A_CCC)
+                .as_deref(),
+            Some(&0x0000_0130_u32.to_le_bytes()[..])
+        );
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_TX_X_A_CD4)
+                .as_deref(),
+            Some(&0x0000_0130_u32.to_le_bytes()[..])
+        );
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_TX_Y_B_ECC)
+                .as_deref(),
+            Some(&0x0000_0131_u32.to_le_bytes()[..])
+        );
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_TX_X_B_ED4)
+                .as_deref(),
+            Some(&0x0000_0131_u32.to_le_bytes()[..])
+        );
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_RX_IQC_A_JAGUAR)
+                .as_deref(),
+            Some(&0x0000_0100_u32.to_le_bytes()[..])
+        );
+        assert_eq!(
+            transport
+                .register_bytes(super::REG_IQK_RX_IQC_B_JAGUAR)
+                .as_deref(),
+            Some(&0x0000_0100_u32.to_le_bytes()[..])
+        );
     }
 
     #[test]
