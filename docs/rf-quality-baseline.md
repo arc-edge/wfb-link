@@ -299,9 +299,10 @@ recovered `80/80` with zero decrypt failures.
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
 present. Use `risk`, `completed`, `cleanup_restored`, `sweep_count`,
-`fallback_stage_count`, and `fallback_stages[]` as the compact
-machine-readable calibration health signal for release gating and field notes.
-Outdoor profile gating rejects a close-range gate artifact with
+`fallback_stage_count`, `fallback_stages[]`, `selected_iqc_fill_applied`, and
+`selected_iqc_fill_register_count` as the compact machine-readable calibration
+health signal for release gating and field notes. Outdoor profile gating
+rejects a close-range gate artifact with
 `runtime_iqk_summary.risk` other than `completed`.
 
 Short FEC smoke runs can emit one fewer WFB datagram than the theoretical

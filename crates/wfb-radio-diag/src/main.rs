@@ -4325,6 +4325,8 @@ struct RfQualityRuntimeIqkSummaryReport {
     sweep_index: Option<u64>,
     sweep_count: Option<u64>,
     max_sweeps: Option<u64>,
+    selected_iqc_fill_applied: Option<bool>,
+    selected_iqc_fill_register_count: Option<u64>,
     completed: bool,
     cleanup_restored: bool,
     fallback_stage_count: usize,
@@ -4338,6 +4340,7 @@ enum RfQualityRuntimeIqkRiskStatus {
     Completed,
     FallbackApplied,
     CleanupNotRestored,
+    FillNotApplied,
     UnknownStatus,
 }
 
@@ -28755,6 +28758,10 @@ fn rf_quality_runtime_iqk_summary(
     let sweep_index = rf_quality_json_u64(runtime_iqk, &["sweep_index"]);
     let sweep_count = rf_quality_json_u64(runtime_iqk, &["sweep_count"]);
     let max_sweeps = rf_quality_json_u64(runtime_iqk, &["max_sweeps"]);
+    let selected_iqc_fill_applied =
+        rf_quality_json_bool(runtime_iqk, &["selected_iqc_fill_applied"]);
+    let selected_iqc_fill_register_count =
+        rf_quality_json_u64(runtime_iqk, &["selected_iqc_fill_register_count"]);
     let cleanup_restored = cleanup_status.as_deref() == Some("restored");
     let mut fallback_stages = Vec::new();
 
@@ -28793,7 +28800,17 @@ fn rf_quality_runtime_iqk_summary(
     } else if !fallback_stages.is_empty() || status.as_deref() == Some("fallback_applied") {
         RfQualityRuntimeIqkRiskStatus::FallbackApplied
     } else if status.as_deref() == Some("completed") {
-        RfQualityRuntimeIqkRiskStatus::Completed
+        let fill_missing = selected_iqc_fill_applied.is_some_and(|applied| !applied)
+            || selected_iqc_fill_register_count.is_some_and(|count| count == 0);
+        let fill_confirmed = selected_iqc_fill_applied == Some(true)
+            && selected_iqc_fill_register_count.is_some_and(|count| count > 0);
+        if fill_confirmed {
+            RfQualityRuntimeIqkRiskStatus::Completed
+        } else if fill_missing {
+            RfQualityRuntimeIqkRiskStatus::FillNotApplied
+        } else {
+            RfQualityRuntimeIqkRiskStatus::UnknownStatus
+        }
     } else {
         RfQualityRuntimeIqkRiskStatus::UnknownStatus
     };
@@ -28805,6 +28822,8 @@ fn rf_quality_runtime_iqk_summary(
         sweep_index,
         sweep_count,
         max_sweeps,
+        selected_iqc_fill_applied,
+        selected_iqc_fill_register_count,
         completed,
         cleanup_restored,
         fallback_stage_count: fallback_stages.len(),
@@ -30041,7 +30060,7 @@ fn rf_quality_profile_gate_report(
                 field: "runtime_iqk_summary.risk",
                 current_value: "completed".to_string(),
                 close_range_value: risk,
-                impact: "runtime IQK close-range gate must complete without cleanup failure or fallback before outdoor range promotion",
+                impact: "runtime IQK close-range gate must complete, restore cleanup state, avoid fallback, and apply selected IQC fill before outdoor range promotion",
             });
         }
     }
@@ -37510,7 +37529,7 @@ u8 array_mp_8812a_fw_nic[] = {
     }
 
     #[test]
-    fn rf_quality_outdoor_profile_rejects_runtime_iqk_fallback_gate() {
+    fn rf_quality_outdoor_profile_rejects_runtime_iqk_fill_gate() {
         let stamp = started_at_unix_ms();
         let gate_path = std::env::temp_dir().join(format!(
             "wfb-radio-diag-close-range-runtime-iqk-{}-{stamp}.json",
@@ -37544,10 +37563,12 @@ u8 array_mp_8812a_fw_nic[] = {
     },
     "calibration": {
       "runtime_iqk_summary": {
-        "risk": "fallback_applied",
+        "risk": "fill_not_applied",
         "completed": false,
         "cleanup_restored": true,
-        "fallback_stage_count": 1
+        "fallback_stage_count": 0,
+        "selected_iqc_fill_applied": false,
+        "selected_iqc_fill_register_count": 0
       }
     }
   },
@@ -37755,6 +37776,8 @@ u8 array_mp_8812a_fw_nic[] = {
                     "sweep_index": 3,
                     "sweep_count": 3,
                     "max_sweeps": 3,
+                    "selected_iqc_fill_applied": false,
+                    "selected_iqc_fill_register_count": 0,
                     "paths": [
                         {
                             "path": "a",
@@ -37791,6 +37814,8 @@ u8 array_mp_8812a_fw_nic[] = {
         assert_eq!(summary.sweep_index, Some(3));
         assert_eq!(summary.sweep_count, Some(3));
         assert_eq!(summary.max_sweeps, Some(3));
+        assert_eq!(summary.selected_iqc_fill_applied, Some(false));
+        assert_eq!(summary.selected_iqc_fill_register_count, Some(0));
         assert_eq!(summary.risk, RfQualityRuntimeIqkRiskStatus::FallbackApplied);
         assert_eq!(summary.fallback_stage_count, 1);
         assert_eq!(summary.fallback_stages[0].path.as_deref(), Some("A"));
@@ -37799,6 +37824,40 @@ u8 array_mp_8812a_fw_nic[] = {
             summary.fallback_stages[0].failure_label.as_deref(),
             Some("rx_iqk_failed_flag")
         );
+    }
+
+    #[test]
+    fn rf_quality_runtime_iqk_summary_rejects_completed_without_fill() {
+        let mut args = rf_quality_report_args();
+        args.calibration_mode = RfQualityCalibrationMode::RuntimeApproximation;
+        let mac_report = serde_json::json!({
+            "tx_calibration_profile": {
+                "profile": "rtl8812a_runtime_iqk",
+                "runtime_iqk": {
+                    "status": "completed",
+                    "cleanup_status": "restored",
+                    "sweep_index": 1,
+                    "sweep_count": 1,
+                    "max_sweeps": 3,
+                    "selected_iqc_fill_applied": false,
+                    "selected_iqc_fill_register_count": 0,
+                    "paths": []
+                }
+            }
+        });
+
+        let macos = rf_quality_macos_report(&args, Some(&mac_report), None, None);
+        let summary = macos
+            .calibration
+            .runtime_iqk_summary
+            .as_ref()
+            .expect("runtime IQK summary");
+
+        assert!(!summary.completed);
+        assert!(summary.cleanup_restored);
+        assert_eq!(summary.selected_iqc_fill_applied, Some(false));
+        assert_eq!(summary.selected_iqc_fill_register_count, Some(0));
+        assert_eq!(summary.risk, RfQualityRuntimeIqkRiskStatus::FillNotApplied);
     }
 
     #[test]
@@ -37836,6 +37895,8 @@ u8 array_mp_8812a_fw_nic[] = {
                     "sweep_index": 1,
                     "sweep_count": 1,
                     "max_sweeps": 3,
+                    "selected_iqc_fill_applied": true,
+                    "selected_iqc_fill_register_count": 20,
                     "paths": []
                 }
             }

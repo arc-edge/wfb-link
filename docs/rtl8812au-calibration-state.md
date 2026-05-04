@@ -324,14 +324,15 @@ Reports label this under `tx_calibration_profile.runtime_iqk` with:
 `rf-quality-report` lifts the same data into
 `macos.calibration.runtime_iqk` and adds
 `macos.calibration.runtime_iqk_summary` with compact `risk`, `completed`,
-`cleanup_restored`, sweep-count, and fallback-stage fields for production
-gating.
+`cleanup_restored`, sweep-count, fallback-stage, and selected-IQC-fill fields
+for production gating.
 
 This is now a real runtime IQK implementation, but it remains experimental for
 range work until receiver-backed A/B evidence exists for the same channel,
 bandwidth, rate, TX power mode, payload, FEC, and antenna geometry. Treat any
-`cleanup_status != "restored"` or unexpected per-path fallback as a calibration
-failure, even if close-range WFB payload recovery still passes.
+`cleanup_status != "restored"`, unexpected per-path fallback, or missing
+selected IQC fill as a calibration failure, even if close-range WFB payload
+recovery still passes.
 
 Hardware validation on May 2, 2026:
 

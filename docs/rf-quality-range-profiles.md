@@ -498,6 +498,8 @@ Do not classify a run as range-ready when any of the following are true:
   passing close-range report.
 - The close-range gate report contains
   `macos.calibration.runtime_iqk_summary.risk` and it is not `completed`.
+  For runtime IQK, `completed` means the sweep completed, cleanup restored,
+  no TX/RX path used fallback, and selected IQC fill applied after cleanup.
 - The close-range gate lacks RX_ANT receiver telemetry, or the RX_ANT
   frequency, MCS index, or bandwidth differs from the outdoor profile.
 - The close-range gate includes `macos.wfb_outcome.receiver_signal.status` and
@@ -516,8 +518,10 @@ Do not classify a run as range-ready when any of the following are true:
   outside the Linux baseline margin.
 - `rtl8812a-runtime-iqk` was selected but the Mac report shows
   `tx_calibration_profile.runtime_iqk.cleanup_status != "restored"` or any
-  per-path TX/RX stage used fallback unexpectedly. Check
-  `runtime_iqk.sweep_summaries[]` and `runtime_iqk_summary.sweep_count` before
+  per-path TX/RX stage used fallback unexpectedly, or
+  `tx_calibration_profile.runtime_iqk.selected_iqc_fill_applied != true`.
+  Check `runtime_iqk.sweep_summaries[]`, `runtime_iqk_summary.sweep_count`, and
+  `runtime_iqk_summary.selected_iqc_fill_register_count` before
   deciding whether the failure is a one-off sweep or repeatable calibration
   instability.
 
