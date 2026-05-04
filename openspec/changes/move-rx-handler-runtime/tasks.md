@@ -9,10 +9,10 @@
 
 - [x] 2.1 Refactor bridge-run RX callback to call the runtime RX handler.
 - [x] 2.2 Preserve existing bridge-run PCAP/JSONL side effects, RX report fields, WFB forward report shape, and error labels.
-- [ ] 2.3 Keep `radio-run` no-TX/RX-only smoke behavior unchanged.
+- [x] 2.3 Keep `radio-run` no-TX/RX-only smoke behavior unchanged.
 
 ## 3. Verification
 
 - [x] 3.1 Update runtime boundary docs for parsed RX packet handler and RX forwarding ownership.
 - [x] 3.2 Run formatting, workspace tests, strict OpenSpec validation, and diff checks.
-- [ ] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.
+- [x] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.
