@@ -20,6 +20,7 @@ Configuration is via environment variables. Common overrides:
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
+  REQUIRE_CALIBRATION_SUCCESS=auto
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
 }
@@ -61,7 +62,8 @@ EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
 M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
-export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED
+REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
+export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
@@ -342,6 +344,8 @@ m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
 rx = report.get("rx") or {}
 tx = report.get("tx") or {}
+calibration = report.get("tx_calibration_profile") or {}
+runtime_iqk = calibration.get("runtime_iqk") or {}
 rx_forwards = rx.get("rx_forwards") or []
 radio_rx_forwarded = sum(
     ((forward.get("counters") or {}).get("forwarded") or 0)
@@ -352,6 +356,10 @@ l2m_unique = int(l2m.get("unique_sequences") or 0)
 m2l_min_unique = int(os.environ["M2L_MIN_UNIQUE"])
 l2m_min_unique = int(os.environ["L2M_MIN_UNIQUE"])
 min_radio_rx_forwarded = int(os.environ["MIN_RADIO_RX_FORWARDED"])
+require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
+calibration_success_required = require_calibration_success in {"1", "true", "yes"}
+if require_calibration_success == "auto":
+    calibration_success_required = report.get("calibration_profile") == "rtl8812a_runtime_iqk"
 failures = []
 if report.get("result") != "pass":
     failures.append(f"radio_result={report.get('result')}")
@@ -365,6 +373,8 @@ if l2m_unique < l2m_min_unique:
     failures.append(f"l2m_unique_sequences={l2m_unique}<{l2m_min_unique}")
 if radio_rx_forwarded < min_radio_rx_forwarded:
     failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
+if calibration_success_required and runtime_iqk.get("status") != "success":
+    failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
 summary = {
     "smoke_result": "fail" if failures else "pass",
     "failures": failures,
@@ -374,6 +384,16 @@ summary = {
     "rx": rx,
     "radio_rx_forwarded_from_snapshots": radio_rx_forwarded,
     "radio_rx_forwards": rx_forwards,
+    "calibration": {
+        "profile": report.get("calibration_profile"),
+        "class": report.get("calibration_class"),
+        "evidence_source": report.get("calibration_evidence_source"),
+        "receiver_backed_validation_required": report.get("receiver_backed_validation_required"),
+        "runtime_iqk_status": runtime_iqk.get("status"),
+        "runtime_iqk_cleanup_status": runtime_iqk.get("cleanup_status"),
+        "runtime_iqk_fallback_stage_count": runtime_iqk.get("fallback_stage_count"),
+        "calibration_success_required": calibration_success_required,
+    },
     "m2l_min_unique": m2l_min_unique,
     "l2m_min_unique": l2m_min_unique,
     "m2l_counter": m2l,
