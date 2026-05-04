@@ -51,6 +51,9 @@ LINUX_HOST=${LINUX_HOST:-pi@drone-2f389.local}
 MAC_LAN_IP=${MAC_LAN_IP:-192.168.122.84}
 LINUX_LAN_IP=${LINUX_LAN_IP:-192.168.122.77}
 LINUX_REMOTE_PATH=${LINUX_REMOTE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"}
+# shellcheck disable=SC2206
+SSH_OPTS_ARRAY=($SSH_OPTS)
 IFACE=${IFACE:-wfb0}
 WFB_SERVICE=${WFB_SERVICE:-arc-wfb-link-1}
 WFB_KEY=${WFB_KEY:-/var/lib/arc/wfb/drone.key}
@@ -125,7 +128,7 @@ cleanup() {
   if [[ -n "${RADIO_PID:-}" ]]; then
     kill "$RADIO_PID" >/dev/null 2>&1 || true
   fi
-  ssh "$LINUX_HOST" "REMOTE_PREFIX='$REMOTE_PREFIX' IFACE='$IFACE' WFB_SERVICE='$WFB_SERVICE' bash -s" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || true
+  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" "REMOTE_PREFIX='$REMOTE_PREFIX' IFACE='$IFACE' WFB_SERVICE='$WFB_SERVICE' bash -s" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || true
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 sudo -n pkill -f "$REMOTE_PREFIX" || true
 sudo -n pkill -x wfb_rx || true
@@ -138,7 +141,7 @@ trap cleanup EXIT INT TERM
 
 prepare_peer() {
   log "preparing Linux peer $LINUX_HOST on channel $CHANNEL"
-  ssh "$LINUX_HOST" \
+  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
     "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_SERVICE='$WFB_SERVICE' bash -s" <<'REMOTE_PREP'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
@@ -309,7 +312,7 @@ wait_for_radio_ready() {
 
 run_peer_traffic() {
   log "running peer TX/RX traffic"
-  ssh "$LINUX_HOST" \
+  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
     "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
@@ -518,7 +521,7 @@ REMOTE_TRAFFIC
 collect_peer_artifacts() {
   log "collecting peer artifacts"
   rm -rf "$OUT_DIR/peer"
-  scp -r "$LINUX_HOST:$REMOTE_PREFIX" "$OUT_DIR/peer" >/dev/null
+  scp "${SSH_OPTS_ARRAY[@]}" -r "$LINUX_HOST:$REMOTE_PREFIX" "$OUT_DIR/peer" >/dev/null
 }
 
 write_summary() {
@@ -670,12 +673,20 @@ esac
 log "output directory: $OUT_DIR"
 if ! prepare_peer; then
   collect_peer_artifacts || true
+  write_radio_startup_failure_summary "linux_peer_preparation_failed" || true
   die "Linux peer preparation failed; partial artifacts copied to $OUT_DIR/peer"
 fi
 start_radio
 wait_for_radio_ready
 if ! run_peer_traffic; then
+  radio_status=0
+  if [[ -n "${RADIO_PID:-}" ]]; then
+    kill "$RADIO_PID" >/dev/null 2>&1 || true
+    wait "$RADIO_PID" || radio_status=$?
+    RADIO_PID=
+  fi
   collect_peer_artifacts || true
+  write_summary || write_radio_startup_failure_summary "linux_peer_traffic_failed" "$radio_status" || true
   die "Linux peer traffic failed; partial artifacts copied to $OUT_DIR/peer"
 fi
 radio_status=0

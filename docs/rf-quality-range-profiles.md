@@ -483,6 +483,56 @@ The structured fields in the report are the summary; the companion artifact is
 where longer notes, maps, photos, service-restore output, and spectrum evidence
 belong.
 
+## Profile Matrix Automation
+
+Use `scripts/run-radio-run-profile-matrix.sh` to compare production
+`radio-run` profiles without manually stitching artifacts together. The matrix
+runner wraps `scripts/run-radio-run-duplex-smoke.sh`, can rsync the checkout to
+a remote hardware Mac, repeats each profile, pulls artifacts back, and writes:
+
+- `matrix-summary.json`: machine-readable ranked runs and profile groups.
+- `matrix-summary.md`: a compact table with pass status, recovery rates,
+  decrypt failures, and artifact paths.
+- `runs/<profile>-rN/`: the underlying duplex smoke artifacts.
+
+Example short-range remote hardware run:
+
+```sh
+HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net \
+HW_DEPLOY=1 \
+HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy \
+MAC_LAN_IP=10.42.0.162 \
+LINUX_HOST=pi@drone-2f389.local \
+PROFILE_SET=short \
+REPEATS=1 \
+EXPECTED_PAYLOADS=80 \
+SOURCE_WARMUP_PAYLOADS=20 \
+scripts/run-radio-run-profile-matrix.sh
+```
+
+`PROFILE_SET=short` currently covers the default `8/12` MCS1 profile,
+symmetric `4/12` MCS1 at a 20 ms source interval, and the best observed indoor
+short-smoke candidate: M2L `4/12` MCS1 plus L2M `3/12` MCS2 at 20 ms.
+`PROFILE_SET=range` adds one lower-overhead reverse-link candidate. For
+operator-defined experiments, set `PROFILE_FILE` to a pipe-delimited list:
+
+```text
+name|description|m2l_k|m2l_n|l2m_k|l2m_n|m2l_mcs|l2m_mcs|interval_sec|m2l_min_pct|l2m_min_pct
+```
+
+The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
+`accepted` when it uses at least `MATRIX_SUSTAINED_PAYLOADS` expected payloads
+(default `200`), the wrapped smoke passes, no decrypt failures occur, and TX
+reports no dropped datagrams or failed submissions.
+
+Remote hardware currently requires the hardware Mac to reach the Linux peer
+over SSH and UDP. On May 4, 2026, after the adapter moved back to
+`rownds-macbook-pro`, the remote Mac could not resolve `drone-2f389.local` and
+could not reach `192.168.122.77`; the matrix failed fast with
+`linux_peer_preparation_failed` at
+`/tmp/wfb-radio-profile-matrix-remote-peerfail-20260504-181200`. This is a peer
+network/topology blocker, not a radio result.
+
 ## Acceptance Margins
 
 `rf-quality-report` records the outcome margin under
