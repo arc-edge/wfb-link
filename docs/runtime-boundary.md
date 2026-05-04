@@ -83,14 +83,19 @@ boundary shifts.
 ## Migration Order
 
 1. Move full RTL8812AU init phase execution behind runtime APIs while keeping `wfb-radio-diag` as a harness that calls those APIs.
-2. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
-3. Move remaining bridge-loop report adaptation and production command execution
+2. Before moving calibration execution, run the close-range 2000-payload A/B
+   against the current runtime-flow/radio-run code and verify the runtime
+   extraction did not regress the May 2 evening baseline tuple
+   `1973/1980/1970` recovered payloads. Only start calibration-extraction Step
+   2 after that non-regression gate passes.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment.
+4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
-4. Continue moving production telemetry types for calibration state, USB
+5. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
    `wfb-radio-runtime`; RX/TX flow counters and adapter-side RSSI/SNR/noise
    frame metadata are runtime-owned now.
-5. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
+6. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
 
 The diagnostic binary should continue to be able to run every bring-up probe. Production behavior should live in runtime APIs first, then in a thinner runtime-oriented command surface.
 
@@ -151,3 +156,14 @@ with parsed RX packet accounting and WFB RX forwarding owned by
 24 parsed RX frames, and 20 SNR-bearing RX frames. No TX datagrams were
 injected. Artifact: `/tmp/wfb-radio-run-rx-handler-smoke.json` on the hardware
 Mac deploy checkout.
+
+After archiving the runtime cutover specs on May 4, 2026,
+`scripts/run-production-radio-smoke.sh --mode both` was run on the hardware Mac
+deploy checkout. The RX-only run completed with `result=pass`,
+`stop_reason=duration_elapsed`, 28 RX buffers/frames, and zero TX datagrams.
+The TX-positive run injected 64 synthetic WFB distributor datagrams through
+`radio-run`, completed with `result=pass`, submitted all 64 frames, and reported
+zero TX failures or drops. Artifacts:
+`/tmp/wfb-prod-radio-smoke-20260504-001308/radio-run-rx-only.json` and
+`/tmp/wfb-prod-radio-smoke-20260504-001308/radio-run-tx-positive.json` on the
+hardware Mac deploy checkout.
