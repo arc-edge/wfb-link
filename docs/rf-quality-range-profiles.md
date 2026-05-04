@@ -555,8 +555,10 @@ unmeasured source warmup to 100 payloads:
   failed submissions were zero, and Mac-side average SNR was about `11 dB`.
 
 This accepts the asymmetric profile as the current short-range production smoke
-default. It does not overturn the earlier 100 ft result, where the same profile
-failed a 200-payload acceptance gate.
+default. `scripts/run-radio-run-duplex-smoke.sh` now also defaults to
+`SOURCE_WARMUP_PAYLOADS=100`; set it lower only when deliberately testing
+first-acquisition behavior. This does not overturn the earlier 100 ft result,
+where the same profile failed a 200-payload acceptance gate.
 
 ## Acceptance Margins
 
