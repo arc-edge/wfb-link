@@ -18,6 +18,9 @@
   register-write execution for channel 36 / HT20.
 - Runtime-owned RTL8812AU LCK calibration execution, RF-serial helper reports,
   register read/write evidence, cleanup handling, and counter deltas.
+- Runtime-owned TX calibration profile execution for production-relevant
+  targeted parity, LCK, and guarded runtime IQK profiles. Diagnostic code still
+  adapts the report and owns the read-only IQK probe marker.
 - Runtime-owned RTL8812AU IQK setup-plan generation and live application,
   backup/restore execution, candidate selection, one-shot stage outcome state,
   TX/RX one-shot execution, live IQC fill application, sweep summaries,
@@ -84,9 +87,10 @@ boundary shifts.
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
-- Runtime IQK CLI authorization, diagnostic evidence formatting, and RF-quality
-  automation while parity is still being hardened. Targeted parity, LCK
-  execution, and runtime IQK execution now live in the runtime library.
+- TX calibration CLI authorization, the read-only IQK probe marker, diagnostic
+  evidence formatting, and RF-quality automation while parity is still being
+  hardened. Targeted parity, LCK execution, and runtime IQK execution now live
+  behind a runtime-owned calibration profile API.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -104,9 +108,10 @@ boundary shifts.
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
 3. Continue shrinking calibration adapters now that targeted parity, LCK
-   execution, and the full guarded runtime IQK sweep/report are runtime-owned.
-   The next calibration extraction target is production init/profile plumbing
-   that can call those runtime APIs without diagnostic command ownership.
+   execution, and the full guarded runtime IQK sweep/report are runtime-owned
+   behind one calibration profile API. The next calibration extraction target
+   is production init/profile plumbing that can call those runtime APIs without
+   diagnostic command ownership.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB

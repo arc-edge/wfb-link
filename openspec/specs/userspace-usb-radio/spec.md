@@ -234,6 +234,13 @@ setup without making runtime IQK the default path.
   helpers while CLI authorization and diagnostic/RF-quality formatting remain
   outside the runtime library
 
+#### Scenario: Runtime library executes TX calibration profiles
+- **WHEN** a diagnostic or production caller requests a production-relevant TX
+  calibration profile after retained init
+- **THEN** targeted Linux-parity, LCK, and guarded runtime IQK profile
+  execution MUST come from one runtime-owned API while the read-only IQK probe
+  marker remains diagnostic-owned evidence formatting
+
 #### Scenario: Runtime IQK restores saved state
 - **WHEN** runtime IQK exits after success or failure
 - **THEN** the runtime library attempts to restore saved MAC/BB, AFE, RF, BB

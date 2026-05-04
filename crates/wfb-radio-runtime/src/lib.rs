@@ -2623,6 +2623,19 @@ pub struct Rtl8812auRuntimeIqkCalibrationReport {
     pub counters: RuntimeRadioCounters,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct Rtl8812auTxCalibrationProfileReport {
+    pub semantics: &'static str,
+    pub upstream_basis: &'static str,
+    pub profile: TxCalibrationProfile,
+    pub channel: u8,
+    pub bandwidth_mhz: u16,
+    pub register_count: usize,
+    pub writes: Vec<Rtl8812auRegisterWriteReport>,
+    pub lck: Option<Rtl8812auLckCalibrationReport>,
+    pub runtime_iqk: Option<Rtl8812auRuntimeIqkCalibrationReport>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Rtl8812auRuntimeIqkSetupWritePlan {
@@ -6231,6 +6244,77 @@ where
     })
 }
 
+pub fn run_rtl8812au_tx_calibration_profile<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    profile: TxCalibrationProfile,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    rfe_type: u8,
+) -> Result<Option<Rtl8812auTxCalibrationProfileReport>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    match profile {
+        TxCalibrationProfile::CurrentDefault => Ok(None),
+        TxCalibrationProfile::Rtl8812aIqkProbe => Err(RuntimeRadioError::new(
+            "tx_calibration_profile_diagnostic_only",
+            "rtl8812a-iqk-probe is a diagnostic-only evidence marker; runtime callers should use rtl8812a-runtime-iqk for live IQK",
+        )),
+        TxCalibrationProfile::LinuxParityCh36Ht20 => {
+            let writes = run_rtl8812au_targeted_calibration_profile(
+                registers, counters, profile, channel, bandwidth,
+            )?
+            .unwrap_or_default();
+            Ok(Some(Rtl8812auTxCalibrationProfileReport {
+                semantics: "explicit targeted RF/TX calibration override; rewrites known Linux-final RTL8812AU RFE, TX scale, and TX BB control values after init and before TX while full IQK/LCK remains unported",
+                upstream_basis: "aircrack-ng RTL8812AU Linux final register capture for AWUS036ACH channel 36 HT20",
+                profile,
+                channel: channel.number,
+                bandwidth_mhz: bandwidth.mhz(),
+                register_count: writes.len(),
+                writes,
+                lck: None,
+                runtime_iqk: None,
+            }))
+        }
+        TxCalibrationProfile::Rtl8812aLck => {
+            let lck = run_rtl8812au_lck_calibration(registers, counters)?;
+            let register_count = 4
+                + usize::from(lck.tx_pause_write.is_some())
+                + usize::from(lck.tx_pause_restore.is_some());
+            Ok(Some(Rtl8812auTxCalibrationProfileReport {
+                semantics: "explicit guarded RTL8812A runtime LCK calibration; ports the Linux local-oscillator calibration sequence without claiming full IQK/Linux parity",
+                upstream_basis: "aircrack-ng _phy_lc_calibrate_8812a and RTL8812A RF serial read/write helpers",
+                profile,
+                channel: channel.number,
+                bandwidth_mhz: bandwidth.mhz(),
+                register_count,
+                writes: Vec::new(),
+                lck: Some(lck),
+                runtime_iqk: None,
+            }))
+        }
+        TxCalibrationProfile::Rtl8812aRuntimeIqk => {
+            let runtime_iqk =
+                run_rtl8812au_runtime_iqk_calibration(registers, channel, rfe_type, counters)?;
+            let register_count =
+                usize::try_from(runtime_iqk.counters.usb_control_writes).unwrap_or(usize::MAX);
+            Ok(Some(Rtl8812auTxCalibrationProfileReport {
+                semantics: "explicit guarded RTL8812A runtime IQK calibration profile; runs bounded Linux-derived TX/RX IQK and restores saved RF/BB state before live TX",
+                upstream_basis: "aircrack-ng RTL8812A _phy_iq_calibrate_8812a runtime IQK sequence",
+                profile,
+                channel: channel.number,
+                bandwidth_mhz: bandwidth.mhz(),
+                register_count,
+                writes: Vec::new(),
+                lck: None,
+                runtime_iqk: Some(runtime_iqk),
+            }))
+        }
+    }
+}
+
 pub fn rtl8812au_tx_scheduler_tail_expected_writes() -> usize {
     1 + RTL8812AU_TX_SCHEDULER_TAIL_U8_WRITES.len() + 1
 }
@@ -7815,6 +7899,86 @@ mod tests {
         assert!(report.counters.usb_control_reads > 0);
         assert!(report.counters.usb_control_writes > 0);
         assert_eq!(report.counters, counters);
+    }
+
+    #[test]
+    fn rtl8812au_tx_calibration_profile_routes_default_and_targeted() {
+        let transport = MockTransport::default();
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+        let channel = Channel::from_number(36).expect("channel 36");
+
+        let default = super::run_rtl8812au_tx_calibration_profile(
+            &registers,
+            &mut counters,
+            TxCalibrationProfile::CurrentDefault,
+            channel,
+            Bandwidth::Mhz20,
+            3,
+        )
+        .expect("default profile");
+        assert!(default.is_none());
+        assert_eq!(counters, RuntimeRadioCounters::default());
+
+        let targeted = super::run_rtl8812au_tx_calibration_profile(
+            &registers,
+            &mut counters,
+            TxCalibrationProfile::LinuxParityCh36Ht20,
+            channel,
+            Bandwidth::Mhz20,
+            3,
+        )
+        .expect("targeted profile")
+        .expect("targeted report");
+        assert_eq!(targeted.profile, TxCalibrationProfile::LinuxParityCh36Ht20);
+        assert_eq!(targeted.channel, 36);
+        assert_eq!(targeted.bandwidth_mhz, 20);
+        assert_eq!(targeted.register_count, 6);
+        assert_eq!(targeted.writes.len(), 6);
+        assert!(targeted.lck.is_none());
+        assert!(targeted.runtime_iqk.is_none());
+        assert!(counters.usb_control_reads > 0);
+        assert!(counters.usb_control_writes > 0);
+    }
+
+    #[test]
+    fn rtl8812au_tx_calibration_profile_routes_runtime_iqk() {
+        let transport = MockTransport::default();
+        transport.insert_u8(super::REG_TXPAUSE, 0);
+        transport.insert_u32(super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_MODE_B_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_READ_A_JAGUAR, 0x000a_a000);
+        transport.insert_u32(super::REG_RF_PI_READ_B_JAGUAR, 0x000b_b000);
+        transport.insert_u32(
+            super::REG_IQK_RESULT_A_D00,
+            super::RTL8812A_IQK_READY_MASK | (0x130 << 16),
+        );
+        transport.insert_u32(
+            super::REG_IQK_RESULT_B_D40,
+            super::RTL8812A_IQK_READY_MASK | (0x131 << 16),
+        );
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        let report = super::run_rtl8812au_tx_calibration_profile(
+            &registers,
+            &mut counters,
+            TxCalibrationProfile::Rtl8812aRuntimeIqk,
+            Channel::from_number(36).expect("channel 36"),
+            Bandwidth::Mhz20,
+            3,
+        )
+        .expect("runtime IQK profile")
+        .expect("runtime IQK report");
+
+        assert_eq!(report.profile, TxCalibrationProfile::Rtl8812aRuntimeIqk);
+        assert!(report.writes.is_empty());
+        assert!(report.lck.is_none());
+        let iqk = report.runtime_iqk.expect("runtime IQK report");
+        assert_eq!(iqk.status, "completed");
+        assert_eq!(iqk.cleanup_status, "restored");
+        assert_eq!(iqk.sweep_count, 1);
+        assert!(report.register_count > 0);
     }
 
     #[test]

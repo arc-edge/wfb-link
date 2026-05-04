@@ -36,9 +36,9 @@ use wfb_radio_runtime::{
     bind_production_tx_ingress_sockets, configure_production_tx_ingress_socket,
     create_production_rx_forward_runtimes, handle_production_bridge_tx_datagram,
     process_production_rx_packet_outcomes, production_rx_forward_snapshots,
-    run_production_bridge_loop, run_rtl8812au_lck_calibration,
-    run_rtl8812au_targeted_calibration_profile, spawn_production_tx_ingress_receivers,
-    MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    run_production_bridge_loop, run_rtl8812au_tx_calibration_profile,
+    spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
+    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
@@ -50,9 +50,9 @@ use wfb_radio_runtime::{
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
     Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport, Rtl8812auRuntimeIqkMaskedBbWritePlan,
-    Rtl8812auRuntimeIqkSetupWritePlan, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-    RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
-    RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auTxCalibrationProfileReport, RuntimeFlowRxTelemetry,
+    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
+    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
     RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
     RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
     RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
@@ -15492,25 +15492,22 @@ fn rtl8812a_iqk_select_candidate(
     wfb_radio_runtime::rtl8812au_iqk_select_candidate(candidates)
 }
 
-fn run_rtl8812a_runtime_iqk_calibration<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    channel: Channel,
-    rfe_type: u8,
-    counters: &mut DiagnosticCounters,
-) -> std::result::Result<TxRuntimeIqkCalibrationReport, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let report = wfb_radio_runtime::run_rtl8812au_runtime_iqk_calibration(
-        registers,
-        channel,
-        rfe_type,
-        &mut runtime_counters,
-    )
-    .map_err(runtime_radio_error)?;
-    *counters = diagnostic_counters_from_runtime(runtime_counters);
-    Ok(report)
+fn tx_calibration_profile_report_from_runtime(
+    report: Rtl8812auTxCalibrationProfileReport,
+    profile: TxCalibrationProfileArg,
+) -> TxCalibrationProfileReport {
+    TxCalibrationProfileReport {
+        semantics: report.semantics,
+        upstream_basis: report.upstream_basis,
+        profile,
+        channel: report.channel,
+        bandwidth_mhz: report.bandwidth_mhz,
+        register_count: report.register_count,
+        writes: report.writes,
+        lck: report.lck,
+        iqk: None,
+        runtime_iqk: report.runtime_iqk,
+    }
 }
 
 fn run_rtl8812a_iqk_probe<T>(
@@ -15749,31 +15746,6 @@ where
 {
     if matches!(
         args.tx_calibration_profile,
-        TxCalibrationProfileArg::Rtl8812aLck
-    ) {
-        let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-        let lck = run_rtl8812au_lck_calibration(registers, &mut runtime_counters)
-            .map_err(runtime_radio_error)?;
-        *counters = diagnostic_counters_from_runtime(runtime_counters);
-        let register_count = 4
-            + usize::from(lck.tx_pause_write.is_some())
-            + usize::from(lck.tx_pause_restore.is_some());
-        return Ok(Some(TxCalibrationProfileReport {
-            semantics: "explicit guarded RTL8812A runtime LCK calibration; ports the Linux local-oscillator calibration sequence without claiming full IQK/Linux parity",
-            upstream_basis: "aircrack-ng _phy_lc_calibrate_8812a and RTL8812A RF serial read/write helpers",
-            profile: args.tx_calibration_profile,
-            channel: channel.number,
-            bandwidth_mhz: bandwidth.mhz(),
-            register_count,
-            writes: Vec::new(),
-            lck: Some(lck),
-            iqk: None,
-            runtime_iqk: None,
-        }));
-    }
-
-    if matches!(
-        args.tx_calibration_profile,
         TxCalibrationProfileArg::Rtl8812aIqkProbe
     ) {
         let iqk = run_rtl8812a_iqk_probe(registers, counters)?;
@@ -15801,54 +15773,24 @@ where
         }));
     }
 
-    if matches!(
-        args.tx_calibration_profile,
-        TxCalibrationProfileArg::Rtl8812aRuntimeIqk
-    ) {
-        let runtime_iqk =
-            run_rtl8812a_runtime_iqk_calibration(registers, channel, rfe_type, counters)?;
-        let register_count =
-            usize::try_from(runtime_iqk.counters.usb_control_writes).unwrap_or(usize::MAX);
-        return Ok(Some(TxCalibrationProfileReport {
-            semantics: "explicit guarded RTL8812A runtime IQK calibration profile; runs bounded Linux-derived TX/RX IQK and restores saved RF/BB state before live TX",
-            upstream_basis: "aircrack-ng RTL8812A _phy_iq_calibrate_8812a runtime IQK sequence",
-            profile: args.tx_calibration_profile,
-            channel: channel.number,
-            bandwidth_mhz: bandwidth.mhz(),
-            register_count,
-            writes: Vec::new(),
-            lck: None,
-            iqk: None,
-            runtime_iqk: Some(runtime_iqk),
-        }));
-    }
-
     let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
-    let Some(writes) = run_rtl8812au_targeted_calibration_profile(
+    let Some(report) = run_rtl8812au_tx_calibration_profile(
         registers,
         &mut runtime_counters,
         RuntimeTxCalibrationProfile::from(args.tx_calibration_profile),
         channel,
         bandwidth,
+        rfe_type,
     )
     .map_err(runtime_radio_error)?
     else {
         return Ok(None);
     };
     *counters = diagnostic_counters_from_runtime(runtime_counters);
-
-    Ok(Some(TxCalibrationProfileReport {
-        semantics: "explicit targeted RF/TX calibration override; rewrites known Linux-final RTL8812AU RFE, TX scale, and TX BB control values after init and before TX while full IQK/LCK remains unported",
-        upstream_basis: "aircrack-ng RTL8812AU Linux final register capture for AWUS036ACH channel 36 HT20",
-        profile: args.tx_calibration_profile,
-        channel: channel.number,
-        bandwidth_mhz: bandwidth.mhz(),
-        register_count: writes.len(),
-        writes,
-        lck: None,
-        iqk: None,
-        runtime_iqk: None,
-    }))
+    Ok(Some(tx_calibration_profile_report_from_runtime(
+        report,
+        args.tx_calibration_profile,
+    )))
 }
 
 fn data_secondary_channel_setting(

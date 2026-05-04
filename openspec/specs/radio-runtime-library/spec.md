@@ -238,6 +238,14 @@ calibration callers.
 - **THEN** it calls the runtime calibration API and remains responsible only for
   CLI authorization, diagnostic report adaptation, and RF-quality formatting
 
+#### Scenario: TX calibration profile executed by runtime
+- **WHEN** a production or diagnostic caller requests a production-relevant TX
+  calibration profile after retained init
+- **THEN** the runtime library executes targeted Linux-parity, LCK, or guarded
+  runtime IQK profiles through one report-neutral API, returns profile
+  register counts and nested calibration evidence, and rejects the read-only
+  IQK probe marker as diagnostic-only
+
 ### Requirement: Runtime RX Metadata
 The runtime library SHALL expose parsed RTL8812AU RX descriptor metadata needed by production bridge and RF-quality callers.
 
