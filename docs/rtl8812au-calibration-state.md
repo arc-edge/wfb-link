@@ -517,3 +517,12 @@ submitted all `149/149` TX frames. The IQK report for
 `status=fallback_applied` with path A RX IQK fallback on every sweep, so runtime
 IQK remains experimental until the fallback/fill path is corrected and rerun
 against receiver evidence.
+
+Follow-up correction: runtime IQK now fails closed during fallback sweeps. It
+does not write final IQC fill values unless every TX/RX path completed in the
+selected sweep. This removed the Mac-to-Linux collapse in the same bench:
+`/tmp/wfb-radio-run-duplex-iqk-allornothing-20260504-141407` reported
+`runtime_iqk.status=completed`, `cleanup_status=restored`, and recovered
+`80/80` Mac-to-Linux. The run still failed the strict duplex gate because the
+Linux-to-Mac direction recovered only `69/80`, so this is a fallback-safety fix,
+not distance-readiness evidence.

@@ -373,7 +373,7 @@ if l2m_unique < l2m_min_unique:
     failures.append(f"l2m_unique_sequences={l2m_unique}<{l2m_min_unique}")
 if radio_rx_forwarded < min_radio_rx_forwarded:
     failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
-if calibration_success_required and runtime_iqk.get("status") != "success":
+if calibration_success_required and runtime_iqk.get("status") not in {"completed", "success"}:
     failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
 summary = {
     "smoke_result": "fail" if failures else "pass",

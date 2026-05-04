@@ -3255,6 +3255,14 @@ pub fn rtl8812au_runtime_iqk_stage_iqc_or_fallback(
         .unwrap_or_else(|| rtl8812au_runtime_iqk_iqc_value(0x200, 0))
 }
 
+fn rtl8812au_runtime_iqk_path_can_fill(
+    tx_stage: &Rtl8812auRuntimeIqkStageReport,
+    rx_stage: &Rtl8812auRuntimeIqkStageReport,
+) -> bool {
+    rtl8812au_runtime_iqk_stage_success_iqc(tx_stage).is_some()
+        && rtl8812au_runtime_iqk_stage_success_iqc(rx_stage).is_some()
+}
+
 pub fn rtl8812au_runtime_iqk_report_status(
     paths: &[Rtl8812auRuntimeIqkPathReport],
     cleanup_status: &str,
@@ -5886,20 +5894,30 @@ where
         let (mut tx_a, mut tx_b) = run_rtl8812au_runtime_iqk_tx_oneshot(registers, counters)?;
         let (mut rx_a, mut rx_b) =
             run_rtl8812au_runtime_iqk_rx_oneshot(registers, counters, &tx_a, &tx_b, rfe_type)?;
-        let fill_a = apply_rtl8812au_runtime_iqk_fill(
-            registers,
-            counters,
-            Rtl8812auRfPath::A,
-            &mut tx_a,
-            &mut rx_a,
-        )?;
-        let fill_b = apply_rtl8812au_runtime_iqk_fill(
-            registers,
-            counters,
-            Rtl8812auRfPath::B,
-            &mut tx_b,
-            &mut rx_b,
-        )?;
+        let can_fill = rtl8812au_runtime_iqk_path_can_fill(&tx_a, &rx_a)
+            && rtl8812au_runtime_iqk_path_can_fill(&tx_b, &rx_b);
+        let fill_a = if can_fill {
+            apply_rtl8812au_runtime_iqk_fill(
+                registers,
+                counters,
+                Rtl8812auRfPath::A,
+                &mut tx_a,
+                &mut rx_a,
+            )?
+        } else {
+            0
+        };
+        let fill_b = if can_fill {
+            apply_rtl8812au_runtime_iqk_fill(
+                registers,
+                counters,
+                Rtl8812auRfPath::B,
+                &mut tx_b,
+                &mut rx_b,
+            )?
+        } else {
+            0
+        };
         Ok::<_, RuntimeRadioError>((tx_a, rx_a, tx_b, rx_b, fill_a + fill_b))
     })();
 
@@ -5948,7 +5966,7 @@ where
             .unwrap_or_default();
 
     Ok(Rtl8812auRuntimeIqkCalibrationReport {
-        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected or fallback IQC values, and restores saved RF/BB state",
+        semantics: "guarded RTL8812A runtime IQK calibration; runs the upstream TX/RX one-shot IQK sequence, fills selected IQC values only when every TX/RX path completed, and restores saved RF/BB state",
         upstream_basis: "aircrack-ng _phy_iq_calibrate_8812a, _iqk_tx_8812a, _iqk_tx_fill_iqc_8812a, and _iqk_rx_fill_iqc_8812a for RTL8812A",
         mode: "runtime_iqk",
         sweep_index: 1,
@@ -7873,6 +7891,9 @@ mod tests {
             selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x20, 0x10)),
             ..tx_stage.clone()
         };
+        assert!(super::rtl8812au_runtime_iqk_path_can_fill(
+            &tx_stage, &rx_stage
+        ));
 
         let applied = super::apply_rtl8812au_runtime_iqk_fill(
             &registers,
@@ -7959,6 +7980,10 @@ mod tests {
             "rx_iqk_skipped_without_tx_iqk",
             Vec::new(),
         );
+        assert!(!super::rtl8812au_runtime_iqk_path_can_fill(
+            &stage,
+            &skipped_rx
+        ));
         let paths = vec![super::Rtl8812auRuntimeIqkPathReport {
             path: super::Rtl8812auRfPath::A,
             path_name: "A",
