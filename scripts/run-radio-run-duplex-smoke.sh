@@ -18,6 +18,9 @@ Configuration is via environment variables. Common overrides:
   LINK_ID=0x000001        # report/runtime value
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
+  ENABLE_M2L=1 ENABLE_L2M=1
+  M2L_FEC_K=8 M2L_FEC_N=12 L2M_FEC_K=8 L2M_FEC_N=12
+  M2L_MCS=1 L2M_MCS=1
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
   MAX_M2L_DECRYPT_FAILURES=0 MAX_L2M_DECRYPT_FAILURES=0
   TX_POWER_MODE=current-default
@@ -60,17 +63,26 @@ M2L_RADIO_PORT=${M2L_RADIO_PORT:-0}
 L2M_RADIO_PORT=${L2M_RADIO_PORT:-1}
 FEC_K=${FEC_K:-8}
 FEC_N=${FEC_N:-12}
+M2L_FEC_K=${M2L_FEC_K:-$FEC_K}
+M2L_FEC_N=${M2L_FEC_N:-$FEC_N}
+L2M_FEC_K=${L2M_FEC_K:-$FEC_K}
+L2M_FEC_N=${L2M_FEC_N:-$FEC_N}
+M2L_MCS=${M2L_MCS:-1}
+L2M_MCS=${L2M_MCS:-1}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
+ENABLE_M2L=${ENABLE_M2L:-1}
+ENABLE_L2M=${ENABLE_L2M:-1}
 M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
 MAX_M2L_DECRYPT_FAILURES=${MAX_M2L_DECRYPT_FAILURES:-0}
 MAX_L2M_DECRYPT_FAILURES=${MAX_L2M_DECRYPT_FAILURES:-0}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
-export M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES REQUIRE_CALIBRATION_SUCCESS
+export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
+export PAYLOAD_LEN PAYLOAD_INTERVAL_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
@@ -298,9 +310,48 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' FEC_K='$FEC_K' FEC_N='$FEC_N' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
+enabled() {
+  case "$1" in
+    0|false|False|FALSE|no|No|NO) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+write_disabled_counter() {
+  local path=$1
+  local host=$2
+  local port=$3
+  local marker=$4
+  python3 - "$path" "$host" "$port" "$marker" "$EXPECTED_PAYLOADS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+host = sys.argv[2]
+port = int(sys.argv[3])
+marker = sys.argv[4]
+expected = int(sys.argv[5])
+report = {
+    "bind": f"{host}:{port}",
+    "bytes": 0,
+    "disabled": True,
+    "duration_sec": 0.0,
+    "expected": expected,
+    "last_peer": None,
+    "marker": marker,
+    "matched_datagrams": 0,
+    "missing_sequences": list(range(expected)),
+    "packets": 0,
+    "unique_sequences": 0,
+}
+path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 cat > "$REMOTE_PREFIX/counter.py" <<'PY'
 import json
 import socket
@@ -364,30 +415,54 @@ grep -q "type monitor" "$REMOTE_PREFIX/channel-state-traffic.txt"
 grep -q "link/ieee802.11/radiotap" "$REMOTE_PREFIX/link-state-traffic.txt"
 grep -q "IEEE802_11_RADIO" "$REMOTE_PREFIX/pcap-linktypes-traffic.txt"
 
-python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-m2l.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-m2l.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/counter-m2l.pid"
-python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-l2m.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-l2m.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/counter-l2m.pid"
+if enabled "$ENABLE_M2L"; then
+  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-m2l.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-m2l.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/counter-m2l.pid"
+else
+  write_disabled_counter "$REMOTE_PREFIX/counter-m2l.json" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER"
+fi
+if enabled "$ENABLE_L2M"; then
+  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-l2m.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-l2m.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/counter-l2m.pid"
+else
+  write_disabled_counter "$REMOTE_PREFIX/counter-l2m.json" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER"
+fi
 
 sudo -n tcpdump -i "$IFACE" -y IEEE802_11_RADIO -s 256 -w "$REMOTE_PREFIX/rf.pcap" > "$REMOTE_PREFIX/tcpdump.log" 2>&1 &
 echo $! > "$REMOTE_PREFIX/tcpdump.pid"
-sudo -n timeout "$COUNTER_SECONDS" wfb_rx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -c 127.0.0.1 -u "$M2L_COUNTER_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-rx-m2l.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/wfb-rx-m2l.pid"
-sudo -n timeout "$COUNTER_SECONDS" wfb_rx -a "$L2M_AGG_PORT" -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -c 127.0.0.1 -u "$L2M_COUNTER_PORT" > "$REMOTE_PREFIX/wfb-rx-l2m-agg.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/wfb-rx-l2m-agg.pid"
+if enabled "$ENABLE_M2L"; then
+  sudo -n timeout "$COUNTER_SECONDS" wfb_rx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -c 127.0.0.1 -u "$M2L_COUNTER_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-rx-m2l.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/wfb-rx-m2l.pid"
+else
+  : > "$REMOTE_PREFIX/wfb-rx-m2l.log"
+fi
+if enabled "$ENABLE_L2M"; then
+  sudo -n timeout "$COUNTER_SECONDS" wfb_rx -a "$L2M_AGG_PORT" -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -c 127.0.0.1 -u "$L2M_COUNTER_PORT" > "$REMOTE_PREFIX/wfb-rx-l2m-agg.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/wfb-rx-l2m-agg.pid"
+else
+  : > "$REMOTE_PREFIX/wfb-rx-l2m-agg.log"
+fi
 sleep 3
-if ! kill -0 "$(cat "$REMOTE_PREFIX/wfb-rx-m2l.pid")" >/dev/null 2>&1; then
+if enabled "$ENABLE_M2L" && ! kill -0 "$(cat "$REMOTE_PREFIX/wfb-rx-m2l.pid")" >/dev/null 2>&1; then
   cat "$REMOTE_PREFIX/wfb-rx-m2l.log" >&2 || true
   exit 21
 fi
-if grep -qi "unknown encapsulation" "$REMOTE_PREFIX/wfb-rx-m2l.log"; then
+if enabled "$ENABLE_M2L" && grep -qi "unknown encapsulation" "$REMOTE_PREFIX/wfb-rx-m2l.log"; then
   cat "$REMOTE_PREFIX/wfb-rx-m2l.log" >&2 || true
   exit 22
 fi
-sudo -n timeout "$COUNTER_SECONDS" wfb_tx -d -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -B 20 -k "$FEC_K" -n "$FEC_N" -u "$LINUX_M2L_SOURCE_PORT" "$MAC_LAN_IP:$RADIO_BIND_PORT" > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/wfb-tx-m2l-dist.pid"
-sudo -n timeout "$COUNTER_SECONDS" wfb_tx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -B 20 -k "$FEC_K" -n "$FEC_N" -u "$LINUX_L2M_SOURCE_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-tx-l2m-rf.log" 2>&1 &
-echo $! > "$REMOTE_PREFIX/wfb-tx-l2m-rf.pid"
+if enabled "$ENABLE_M2L"; then
+  sudo -n timeout "$COUNTER_SECONDS" wfb_tx -d -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -B 20 -M "$M2L_MCS" -k "$M2L_FEC_K" -n "$M2L_FEC_N" -u "$LINUX_M2L_SOURCE_PORT" "$MAC_LAN_IP:$RADIO_BIND_PORT" > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/wfb-tx-m2l-dist.pid"
+else
+  : > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log"
+fi
+if enabled "$ENABLE_L2M"; then
+  sudo -n timeout "$COUNTER_SECONDS" wfb_tx -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$L2M_RADIO_PORT" -B 20 -M "$L2M_MCS" -k "$L2M_FEC_K" -n "$L2M_FEC_N" -u "$LINUX_L2M_SOURCE_PORT" "$IFACE" > "$REMOTE_PREFIX/wfb-tx-l2m-rf.log" 2>&1 &
+  echo $! > "$REMOTE_PREFIX/wfb-tx-l2m-rf.pid"
+else
+  : > "$REMOTE_PREFIX/wfb-tx-l2m-rf.log"
+fi
 sleep 2
 
 python3 - <<'PY'
@@ -395,10 +470,15 @@ import os
 import socket
 import time
 
+def enabled(name):
+    return os.environ.get(name, "1").lower() not in {"0", "false", "no"}
+
 payload_len = int(os.environ["PAYLOAD_LEN"])
 warmup = int(os.environ["SOURCE_WARMUP_PAYLOADS"])
 expected = int(os.environ["EXPECTED_PAYLOADS"])
 interval = float(os.environ["PAYLOAD_INTERVAL_SEC"])
+enable_m2l = enabled("ENABLE_M2L")
+enable_l2m = enabled("ENABLE_L2M")
 source_m2l = ("127.0.0.1", int(os.environ["LINUX_M2L_SOURCE_PORT"]))
 source_l2m = ("127.0.0.1", int(os.environ["LINUX_L2M_SOURCE_PORT"]))
 sock_m2l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -409,15 +489,19 @@ def payload(marker, seq, fill):
     return marker + seq.to_bytes(4, "big") + fill * (payload_len - len(marker) - 4)
 
 for seq in range(warmup):
-    sock_m2l.sendto(payload(os.environ["M2L_WARMUP_MARKER"], seq, b"w"), source_m2l)
-    sock_l2m.sendto(payload(os.environ["L2M_WARMUP_MARKER"], seq, b"w"), source_l2m)
+    if enable_m2l:
+        sock_m2l.sendto(payload(os.environ["M2L_WARMUP_MARKER"], seq, b"w"), source_m2l)
+    if enable_l2m:
+        sock_l2m.sendto(payload(os.environ["L2M_WARMUP_MARKER"], seq, b"w"), source_l2m)
     time.sleep(interval)
 for seq in range(expected):
-    sock_m2l.sendto(payload(os.environ["M2L_MARKER"], seq, b"m"), source_m2l)
-    sock_l2m.sendto(payload(os.environ["L2M_MARKER"], seq, b"l"), source_l2m)
+    if enable_m2l:
+        sock_m2l.sendto(payload(os.environ["M2L_MARKER"], seq, b"m"), source_m2l)
+    if enable_l2m:
+        sock_l2m.sendto(payload(os.environ["L2M_MARKER"], seq, b"l"), source_l2m)
     time.sleep(interval)
 PY
-printf 'sent warmup=%s marked=%s per direction link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$EXPECTED_PAYLOADS" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
+printf 'sent warmup=%s marked=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$EXPECTED_PAYLOADS" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
 
 for _ in $(seq 1 "$PEER_WAIT_SECONDS"); do
   [[ -f "$REMOTE_PREFIX/counter-m2l.json" && -f "$REMOTE_PREFIX/counter-l2m.json" ]] && break
@@ -480,6 +564,8 @@ l2m_min_unique = int(os.environ["L2M_MIN_UNIQUE"])
 min_radio_rx_forwarded = int(os.environ["MIN_RADIO_RX_FORWARDED"])
 max_m2l_decrypt_failures = int(os.environ["MAX_M2L_DECRYPT_FAILURES"])
 max_l2m_decrypt_failures = int(os.environ["MAX_L2M_DECRYPT_FAILURES"])
+m2l_enabled = os.environ.get("ENABLE_M2L", "1").lower() not in {"0", "false", "no"}
+l2m_enabled = os.environ.get("ENABLE_L2M", "1").lower() not in {"0", "false", "no"}
 m2l_decrypt_failures = count_lines(run / "peer" / "wfb-rx-m2l.log", "Unable to decrypt")
 l2m_decrypt_failures = count_lines(run / "peer" / "wfb-rx-l2m-agg.log", "Unable to decrypt")
 m2l_unknown_encapsulation = count_lines(run / "peer" / "wfb-rx-m2l.log", "unknown encapsulation")
@@ -494,15 +580,15 @@ if (tx.get("failed_submissions") or 0) != 0:
     failures.append(f"tx_failed_submissions={tx.get('failed_submissions')}")
 if (tx.get("dropped_datagrams") or 0) != 0:
     failures.append(f"tx_dropped_datagrams={tx.get('dropped_datagrams')}")
-if m2l_unique < m2l_min_unique:
+if m2l_enabled and m2l_unique < m2l_min_unique:
     failures.append(f"m2l_unique_sequences={m2l_unique}<{m2l_min_unique}")
-if l2m_unique < l2m_min_unique:
+if l2m_enabled and l2m_unique < l2m_min_unique:
     failures.append(f"l2m_unique_sequences={l2m_unique}<{l2m_min_unique}")
-if radio_rx_forwarded < min_radio_rx_forwarded:
+if l2m_enabled and radio_rx_forwarded < min_radio_rx_forwarded:
     failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
-if m2l_decrypt_failures > max_m2l_decrypt_failures:
+if m2l_enabled and m2l_decrypt_failures > max_m2l_decrypt_failures:
     failures.append(f"m2l_decrypt_failures={m2l_decrypt_failures}>{max_m2l_decrypt_failures}")
-if l2m_decrypt_failures > max_l2m_decrypt_failures:
+if l2m_enabled and l2m_decrypt_failures > max_l2m_decrypt_failures:
     failures.append(f"l2m_decrypt_failures={l2m_decrypt_failures}>{max_l2m_decrypt_failures}")
 if calibration_success_required and runtime_iqk.get("status") not in {"completed", "success"}:
     failures.append(f"runtime_iqk_status={runtime_iqk.get('status')}")
@@ -521,6 +607,21 @@ summary = {
     "rx": rx,
     "radio_rx_forwarded_from_snapshots": radio_rx_forwarded,
     "radio_rx_forwards": rx_forwards,
+    "directions": {
+        "m2l_enabled": m2l_enabled,
+        "l2m_enabled": l2m_enabled,
+    },
+    "link_profile": {
+        "m2l_fec_k": int(os.environ.get("M2L_FEC_K", 0)),
+        "m2l_fec_n": int(os.environ.get("M2L_FEC_N", 0)),
+        "l2m_fec_k": int(os.environ.get("L2M_FEC_K", 0)),
+        "l2m_fec_n": int(os.environ.get("L2M_FEC_N", 0)),
+        "m2l_mcs": int(os.environ.get("M2L_MCS", 0)),
+        "l2m_mcs": int(os.environ.get("L2M_MCS", 0)),
+        "payload_interval_sec": float(os.environ.get("PAYLOAD_INTERVAL_SEC", 0)),
+        "payload_len": int(os.environ.get("PAYLOAD_LEN", 0)),
+        "expected_payloads": int(os.environ.get("EXPECTED_PAYLOADS", 0)),
+    },
     "calibration": {
         "profile": report.get("calibration_profile"),
         "class": report.get("calibration_class"),

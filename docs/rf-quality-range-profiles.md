@@ -445,6 +445,39 @@ The first longer-distance 20 MHz acceptance run is deferred until the radios can
 be placed in a real outdoor, separated, or attenuated geometry. The current
 accepted result is close-range only and must not be described as a range result.
 
+### Indoor 100 ft Exploratory Notes
+
+On May 4, 2026, the radios were separated by roughly 100 ft on the same floor
+through several doors. Treat these artifacts as indoor range exploration only,
+not accepted long-distance evidence:
+
+- The default duplex profile on channel 36, current-default calibration, FEC
+  `8/12`, MCS1 failed (`0/80` Mac-to-Linux, `21/80` Linux-to-Mac) at
+  `/tmp/wfb-radio-run-distance-100ft-current-default-smoke-20260504-160256`.
+- Slowing source cadence and increasing redundancy helped. Channel 36,
+  current-default calibration, symmetric FEC `4/12`, MCS1, 20 ms payload
+  interval recovered `80/80` Mac-to-Linux and `72/80` Linux-to-Mac with zero
+  decrypt failures at
+  `/tmp/wfb-radio-run-distance-100ft-current-default-fec4x12-interval20ms-20260504-161901`.
+- Per-direction controls showed Mac-to-Linux was the stronger leg: M2L-only
+  `4/12` at 20 ms recovered `80/80` with zero decrypt failures at
+  `/tmp/wfb-radio-run-distance-100ft-m2l-only-fec4x12-interval20ms-20260504-162339`.
+- The best short indoor profile was asymmetric: M2L `4/12` at MCS1, L2M
+  `3/12` at MCS2, channel 36, current-default calibration, 20 ms payload
+  interval. Two 80-payload smokes recovered `80/80` plus `76/80` and `80/80`
+  plus `78/80`, both with zero decrypt failures:
+  `/tmp/wfb-radio-run-distance-100ft-asym-m2l4x12-l2m3x12-mcs2-interval20ms-20260504-163813`
+  and
+  `/tmp/wfb-radio-run-distance-100ft-asym-m2l4x12-l2m3x12-mcs2-interval20ms-repeat-20260504-164421`.
+- The same asymmetric profile did not pass a 200-payload acceptance gate:
+  `181/200` Mac-to-Linux, `164/200` Linux-to-Mac, and 66 Linux-to-Mac decrypt
+  failures at
+  `/tmp/wfb-radio-run-distance-100ft-asym-m2l4x12-l2m3x12-mcs2-200p-interval20ms-20260504-164549`.
+  Keep it as a promising smoke profile, not a production/range default.
+- Channel 161 with the current channel-36 stop-gap calibration failed
+  completely at this placement. EFUSE-derived TX power and runtime IQK also
+  remain receiver-gated for range work.
+
 Use `docs/rf-quality-field-notes-template.md` for the companion note artifact.
 The structured fields in the report are the summary; the companion artifact is
 where longer notes, maps, photos, service-restore output, and spectrum evidence
