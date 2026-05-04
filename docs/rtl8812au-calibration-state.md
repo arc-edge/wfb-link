@@ -502,3 +502,18 @@ inside the Linux payload-loss margin. That was enough to defer deeper runtime
 calibration at the time. LCK and runtime IQK have since been ported as opt-in
 profiles; both still need receiver-backed or spectrum-backed A/B evidence
 before being promoted for distance work.
+
+May 4, 2026 production `radio-run` A/B on the current local 6 ft bench keeps
+that caution in place. Strict current-default validation failed the peer gate
+because the bench placement was noisy (`74/80` Mac-to-Linux and `77/80`
+Linux-to-Mac at `/tmp/wfb-radio-run-duplex-strict-20260504-140119`) while the
+production loop stayed clean. `rtl8812a-lck` was similar (`78/80` and `76/80`
+at `/tmp/wfb-radio-run-duplex-lck-strict-20260504-140606`). The
+`rtl8812a-runtime-iqk` profile is not production-usable yet: it forwarded the
+Linux-to-Mac direction cleanly (`80/80`) but Mac-to-Linux recovered `0/80`, and
+Linux `wfb_rx` logged many unable-decrypt packets even though `radio-run`
+submitted all `149/149` TX frames. The IQK report for
+`/tmp/wfb-radio-run-duplex-iqk-strict-20260504-140426` showed
+`status=fallback_applied` with path A RX IQK fallback on every sweep, so runtime
+IQK remains experimental until the fallback/fill path is corrected and rerun
+against receiver evidence.

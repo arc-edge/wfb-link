@@ -19,6 +19,7 @@ Configuration is via environment variables. Common overrides:
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=20
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
+  TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
 }
@@ -140,6 +141,7 @@ REMOTE_PREP
 start_radio() {
   log "starting local radio-run production loop"
   local tx_power_args=()
+  local write_auth_arg=()
   if [[ "$TX_POWER_MODE" != "current-default" ]]; then
     tx_power_args+=(--tx-power-mode "$TX_POWER_MODE")
     if [[ "$TX_POWER_MODE" == "efuse-derived" ]]; then
@@ -149,6 +151,11 @@ start_radio() {
       )
     fi
   fi
+  case "$TX_CALIBRATION_PROFILE" in
+    linux-parity-ch36-ht20|rtl8812a-lck|rtl8812a-runtime-iqk)
+      write_auth_arg+=(--i-understand-this-writes-registers)
+      ;;
+  esac
 
   cargo run -p wfb-radio-diag -- --json \
     --report "$OUT_DIR/radio-run.json" \
@@ -165,6 +172,7 @@ start_radio() {
     --max-datagrams 0 \
     "${tx_power_args[@]}" \
     --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+    "${write_auth_arg[@]}" \
     --wfb-link-id "$LINK_ID" \
     --wfb-radio-port "$L2M_RADIO_PORT" \
     --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
