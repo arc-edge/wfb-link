@@ -205,6 +205,17 @@ sweep 3, recovered `1978/2000`, and adds first-class channel-state evidence.
 It replaces the older runtime-IQK artifacts as the best close-range gate shape,
 while preserving the same distance-evidence requirement.
 
+After moving full runtime-IQK sweep orchestration into `wfb-radio-runtime`, the
+post-extraction close-range pair on May 4, 2026 stayed within the same gate:
+current-default
+`/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-default-a1/rf-quality-report.json`
+recovered `1996/2000`, and runtime-IQK
+`/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-runtime-iqk-a1/rf-quality-report.json`
+recovered `1991/2000`. Both submitted `3000/3000`, logged zero decrypt
+failures, verified channel 36 / 20 MHz, and passed as
+`baseline_comparable` / `matched` / `within_margin`. The runtime-IQK run
+completed in sweep 2 with cleanup restored and no per-path fallback.
+
 `rf-quality-report` also emits
 `macos.calibration.runtime_iqk_summary` whenever a runtime IQK profile report is
 present. Use `risk`, `completed`, `cleanup_restored`, `sweep_count`,

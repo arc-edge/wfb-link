@@ -214,6 +214,16 @@ Runtime IQK validation on May 2, 2026:
   `channel_state.verify_status=verified` for channel 36 / 20 MHz. This is the
   current latest-schema close-range gate for runtime IQK; it is still not a
   stepped or outdoor distance result.
+- Runtime-owned sweep extraction gate:
+  `/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-runtime-iqk-a1/rf-quality-report.json`
+  recovered `1991/2000`, submitted `3000/3000`, logged zero decrypt failures,
+  stayed `baseline_comparable` / `within_margin`, and completed runtime IQK in
+  sweep 2 with cleanup restored and no TX/RX fallback on either path. The
+  paired current-default non-regression run at
+  `/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-default-a1/rf-quality-report.json`
+  recovered `1996/2000`. This validates moving the guarded IQK sweep/report
+  into `wfb-radio-runtime`; it still does not replace stepped or outdoor
+  evidence for long-distance acceptance.
 
 Telemetry-gated default rerun on May 2, 2026:
 

@@ -148,6 +148,20 @@ backup/restore offsets, masks, latch registers, TX/RX one-shot attempt loops,
 live fill masked writes, bounded sweep reporting, retry/fallback report shape,
 invalid-path rejection, and signed-component selection tolerance.
 
+After the full-sweep move, the close-range hardware gate was rerun through the
+same deploy path on May 4, 2026. The current-default non-regression artifact is
+`/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-default-a1/rf-quality-report.json`:
+`result=pass`, `baseline_comparable`, `matched`, `within_margin`,
+`3000/3000` datagrams, `1996/2000` recovered payloads, zero decrypt failures,
+and Linux channel state verified at channel 36 / 20 MHz. The runtime-IQK
+artifact is
+`/tmp/wfb-rfq-runtime-iqk-extraction-post-sweep-runtime-iqk-a1/rf-quality-report.json`:
+`result=pass`, `baseline_comparable`, `matched`, `within_margin`,
+`3000/3000` datagrams, `1991/2000` recovered payloads, zero decrypt failures,
+and runtime IQK completed in sweep 2 with cleanup restored and both TX/RX paths
+successful without fallback. This confirms the runtime-owned sweep preserves
+the prior close-range behavior.
+
 ## Latest Runtime-Flow Smoke
 
 On May 3, 2026, a short hardware-Mac `runtime-flow --macos-usbhost` smoke on
