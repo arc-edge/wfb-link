@@ -20,8 +20,8 @@ use std::{
 use radio_core::{
     build_tx_packet, frame_type, list_usb_devices, parse_rx_packet,
     rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
-    submit_tx_frame, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo, FrameType,
-    InterfaceInfo, ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
+    submit_tx_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
+    FrameType, InterfaceInfo, ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
     Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
     UsbDeviceInfo, UsbEndpoints, UsbError,
 };
@@ -2230,25 +2230,49 @@ const REG_RCR: u16 = 0x0608;
 const REG_MACID: u16 = 0x0610;
 const REG_NAV_UPPER: u16 = 0x0652;
 const REG_RXFLTMAP2: u16 = 0x06a4;
+const REG_BCN_CTRL: u16 = 0x0550;
 const REG_AGC_TABLE_JAGUAR: u16 = 0x082c;
+const REG_OFDMCCKEN_JAGUAR: u16 = 0x0808;
+const REG_CCA_ON_SEC_JAGUAR: u16 = 0x0838;
 const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
+const REG_IQK_MACBB_0X090C: u16 = 0x090c;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
+const REG_CCK_RX_PATH_JAGUAR: u16 = 0x0a07;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
 const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
+const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
+const REG_IQK_AFE_A_C60: u16 = 0x0c60;
+const REG_IQK_AFE_A_C64: u16 = 0x0c64;
+const REG_IQK_AFE_A_C68: u16 = 0x0c68;
+const REG_IQK_TX_TONE_A_C80: u16 = 0x0c80;
+const REG_IQK_RX_TONE_A_C84: u16 = 0x0c84;
+const REG_IQK_RFE_SETTING_A_C88: u16 = 0x0c88;
+const REG_IQK_RFE_SETTING_A_C8C: u16 = 0x0c8c;
 const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
 const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
 const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
 const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
+const REG_IQK_TX_POWER_CTRL_A_C94: u16 = 0x0c94;
 const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
 const REG_IQK_TX_CTRL_A_CC4: u16 = 0x0cc4;
 const REG_IQK_TX_CTRL_A_CC8: u16 = 0x0cc8;
 const REG_IQK_TX_Y_A_CCC: u16 = 0x0ccc;
 const REG_IQK_TX_X_A_CD4: u16 = 0x0cd4;
+const REG_IQK_VDF_A_CE8: u16 = 0x0ce8;
 const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
 const REG_IQK_RX_IQC_B_JAGUAR: u16 = 0x0e10;
+const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
+const REG_IQK_AFE_B_E60: u16 = 0x0e60;
+const REG_IQK_AFE_B_E64: u16 = 0x0e64;
+const REG_IQK_AFE_B_E68: u16 = 0x0e68;
+const REG_IQK_TX_TONE_B_E80: u16 = 0x0e80;
+const REG_IQK_RX_TONE_B_E84: u16 = 0x0e84;
+const REG_IQK_RFE_SETTING_B_E88: u16 = 0x0e88;
+const REG_IQK_RFE_SETTING_B_E8C: u16 = 0x0e8c;
 const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
 const REG_TX_BB_CTRL_B_JAGUAR: u16 = REG_RF_PATH_B_3WIRE;
+const REG_TX_POWER_BEFORE_IQK_A_JAGUAR: u16 = 0x0e94;
 const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
@@ -2257,6 +2281,7 @@ const REG_IQK_TX_CTRL_B_EC4: u16 = 0x0ec4;
 const REG_IQK_TX_CTRL_B_EC8: u16 = 0x0ec8;
 const REG_IQK_TX_Y_B_ECC: u16 = 0x0ecc;
 const REG_IQK_TX_X_B_ED4: u16 = 0x0ed4;
+const REG_IQK_VDF_B_EE8: u16 = 0x0ee8;
 const REG_USB_HRPWM: u16 = 0xfe58;
 
 const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
@@ -2283,6 +2308,10 @@ const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
 const RCR_APPFCS: u32 = 1 << 31;
 const RF_CHNLBW_JAGUAR: u32 = 0x18;
 const RF_LCK_JAGUAR: u32 = 0xb4;
+const RF_IQK_TX_0X30_JAGUAR: u32 = 0x30;
+const RF_IQK_TX_0X31_JAGUAR: u32 = 0x31;
+const RF_IQK_TX_0X32_JAGUAR: u32 = 0x32;
+const RF_IQK_MODE_JAGUAR: u32 = 0xef;
 const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
 const RF_LCK_MODE_BIT: u32 = 1 << 14;
 const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
@@ -2362,6 +2391,35 @@ pub struct Rtl8812auRuntimeIqkMaskedBbWritePlan {
     pub data: u32,
     pub data_hex: String,
     pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Rtl8812auRuntimeIqkSetupWritePlan {
+    Register {
+        phase: &'static str,
+        register_name: &'static str,
+        address: u16,
+        address_hex: String,
+        width: &'static str,
+        value: u32,
+        value_hex: String,
+        reason: &'static str,
+    },
+    MaskedBb {
+        phase: &'static str,
+        write: Rtl8812auRuntimeIqkMaskedBbWritePlan,
+    },
+    Rf {
+        phase: &'static str,
+        path: Rtl8812auRfPath,
+        path_name: &'static str,
+        rf_offset: u32,
+        rf_offset_hex: String,
+        value: u32,
+        value_hex: String,
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3243,6 +3301,419 @@ pub fn rtl8812au_iqk_rx_fill_iqc_plan(
             reason,
         ),
     ])
+}
+
+fn rtl8812au_runtime_iqk_setup_write8_plan(
+    phase: &'static str,
+    register_name: &'static str,
+    address: u16,
+    value: u8,
+    reason: &'static str,
+) -> Rtl8812auRuntimeIqkSetupWritePlan {
+    Rtl8812auRuntimeIqkSetupWritePlan::Register {
+        phase,
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        width: "u8",
+        value: u32::from(value),
+        value_hex: format_register_value(value, 2),
+        reason,
+    }
+}
+
+fn rtl8812au_runtime_iqk_setup_write32_plan(
+    phase: &'static str,
+    register_name: &'static str,
+    address: u16,
+    value: u32,
+    reason: &'static str,
+) -> Rtl8812auRuntimeIqkSetupWritePlan {
+    Rtl8812auRuntimeIqkSetupWritePlan::Register {
+        phase,
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        width: "u32",
+        value,
+        value_hex: format_register_value(value, 8),
+        reason,
+    }
+}
+
+fn rtl8812au_runtime_iqk_setup_masked_bb_plan(
+    phase: &'static str,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    data: u32,
+    reason: &'static str,
+) -> Rtl8812auRuntimeIqkSetupWritePlan {
+    Rtl8812auRuntimeIqkSetupWritePlan::MaskedBb {
+        phase,
+        write: rtl8812au_runtime_iqk_masked_bb_write_plan(
+            register_name,
+            address,
+            mask,
+            data,
+            reason,
+        ),
+    }
+}
+
+fn rtl8812au_runtime_iqk_setup_rf_plan(
+    phase: &'static str,
+    path: Rtl8812auRfPath,
+    rf_offset: u32,
+    value: u32,
+    reason: &'static str,
+) -> Rtl8812auRuntimeIqkSetupWritePlan {
+    Rtl8812auRuntimeIqkSetupWritePlan::Rf {
+        phase,
+        path,
+        path_name: path.name().unwrap_or("?"),
+        rf_offset,
+        rf_offset_hex: format_register_value(rf_offset, 2),
+        value,
+        value_hex: format_register_value(value, 5),
+        reason,
+    }
+}
+
+pub fn rtl8812au_runtime_iqk_setup_plan(
+    band: Band,
+    rfe_type: u8,
+    ext_pa_5g: bool,
+    ext_pa_2g: bool,
+) -> Vec<Rtl8812auRuntimeIqkSetupWritePlan> {
+    let mut plan = vec![
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "mac_config",
+            "REG_AGC_TABLE_JAGUAR",
+            REG_AGC_TABLE_JAGUAR,
+            RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+            0,
+            "_iqk_configure_mac_8812a selects page C before MAC gating",
+        ),
+        rtl8812au_runtime_iqk_setup_write8_plan(
+            "mac_config",
+            "REG_TXPAUSE",
+            REG_TXPAUSE,
+            0x3f,
+            "_iqk_configure_mac_8812a pauses packet TX queues during IQK",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "mac_config",
+            "REG_BCN_CTRL",
+            REG_BCN_CTRL,
+            0x0000_0808,
+            0,
+            "_iqk_configure_mac_8812a disables beacon/TBTT interactions during IQK",
+        ),
+        rtl8812au_runtime_iqk_setup_write8_plan(
+            "mac_config",
+            "REG_OFDMCCKEN_JAGUAR",
+            REG_OFDMCCKEN_JAGUAR,
+            0x00,
+            "_iqk_configure_mac_8812a disables RX antenna path",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "mac_config",
+            "REG_CCA_ON_SEC_JAGUAR",
+            REG_CCA_ON_SEC_JAGUAR,
+            0x0000_000f,
+            0x0c,
+            "_iqk_configure_mac_8812a gates CCA during IQK",
+        ),
+        rtl8812au_runtime_iqk_setup_write8_plan(
+            "mac_config",
+            "REG_CCK_RX_PATH_JAGUAR",
+            REG_CCK_RX_PATH_JAGUAR,
+            0x0f,
+            "_iqk_configure_mac_8812a disables CCK RX path during IQK",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "tx_setup",
+            "REG_AGC_TABLE_JAGUAR",
+            REG_AGC_TABLE_JAGUAR,
+            RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+            0,
+            "_iqk_tx_8812a selects page C before AFE/RF setup",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xc60",
+            REG_IQK_AFE_A_C60,
+            0x7777_7777,
+            "_iqk_tx_8812a enables path A DAC/ADC",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xc64",
+            REG_IQK_AFE_A_C64,
+            0x7777_7777,
+            "_iqk_tx_8812a enables path A DAC/ADC",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xe60",
+            REG_IQK_AFE_B_E60,
+            0x7777_7777,
+            "_iqk_tx_8812a enables path B DAC/ADC",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xe64",
+            REG_IQK_AFE_B_E64,
+            0x7777_7777,
+            "_iqk_tx_8812a enables path B DAC/ADC",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xc68",
+            REG_IQK_AFE_A_C68,
+            0x1979_1979,
+            "_iqk_tx_8812a configures path A AFE IQK bias",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "afe_setup",
+            "R_0xe68",
+            REG_IQK_AFE_B_E68,
+            0x1979_1979,
+            "_iqk_tx_8812a configures path B AFE IQK bias",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "afe_setup",
+            "rA_PI_Mode_Jaguar",
+            REG_RF_PI_MODE_A_JAGUAR,
+            0x0000_000f,
+            0x04,
+            "_iqk_tx_8812a disables hardware 3-wire path A",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "afe_setup",
+            "rB_PI_Mode_Jaguar",
+            REG_RF_PI_MODE_B_JAGUAR,
+            0x0000_000f,
+            0x04,
+            "_iqk_tx_8812a disables hardware 3-wire path B",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "afe_setup",
+            "R_0xc5c",
+            REG_IQK_AFE_A_C5C,
+            0x0700_0000,
+            0x07,
+            "_iqk_tx_8812a sets path A DAC/ADC sampling rate",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "afe_setup",
+            "R_0xe5c",
+            REG_IQK_AFE_B_E5C,
+            0x0700_0000,
+            0x07,
+            "_iqk_tx_8812a sets path B DAC/ADC sampling rate",
+        ),
+    ];
+
+    for path in [Rtl8812auRfPath::A, Rtl8812auRfPath::B] {
+        plan.extend([
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                RF_IQK_MODE_JAGUAR,
+                0x80002,
+                "_iqk_tx_8812a selects RF IQK mode",
+            ),
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                RF_IQK_TX_0X30_JAGUAR,
+                0x20000,
+                "_iqk_tx_8812a programs TX IQK RF register 0x30",
+            ),
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                RF_IQK_TX_0X31_JAGUAR,
+                0x3fffd,
+                "_iqk_tx_8812a programs TX IQK RF register 0x31",
+            ),
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                RF_IQK_TX_0X32_JAGUAR,
+                0xfe83f,
+                "_iqk_tx_8812a programs TX IQK RF register 0x32",
+            ),
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                0x65,
+                0x931d5,
+                "_iqk_tx_8812a programs TX IQK RF register 0x65",
+            ),
+            rtl8812au_runtime_iqk_setup_rf_plan(
+                "rf_tx_setup",
+                path,
+                0x8f,
+                0x8a001,
+                "_iqk_tx_8812a programs TX IQK RF register 0x8f",
+            ),
+        ]);
+    }
+
+    let rfe_setting = if band == Band::Ghz5 {
+        if ext_pa_5g {
+            if rfe_type == 1 {
+                0x8214_03e3
+            } else {
+                0x8214_03f7
+            }
+        } else {
+            0x8214_03f1
+        }
+    } else if rfe_type == 3 {
+        if ext_pa_2g {
+            0x8214_03e3
+        } else {
+            0x8214_03f7
+        }
+    } else {
+        0x8214_03f1
+    };
+    let mixer_setting = if band == Band::Ghz5 {
+        0x6816_3e96
+    } else {
+        0x2816_3e96
+    };
+
+    plan.extend([
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "bb_iqk_setup",
+            "R_0x90c",
+            REG_IQK_MACBB_0X090C,
+            0x0000_8000,
+            "_iqk_tx_8812a enables IQK MAC/BB mode",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "bb_iqk_setup",
+            "R_0xc94",
+            REG_IQK_TX_POWER_CTRL_A_C94,
+            0x0000_0001,
+            1,
+            "_iqk_tx_8812a enables path A IQK power latch",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "bb_iqk_setup",
+            "R_0xe94",
+            REG_TX_POWER_BEFORE_IQK_A_JAGUAR,
+            0x0000_0001,
+            1,
+            "_iqk_tx_8812a enables path B IQK power latch",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "bb_iqk_setup",
+            "R_0x978",
+            0x0978,
+            0x2900_2000,
+            "_iqk_tx_8812a programs TX tone X/Y source",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "bb_iqk_setup",
+            "R_0x97c",
+            0x097c,
+            0xa900_2000,
+            "_iqk_tx_8812a programs RX tone X/Y source",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "bb_iqk_setup",
+            "R_0x984",
+            0x0984,
+            0x0046_2910,
+            "_iqk_tx_8812a enables AGC/idac IQK mask",
+        ),
+        rtl8812au_runtime_iqk_setup_masked_bb_plan(
+            "page_c1_setup",
+            "REG_AGC_TABLE_JAGUAR",
+            REG_AGC_TABLE_JAGUAR,
+            RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+            1,
+            "_iqk_tx_8812a selects page C1 before tone/RFE latches",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xc88",
+            REG_IQK_RFE_SETTING_A_C88,
+            rfe_setting,
+            "_iqk_tx_8812a programs path A RFE IQK setting",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xe88",
+            REG_IQK_RFE_SETTING_B_E88,
+            rfe_setting,
+            "_iqk_tx_8812a programs path B RFE IQK setting",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xc8c",
+            REG_IQK_RFE_SETTING_A_C8C,
+            mixer_setting,
+            "_iqk_tx_8812a programs path A band-specific mixer setting",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xe8c",
+            REG_IQK_RFE_SETTING_B_E8C,
+            mixer_setting,
+            "_iqk_tx_8812a programs path B band-specific mixer setting",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xc80",
+            REG_IQK_TX_TONE_A_C80,
+            0x1800_8c10,
+            "_iqk_tx_8812a programs path A TX tone for one-shot",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xc84",
+            REG_IQK_RX_TONE_A_C84,
+            0x3800_8c10,
+            "_iqk_tx_8812a programs path A RX tone for one-shot",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xce8",
+            REG_IQK_VDF_A_CE8,
+            0,
+            "_iqk_tx_8812a disables path A VDF branch for HT20/HT40 flow",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xe80",
+            REG_IQK_TX_TONE_B_E80,
+            0x1800_8c10,
+            "_iqk_tx_8812a programs path B TX tone for one-shot",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xe84",
+            REG_IQK_RX_TONE_B_E84,
+            0x3800_8c10,
+            "_iqk_tx_8812a programs path B RX tone for one-shot",
+        ),
+        rtl8812au_runtime_iqk_setup_write32_plan(
+            "page_c1_setup",
+            "R_0xee8",
+            REG_IQK_VDF_B_EE8,
+            0,
+            "_iqk_tx_8812a disables path B VDF branch for HT20/HT40 flow",
+        ),
+    ]);
+
+    plan
 }
 
 const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
@@ -4418,7 +4889,7 @@ mod tests {
 
     use radio_core::{
         rtl8812au::{Rtl8812auUsbTransport, TxQueue},
-        Bandwidth, Channel, DeviceSelector, ParsedRxPacket, Rtl8812auRegisterAccess, RxFrame,
+        Band, Bandwidth, Channel, DeviceSelector, ParsedRxPacket, Rtl8812auRegisterAccess, RxFrame,
         RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
     };
 
@@ -4864,6 +5335,136 @@ mod tests {
         .expect("selected signed-wrap candidate");
         assert_eq!(signed_wrap_selected.x, 0x1f8);
         assert_eq!(signed_wrap_selected.y, 0x000);
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_setup_plan_ports_mac_afe_rf_prerequisites() {
+        fn register_value(
+            plan: &[super::Rtl8812auRuntimeIqkSetupWritePlan],
+            address: u16,
+        ) -> Option<(u32, &'static str)> {
+            plan.iter().find_map(|write| match write {
+                super::Rtl8812auRuntimeIqkSetupWritePlan::Register {
+                    address: candidate,
+                    value,
+                    width,
+                    ..
+                } if *candidate == address => Some((*value, *width)),
+                _ => None,
+            })
+        }
+
+        fn masked_data(
+            plan: &[super::Rtl8812auRuntimeIqkSetupWritePlan],
+            address: u16,
+            mask: u32,
+        ) -> Option<u32> {
+            plan.iter().find_map(|write| match write {
+                super::Rtl8812auRuntimeIqkSetupWritePlan::MaskedBb { write, .. }
+                    if write.address == address && write.mask == mask =>
+                {
+                    Some(write.data)
+                }
+                _ => None,
+            })
+        }
+
+        fn rf_value(
+            plan: &[super::Rtl8812auRuntimeIqkSetupWritePlan],
+            path: super::Rtl8812auRfPath,
+            rf_offset: u32,
+        ) -> Option<u32> {
+            plan.iter().find_map(|write| match write {
+                super::Rtl8812auRuntimeIqkSetupWritePlan::Rf {
+                    path: candidate_path,
+                    rf_offset: candidate_offset,
+                    value,
+                    ..
+                } if *candidate_path == path && *candidate_offset == rf_offset => Some(*value),
+                _ => None,
+            })
+        }
+
+        let plan = super::rtl8812au_runtime_iqk_setup_plan(Band::Ghz5, 0x03, true, false);
+        assert_eq!(
+            register_value(&plan, super::REG_TXPAUSE),
+            Some((0x3f, "u8"))
+        );
+        assert_eq!(
+            masked_data(
+                &plan,
+                super::REG_AGC_TABLE_JAGUAR,
+                super::RTL8812A_IQK_PAGE_C1_SELECT_BIT
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            masked_data(&plan, super::REG_BCN_CTRL, 0x0000_0808),
+            Some(0)
+        );
+        assert_eq!(
+            register_value(&plan, super::REG_IQK_AFE_A_C60),
+            Some((0x7777_7777, "u32"))
+        );
+        assert_eq!(
+            masked_data(&plan, super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_000f),
+            Some(0x04)
+        );
+        assert_eq!(
+            rf_value(&plan, super::Rtl8812auRfPath::A, super::RF_IQK_MODE_JAGUAR),
+            Some(0x80002)
+        );
+        assert_eq!(
+            rf_value(
+                &plan,
+                super::Rtl8812auRfPath::B,
+                super::RF_IQK_TX_0X32_JAGUAR
+            ),
+            Some(0xfe83f)
+        );
+        assert_eq!(
+            register_value(&plan, super::REG_IQK_RFE_SETTING_A_C88),
+            Some((0x8214_03f7, "u32"))
+        );
+        assert_eq!(
+            register_value(&plan, super::REG_IQK_RFE_SETTING_A_C8C),
+            Some((0x6816_3e96, "u32"))
+        );
+        assert_eq!(
+            register_value(&plan, super::REG_IQK_TX_TONE_A_C80),
+            Some((0x1800_8c10, "u32"))
+        );
+        assert_eq!(
+            register_value(&plan, super::REG_IQK_RX_TONE_B_E84),
+            Some((0x3800_8c10, "u32"))
+        );
+
+        let path_a_rf_writes = plan
+            .iter()
+            .filter(|write| {
+                matches!(
+                    write,
+                    super::Rtl8812auRuntimeIqkSetupWritePlan::Rf {
+                        path: super::Rtl8812auRfPath::A,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let path_b_rf_writes = plan
+            .iter()
+            .filter(|write| {
+                matches!(
+                    write,
+                    super::Rtl8812auRuntimeIqkSetupWritePlan::Rf {
+                        path: super::Rtl8812auRfPath::B,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(path_a_rf_writes, 6);
+        assert_eq!(path_b_rf_writes, 6);
     }
 
     #[test]

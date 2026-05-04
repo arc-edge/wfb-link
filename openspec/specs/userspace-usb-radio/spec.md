@@ -216,12 +216,14 @@ setup without making runtime IQK the default path.
   counts, selected TX/RX IQC values, fallback use, affected registers, USB
   counters, and cleanup status
 
-#### Scenario: Runtime library plans IQK result writes
-- **WHEN** a diagnostic or production calibration caller has selected TX/RX IQK
-  values for path A or path B
-- **THEN** candidate selection and TX/RX IQC masked-write planning MUST come
-  from runtime-owned helpers while live sweep evidence formatting remains
-  diagnostic-owned until full IQK execution is migrated
+#### Scenario: Runtime library plans IQK setup and result writes
+- **WHEN** a diagnostic or production calibration caller configures runtime
+  IQK for the current band/RFE state and has selected TX/RX IQK values for
+  path A or path B
+- **THEN** setup planning, candidate selection, and TX/RX IQC masked-write
+  planning MUST come from runtime-owned helpers while live sweep execution and
+  evidence formatting remain diagnostic-owned until full IQK execution is
+  migrated
 
 #### Scenario: Runtime IQK restores saved state
 - **WHEN** runtime IQK exits after success or failure

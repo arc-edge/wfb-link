@@ -18,9 +18,10 @@
   register-write execution for channel 36 / HT20.
 - Runtime-owned RTL8812AU LCK calibration execution, RF-serial helper reports,
   register read/write evidence, cleanup handling, and counter deltas.
-- Runtime-owned RTL8812AU IQK candidate selection and TX/RX IQC fill-plan
-  helpers. These preserve the upstream masks, path-specific latch registers,
-  fallback rules, and signed-component tolerance used by the live IQK sweep.
+- Runtime-owned RTL8812AU IQK setup-plan, candidate-selection, and TX/RX IQC
+  fill-plan helpers. These preserve the upstream MAC/AFE/RF prerequisites,
+  masks, path-specific latch registers, fallback rules, and signed-component
+  tolerance used by the live IQK sweep.
 - Runtime radio session metadata, endpoint selection, counters, and error classification.
 - Runtime 802.11 TX submission through descriptor construction and bulk OUT.
 - Runtime descriptor-prefixed raw TX packet replay for trace-parity and benchmark paths.
@@ -82,8 +83,8 @@ boundary shifts.
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
 - Runtime IQK live register orchestration, backup/restore execution, one-shot
   sweep execution, and evidence reports while parity is still being hardened.
-  Targeted parity, LCK execution, and IQK candidate/IQC planning have moved
-  into the runtime library.
+  Targeted parity, LCK execution, and IQK setup/candidate/IQC planning have
+  moved into the runtime library.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -100,7 +101,7 @@ boundary shifts.
    2 after that non-regression gate passes. This gate passed on May 4, 2026:
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
-3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK candidate/IQC planning are runtime-owned; IQK live sweep execution remains the next calibration-extraction target.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK setup/candidate/IQC planning are runtime-owned; IQK live sweep execution remains the next calibration-extraction target.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
@@ -130,11 +131,12 @@ observed no WFB session, and classified as `degraded_comparison` /
 profile as diagnostic-only evidence until its register values are corrected or
 validated independently; it is not part of the production-ready path.
 
-The first IQK extraction slice moved pure candidate selection and TX/RX IQC
-fill-plan helpers into `wfb-radio-runtime`. This slice does not touch hardware:
-the diagnostic command still owns the guarded backup/restore, one-shot IQK
-sweep, and JSON evidence report. Focused runtime and diagnostic IQK helper
-tests verify the masks, latch registers, fallback behavior, invalid-path
+The first IQK extraction slices moved pure setup planning, candidate selection,
+and TX/RX IQC fill-plan helpers into `wfb-radio-runtime`. These slices do not
+touch hardware: the diagnostic command still owns guarded backup/restore,
+one-shot IQK sweep execution, setup-plan application, and JSON evidence
+reporting. Focused runtime and diagnostic IQK helper tests verify MAC/AFE/RF
+prerequisites, masks, latch registers, fallback behavior, invalid-path
 rejection, and signed-component selection tolerance.
 
 ## Latest Runtime-Flow Smoke
