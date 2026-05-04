@@ -20459,6 +20459,34 @@ fn set_rx_wfb_forward_reports_from_runtime(
     report.wfb_forwards = reports;
 }
 
+fn runtime_rx_forward_snapshots_from_bridge_report(
+    report: &RxFixtureReport,
+) -> Vec<ProductionRuntimeRxForwardSnapshot> {
+    let forwards: Vec<&RxWfbForwardReport> = if report.wfb_forwards.is_empty() {
+        report.wfb_forward.iter().collect()
+    } else {
+        report.wfb_forwards.iter().collect()
+    };
+
+    forwards
+        .into_iter()
+        .filter_map(|forward| {
+            let channel_id = WfbChannelId::new(forward.link_id, forward.radio_port).ok()?;
+            Some(ProductionRuntimeRxForwardSnapshot {
+                config: RxForwardConfig {
+                    channel_id,
+                    wlan_idx: forward.wlan_idx,
+                    mcs_index: forward.mcs_index,
+                    bandwidth_mhz: forward.bandwidth_mhz,
+                },
+                aggregator: forward.aggregator,
+                forwarded_bytes: forward.forwarded_bytes,
+                counters: forward.counters.clone(),
+            })
+        })
+        .collect()
+}
+
 fn bridge_run_runtime_forward_plans(
     configs: &[RxScanWfbForwardConfig],
 ) -> Vec<ProductionRuntimeRxForwardPlan> {
@@ -23635,20 +23663,11 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             _ => "failed",
         })
         .unwrap_or("not_started");
-    let forwarded_payloads = bridge
-        .rx
-        .wfb_forward
-        .as_ref()
+    let rx_forwards = runtime_rx_forward_snapshots_from_bridge_report(&bridge.rx);
+    let forwarded_payloads = rx_forwards
+        .iter()
         .map(|forward| forward.counters.forwarded)
-        .unwrap_or_default()
-        .saturating_add(
-            bridge
-                .rx
-                .wfb_forwards
-                .iter()
-                .map(|forward| forward.counters.forwarded)
-                .sum::<u64>(),
-        );
+        .sum::<u64>();
 
     RuntimeFlowReport {
         schema_version: 1,
@@ -23685,6 +23704,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             snr_frames: bridge.rx.snr_frames,
             noise_frames: bridge.rx.noise_frames,
             forwarded_payloads,
+            rx_forwards,
             dropped_packets: bridge.rx.dropped_packets,
         },
         tx: RuntimeFlowTxTelemetry {
@@ -28753,6 +28773,9 @@ fn rf_quality_wfb_outcome(
         recovered_payloads: args
             .recovered_payloads
             .or_else(|| rf_quality_json_u64(value, &["rx", "forwarded_payloads"]))
+            .or_else(|| {
+                rf_quality_json_u64(value, &["rx", "rx_forwards", "0", "counters", "forwarded"])
+            })
             .or_else(|| rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "forwarded"]))
             .or_else(|| {
                 rf_quality_json_u64(value, &["rx", "wfb_forwards", "0", "counters", "forwarded"])
@@ -28762,7 +28785,12 @@ fn rf_quality_wfb_outcome(
             .or_else(|| rf_quality_json_u64(value, &["tx", "dropped_datagrams"]))
             .or_else(|| rf_quality_json_u64(value, &["rx", "dropped_packets"])),
         malformed_datagrams: rf_quality_json_u64(value, &["bridge_counters", "malformed"]).or_else(
-            || rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"]),
+            || {
+                rf_quality_json_u64(value, &["rx", "rx_forwards", "0", "counters", "malformed"])
+                    .or_else(|| {
+                        rf_quality_json_u64(value, &["rx", "wfb_forward", "counters", "malformed"])
+                    })
+            },
         ),
         receiver_evidence: receiver_evidence.cloned(),
         receiver_telemetry: rf_quality_receiver_telemetry(receiver_evidence),
@@ -34664,6 +34692,7 @@ fn print_runtime_flow_human(report: &RuntimeFlowReport) {
         report.rx.forwarded_payloads,
         report.rx.dropped_packets
     );
+    print_runtime_rx_forward_snapshots_human(&report.rx.rx_forwards);
     println!(
         "TX: datagrams={} submitted={} failed={} dropped={} bytes={}",
         report.tx.datagrams_received,
@@ -34717,6 +34746,7 @@ fn print_radio_run_human(report: &ProductionRuntimeFlowReport) {
         report.rx.forwarded_payloads,
         report.rx.dropped_packets
     );
+    print_runtime_rx_forward_snapshots_human(&report.rx.rx_forwards);
     println!(
         "TX: datagrams={} submitted={} failed={} dropped={} bytes={}",
         report.tx.datagrams_received,
@@ -34731,6 +34761,27 @@ fn print_radio_run_human(report: &ProductionRuntimeFlowReport) {
     }
     if let Some(error) = &report.error {
         println!("Error: {} - {}", error.code, error.message);
+    }
+}
+
+fn print_runtime_rx_forward_snapshots_human(forwards: &[ProductionRuntimeRxForwardSnapshot]) {
+    for forward in forwards {
+        let channel_id = forward.config.channel_id;
+        println!(
+            "RX forward: link_id={} radio_port={} aggregator={} forwarded={} bytes={} matched={} filtered={} malformed={} send_failed={}",
+            format_value(channel_id.link_id, 6),
+            format_value(channel_id.radio_port, 2),
+            forward
+                .aggregator
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "disabled".to_string()),
+            forward.counters.forwarded,
+            forward.forwarded_bytes,
+            forward.counters.matched,
+            forward.counters.filtered,
+            forward.counters.malformed,
+            forward.counters.send_failed
+        );
     }
 }
 
@@ -39996,6 +40047,53 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(configs[1].config.channel_id.radio_port, 0x04);
         assert_eq!(configs[2].config.channel_id.link_id, 0x000002);
         assert_eq!(configs[2].config.channel_id.radio_port, 0x05);
+    }
+
+    #[test]
+    fn runtime_rx_forward_snapshots_use_canonical_forward_list() {
+        fn forward_report(radio_port: u8, forwarded: u64) -> RxWfbForwardReport {
+            RxWfbForwardReport {
+                link_id: 0x000001,
+                link_id_hex: format_value(0x000001_u32, 6),
+                radio_port,
+                radio_port_hex: format_value(radio_port, 2),
+                aggregator: Some("127.0.0.1:5700".parse().expect("addr")),
+                wlan_idx: 0,
+                mcs_index: 1,
+                bandwidth_mhz: 20,
+                forwarded_bytes: forwarded * 32,
+                counters: RxCounters {
+                    matched: forwarded,
+                    forwarded,
+                    ..RxCounters::default()
+                },
+            }
+        }
+
+        let primary_alias = forward_report(0x03, 7);
+        let mut report = RxFixtureReport {
+            wfb_forward: Some(primary_alias.clone()),
+            wfb_forwards: vec![primary_alias, forward_report(0x04, 11)],
+            ..RxFixtureReport::default()
+        };
+
+        let snapshots = runtime_rx_forward_snapshots_from_bridge_report(&report);
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.counters.forwarded)
+                .sum::<u64>(),
+            18
+        );
+        assert_eq!(snapshots[0].config.channel_id.radio_port, 0x03);
+        assert_eq!(snapshots[1].config.channel_id.radio_port, 0x04);
+
+        report.wfb_forwards.clear();
+        let snapshots = runtime_rx_forward_snapshots_from_bridge_report(&report);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].counters.forwarded, 7);
     }
 
     #[test]

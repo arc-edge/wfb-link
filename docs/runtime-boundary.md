@@ -87,6 +87,12 @@ accounting, WFB RX forwarding, and TX-power register programming into runtime
 ownership. PCAP/JSONL output, EFUSE source file loading, and diagnostic report
 mutation still live in the diagnostic adapter while the boundary shifts.
 
+`radio-run` JSON now carries the runtime RX forwarding snapshots at
+`rx.rx_forwards[]` in addition to the aggregate `rx.forwarded_payloads`. The
+aggregate is derived from the canonical forward list, not the legacy
+`wfb_forward` primary alias, so production summaries no longer double-count the
+first RX forwarding target.
+
 RF-quality automation can now opt into `MAC_RADIO_COMMAND=radio-run` so the
 receiver-backed close-range harness can exercise the production command path.
 Bridge mode remains the default until the production command has matching

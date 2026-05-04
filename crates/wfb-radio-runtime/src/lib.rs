@@ -481,7 +481,7 @@ pub struct RuntimeRxRead {
     pub counters: RuntimeRadioCounters,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeFlowRxTelemetry {
     pub buffers_read: u64,
@@ -492,6 +492,7 @@ pub struct RuntimeFlowRxTelemetry {
     pub snr_frames: u64,
     pub noise_frames: u64,
     pub forwarded_payloads: u64,
+    pub rx_forwards: Vec<ProductionRuntimeRxForwardSnapshot>,
     pub dropped_packets: u64,
 }
 
@@ -8501,6 +8502,7 @@ mod tests {
             snr_frames: 5,
             noise_frames: 5,
             forwarded_payloads: 3,
+            rx_forwards: Vec::new(),
             dropped_packets: 4,
         };
         let tx = RuntimeFlowTxTelemetry {

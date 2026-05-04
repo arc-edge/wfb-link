@@ -326,11 +326,18 @@ def load(path):
 report = load(run / "radio-run.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
+rx = report.get("rx") or {}
+rx_forwards = rx.get("rx_forwards") or []
 summary = {
     "radio_result": report.get("result"),
     "stop_reason": report.get("stop_reason"),
     "tx": report.get("tx"),
-    "rx": report.get("rx"),
+    "rx": rx,
+    "radio_rx_forwarded_from_snapshots": sum(
+        ((forward.get("counters") or {}).get("forwarded") or 0)
+        for forward in rx_forwards
+    ),
+    "radio_rx_forwards": rx_forwards,
     "m2l_counter": m2l,
     "l2m_counter": l2m,
 }
