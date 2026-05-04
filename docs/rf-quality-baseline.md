@@ -102,6 +102,10 @@ The channel-state JSON embeds `peer_isolation_status`,
 `peer_process_matches_after_stop`. This prevents a competing WFB transmitter or
 stale receiver from turning into misleading decrypt-error or packet-loss
 evidence.
+The runner keeps `LINK_ID` in report-friendly form, such as `0x000001`, but
+passes decimal `WFB_CLI_LINK_ID` to Linux `wfb_tx` and `wfb_rx`. WFB-ng's CLI
+does not reliably parse hex link IDs; a hex string can produce on-air
+`57:42:00:00:00:00` frames while the report says link `0x000001`.
 The restore JSON records the post-run service action, service state, and WFB
 process matches after the controlled sender/receiver processes are stopped, so
 cleanup failures are visible in machine-readable run evidence.
@@ -165,6 +169,12 @@ The pcap-channel-evidence smoke
 recovered `80/80` and recorded
 `pcap_channel_evidence.status=verified`, with all `186` frequency-tagged RF
 pcap frames on `5180 MHz`.
+After fixing Linux WFB-ng link-ID CLI conversion, the patched local smoke
+`/tmp/wfb-rfq-local-direct-link-decimal-smoke-a1/rf-quality-report.json`
+again recovered `80/80` with zero decrypt failures, recorded
+`receiver_evidence.link_id=0x000001`, `wfb_cli_link_id=1`, verified channel 36,
+and kept pcap channel evidence `verified` with all `208` frequency-tagged
+frames on `5180 MHz`.
 New-format reports classify all-zero WFB-ng SNR as `receiver_signal.status=usable`
 rather than `complete` when the RX_ANT tuple and RSSI evidence are otherwise
 valid. The current latest-schema runtime-IQK reference is
@@ -306,6 +316,8 @@ DATAGRAM_SHORTFALL_TOLERANCE=1
 This does not make a failed bridge artifact disappear; it preserves the
 expected-versus-observed datagram evidence so the RF-quality envelope can still
 be interpreted when receiver recovery is complete.
+The same artifact records both `link_id` and `wfb_cli_link_id` so future runs
+can confirm the reported WFB tuple and Linux CLI tuple stayed aligned.
 
 For session acquisition, the runner sends unmeasured source payloads before the
 marked payload sequence. The current default is:

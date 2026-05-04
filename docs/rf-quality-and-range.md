@@ -38,6 +38,9 @@ NetworkManager scan bursts and catches cases where `wfb0` falls back to
 `type managed` after the normal WFB service is stopped. The generated
 `channel-state.json` records NetworkManager, monitor-mode, channel, and
 bandwidth evidence.
+The profile link ID may be written as hex for reports, but WFB-ng's Linux CLI
+expects decimal. The runner converts `LINK_ID=0x000001` to
+`WFB_CLI_LINK_ID=1` before invoking `wfb_tx` or `wfb_rx`.
 The generated `pcap-channel-evidence.json` reads the Linux RF pcap with
 `tcpdump`, counts radiotap frequency tags, and records whether captured frames
 stayed on the requested frequency. `verified` means all frequency-tagged frames
