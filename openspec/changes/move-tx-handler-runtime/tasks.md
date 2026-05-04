@@ -8,10 +8,10 @@
 
 - [x] 2.1 Refactor bridge-run TX callback to call the runtime TX handler.
 - [x] 2.2 Preserve existing bridge-run last-datagram report fields, bridge counters, submit counters, TX status failure post-processing, and throughput byte counters.
-- [ ] 2.3 Keep `radio-run` no-TX/RX-only smoke behavior unchanged.
+- [x] 2.3 Keep `radio-run` no-TX/RX-only smoke behavior unchanged.
 
 ## 3. Verification
 
 - [x] 3.1 Update runtime boundary docs for queued TX datagram handler ownership.
 - [x] 3.2 Run formatting, workspace tests, strict OpenSpec validation, and diff checks.
-- [ ] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.
+- [x] 3.3 Commit, push, sync to hardware Mac, and run a short no-TX or RX-only smoke if practical.

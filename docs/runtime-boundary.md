@@ -131,3 +131,10 @@ and 5 RX frames with PHY status, valid RSSI, SNR, and derived noise. No TX
 datagrams were injected. Artifact:
 `/tmp/wfb-radio-run-loop-executor-smoke.json` on the hardware Mac deploy
 checkout.
+
+After the `move-tx-handler-runtime` slice on May 4, 2026, the smoke was rerun
+with queued TX datagram processing owned by `wfb-radio-runtime`. The run
+completed with `result=pass`, `stop_reason=duration_elapsed`, init readiness
+`ready`, 14/14 phases completed, and 5 RX frames with PHY status, valid RSSI,
+SNR, and derived noise. No TX datagrams were injected. Artifact:
+`/tmp/wfb-radio-run-tx-handler-smoke.json` on the hardware Mac deploy checkout.
