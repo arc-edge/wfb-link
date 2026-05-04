@@ -14,6 +14,8 @@
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 - RTL8812AU same-session init phase identities and default/Linux-order phase sequencing policy.
 - Runtime execution helpers for the TX scheduler tail, monitor/no-link receive filter, and EFUSE MACID programming.
+- Runtime-owned targeted Linux-parity calibration override planning and
+  register-write execution for channel 36 / HT20.
 - Runtime-owned RTL8812AU LCK calibration execution, RF-serial helper reports,
   register read/write evidence, cleanup handling, and counter deltas.
 - Runtime radio session metadata, endpoint selection, counters, and error classification.
@@ -76,7 +78,8 @@ boundary shifts.
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
 - Runtime IQK register orchestration and evidence reports while parity is
-  still being hardened. LCK execution has moved into the runtime library.
+  still being hardened. Targeted parity and LCK execution have moved into the
+  runtime library.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
   report mutation, TX status probes, and RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
@@ -93,7 +96,7 @@ boundary shifts.
    2 after that non-regression gate passes. This gate passed on May 4, 2026:
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
-3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. LCK execution is runtime-owned; runtime IQK and targeted parity override execution remain the next calibration-extraction targets.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity and LCK execution are runtime-owned; runtime IQK remains the next calibration-extraction target.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
@@ -113,6 +116,15 @@ On May 4, 2026, after moving RTL8812AU LCK execution into
 `3000/3000` submitted datagrams, `1981/2000` recovered payloads, zero decrypt
 failures, and Linux channel state verified at channel 36 / 20 MHz. Artifact:
 `/tmp/wfb-rfq-runtime-lck-extraction-a1/rf-quality-report.json`.
+
+The targeted Linux-parity override path was also moved into
+`wfb-radio-runtime` and rerun once on hardware at
+`/tmp/wfb-rfq-runtime-targeted-extraction-a1/rf-quality-report.json`. That
+experimental profile submitted `3000/3000` datagrams but recovered `0/2000`,
+observed no WFB session, and classified as `degraded_comparison` /
+`outside_margin` with channel 36 / 20 MHz verified. Keep the targeted override
+profile as diagnostic-only evidence until its register values are corrected or
+validated independently; it is not part of the production-ready path.
 
 ## Latest Runtime-Flow Smoke
 

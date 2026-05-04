@@ -2236,8 +2236,14 @@ const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
 const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
 const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
 const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
+const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
+const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
+const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
 const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
 const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
+const REG_TX_BB_CTRL_B_JAGUAR: u16 = REG_RF_PATH_B_3WIRE;
+const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
+const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
 const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
 const REG_USB_HRPWM: u16 = 0xfe58;
@@ -2317,6 +2323,13 @@ impl Rtl8812auRfPath {
             Self::Both => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rtl8812auRegisterWriteSpec {
+    pub register_name: &'static str,
+    pub address: u16,
+    pub value: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2688,6 +2701,36 @@ where
     })
 }
 
+fn write32_register_report<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    register_name: &'static str,
+    address: u16,
+    value: u32,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<Rtl8812auRegisterWriteReport, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_counters = *counters;
+    let before = read32_with_counter(registers, counters, address, register_name, "pre-write")?;
+    write32_with_counter(registers, counters, address, value, register_name, "write")?;
+    let after = read32_with_counter(registers, counters, address, register_name, "post-write")?;
+    Ok(Rtl8812auRegisterWriteReport {
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        width: "u32",
+        before,
+        before_hex: format_register_value(before, 8),
+        written: value,
+        written_hex: format_register_value(value, 8),
+        after,
+        after_hex: format_register_value(after, 8),
+        changed: before != after,
+        counters: counters.saturating_sub(before_counters),
+    })
+}
+
 fn bb_set_bb_reg<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut RuntimeRadioCounters,
@@ -2938,6 +2981,91 @@ where
         value_hex: format_register_value(value, 5),
         counters: counters.saturating_sub(before),
     })
+}
+
+const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rA_TxScale_Jaguar",
+        address: REG_TX_SCALE_A_JAGUAR,
+        value: 0x4000_0003,
+    },
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rB_TxScale_Jaguar",
+        address: REG_TX_SCALE_B_JAGUAR,
+        value: 0x4000_0003,
+    },
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rA_RFE_Pinmux_Jaguar",
+        address: REG_RFE_PINMUX_A_JAGUAR,
+        value: 0x5433_7770,
+    },
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rB_RFE_Pinmux_Jaguar",
+        address: REG_RFE_PINMUX_B_JAGUAR,
+        value: 0x5433_7770,
+    },
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rA_TxBbCtrl",
+        address: REG_TX_BB_CTRL_A_JAGUAR,
+        value: 0x0180_7c09,
+    },
+    Rtl8812auRegisterWriteSpec {
+        register_name: "rB_TxBbCtrl",
+        address: REG_TX_BB_CTRL_B_JAGUAR,
+        value: 0x0180_7c09,
+    },
+];
+
+pub fn rtl8812au_targeted_calibration_writes(
+    profile: TxCalibrationProfile,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> Result<Option<&'static [Rtl8812auRegisterWriteSpec]>, RuntimeRadioError> {
+    match profile {
+        TxCalibrationProfile::CurrentDefault
+        | TxCalibrationProfile::Rtl8812aLck
+        | TxCalibrationProfile::Rtl8812aIqkProbe
+        | TxCalibrationProfile::Rtl8812aRuntimeIqk => Ok(None),
+        TxCalibrationProfile::LinuxParityCh36Ht20
+            if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
+        {
+            Ok(Some(LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES))
+        }
+        TxCalibrationProfile::LinuxParityCh36Ht20 => Err(RuntimeRadioError::new(
+            "tx_calibration_profile_unsupported",
+            format!(
+                "tx calibration profile linux-parity-ch36-ht20 only supports channel 36 HT20; requested channel {} {} MHz",
+                channel.number,
+                bandwidth.mhz()
+            ),
+        )),
+    }
+}
+
+pub fn run_rtl8812au_targeted_calibration_profile<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    profile: TxCalibrationProfile,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> Result<Option<Vec<Rtl8812auRegisterWriteReport>>, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let Some(writes) = rtl8812au_targeted_calibration_writes(profile, channel, bandwidth)? else {
+        return Ok(None);
+    };
+    let mut reports = Vec::with_capacity(writes.len());
+    for write in writes {
+        reports.push(write32_register_report(
+            registers,
+            write.register_name,
+            write.address,
+            write.value,
+            counters,
+        )?);
+    }
+    Ok(Some(reports))
 }
 
 #[derive(Default)]
@@ -4333,6 +4461,48 @@ mod tests {
                     )
                     .to_le_bytes()
         }));
+    }
+
+    #[test]
+    fn targeted_linux_parity_profile_runs_runtime_register_writes() {
+        let channel = Channel::from_number(36).expect("channel 36");
+        let specs = super::rtl8812au_targeted_calibration_writes(
+            TxCalibrationProfile::LinuxParityCh36Ht20,
+            channel,
+            Bandwidth::Mhz20,
+        )
+        .expect("targeted specs")
+        .expect("writes");
+        assert_eq!(specs.len(), 6);
+        assert_eq!(specs[0].address, super::REG_TX_SCALE_A_JAGUAR);
+        assert_eq!(specs[0].value, 0x4000_0003);
+        assert_eq!(specs[2].address, super::REG_RFE_PINMUX_A_JAGUAR);
+        assert_eq!(specs[2].value, 0x5433_7770);
+        assert!(super::rtl8812au_targeted_calibration_writes(
+            TxCalibrationProfile::LinuxParityCh36Ht20,
+            channel,
+            Bandwidth::Mhz40,
+        )
+        .is_err());
+
+        let transport = MockTransport::default();
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+        let reports = super::run_rtl8812au_targeted_calibration_profile(
+            &registers,
+            &mut counters,
+            TxCalibrationProfile::LinuxParityCh36Ht20,
+            channel,
+            Bandwidth::Mhz20,
+        )
+        .expect("targeted profile")
+        .expect("reports");
+
+        assert_eq!(reports.len(), 6);
+        assert_eq!(reports[0].written, 0x4000_0003);
+        assert_eq!(reports[2].written, 0x5433_7770);
+        assert_eq!(counters.usb_control_reads, 12);
+        assert_eq!(counters.usb_control_writes, 6);
     }
 
     #[test]

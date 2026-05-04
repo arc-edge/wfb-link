@@ -151,6 +151,21 @@ The runtime library SHALL execute the guarded RTL8812AU LCK calibration sequence
 - **WHEN** a diagnostic command enables the LCK calibration profile
 - **THEN** it calls the runtime LCK executor and only maps counters and serialization into the diagnostic report
 
+### Requirement: Runtime Targeted Calibration Execution
+The runtime library SHALL plan and execute targeted Linux-parity calibration override writes without depending on diagnostic command or report types.
+
+#### Scenario: Targeted profile runs
+- **WHEN** a caller enables the supported channel 36 / HT20 targeted Linux-parity profile
+- **THEN** the runtime library returns the selected RFE, TX-scale, and TX-BB register writes and can execute them with report-neutral before/write/after evidence
+
+#### Scenario: Unsupported targeted profile rejected
+- **WHEN** a caller enables the targeted Linux-parity profile on an unsupported channel or bandwidth
+- **THEN** the runtime library rejects the profile before applying targeted override writes
+
+#### Scenario: Diagnostic command adapts targeted calibration
+- **WHEN** a diagnostic command enables the targeted Linux-parity profile
+- **THEN** it calls the runtime targeted calibration executor and only maps counters and serialization into the diagnostic report
+
 ### Requirement: Runtime RX Metadata
 The runtime library SHALL expose parsed RTL8812AU RX descriptor metadata needed by production bridge and RF-quality callers.
 

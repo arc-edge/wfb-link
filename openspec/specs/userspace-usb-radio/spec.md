@@ -115,6 +115,10 @@ The system SHALL provide an explicit targeted calibration profile for RTL8812AU 
 - **WHEN** the operator enables the targeted parity profile for an unsupported channel, bandwidth, or chipset state
 - **THEN** the command MUST fail before RF transmission or leave the profile unapplied with an explicit reportable reason
 
+#### Scenario: Runtime library executes targeted profile
+- **WHEN** an initialized runtime or diagnostic caller enables the supported targeted Linux-parity profile
+- **THEN** the targeted override register writes MUST execute through runtime-owned helpers while diagnostic code remains responsible only for CLI parsing and report adaptation
+
 ### Requirement: Receiver Metadata Confidence
 The system SHALL expose RX metadata with enough source and confidence information for RF-quality reports to distinguish measured signal evidence from fallbacks.
 

@@ -37,8 +37,8 @@ use wfb_radio_runtime::{
     create_production_rx_forward_runtimes, handle_production_bridge_tx_datagram,
     process_production_rx_packet_outcomes, production_rx_forward_snapshots,
     run_production_bridge_loop, run_rtl8812au_lck_calibration,
-    spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
-    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    run_rtl8812au_targeted_calibration_profile, spawn_production_tx_ingress_receivers,
+    MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
@@ -48,13 +48,14 @@ use wfb_radio_runtime::{
     ProductionRuntimeRxForwardPlan, ProductionRuntimeRxForwardSnapshot,
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
-    Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, RuntimeFlowRxTelemetry,
-    RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
-    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
-    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
+    RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
+    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
+    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
+    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
     PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
 };
@@ -3762,7 +3763,7 @@ struct TxCalibrationProfileReport {
     channel: u8,
     bandwidth_mhz: u16,
     register_count: usize,
-    writes: Vec<BridgeTxBenchRegisterClearReport>,
+    writes: Vec<Rtl8812auRegisterWriteReport>,
     lck: Option<Rtl8812auLckCalibrationReport>,
     iqk: Option<TxIqkProbeReport>,
     runtime_iqk: Option<TxRuntimeIqkCalibrationReport>,
@@ -15564,41 +15565,6 @@ fn validate_tx_calibration_profile_write_authorization(
     Ok(())
 }
 
-const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[CapturedTxBringupWrite] = &[
-    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x4000_0003),
-    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x4000_0003),
-    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7770),
-    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7770),
-    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0180_7c09),
-    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0180_7c09),
-];
-
-fn tx_calibration_profile_writes(
-    profile: TxCalibrationProfileArg,
-    channel: Channel,
-    bandwidth: Bandwidth,
-) -> std::result::Result<Option<&'static [CapturedTxBringupWrite]>, DiagnosticErrorReport> {
-    match profile {
-        TxCalibrationProfileArg::CurrentDefault
-        | TxCalibrationProfileArg::Rtl8812aLck
-        | TxCalibrationProfileArg::Rtl8812aIqkProbe
-        | TxCalibrationProfileArg::Rtl8812aRuntimeIqk => Ok(None),
-        TxCalibrationProfileArg::LinuxParityCh36Ht20
-            if channel.number == 36 && bandwidth == Bandwidth::Mhz20 =>
-        {
-            Ok(Some(LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES))
-        }
-        TxCalibrationProfileArg::LinuxParityCh36Ht20 => Err(DiagnosticErrorReport {
-            code: "tx_calibration_profile_unsupported",
-            message: format!(
-                "tx calibration profile linux-parity-ch36-ht20 only supports channel 36 HT20; requested channel {} {} MHz",
-                channel.number,
-                bandwidth.mhz()
-            ),
-        }),
-    }
-}
-
 fn calibration_register_read_report(
     register_name: &'static str,
     address: u16,
@@ -18333,17 +18299,19 @@ where
         }));
     }
 
-    let Some(profile_writes) =
-        tx_calibration_profile_writes(args.tx_calibration_profile, channel, bandwidth)?
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let Some(writes) = run_rtl8812au_targeted_calibration_profile(
+        registers,
+        &mut runtime_counters,
+        RuntimeTxCalibrationProfile::from(args.tx_calibration_profile),
+        channel,
+        bandwidth,
+    )
+    .map_err(runtime_radio_error)?
     else {
         return Ok(None);
     };
-    let mut writes = Vec::new();
-    for &(name, address, value) in profile_writes {
-        writes.push(bridge_tx_bench_write32_register(
-            registers, name, address, value, counters,
-        )?);
-    }
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
 
     Ok(Some(TxCalibrationProfileReport {
         semantics: "explicit targeted RF/TX calibration override; rewrites known Linux-final RTL8812AU RFE, TX scale, and TX BB control values after init and before TX while full IQK/LCK remains unported",
@@ -42325,19 +42293,19 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
     #[test]
     fn targeted_linux_parity_profile_selects_ch36_ht20_overrides() {
         fn value_for(
-            writes: &[CapturedTxBringupWrite],
+            writes: &[wfb_radio_runtime::Rtl8812auRegisterWriteSpec],
             address: u16,
         ) -> std::result::Result<u32, &'static str> {
             writes
                 .iter()
-                .find(|(_, candidate, _)| *candidate == address)
-                .map(|(_, _, value)| *value)
+                .find(|write| write.address == address)
+                .map(|write| write.value)
                 .ok_or("missing register")
         }
 
         let channel_36 = Channel::from_number(36).expect("channel 36");
-        let writes = tx_calibration_profile_writes(
-            TxCalibrationProfileArg::LinuxParityCh36Ht20,
+        let writes = wfb_radio_runtime::rtl8812au_targeted_calibration_writes(
+            RuntimeTxCalibrationProfile::LinuxParityCh36Ht20,
             channel_36,
             Bandwidth::Mhz20,
         )
@@ -42357,28 +42325,28 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             value_for(writes, REG_TX_BB_CTRL_A_JAGUAR).expect("tx bb A"),
             0x0180_7c09
         );
-        assert!(tx_calibration_profile_writes(
-            TxCalibrationProfileArg::LinuxParityCh36Ht20,
+        assert!(wfb_radio_runtime::rtl8812au_targeted_calibration_writes(
+            RuntimeTxCalibrationProfile::LinuxParityCh36Ht20,
             channel_36,
             Bandwidth::Mhz40,
         )
         .is_err());
-        assert!(tx_calibration_profile_writes(
-            TxCalibrationProfileArg::Rtl8812aLck,
+        assert!(wfb_radio_runtime::rtl8812au_targeted_calibration_writes(
+            RuntimeTxCalibrationProfile::Rtl8812aLck,
             channel_36,
             Bandwidth::Mhz40,
         )
         .expect("lck profile")
         .is_none());
-        assert!(tx_calibration_profile_writes(
-            TxCalibrationProfileArg::Rtl8812aIqkProbe,
+        assert!(wfb_radio_runtime::rtl8812au_targeted_calibration_writes(
+            RuntimeTxCalibrationProfile::Rtl8812aIqkProbe,
             channel_36,
             Bandwidth::Mhz40,
         )
         .expect("iqk probe profile")
         .is_none());
-        assert!(tx_calibration_profile_writes(
-            TxCalibrationProfileArg::Rtl8812aRuntimeIqk,
+        assert!(wfb_radio_runtime::rtl8812au_targeted_calibration_writes(
+            RuntimeTxCalibrationProfile::Rtl8812aRuntimeIqk,
             channel_36,
             Bandwidth::Mhz40,
         )

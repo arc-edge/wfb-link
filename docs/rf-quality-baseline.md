@@ -375,6 +375,13 @@ failures, verified channel 36 / 20 MHz, and stayed `within_margin`. This keeps
 the LCK runtime extraction comparable with both the May 2 tuple and the May 4
 pre-extraction gate.
 
+The targeted Linux-parity override runtime extraction was also smoke-tested at
+`/tmp/wfb-rfq-runtime-targeted-extraction-a1/rf-quality-report.json`. It
+submitted `3000/3000` but recovered `0/2000`, observed no WFB session, and
+classified as `degraded_comparison` / `outside_margin` with channel 36 / 20 MHz
+verified. Treat this as evidence that the targeted override values still need
+RF correction; do not use that profile as a range-readiness gate.
+
 Standalone IQK diagnostic artifacts from `rtl8812a-iqk-diagnostic` can be used
 as RF-quality review evidence, but they are not runtime calibration evidence.
 When attaching one to a range-readiness note, record the artifact path,
