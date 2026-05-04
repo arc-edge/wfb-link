@@ -20,7 +20,7 @@
   register read/write evidence, cleanup handling, and counter deltas.
 - Runtime-owned RTL8812AU IQK setup-plan generation and live application,
   backup/restore execution, candidate selection, one-shot stage outcome state,
-  TX one-shot execution, sweep summaries, and TX/RX IQC fill-plan helpers.
+  TX/RX one-shot execution, sweep summaries, and TX/RX IQC fill-plan helpers.
   These preserve the upstream MAC/AFE/RF prerequisites, backup register groups,
   RF serial backup offsets, masks, path-specific latch registers,
   retry/fallback reporting, and signed-component tolerance used by the live IQK
@@ -84,9 +84,9 @@ boundary shifts.
 ## Still Diagnostic-Owned
 
 - Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
-- Runtime IQK RX one-shot register sequencing, sweep orchestration, and
+- Runtime IQK full-sweep orchestration, live IQC fill application, and
   diagnostic evidence formatting while parity is still being hardened. Targeted
-  parity, LCK execution, and IQK setup/backup/restore plus TX one-shot
+  parity, LCK execution, and IQK setup/backup/restore plus TX/RX one-shot
   execution, candidate/IQC planning, and one-shot outcome state have moved into
   the runtime library.
 - WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
@@ -105,7 +105,7 @@ boundary shifts.
    2 after that non-regression gate passes. This gate passed on May 4, 2026:
    the accepted current-default, IQK marker, and LCK reruns recovered
    `1989/1988/1992` payloads with zero decrypt failures.
-3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK setup/backup/restore plus TX one-shot execution, candidate/IQC planning, and one-shot outcome state are runtime-owned; RX one-shot register sequencing and full sweep orchestration remain the next calibration-extraction targets.
+3. Move calibration execution once IQK/LCK parity is stable enough to expose as runtime behavior rather than diagnostic experiment. Targeted parity, LCK execution, and IQK setup/backup/restore plus TX/RX one-shot execution, candidate/IQC planning, and one-shot outcome state are runtime-owned; live IQC fill application and full sweep orchestration remain the next calibration-extraction targets.
 4. Move remaining bridge-loop report adaptation and production command execution
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
@@ -137,12 +137,12 @@ validated independently; it is not part of the production-ready path.
 
 The first IQK extraction slices moved setup planning, setup-plan application,
 backup/restore execution, candidate selection, one-shot stage outcome state,
-sweep summaries, TX one-shot execution, and TX/RX IQC fill-plan helpers into
-`wfb-radio-runtime`. The diagnostic command still owns RX one-shot register
-sequencing, full sweep orchestration, and JSON evidence formatting. Focused
+sweep summaries, TX/RX one-shot execution, and TX/RX IQC fill-plan helpers into
+`wfb-radio-runtime`. The diagnostic command still owns live IQC fill
+application, full sweep orchestration, and JSON evidence formatting. Focused
 runtime and diagnostic IQK helper tests verify MAC/AFE/RF prerequisites, live
 setup writes, backup register groups, RF serial backup/restore offsets, masks,
-latch registers, TX one-shot attempt loops, retry/fallback report shape,
+latch registers, TX/RX one-shot attempt loops, retry/fallback report shape,
 invalid-path rejection, and signed-component selection tolerance.
 
 ## Latest Runtime-Flow Smoke

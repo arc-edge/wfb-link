@@ -51,16 +51,16 @@ use wfb_radio_runtime::{
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
     Rtl8812auRfPath, Rtl8812auRuntimeIqkAttemptReport, Rtl8812auRuntimeIqkBackupReport,
     Rtl8812auRuntimeIqkCleanupReport, Rtl8812auRuntimeIqkIqcValue,
-    Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkOneShotPathState,
-    Rtl8812auRuntimeIqkPathReport, Rtl8812auRuntimeIqkSetupWritePlan,
-    Rtl8812auRuntimeIqkStageReport, Rtl8812auRuntimeIqkSweepPathSummaryReport,
-    Rtl8812auRuntimeIqkSweepSummaryReport, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-    RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution, RuntimeRadioCounters,
-    RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
-    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkPathReport,
+    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auRuntimeIqkStageReport,
+    Rtl8812auRuntimeIqkSweepPathSummaryReport, Rtl8812auRuntimeIqkSweepSummaryReport,
+    RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
+    RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
+    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
+    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
     PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
 };
@@ -3837,7 +3837,6 @@ type TxRuntimeIqkAttemptReport = Rtl8812auRuntimeIqkAttemptReport;
 type TxRuntimeIqkIqcValue = Rtl8812auRuntimeIqkIqcValue;
 type TxRuntimeIqkMaskedBbWritePlan = Rtl8812auRuntimeIqkMaskedBbWritePlan;
 type TxRuntimeIqkSetupWritePlan = Rtl8812auRuntimeIqkSetupWritePlan;
-type RuntimeIqkOneShotPathState = Rtl8812auRuntimeIqkOneShotPathState;
 
 #[derive(Debug, Serialize)]
 struct Rtl8812aIqkDiagnosticReport {
@@ -5721,8 +5720,6 @@ const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
 const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
 const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
-const REG_IQK_RESULT_A_D00: u16 = 0x0d00;
-const REG_IQK_RESULT_B_D40: u16 = 0x0d40;
 const REG_TX_AGC_A_CCK_JAGUAR: u16 = 0x0c20;
 const REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR: u16 = 0x0c34;
 const REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR: u16 = 0x0c38;
@@ -5736,7 +5733,6 @@ const REG_OFDM0_XBAGCCORE1: u16 = 0x0c58;
 #[allow(dead_code)]
 const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
 const REG_IQK_TX_TONE_A_C80: u16 = 0x0c80;
-const REG_IQK_RX_TONE_A_C84: u16 = 0x0c84;
 const REG_IQK_RFE_SETTING_A_C88: u16 = 0x0c88;
 const REG_IQK_RFE_SETTING_A_C8C: u16 = 0x0c8c;
 const REG_IQK_AFE_A_C5C: u16 = 0x0c5c;
@@ -5776,10 +5772,7 @@ const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
 const REG_TX_PWR_OFFSET_B_JAGUAR: u16 = 0x0e50;
 #[allow(dead_code)]
 const REG_IQK_RX_IQC_B_JAGUAR: u16 = 0x0e10;
-const REG_IQK_TX_TONE_B_E80: u16 = 0x0e80;
 const REG_IQK_RX_TONE_B_E84: u16 = 0x0e84;
-const REG_IQK_RFE_SETTING_B_E88: u16 = 0x0e88;
-const REG_IQK_RFE_SETTING_B_E8C: u16 = 0x0e8c;
 const REG_FPGA0_IQK_JAGUAR: u16 = 0x0e28;
 const REG_TX_IQK_TONE_A_JAGUAR: u16 = 0x0e30;
 const REG_RX_IQK_TONE_A_JAGUAR: u16 = 0x0e34;
@@ -14389,13 +14382,8 @@ const RF_CALIBRATION_IQK_REGISTERS: &[RfCalibrationRegisterSpec] = &[
 ];
 
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
-const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
 const RTL8812A_IQK_MAX_SWEEPS: u8 = 3;
-const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
-const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
-const RTL8812A_IQK_RX_FAIL_MASK: u32 = 1 << 11;
 const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
-const RTL8812A_IQK_RESULT_FIELD_MASK: u32 = 0x07ff_0000;
 
 const RTL8812A_IQK_MACBB_BACKUP_REGISTERS: &[RfCalibrationRegisterSpec] = &[
     ("R_0x520", REG_IQK_MACBB_0X0520),
@@ -15501,31 +15489,6 @@ fn rtl8812a_iqk_rx_fill_iqc_plan(
 }
 
 #[allow(dead_code)]
-fn rtl8812a_iqk_select_page<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    page_c1: bool,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    bb_set_bb_reg(
-        registers,
-        counters,
-        REG_AGC_TABLE_JAGUAR,
-        RTL8812A_IQK_PAGE_C1_SELECT_BIT,
-        u32::from(page_c1),
-    )
-    .map_err(|error| DiagnosticErrorReport {
-        code: "rtl8812a_runtime_iqk_page_select_failed",
-        message: format!(
-            "REG_AGC_TABLE_JAGUAR page {} select failed: {error}",
-            if page_c1 { "C1" } else { "C" }
-        ),
-    })
-}
-
-#[allow(dead_code)]
 fn run_rtl8812a_runtime_iqk_backup<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut DiagnosticCounters,
@@ -15653,155 +15616,6 @@ fn rtl8812a_iqk_select_candidate(
     wfb_radio_runtime::rtl8812au_iqk_select_candidate(candidates)
 }
 
-fn bb_masked_field(value: u32, mask: u32) -> u32 {
-    if mask == 0 {
-        return 0;
-    }
-    (value & mask) >> mask.trailing_zeros()
-}
-
-fn runtime_iqk_write32<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    register_name: &'static str,
-    address: u16,
-    value: u32,
-    error_code: &'static str,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    write32_with_counter(registers, counters, address, value).map_err(|error| {
-        DiagnosticErrorReport {
-            code: error_code,
-            message: format!(
-                "{register_name} {} write {} failed: {error}",
-                format_address(address),
-                format_value(value, 8)
-            ),
-        }
-    })
-}
-
-fn runtime_iqk_read32<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    register_name: &'static str,
-    address: u16,
-    error_code: &'static str,
-) -> std::result::Result<u32, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    read32_with_counter(registers, counters, address).map_err(|error| DiagnosticErrorReport {
-        code: error_code,
-        message: format!(
-            "{register_name} {} read failed: {error}",
-            format_address(address)
-        ),
-    })
-}
-
-fn runtime_iqk_set_bb_reg<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    register_name: &'static str,
-    address: u16,
-    mask: u32,
-    data: u32,
-    error_code: &'static str,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    bb_set_bb_reg(registers, counters, address, mask, data).map_err(|error| DiagnosticErrorReport {
-        code: error_code,
-        message: format!(
-            "{register_name} {} masked write mask={} data={} failed: {error}",
-            format_address(address),
-            format_value(mask, 8),
-            format_value(data, 8)
-        ),
-    })
-}
-
-fn runtime_iqk_rf_masked_write<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    path: TxPowerPathArg,
-    rf_offset: u32,
-    mask: u32,
-    data: u32,
-    error_code: &'static str,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let before = rf_serial_read_register(registers, path, rf_offset, counters)?;
-    let written = apply_rf_mask(before.value, mask, data);
-    rf_serial_write_single_path(registers, path, rf_offset, written, counters).map_err(
-        |error| DiagnosticErrorReport {
-            code: error_code,
-            message: format!(
-                "RF path {} offset {} masked write mask={} data={} failed: {}",
-                before.path_name,
-                before.rf_offset_hex,
-                format_value(mask, 5),
-                format_value(data, 5),
-                error.message
-            ),
-        },
-    )?;
-    Ok(())
-}
-
-fn runtime_iqk_capture_rx_candidate<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    latch_register_name: &'static str,
-    latch_register: u16,
-    result_register_name: &'static str,
-    result_register: u16,
-) -> std::result::Result<TxRuntimeIqkIqcValue, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    runtime_iqk_write32(
-        registers,
-        counters,
-        latch_register_name,
-        latch_register,
-        0x0600_0000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    let rx_x_raw = runtime_iqk_read32(
-        registers,
-        counters,
-        result_register_name,
-        result_register,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        latch_register_name,
-        latch_register,
-        0x0800_0000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    let rx_y_raw = runtime_iqk_read32(
-        registers,
-        counters,
-        result_register_name,
-        result_register,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    Ok(runtime_iqk_iqc_value(
-        bb_masked_field(rx_x_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
-        bb_masked_field(rx_y_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
-    ))
-}
-
 #[allow(dead_code)]
 fn run_rtl8812a_runtime_iqk_tx_oneshot<T>(
     registers: &Rtl8812auRegisterAccess<T>,
@@ -15817,315 +15631,6 @@ where
     result.map_err(runtime_radio_error)
 }
 
-fn runtime_iqk_skipped_stage_report(
-    stage: &'static str,
-    label: &'static str,
-    fill_plan: Vec<TxRuntimeIqkMaskedBbWritePlan>,
-) -> TxRuntimeIqkStageReport {
-    TxRuntimeIqkStageReport {
-        stage,
-        status: "skipped",
-        ready: None,
-        failed: None,
-        retry_count: 0,
-        average_count: 0,
-        delay_count_max: None,
-        attempts: Vec::new(),
-        candidates: Vec::new(),
-        selected_iqc: Some(runtime_iqk_iqc_value(0x200, 0)),
-        fallback_used: true,
-        failure_label: Some(label),
-        fill_plan,
-    }
-}
-
-fn runtime_iqk_stage_success_iqc(stage: &TxRuntimeIqkStageReport) -> Option<TxRuntimeIqkIqcValue> {
-    if stage.status == "success" && !stage.fallback_used {
-        stage.selected_iqc.clone()
-    } else {
-        None
-    }
-}
-
-fn runtime_iqk_prepare_rx_path<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    path: TxPowerPathArg,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    for (rf_offset, value) in [
-        (RF_IQK_MODE_JAGUAR, 0x80000),
-        (RF_IQK_TX_0X30_JAGUAR, 0x30000),
-        (RF_IQK_TX_0X31_JAGUAR, 0x3f7ff),
-        (RF_IQK_TX_0X32_JAGUAR, 0xfe7bf),
-        (0x8f, 0x88001),
-        (0x65, 0x931d1),
-        (RF_IQK_MODE_JAGUAR, 0),
-    ] {
-        rf_serial_write_single_path(registers, path, rf_offset, value, counters).map_err(
-            |error| DiagnosticErrorReport {
-                code: "rtl8812a_runtime_iqk_rx_failed",
-                message: format!(
-                    "RF path {:?} RX IQK setup offset {} value {} failed: {}",
-                    path,
-                    format_value(rf_offset, 2),
-                    format_value(value, 5),
-                    error.message
-                ),
-            },
-        )?;
-    }
-    Ok(())
-}
-
-fn runtime_iqk_load_lok<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    path: TxPowerPathArg,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let lok_source =
-        rf_serial_read_register(registers, path, RF_IQK_LOK_READBACK_JAGUAR, counters)?;
-    let lok_data = bb_masked_field(lok_source.value, 0x000f_fc00);
-    runtime_iqk_rf_masked_write(
-        registers,
-        counters,
-        path,
-        RF_IQK_LOK_LOAD_JAGUAR,
-        0x0007_fe00,
-        lok_data,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )
-}
-
-fn runtime_iqk_prepare_rx_oneshot<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    tx_path_a_ready: bool,
-    tx_path_b_ready: bool,
-    rfe_type: u8,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    rtl8812a_iqk_select_page(registers, counters, false)?;
-    if tx_path_a_ready {
-        runtime_iqk_prepare_rx_path(registers, counters, TxPowerPathArg::A)?;
-    }
-    if tx_path_b_ready {
-        runtime_iqk_prepare_rx_path(registers, counters, TxPowerPathArg::B)?;
-    }
-    runtime_iqk_set_bb_reg(
-        registers,
-        counters,
-        "R_0x978",
-        0x0978,
-        0x8000_0000,
-        1,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_set_bb_reg(
-        registers,
-        counters,
-        "R_0x97c",
-        0x097c,
-        0x8000_0000,
-        0,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "R_0x90c",
-        REG_IQK_MACBB_0X090C,
-        0x0000_8000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "R_0x984",
-        0x0984,
-        0x0046_a890,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "rA_RFE_Pinmux_Jaguar",
-        REG_RFE_PINMUX_A_JAGUAR,
-        0x7777_7717,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "rB_RFE_Pinmux_Jaguar",
-        REG_RFE_PINMUX_B_JAGUAR,
-        0x7777_7717,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    let inv_value = if rfe_type == 1 {
-        0x0000_0077
-    } else {
-        0x0200_0077
-    };
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "rA_RFE_Inv_Jaguar",
-        REG_RFE_INV_A_JAGUAR,
-        inv_value,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        "rB_RFE_Inv_Jaguar",
-        REG_RFE_INV_B_JAGUAR,
-        inv_value,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-
-    rtl8812a_iqk_select_page(registers, counters, true)?;
-    if tx_path_a_ready {
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xc80",
-            REG_IQK_TX_TONE_A_C80,
-            0x3800_8c10,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xc84",
-            REG_IQK_RX_TONE_A_C84,
-            0x1800_8c10,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xc88",
-            REG_IQK_RFE_SETTING_A_C88,
-            0x8214_0119,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-    }
-    if tx_path_b_ready {
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xe80",
-            REG_IQK_TX_TONE_B_E80,
-            0x3800_8c10,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xe84",
-            REG_IQK_RX_TONE_B_E84,
-            0x1800_8c10,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-        runtime_iqk_write32(
-            registers,
-            counters,
-            "R_0xe88",
-            REG_IQK_RFE_SETTING_B_E88,
-            0x8214_0119,
-            "rtl8812a_runtime_iqk_rx_failed",
-        )?;
-    }
-    Ok(())
-}
-
-fn runtime_iqk_trigger_rx_path<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    counters: &mut DiagnosticCounters,
-    tx_iqc: TxRuntimeIqkIqcValue,
-    path_name: &'static str,
-    mixer_register_name: &'static str,
-    mixer_register: u16,
-    latch_register_name: &'static str,
-    latch_register: u16,
-    mixer_value: u32,
-) -> std::result::Result<(), DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    rtl8812a_iqk_select_page(registers, counters, false)?;
-    runtime_iqk_set_bb_reg(
-        registers,
-        counters,
-        "R_0x978",
-        0x0978,
-        0x03ff_8000,
-        tx_iqc.x,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_set_bb_reg(
-        registers,
-        counters,
-        "R_0x978",
-        0x0978,
-        0x0000_07ff,
-        tx_iqc.y,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    rtl8812a_iqk_select_page(registers, counters, true)?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        mixer_register_name,
-        mixer_register,
-        mixer_value,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        latch_register_name,
-        latch_register,
-        0x0030_0000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        latch_register_name,
-        latch_register,
-        0x0010_0000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    std::thread::sleep(Duration::from_millis(5));
-    runtime_iqk_write32(
-        registers,
-        counters,
-        mixer_register_name,
-        mixer_register,
-        0x3c00_0000,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    runtime_iqk_write32(
-        registers,
-        counters,
-        latch_register_name,
-        latch_register,
-        0,
-        "rtl8812a_runtime_iqk_rx_failed",
-    )?;
-    let _ = path_name;
-    Ok(())
-}
-
 #[allow(dead_code)]
 fn run_rtl8812a_runtime_iqk_rx_oneshot<T>(
     registers: &Rtl8812auRegisterAccess<T>,
@@ -16137,242 +15642,16 @@ fn run_rtl8812a_runtime_iqk_rx_oneshot<T>(
 where
     T: radio_core::rtl8812au::Rtl8812auUsbTransport,
 {
-    let tx_a_iqc = runtime_iqk_stage_success_iqc(tx_path_a);
-    let tx_b_iqc = runtime_iqk_stage_success_iqc(tx_path_b);
-    let mut path_a = RuntimeIqkOneShotPathState::default();
-    let mut path_b = RuntimeIqkOneShotPathState::default();
-
-    rtl8812a_iqk_select_page(registers, counters, false)?;
-    if tx_a_iqc.is_some() {
-        runtime_iqk_load_lok(registers, counters, TxPowerPathArg::A)?;
-    }
-    if tx_b_iqc.is_some() {
-        runtime_iqk_load_lok(registers, counters, TxPowerPathArg::B)?;
-    }
-    runtime_iqk_prepare_rx_oneshot(
+    let mut runtime_counters = runtime_radio_counters_from_diagnostic(*counters);
+    let result = wfb_radio_runtime::run_rtl8812au_runtime_iqk_rx_oneshot(
         registers,
-        counters,
-        tx_a_iqc.is_some(),
-        tx_b_iqc.is_some(),
+        &mut runtime_counters,
+        tx_path_a,
+        tx_path_b,
         rfe_type,
-    )?;
-
-    if tx_a_iqc.is_none() && tx_b_iqc.is_none() {
-        return Ok((
-            runtime_iqk_skipped_stage_report("rx", "rx_iqk_skipped_without_tx_iqk", Vec::new()),
-            runtime_iqk_skipped_stage_report("rx", "rx_iqk_skipped_without_tx_iqk", Vec::new()),
-        ));
-    }
-
-    let path_a_mixer = if rfe_type == 1 {
-        0x2816_1500
-    } else {
-        0x2816_0cc0
-    };
-    let path_b_mixer = if rfe_type == 1 {
-        0x2816_1500
-    } else {
-        0x2816_0ca0
-    };
-
-    while !((path_a.is_finished() || tx_a_iqc.is_none())
-        && (path_b.is_finished() || tx_b_iqc.is_none()))
-    {
-        // The upstream loop re-triggers every TX-ready path on each RX retry,
-        // even when that path's RX IQK has already found a stable pair.
-        if let Some(tx_iqc) = tx_a_iqc.as_ref() {
-            runtime_iqk_trigger_rx_path(
-                registers,
-                counters,
-                tx_iqc.clone(),
-                "A",
-                "R_0xc8c",
-                REG_IQK_RFE_SETTING_A_C8C,
-                "R_0xcb8",
-                REG_RFE_TIMING_A_JAGUAR,
-                path_a_mixer,
-            )?;
-        }
-        if let Some(tx_iqc) = tx_b_iqc.as_ref() {
-            runtime_iqk_trigger_rx_path(
-                registers,
-                counters,
-                tx_iqc.clone(),
-                "B",
-                "R_0xe8c",
-                REG_IQK_RFE_SETTING_B_E8C,
-                "R_0xeb8",
-                REG_RFE_TIMING_B_JAGUAR,
-                path_b_mixer,
-            )?;
-        }
-
-        let mut delay_count = 0;
-        loop {
-            if !path_a.is_finished() && tx_a_iqc.is_some() {
-                let value = runtime_iqk_read32(
-                    registers,
-                    counters,
-                    "R_0xd00",
-                    REG_IQK_RESULT_A_D00,
-                    "rtl8812a_runtime_iqk_rx_failed",
-                )?;
-                path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
-            }
-            if !path_b.is_finished() && tx_b_iqc.is_some() {
-                let value = runtime_iqk_read32(
-                    registers,
-                    counters,
-                    "R_0xd40",
-                    REG_IQK_RESULT_B_D40,
-                    "rtl8812a_runtime_iqk_rx_failed",
-                )?;
-                path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
-            }
-            let path_a_ready =
-                path_a.is_finished() || tx_a_iqc.is_none() || path_a.ready().unwrap_or(false);
-            let path_b_ready =
-                path_b.is_finished() || tx_b_iqc.is_none() || path_b.ready().unwrap_or(false);
-            if (path_a_ready && path_b_ready) || delay_count > RTL8812A_IQK_READY_POLL_LIMIT {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-            delay_count += 1;
-        }
-        path_a.note_delay_count(delay_count);
-        path_b.note_delay_count(delay_count);
-
-        if delay_count < RTL8812A_IQK_READY_POLL_LIMIT {
-            if !path_a.is_finished() && tx_a_iqc.is_some() {
-                let value = runtime_iqk_read32(
-                    registers,
-                    counters,
-                    "R_0xd00",
-                    REG_IQK_RESULT_A_D00,
-                    "rtl8812a_runtime_iqk_rx_failed",
-                )?;
-                let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
-                path_a.set_failed(failed);
-                if failed {
-                    path_a.push_attempt(
-                        path_a.ready(),
-                        Some(failed),
-                        Some(delay_count),
-                        Some(value),
-                        None,
-                        Some("rx_iqk_failed_flag"),
-                    );
-                    path_a.note_retry("rx_iqk_failed_flag");
-                } else {
-                    let candidate = runtime_iqk_capture_rx_candidate(
-                        registers,
-                        counters,
-                        "R_0xcb8",
-                        REG_RFE_TIMING_A_JAGUAR,
-                        "R_0xd00",
-                        REG_IQK_RESULT_A_D00,
-                    )?;
-                    path_a.push_attempt(
-                        path_a.ready(),
-                        Some(failed),
-                        Some(delay_count),
-                        Some(value),
-                        Some(candidate.clone()),
-                        None,
-                    );
-                    path_a.push_candidate(candidate);
-                }
-            }
-            if !path_b.is_finished() && tx_b_iqc.is_some() {
-                let value = runtime_iqk_read32(
-                    registers,
-                    counters,
-                    "R_0xd40",
-                    REG_IQK_RESULT_B_D40,
-                    "rtl8812a_runtime_iqk_rx_failed",
-                )?;
-                let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
-                path_b.set_failed(failed);
-                if failed {
-                    path_b.push_attempt(
-                        path_b.ready(),
-                        Some(failed),
-                        Some(delay_count),
-                        Some(value),
-                        None,
-                        Some("rx_iqk_failed_flag"),
-                    );
-                    path_b.note_retry("rx_iqk_failed_flag");
-                } else {
-                    let candidate = runtime_iqk_capture_rx_candidate(
-                        registers,
-                        counters,
-                        "R_0xeb8",
-                        REG_RFE_TIMING_B_JAGUAR,
-                        "R_0xd40",
-                        REG_IQK_RESULT_B_D40,
-                    )?;
-                    path_b.push_attempt(
-                        path_b.ready(),
-                        Some(failed),
-                        Some(delay_count),
-                        Some(value),
-                        Some(candidate.clone()),
-                        None,
-                    );
-                    path_b.push_candidate(candidate);
-                }
-            }
-        } else {
-            if !path_a.is_finished() && tx_a_iqc.is_some() {
-                path_a.push_attempt(
-                    path_a.ready(),
-                    None,
-                    Some(delay_count),
-                    None,
-                    None,
-                    Some("rx_iqk_not_ready"),
-                );
-                path_a.note_retry("rx_iqk_not_ready");
-            }
-            if !path_b.is_finished() && tx_b_iqc.is_some() {
-                path_b.push_attempt(
-                    path_b.ready(),
-                    None,
-                    Some(delay_count),
-                    None,
-                    None,
-                    Some("rx_iqk_not_ready"),
-                );
-                path_b.note_retry("rx_iqk_not_ready");
-            }
-        }
-
-        if (path_a.is_finished() || tx_a_iqc.is_none())
-            && (path_b.is_finished() || tx_b_iqc.is_none())
-        {
-            break;
-        }
-        if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
-            || path_b.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
-            || path_a.candidate_count() == 3
-            || path_b.candidate_count() == 3
-        {
-            break;
-        }
-    }
-
-    let path_a_report = if tx_a_iqc.is_some() {
-        path_a.into_stage_report("rx", runtime_iqk_iqc_value(0x200, 0), Vec::new())
-    } else {
-        runtime_iqk_skipped_stage_report("rx", "rx_iqk_skipped_without_tx_iqk", Vec::new())
-    };
-    let path_b_report = if tx_b_iqc.is_some() {
-        path_b.into_stage_report("rx", runtime_iqk_iqc_value(0x200, 0), Vec::new())
-    } else {
-        runtime_iqk_skipped_stage_report("rx", "rx_iqk_skipped_without_tx_iqk", Vec::new())
-    };
-    Ok((path_a_report, path_b_report))
+    );
+    *counters = diagnostic_counters_from_runtime(runtime_counters);
+    result.map_err(runtime_radio_error)
 }
 
 fn runtime_iqk_stage_iqc_or_fallback(stage: &TxRuntimeIqkStageReport) -> TxRuntimeIqkIqcValue {
@@ -27021,28 +26300,6 @@ fn rf_serial_read_target(path: TxPowerPathArg) -> Option<RfSerialReadTarget> {
         TxPowerPathArg::B => Some(RF_SERIAL_READ_TARGET_B),
         TxPowerPathArg::Both => None,
     }
-}
-
-fn rf_serial_write_single_path<T>(
-    registers: &Rtl8812auRegisterAccess<T>,
-    path: TxPowerPathArg,
-    rf_offset: u32,
-    value: u32,
-    counters: &mut DiagnosticCounters,
-) -> std::result::Result<BridgeTxBenchRfSerialWriteReport, DiagnosticErrorReport>
-where
-    T: radio_core::rtl8812au::Rtl8812auUsbTransport,
-{
-    let write = PreTxRfWriteArg {
-        path,
-        rf_offset,
-        value: value & RF_REGISTER_OFFSET_MASK,
-    };
-    let mut reports = bridge_tx_bench_write_rf_serial_register(registers, &write, counters)?;
-    reports.pop().ok_or_else(|| DiagnosticErrorReport {
-        code: "rf_serial_write_failed",
-        message: format!("RF serial write produced no report for path {path:?}"),
-    })
 }
 
 fn rf_serial_read_register<T>(

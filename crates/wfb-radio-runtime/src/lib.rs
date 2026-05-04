@@ -2317,9 +2317,11 @@ const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
 const RCR_APPFCS: u32 = 1 << 31;
 const RF_CHNLBW_JAGUAR: u32 = 0x18;
 const RF_LCK_JAGUAR: u32 = 0xb4;
+const RF_IQK_LOK_READBACK_JAGUAR: u32 = 0x08;
 const RF_IQK_TX_0X30_JAGUAR: u32 = 0x30;
 const RF_IQK_TX_0X31_JAGUAR: u32 = 0x31;
 const RF_IQK_TX_0X32_JAGUAR: u32 = 0x32;
+const RF_IQK_LOK_LOAD_JAGUAR: u32 = 0x58;
 const RF_IQK_MODE_JAGUAR: u32 = 0xef;
 const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
 const RF_LCK_MODE_BIT: u32 = 1 << 14;
@@ -2328,6 +2330,7 @@ const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
 const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
 const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
+const RTL8812A_IQK_RX_FAIL_MASK: u32 = 1 << 11;
 const RTL8812A_IQK_TX_FAIL_MASK: u32 = 1 << 12;
 const RTL8812A_IQK_RESULT_FIELD_MASK: u32 = 0x07ff_0000;
 const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
@@ -3284,6 +3287,119 @@ where
     Ok(candidate)
 }
 
+fn apply_rf_mask(original: u32, bitmask: u32, data: u32) -> u32 {
+    if bitmask == 0 {
+        return original;
+    }
+    let bitshift = bitmask.trailing_zeros();
+    (original & !bitmask) | ((data << bitshift) & bitmask)
+}
+
+fn runtime_iqk_set_bb_reg<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    data: u32,
+    error_code: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    bb_set_bb_reg(registers, counters, address, mask, data, register_name).map_err(|error| {
+        RuntimeRadioError::new(
+            error_code,
+            format!(
+                "{register_name} {} masked write mask={} data={} failed: {}",
+                format_register_address(address),
+                format_register_value(mask, 8),
+                format_register_value(data, 8),
+                error.message
+            ),
+        )
+    })
+}
+
+fn runtime_iqk_rf_masked_write<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+    rf_offset: u32,
+    mask: u32,
+    data: u32,
+    error_code: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = rf_serial_read_register(registers, path, rf_offset, counters)?;
+    let written = apply_rf_mask(before.value, mask, data);
+    rf_serial_write_single_path(registers, path, rf_offset, written, counters).map_err(
+        |error| {
+            RuntimeRadioError::new(
+                error_code,
+                format!(
+                    "RF path {} offset {} masked write mask={} data={} failed: {}",
+                    before.path_name,
+                    before.rf_offset_hex,
+                    format_register_value(mask, 5),
+                    format_register_value(data, 5),
+                    error.message
+                ),
+            )
+        },
+    )?;
+    Ok(())
+}
+
+fn runtime_iqk_capture_rx_candidate<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    latch_register_name: &'static str,
+    latch_register: u16,
+    result_register_name: &'static str,
+    result_register: u16,
+) -> Result<Rtl8812auRuntimeIqkIqcValue, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0600_0000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    let rx_x_raw = runtime_iqk_read32(
+        registers,
+        counters,
+        result_register_name,
+        result_register,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0800_0000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    let rx_y_raw = runtime_iqk_read32(
+        registers,
+        counters,
+        result_register_name,
+        result_register,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    Ok(rtl8812au_runtime_iqk_iqc_value(
+        bb_masked_field(rx_x_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
+        bb_masked_field(rx_y_raw, RTL8812A_IQK_RESULT_FIELD_MASK),
+    ))
+}
+
 pub fn run_rtl8812au_runtime_iqk_tx_oneshot<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut RuntimeRadioCounters,
@@ -3509,6 +3625,553 @@ where
     ))
 }
 
+fn runtime_iqk_prepare_rx_path<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    for (rf_offset, value) in [
+        (RF_IQK_MODE_JAGUAR, 0x80000),
+        (RF_IQK_TX_0X30_JAGUAR, 0x30000),
+        (RF_IQK_TX_0X31_JAGUAR, 0x3f7ff),
+        (RF_IQK_TX_0X32_JAGUAR, 0xfe7bf),
+        (0x8f, 0x88001),
+        (0x65, 0x931d1),
+        (RF_IQK_MODE_JAGUAR, 0),
+    ] {
+        rf_serial_write_single_path(registers, path, rf_offset, value, counters).map_err(
+            |error| {
+                RuntimeRadioError::new(
+                    "rtl8812a_runtime_iqk_rx_failed",
+                    format!(
+                        "RF path {:?} RX IQK setup offset {} value {} failed: {}",
+                        path,
+                        format_register_value(rf_offset, 2),
+                        format_register_value(value, 5),
+                        error.message
+                    ),
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn runtime_iqk_load_lok<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    path: Rtl8812auRfPath,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let lok_source =
+        rf_serial_read_register(registers, path, RF_IQK_LOK_READBACK_JAGUAR, counters)?;
+    let lok_data = bb_masked_field(lok_source.value, 0x000f_fc00);
+    runtime_iqk_rf_masked_write(
+        registers,
+        counters,
+        path,
+        RF_IQK_LOK_LOAD_JAGUAR,
+        0x0007_fe00,
+        lok_data,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )
+}
+
+fn runtime_iqk_prepare_rx_oneshot<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    tx_path_a_ready: bool,
+    tx_path_b_ready: bool,
+    rfe_type: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    rtl8812au_iqk_select_page(registers, counters, false)?;
+    if tx_path_a_ready {
+        runtime_iqk_prepare_rx_path(registers, counters, Rtl8812auRfPath::A)?;
+    }
+    if tx_path_b_ready {
+        runtime_iqk_prepare_rx_path(registers, counters, Rtl8812auRfPath::B)?;
+    }
+    runtime_iqk_set_bb_reg(
+        registers,
+        counters,
+        "R_0x978",
+        0x0978,
+        0x8000_0000,
+        1,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_set_bb_reg(
+        registers,
+        counters,
+        "R_0x97c",
+        0x097c,
+        0x8000_0000,
+        0,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "R_0x90c",
+        REG_IQK_MACBB_0X090C,
+        0x0000_8000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "R_0x984",
+        0x0984,
+        0x0046_a890,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "rA_RFE_Pinmux_Jaguar",
+        REG_RFE_PINMUX_A_JAGUAR,
+        0x7777_7717,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "rB_RFE_Pinmux_Jaguar",
+        REG_RFE_PINMUX_B_JAGUAR,
+        0x7777_7717,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    let inv_value = if rfe_type == 1 {
+        0x0000_0077
+    } else {
+        0x0200_0077
+    };
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "rA_RFE_Inv_Jaguar",
+        REG_RFE_INV_A_JAGUAR,
+        inv_value,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        "rB_RFE_Inv_Jaguar",
+        REG_RFE_INV_B_JAGUAR,
+        inv_value,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+
+    rtl8812au_iqk_select_page(registers, counters, true)?;
+    if tx_path_a_ready {
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xc80",
+            REG_IQK_TX_TONE_A_C80,
+            0x3800_8c10,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xc84",
+            REG_IQK_RX_TONE_A_C84,
+            0x1800_8c10,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xc88",
+            REG_IQK_RFE_SETTING_A_C88,
+            0x8214_0119,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+    }
+    if tx_path_b_ready {
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xe80",
+            REG_IQK_TX_TONE_B_E80,
+            0x3800_8c10,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xe84",
+            REG_IQK_RX_TONE_B_E84,
+            0x1800_8c10,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+        runtime_iqk_write32(
+            registers,
+            counters,
+            "R_0xe88",
+            REG_IQK_RFE_SETTING_B_E88,
+            0x8214_0119,
+            "rtl8812a_runtime_iqk_rx_failed",
+        )?;
+    }
+    Ok(())
+}
+
+fn runtime_iqk_trigger_rx_path<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    tx_iqc: &Rtl8812auRuntimeIqkIqcValue,
+    mixer_register_name: &'static str,
+    mixer_register: u16,
+    latch_register_name: &'static str,
+    latch_register: u16,
+    mixer_value: u32,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    rtl8812au_iqk_select_page(registers, counters, false)?;
+    runtime_iqk_set_bb_reg(
+        registers,
+        counters,
+        "R_0x978",
+        0x0978,
+        0x03ff_8000,
+        tx_iqc.x,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_set_bb_reg(
+        registers,
+        counters,
+        "R_0x978",
+        0x0978,
+        0x0000_07ff,
+        tx_iqc.y,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    rtl8812au_iqk_select_page(registers, counters, true)?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        mixer_register_name,
+        mixer_register,
+        mixer_value,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0030_0000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0x0010_0000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    thread::sleep(Duration::from_millis(5));
+    runtime_iqk_write32(
+        registers,
+        counters,
+        mixer_register_name,
+        mixer_register,
+        0x3c00_0000,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    runtime_iqk_write32(
+        registers,
+        counters,
+        latch_register_name,
+        latch_register,
+        0,
+        "rtl8812a_runtime_iqk_rx_failed",
+    )?;
+    Ok(())
+}
+
+pub fn run_rtl8812au_runtime_iqk_rx_oneshot<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    tx_path_a: &Rtl8812auRuntimeIqkStageReport,
+    tx_path_b: &Rtl8812auRuntimeIqkStageReport,
+    rfe_type: u8,
+) -> Result<
+    (
+        Rtl8812auRuntimeIqkStageReport,
+        Rtl8812auRuntimeIqkStageReport,
+    ),
+    RuntimeRadioError,
+>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let tx_a_iqc = rtl8812au_runtime_iqk_stage_success_iqc(tx_path_a);
+    let tx_b_iqc = rtl8812au_runtime_iqk_stage_success_iqc(tx_path_b);
+    let mut path_a = Rtl8812auRuntimeIqkOneShotPathState::default();
+    let mut path_b = Rtl8812auRuntimeIqkOneShotPathState::default();
+
+    rtl8812au_iqk_select_page(registers, counters, false)?;
+    if tx_a_iqc.is_some() {
+        runtime_iqk_load_lok(registers, counters, Rtl8812auRfPath::A)?;
+    }
+    if tx_b_iqc.is_some() {
+        runtime_iqk_load_lok(registers, counters, Rtl8812auRfPath::B)?;
+    }
+    runtime_iqk_prepare_rx_oneshot(
+        registers,
+        counters,
+        tx_a_iqc.is_some(),
+        tx_b_iqc.is_some(),
+        rfe_type,
+    )?;
+
+    if tx_a_iqc.is_none() && tx_b_iqc.is_none() {
+        return Ok((
+            rtl8812au_runtime_iqk_skipped_stage_report(
+                "rx",
+                "rx_iqk_skipped_without_tx_iqk",
+                Vec::new(),
+            ),
+            rtl8812au_runtime_iqk_skipped_stage_report(
+                "rx",
+                "rx_iqk_skipped_without_tx_iqk",
+                Vec::new(),
+            ),
+        ));
+    }
+
+    let path_a_mixer = if rfe_type == 1 {
+        0x2816_1500
+    } else {
+        0x2816_0cc0
+    };
+    let path_b_mixer = if rfe_type == 1 {
+        0x2816_1500
+    } else {
+        0x2816_0ca0
+    };
+
+    while !((path_a.is_finished() || tx_a_iqc.is_none())
+        && (path_b.is_finished() || tx_b_iqc.is_none()))
+    {
+        // The upstream loop re-triggers every TX-ready path on each RX retry,
+        // even when that path's RX IQK has already found a stable pair.
+        if let Some(tx_iqc) = tx_a_iqc.as_ref() {
+            runtime_iqk_trigger_rx_path(
+                registers,
+                counters,
+                tx_iqc,
+                "R_0xc8c",
+                REG_IQK_RFE_SETTING_A_C8C,
+                "R_0xcb8",
+                REG_RFE_TIMING_A_JAGUAR,
+                path_a_mixer,
+            )?;
+        }
+        if let Some(tx_iqc) = tx_b_iqc.as_ref() {
+            runtime_iqk_trigger_rx_path(
+                registers,
+                counters,
+                tx_iqc,
+                "R_0xe8c",
+                REG_IQK_RFE_SETTING_B_E8C,
+                "R_0xeb8",
+                REG_RFE_TIMING_B_JAGUAR,
+                path_b_mixer,
+            )?;
+        }
+
+        let mut delay_count = 0;
+        loop {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd00",
+                    REG_IQK_RESULT_A_D00,
+                    "rtl8812a_runtime_iqk_rx_failed",
+                )?;
+                path_a.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
+            }
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd40",
+                    REG_IQK_RESULT_B_D40,
+                    "rtl8812a_runtime_iqk_rx_failed",
+                )?;
+                path_b.set_ready(value & RTL8812A_IQK_READY_MASK != 0);
+            }
+            let path_a_ready =
+                path_a.is_finished() || tx_a_iqc.is_none() || path_a.ready().unwrap_or(false);
+            let path_b_ready =
+                path_b.is_finished() || tx_b_iqc.is_none() || path_b.ready().unwrap_or(false);
+            if (path_a_ready && path_b_ready) || delay_count > RTL8812A_IQK_READY_POLL_LIMIT {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+            delay_count += 1;
+        }
+        path_a.note_delay_count(delay_count);
+        path_b.note_delay_count(delay_count);
+
+        if delay_count < RTL8812A_IQK_READY_POLL_LIMIT {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd00",
+                    REG_IQK_RESULT_A_D00,
+                    "rtl8812a_runtime_iqk_rx_failed",
+                )?;
+                let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
+                path_a.set_failed(failed);
+                if failed {
+                    path_a.push_attempt(
+                        path_a.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("rx_iqk_failed_flag"),
+                    );
+                    path_a.note_retry("rx_iqk_failed_flag");
+                } else {
+                    let candidate = runtime_iqk_capture_rx_candidate(
+                        registers,
+                        counters,
+                        "R_0xcb8",
+                        REG_RFE_TIMING_A_JAGUAR,
+                        "R_0xd00",
+                        REG_IQK_RESULT_A_D00,
+                    )?;
+                    path_a.push_attempt(
+                        path_a.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_a.push_candidate(candidate);
+                }
+            }
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
+                let value = runtime_iqk_read32(
+                    registers,
+                    counters,
+                    "R_0xd40",
+                    REG_IQK_RESULT_B_D40,
+                    "rtl8812a_runtime_iqk_rx_failed",
+                )?;
+                let failed = value & RTL8812A_IQK_RX_FAIL_MASK != 0;
+                path_b.set_failed(failed);
+                if failed {
+                    path_b.push_attempt(
+                        path_b.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        None,
+                        Some("rx_iqk_failed_flag"),
+                    );
+                    path_b.note_retry("rx_iqk_failed_flag");
+                } else {
+                    let candidate = runtime_iqk_capture_rx_candidate(
+                        registers,
+                        counters,
+                        "R_0xeb8",
+                        REG_RFE_TIMING_B_JAGUAR,
+                        "R_0xd40",
+                        REG_IQK_RESULT_B_D40,
+                    )?;
+                    path_b.push_attempt(
+                        path_b.ready(),
+                        Some(failed),
+                        Some(delay_count),
+                        Some(value),
+                        Some(candidate.clone()),
+                        None,
+                    );
+                    path_b.push_candidate(candidate);
+                }
+            }
+        } else {
+            if !path_a.is_finished() && tx_a_iqc.is_some() {
+                path_a.push_attempt(
+                    path_a.ready(),
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("rx_iqk_not_ready"),
+                );
+                path_a.note_retry("rx_iqk_not_ready");
+            }
+            if !path_b.is_finished() && tx_b_iqc.is_some() {
+                path_b.push_attempt(
+                    path_b.ready(),
+                    None,
+                    Some(delay_count),
+                    None,
+                    None,
+                    Some("rx_iqk_not_ready"),
+                );
+                path_b.note_retry("rx_iqk_not_ready");
+            }
+        }
+
+        if (path_a.is_finished() || tx_a_iqc.is_none())
+            && (path_b.is_finished() || tx_b_iqc.is_none())
+        {
+            break;
+        }
+        if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
+            || path_b.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
+            || path_a.candidate_count() == 3
+            || path_b.candidate_count() == 3
+        {
+            break;
+        }
+    }
+
+    let path_a_report = if tx_a_iqc.is_some() {
+        path_a.into_stage_report("rx", rtl8812au_runtime_iqk_iqc_value(0x200, 0), Vec::new())
+    } else {
+        rtl8812au_runtime_iqk_skipped_stage_report(
+            "rx",
+            "rx_iqk_skipped_without_tx_iqk",
+            Vec::new(),
+        )
+    };
+    let path_b_report = if tx_b_iqc.is_some() {
+        path_b.into_stage_report("rx", rtl8812au_runtime_iqk_iqc_value(0x200, 0), Vec::new())
+    } else {
+        rtl8812au_runtime_iqk_skipped_stage_report(
+            "rx",
+            "rx_iqk_skipped_without_tx_iqk",
+            Vec::new(),
+        )
+    };
+    Ok((path_a_report, path_b_report))
+}
+
 pub fn rtl8812au_runtime_iqk_masked_bb_write_plan(
     register_name: &'static str,
     address: u16,
@@ -3700,6 +4363,15 @@ fn rf_serial_read_target(path: Rtl8812auRfPath) -> Option<RfSerialReadTarget> {
 
 fn rf_register_display_name(rf_offset: u32) -> &'static str {
     match rf_offset {
+        0x00 => "RF_0x00",
+        RF_IQK_LOK_READBACK_JAGUAR => "RF_0x08_LOK_readback",
+        RF_IQK_TX_0X30_JAGUAR => "RF_0x30_IQK",
+        RF_IQK_TX_0X31_JAGUAR => "RF_0x31_IQK",
+        RF_IQK_TX_0X32_JAGUAR => "RF_0x32_IQK",
+        RF_IQK_LOK_LOAD_JAGUAR => "RF_0x58_LOK_load",
+        0x65 => "RF_0x65_IQK_backup",
+        0x8f => "RF_0x8f_IQK_backup",
+        RF_IQK_MODE_JAGUAR => "RF_0xef_IQK_mode",
         RF_CHNLBW_JAGUAR => "RF_CHNLBW_Jaguar",
         RF_LCK_JAGUAR => "RF_LCK",
         _ => "RF register",
@@ -6678,6 +7350,81 @@ mod tests {
         }));
         assert!(writes.iter().any(|(address, bytes)| {
             *address == super::REG_RFE_TIMING_A_JAGUAR && bytes.as_slice() == 0_u32.to_le_bytes()
+        }));
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_rx_oneshot_runs_lok_prep_and_attempt_loop() {
+        let transport = MockTransport::default();
+        transport.insert_u32(super::REG_RF_PI_MODE_A_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_MODE_B_JAGUAR, 0x0000_0004);
+        transport.insert_u32(super::REG_RF_PI_READ_A_JAGUAR, 0x000a_a000);
+        transport.insert_u32(super::REG_RF_PI_READ_B_JAGUAR, 0x000b_b000);
+        transport.insert_u32(
+            super::REG_IQK_RESULT_A_D00,
+            super::RTL8812A_IQK_READY_MASK | (0x130 << 16),
+        );
+        transport.insert_u32(
+            super::REG_IQK_RESULT_B_D40,
+            super::RTL8812A_IQK_READY_MASK | (0x131 << 16),
+        );
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+        let tx_a = super::Rtl8812auRuntimeIqkStageReport {
+            stage: "tx",
+            status: "success",
+            ready: Some(true),
+            failed: Some(false),
+            retry_count: 0,
+            average_count: 2,
+            delay_count_max: Some(0),
+            attempts: Vec::new(),
+            candidates: Vec::new(),
+            selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x120, 0x020)),
+            fallback_used: false,
+            failure_label: None,
+            fill_plan: Vec::new(),
+        };
+        let tx_b = super::Rtl8812auRuntimeIqkStageReport {
+            selected_iqc: Some(super::rtl8812au_runtime_iqk_iqc_value(0x121, 0x021)),
+            ..tx_a.clone()
+        };
+
+        let (rx_a, rx_b) =
+            super::run_rtl8812au_runtime_iqk_rx_oneshot(&registers, &mut counters, &tx_a, &tx_b, 3)
+                .expect("RX IQK one-shot");
+
+        assert_eq!(rx_a.stage, "rx");
+        assert_eq!(rx_a.status, "success");
+        assert_eq!(rx_a.average_count, 2);
+        assert_eq!(
+            rx_a.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
+            Some((0x130, 0x130))
+        );
+        assert_eq!(rx_b.status, "success");
+        assert_eq!(rx_b.average_count, 2);
+        assert_eq!(
+            rx_b.selected_iqc.as_ref().map(|iqc| (iqc.x, iqc.y)),
+            Some((0x131, 0x131))
+        );
+        assert!(counters.usb_control_reads > 0);
+        assert!(counters.usb_control_writes > 0);
+
+        let writes = transport.writes();
+        assert!(writes.iter().any(|(address, bytes)| {
+            let Ok(encoded) = <[u8; 4]>::try_from(bytes.as_slice()).map(u32::from_le_bytes) else {
+                return false;
+            };
+            *address == super::REG_RF_PATH_A_3WIRE
+                && ((encoded >> 20) & 0xff) == super::RF_IQK_LOK_LOAD_JAGUAR
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_IQK_RFE_SETTING_A_C8C
+                && bytes.as_slice() == 0x2816_0cc0_u32.to_le_bytes()
+        }));
+        assert!(writes.iter().any(|(address, bytes)| {
+            *address == super::REG_RFE_PINMUX_A_JAGUAR
+                && bytes.as_slice() == 0x7777_7717_u32.to_le_bytes()
         }));
     }
 

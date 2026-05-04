@@ -221,10 +221,11 @@ setup without making runtime IQK the default path.
   IQK for the current band/RFE state and has selected TX/RX IQK values for
   path A or path B
 - **THEN** setup planning, setup-plan application, state backup/restore,
-  candidate selection, one-shot outcome state, TX one-shot execution, sweep
+  candidate selection, one-shot outcome state, TX/RX one-shot execution, sweep
   summary generation, and TX/RX IQC masked-write planning MUST come from
-  runtime-owned helpers while RX one-shot register sequencing and evidence
-  formatting remain diagnostic-owned until full IQK execution is migrated
+  runtime-owned helpers while live IQC fill application, sweep orchestration,
+  and evidence formatting remain diagnostic-owned until full IQK execution is
+  migrated
 
 #### Scenario: Runtime IQK restores saved state
 - **WHEN** runtime IQK exits after success or failure
