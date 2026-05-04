@@ -55,11 +55,12 @@ use wfb_radio_runtime::{
     Rtl8812auTxPowerControlMode, Rtl8812auTxPowerControlReport, Rtl8812auTxPowerEfusePlanReport,
     Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile, RuntimeFlowRxTelemetry,
     RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
-    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-    RuntimeSameSessionInitFailure, RuntimeSameSessionInitPhaseFailure,
-    RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
-    RuntimeSameSessionInitReadiness, RuntimeTransportError, RuntimeTxCalibrationEvidenceSource,
-    RuntimeUsbOpenConfig, RuntimeUsbTransport, TxCalibrationClass as RuntimeTxCalibrationClass,
+    RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeRxSignalSummary,
+    RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
+    RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
+    RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness, RuntimeTransportError,
+    RuntimeTxCalibrationEvidenceSource, RuntimeUsbOpenConfig, RuntimeUsbTransport,
+    TxCalibrationClass as RuntimeTxCalibrationClass,
     TxCalibrationProfile as RuntimeTxCalibrationProfile, PRODUCTION_TX_RECEIVE_TIMEOUT,
     PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
 };
@@ -3362,6 +3363,7 @@ struct RxFixtureReport {
     rssi_valid_frames: u64,
     snr_frames: u64,
     noise_frames: u64,
+    signal: RuntimeRxSignalSummary,
     dropped_packets: u64,
     need_more_data: u64,
     bytes_consumed: u64,
@@ -20647,6 +20649,7 @@ fn apply_runtime_rx_packet_telemetry(
         .saturating_add(telemetry.rssi_valid_frames);
     report.snr_frames = report.snr_frames.saturating_add(telemetry.snr_frames);
     report.noise_frames = report.noise_frames.saturating_add(telemetry.noise_frames);
+    report.signal.merge(&telemetry.signal);
     report.dropped_packets = report
         .dropped_packets
         .saturating_add(telemetry.dropped_packets);
@@ -20707,6 +20710,7 @@ fn count_rx_metadata(report: &mut RxFixtureReport, frame: &radio_core::RxFrame) 
     if frame.noise_dbm.is_some() {
         report.noise_frames += 1;
     }
+    report.signal.observe_frame(frame);
 }
 
 fn process_wfb_rx_forwards(
@@ -23793,6 +23797,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             rssi_valid_frames: bridge.rx.rssi_valid_frames,
             snr_frames: bridge.rx.snr_frames,
             noise_frames: bridge.rx.noise_frames,
+            signal: bridge.rx.signal,
             forwarded_payloads,
             rx_forwards,
             dropped_packets: bridge.rx.dropped_packets,
@@ -39957,6 +39962,10 @@ u8 array_mp_8812a_fw_nic[] = {
         assert_eq!(report.rssi_valid_frames, 1);
         assert_eq!(report.snr_frames, 1);
         assert_eq!(report.noise_frames, 1);
+        assert_eq!(report.signal.rssi_dbm.sample_count, 1);
+        assert_eq!(report.signal.rssi_dbm.average, Some(-44));
+        assert_eq!(report.signal.snr_db.average, Some(24));
+        assert_eq!(report.signal.noise_dbm.average, Some(-68));
     }
 
     #[test]

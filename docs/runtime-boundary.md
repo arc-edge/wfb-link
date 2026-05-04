@@ -130,8 +130,9 @@ receiver-backed calibration evidence.
    harness code out of `wfb-radio-diag`.
 5. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
-   `wfb-radio-runtime`; RX/TX flow counters and adapter-side RSSI/SNR/noise
-   frame metadata are runtime-owned now.
+   `wfb-radio-runtime`; RX/TX flow counters, adapter-side RSSI/SNR/noise frame
+   metadata counts, and RSSI/SNR/noise min/max/average summaries are
+   runtime-owned now.
 6. Keep legacy smoke probes diagnostic-only unless a production workflow needs them.
 
 The diagnostic binary should continue to be able to run every bring-up probe. Production behavior should live in runtime APIs first, then in a thinner runtime-oriented command surface.
@@ -254,6 +255,14 @@ with parsed RX packet accounting and WFB RX forwarding owned by
 24 parsed RX frames, and 20 SNR-bearing RX frames. No TX datagrams were
 injected. Artifact: `/tmp/wfb-radio-run-rx-handler-smoke.json` on the hardware
 Mac deploy checkout.
+
+Production RX telemetry now also emits `rx.signal` with RSSI, SNR, and noise
+sample counts plus min/max/rounded-average dB values. The summary is computed
+from the same RTL8812AU PHY-status metadata used by `rx-scan` frame JSONL and
+is present in both diagnostic bridge reports and runtime-owned `radio-run`
+reports. Live validation at
+`/tmp/wfb-radio-run-duplex-signal-summary-20260504-155712` populated
+`rx.signal` over `6991` samples while both peer counters recovered `20/20`.
 
 After archiving the runtime cutover specs on May 4, 2026,
 `scripts/run-production-radio-smoke.sh --mode both` was run on the hardware Mac

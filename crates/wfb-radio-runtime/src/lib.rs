@@ -491,9 +491,87 @@ pub struct RuntimeFlowRxTelemetry {
     pub rssi_valid_frames: u64,
     pub snr_frames: u64,
     pub noise_frames: u64,
+    pub signal: RuntimeRxSignalSummary,
     pub forwarded_payloads: u64,
     pub rx_forwards: Vec<ProductionRuntimeRxForwardSnapshot>,
     pub dropped_packets: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeRxSignalMetric {
+    pub sample_count: u64,
+    pub min: Option<i8>,
+    pub max: Option<i8>,
+    pub average: Option<i64>,
+    #[serde(skip)]
+    sum: i64,
+}
+
+impl RuntimeRxSignalMetric {
+    pub fn observe(&mut self, value: i8) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.sum = self.sum.saturating_add(i64::from(value));
+        self.min = Some(self.min.map_or(value, |current| current.min(value)));
+        self.max = Some(self.max.map_or(value, |current| current.max(value)));
+        self.average = Some(rounded_average_i64(self.sum, self.sample_count));
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        if other.sample_count == 0 {
+            return;
+        }
+        self.sample_count = self.sample_count.saturating_add(other.sample_count);
+        self.sum = self.sum.saturating_add(other.sum);
+        self.min = match (self.min, other.min) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (None, Some(right)) => Some(right),
+            (left, None) => left,
+        };
+        self.max = match (self.max, other.max) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, Some(right)) => Some(right),
+            (left, None) => left,
+        };
+        self.average = Some(rounded_average_i64(self.sum, self.sample_count));
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeRxSignalSummary {
+    pub rssi_dbm: RuntimeRxSignalMetric,
+    pub snr_db: RuntimeRxSignalMetric,
+    pub noise_dbm: RuntimeRxSignalMetric,
+}
+
+impl RuntimeRxSignalSummary {
+    pub fn observe_frame(&mut self, frame: &RxFrame) {
+        if frame.rssi_dbm_valid {
+            self.rssi_dbm.observe(frame.rssi_dbm);
+        }
+        if let Some(snr_db) = frame.snr_db {
+            self.snr_db.observe(snr_db);
+        }
+        if let Some(noise_dbm) = frame.noise_dbm {
+            self.noise_dbm.observe(noise_dbm);
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.rssi_dbm.merge(&other.rssi_dbm);
+        self.snr_db.merge(&other.snr_db);
+        self.noise_dbm.merge(&other.noise_dbm);
+    }
+}
+
+fn rounded_average_i64(sum: i64, count: u64) -> i64 {
+    let count = i64::try_from(count).unwrap_or(i64::MAX).max(1);
+    if sum >= 0 {
+        (sum + count / 2) / count
+    } else {
+        -((-sum + count / 2) / count)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -670,6 +748,7 @@ pub struct ProductionRuntimeRxPacketTelemetry {
     pub rssi_valid_frames: u64,
     pub snr_frames: u64,
     pub noise_frames: u64,
+    pub signal: RuntimeRxSignalSummary,
     pub dropped_packets: u64,
     pub need_more_data: u64,
     pub management_frames: u64,
@@ -769,6 +848,7 @@ fn count_production_rx_metadata(
     if frame.noise_dbm.is_some() {
         telemetry.noise_frames = telemetry.noise_frames.saturating_add(1);
     }
+    telemetry.signal.observe_frame(frame);
 }
 
 fn count_production_rx_frame_type(
@@ -8787,6 +8867,7 @@ mod tests {
             rssi_valid_frames: 6,
             snr_frames: 5,
             noise_frames: 5,
+            signal: super::RuntimeRxSignalSummary::default(),
             forwarded_payloads: 3,
             rx_forwards: Vec::new(),
             dropped_packets: 4,
@@ -9127,10 +9208,52 @@ mod tests {
         assert_eq!(outcome.telemetry.rssi_valid_frames, 1);
         assert_eq!(outcome.telemetry.snr_frames, 1);
         assert_eq!(outcome.telemetry.noise_frames, 1);
+        assert_eq!(outcome.telemetry.signal.rssi_dbm.sample_count, 1);
+        assert_eq!(outcome.telemetry.signal.rssi_dbm.min, Some(-47));
+        assert_eq!(outcome.telemetry.signal.rssi_dbm.max, Some(-47));
+        assert_eq!(outcome.telemetry.signal.rssi_dbm.average, Some(-47));
+        assert_eq!(outcome.telemetry.signal.snr_db.average, Some(45));
+        assert_eq!(outcome.telemetry.signal.noise_dbm.average, Some(-92));
         assert_eq!(outcome.telemetry.data_frames, 1);
         assert_eq!(outcome.telemetry.dropped_packets, 1);
         assert_eq!(outcome.telemetry.need_more_data, 1);
         assert!(outcome.rx_forwards.is_empty());
+    }
+
+    #[test]
+    fn production_rx_handler_tracks_signal_ranges() {
+        let mut second = runtime_rx_frame(vec![0x08; 24]);
+        second.rssi_dbm = -55;
+        second.snr_db = Some(25);
+        second.noise_dbm = Some(-90);
+        let packets = vec![
+            ParsedRxPacket {
+                consumed: 64,
+                outcome: RxParseOutcome::Frame,
+                frame: Some(runtime_rx_frame(vec![0x08; 24])),
+            },
+            ParsedRxPacket {
+                consumed: 64,
+                outcome: RxParseOutcome::Frame,
+                frame: Some(second),
+            },
+        ];
+        let mut forwards = Vec::new();
+
+        let outcome =
+            process_production_rx_packet_outcomes(&packets, &mut forwards).expect("rx outcomes");
+        let signal = outcome.telemetry.signal;
+
+        assert_eq!(signal.rssi_dbm.sample_count, 2);
+        assert_eq!(signal.rssi_dbm.min, Some(-55));
+        assert_eq!(signal.rssi_dbm.max, Some(-47));
+        assert_eq!(signal.rssi_dbm.average, Some(-51));
+        assert_eq!(signal.snr_db.min, Some(25));
+        assert_eq!(signal.snr_db.max, Some(45));
+        assert_eq!(signal.snr_db.average, Some(35));
+        assert_eq!(signal.noise_dbm.min, Some(-92));
+        assert_eq!(signal.noise_dbm.max, Some(-90));
+        assert_eq!(signal.noise_dbm.average, Some(-91));
     }
 
     #[test]
