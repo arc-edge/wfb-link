@@ -122,6 +122,12 @@ width when available, and `verify_status` (`verified`, `mismatch`,
 `set_unverified`, `set_failed`, or `skipped`). The same object is embedded in
 `datagram-evidence.json` and `${REMOTE_PREFIX}-summary.json` so missing `iw` or
 channel drift is visible without scraping `setup.log`.
+The runner also writes local `pcap-channel-evidence.json` from the copied Linux
+RF pcap. It counts radiotap frequency tags and is embedded in
+`datagram-evidence.json` as `pcap_channel_evidence`. `verified` means all
+frequency-tagged frames stayed on the requested channel; `off_channel_frames`
+or `requested_frequency_absent` makes the RF-quality outcome fail the
+production margin even when payload recovery looks good.
 `rf-quality-report` lifts that object to `macos.wfb_outcome.channel_state`.
 New-format outdoor gates reject a close-range report when
 `channel_state.verify_status` is present and not `verified`, or when observed
@@ -148,6 +154,17 @@ The current hardened automation evidence is
 zero decrypt failures, tuple-consistent `RX_ANT` telemetry at `5180/MCS1/20`,
 bridge-ready evidence before RF traffic, restore JSON, and an empty
 `missing-artifacts.txt`.
+After moving the Mac adapter to the local Mac and hardening the peer against
+NetworkManager scan drift, the May 4, 2026 local direct channel-36 EFUSE run
+`/tmp/wfb-rfq-local-direct-ch36-peerhard-efuse-full-a1/rf-quality-report.json`
+recovered `1993/2000`, logged zero decrypt failures, verified monitor-mode
+channel 36 / 20 MHz, and passed as
+`baseline_comparable` / `matched` / `within_margin`.
+The pcap-channel-evidence smoke
+`/tmp/wfb-rfq-local-direct-ch36-pcap-evidence-smoke-a1/rf-quality-report.json`
+recovered `80/80` and recorded
+`pcap_channel_evidence.status=verified`, with all `186` frequency-tagged RF
+pcap frames on `5180 MHz`.
 New-format reports classify all-zero WFB-ng SNR as `receiver_signal.status=usable`
 rather than `complete` when the RX_ANT tuple and RSSI evidence are otherwise
 valid. The current latest-schema runtime-IQK reference is

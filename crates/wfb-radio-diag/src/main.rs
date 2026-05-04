@@ -29281,6 +29281,7 @@ fn rf_quality_outcome_comparison(
     let receiver_metadata_status = rf_quality_receiver_metadata_status(&macos.wfb_outcome);
     let peer_isolation_failure = rf_quality_peer_isolation_failure(&macos.wfb_outcome);
     let receiver_decrypt_failure = rf_quality_receiver_decrypt_failure(&macos.wfb_outcome);
+    let pcap_channel_failure = rf_quality_pcap_channel_failure(&macos.wfb_outcome);
     let acceptance_margin = rf_quality_outcome_acceptance_margin(
         &macos_side,
         linux_side.as_ref(),
@@ -29288,6 +29289,7 @@ fn rf_quality_outcome_comparison(
         receiver_metadata_status,
         peer_isolation_failure,
         receiver_decrypt_failure,
+        pcap_channel_failure,
     );
 
     RfQualityOutcomeComparisonReport {
@@ -29306,6 +29308,7 @@ fn rf_quality_outcome_acceptance_margin(
     receiver_metadata_status: &'static str,
     peer_isolation_failure: Option<&'static str>,
     receiver_decrypt_failure: Option<&'static str>,
+    pcap_channel_failure: Option<&'static str>,
 ) -> RfQualityOutcomeAcceptanceMarginReport {
     let Some(linux_baseline) = linux_baseline else {
         return RfQualityOutcomeAcceptanceMarginReport {
@@ -29345,6 +29348,9 @@ fn rf_quality_outcome_acceptance_margin(
         failures.push(failure);
     }
     if let Some(failure) = receiver_decrypt_failure {
+        failures.push(failure);
+    }
+    if let Some(failure) = pcap_channel_failure {
         failures.push(failure);
     }
 
@@ -29392,6 +29398,24 @@ fn rf_quality_peer_isolation_failure(
         None
     } else {
         Some("Linux peer isolation was required but not verified clean before receiver start")
+    }
+}
+
+fn rf_quality_pcap_channel_failure(
+    wfb_outcome: &RfQualityWfbOutcomeReport,
+) -> Option<&'static str> {
+    let evidence = wfb_outcome.receiver_evidence.as_ref()?;
+    let status = rf_quality_json_string(evidence, &["pcap_channel_evidence", "status"])?;
+    rf_quality_pcap_channel_status_failure(status.as_str())
+}
+
+fn rf_quality_pcap_channel_status_failure(status: &str) -> Option<&'static str> {
+    match status {
+        "off_channel_frames" => Some("Linux RF pcap included frames outside the requested channel"),
+        "requested_frequency_absent" => {
+            Some("Linux RF pcap did not contain frames on the requested channel")
+        }
+        _ => None,
     }
 }
 
@@ -29982,7 +30006,7 @@ fn rf_quality_close_range_gate_channel_state_matches(
     profile: &RfQualityProfileReport,
     close_range_report: &serde_json::Value,
 ) {
-    let Some(channel_state) = rf_quality_json_get(
+    if let Some(channel_state) = rf_quality_json_get(
         close_range_report,
         &["macos", "wfb_outcome", "channel_state"],
     )
@@ -29991,35 +30015,64 @@ fn rf_quality_close_range_gate_channel_state_matches(
             close_range_report,
             &["macos", "wfb_outcome", "receiver_evidence", "channel_state"],
         )
-    }) else {
-        return;
-    };
-    if let Some(status) = rf_quality_json_string(channel_state, &["verify_status"]) {
-        if status != "verified" {
-            mismatches.push(RfQualityProfileGateMismatchReport {
-                field: "channel_state.verify_status",
-                current_value: "verified".to_string(),
-                close_range_value: status,
-                impact: "outdoor range promotion requires close-range Linux peer channel verification to pass when channel-state evidence is present",
-            });
+    }) {
+        if let Some(status) = rf_quality_json_string(channel_state, &["verify_status"]) {
+            if status != "verified" {
+                mismatches.push(RfQualityProfileGateMismatchReport {
+                    field: "channel_state.verify_status",
+                    current_value: "verified".to_string(),
+                    close_range_value: status,
+                    impact: "outdoor range promotion requires close-range Linux peer channel verification to pass when channel-state evidence is present",
+                });
+            }
         }
-    }
-    if let Some(freq_mhz) = profile.channel_frequency_mhz {
+        if let Some(freq_mhz) = profile.channel_frequency_mhz {
+            rf_quality_gate_compare_u64(
+                mismatches,
+                "channel_state.observed_frequency_mhz",
+                u64::from(freq_mhz),
+                rf_quality_json_u64(channel_state, &["observed_frequency_mhz"]),
+                "close-range Linux peer observed channel frequency must match the outdoor profile",
+            );
+        }
         rf_quality_gate_compare_u64(
             mismatches,
-            "channel_state.observed_frequency_mhz",
-            u64::from(freq_mhz),
-            rf_quality_json_u64(channel_state, &["observed_frequency_mhz"]),
-            "close-range Linux peer observed channel frequency must match the outdoor profile",
+            "channel_state.observed_width_mhz",
+            u64::from(profile.bandwidth_mhz),
+            rf_quality_json_u64(channel_state, &["observed_width_mhz"]),
+            "close-range Linux peer observed channel width must match the outdoor profile",
         );
     }
-    rf_quality_gate_compare_u64(
-        mismatches,
-        "channel_state.observed_width_mhz",
-        u64::from(profile.bandwidth_mhz),
-        rf_quality_json_u64(channel_state, &["observed_width_mhz"]),
-        "close-range Linux peer observed channel width must match the outdoor profile",
-    );
+
+    if let Some(pcap_channel_evidence) = rf_quality_json_get(
+        close_range_report,
+        &[
+            "macos",
+            "wfb_outcome",
+            "receiver_evidence",
+            "pcap_channel_evidence",
+        ],
+    ) {
+        if let Some(status) = rf_quality_json_string(pcap_channel_evidence, &["status"]) {
+            if rf_quality_pcap_channel_status_failure(status.as_str()).is_some() {
+                mismatches.push(RfQualityProfileGateMismatchReport {
+                    field: "pcap_channel_evidence.status",
+                    current_value: "verified".to_string(),
+                    close_range_value: status,
+                    impact: "outdoor range promotion requires the close-range RF pcap to stay on the requested channel when pcap channel evidence is present",
+                });
+            }
+        }
+        if let Some(freq_mhz) = profile.channel_frequency_mhz {
+            rf_quality_gate_compare_u64(
+                mismatches,
+                "pcap_channel_evidence.requested_frequency_mhz",
+                u64::from(freq_mhz),
+                rf_quality_json_u64(pcap_channel_evidence, &["requested_frequency_mhz"]),
+                "close-range RF pcap requested frequency must match the outdoor profile",
+            );
+        }
+    }
 }
 
 fn rf_quality_close_range_gate_receiver_telemetry_samples(
@@ -37166,6 +37219,73 @@ u8 array_mp_8812a_fw_nic[] = {
     }
 
     #[test]
+    fn rf_quality_outdoor_profile_rejects_off_channel_pcap_gate() {
+        let stamp = started_at_unix_ms();
+        let gate_path = std::env::temp_dir().join(format!(
+            "wfb-radio-diag-close-range-pcap-channel-mismatch-{}-{stamp}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &gate_path,
+            r#"{
+  "profile": {
+    "kind": "close_range",
+    "channel": 36,
+    "bandwidth_mhz": 20,
+    "tx_rate": "mcs1",
+    "tx_descriptor_profile": "linux_monitor",
+    "tx_power_mode": "current_default",
+    "calibration_mode": "stop_gap_captured",
+    "wfb": {"link_id": "0x000001", "radio_port": "0x23", "fec_k": 1, "fec_n": 3},
+    "payload_len": 1024,
+    "expected_payloads": 30
+  },
+  "macos": {
+    "wfb_outcome": {
+      "receiver_telemetry": {
+        "rx_antenna_report_count": 2,
+        "rx_antenna_summary": {
+          "latest_by_antenna": [
+            {"antenna_id": 0, "freq_mhz": 5180, "mcs_index": 1, "bandwidth_mhz": 20, "rssi_avg_dbm": -42, "snr_avg_db": 28}
+          ]
+        }
+      },
+      "receiver_evidence": {
+        "pcap_channel_evidence": {
+          "status": "off_channel_frames",
+          "requested_channel": 36,
+          "requested_frequency_mhz": 5180,
+          "requested_frequency_frame_count": 50,
+          "off_requested_frequency_frame_count": 4
+        }
+      }
+    }
+  },
+  "acceptance": {"status": "baseline_comparable"},
+  "result": "pass"
+}"#,
+        )
+        .expect("write pcap-channel mismatch close-range gate");
+
+        let mut args = rf_quality_report_args();
+        args.profile_kind = RfQualityProfileKind::OutdoorLongDistance;
+        args.close_range_report = Some(gate_path.clone());
+        let report = rf_quality_report(args);
+        let _ = fs::remove_file(gate_path);
+
+        assert_eq!(report.result, DiagnosticResult::Fail);
+        assert_eq!(
+            report.profile_gate.status,
+            RfQualityProfileGateStatus::MismatchedProfile
+        );
+        assert_eq!(report.profile_gate.mismatch_count, 1);
+        assert_eq!(
+            report.profile_gate.mismatches[0].field,
+            "pcap_channel_evidence.status"
+        );
+    }
+
+    #[test]
     fn rf_quality_outdoor_profile_rejects_runtime_iqk_fallback_gate() {
         let stamp = started_at_unix_ms();
         let gate_path = std::env::temp_dir().join(format!(
@@ -37807,6 +37927,75 @@ u8 array_mp_8812a_fw_nic[] = {
         assert_eq!(
             comparison.outcome.acceptance_margin.failures,
             vec!["Linux peer isolation was required but not verified clean before receiver start"]
+        );
+        assert_eq!(
+            acceptance.status,
+            RfQualityAcceptanceStatus::DegradedComparison
+        );
+    }
+
+    #[test]
+    fn rf_quality_outcome_margin_flags_off_channel_pcap_evidence() {
+        let mut args = rf_quality_report_args();
+        args.expected_payloads = Some(100);
+        args.recovered_payloads = Some(100);
+        let profile =
+            rf_quality_profile_report(&args, Some(Channel::from_number(36).expect("channel")));
+        let mut macos = rf_quality_macos_report(&args, None, None, None);
+        macos.wfb_outcome.receiver_evidence = Some(serde_json::json!({
+            "pcap_channel_evidence": {
+                "status": "off_channel_frames",
+                "requested_channel": 36,
+                "requested_frequency_mhz": 5180,
+                "requested_frequency_frame_count": 10,
+                "off_requested_frequency_frame_count": 3,
+                "total_frequency_tagged_frames": 13,
+                "frequency_counts": [
+                    {"frequency_mhz": 5180, "count": 10},
+                    {"frequency_mhz": 2412, "count": 3}
+                ]
+            }
+        }));
+        let baseline = RfQualityLinuxBaselineReport {
+            source_report: PathBuf::from("/tmp/linux-baseline.json"),
+            command: Some("linux-wfb-baseline".to_string()),
+            adapter: None,
+            channel: Some(36),
+            bandwidth_mhz: Some(20),
+            tx_rate: Some("mcs1".to_string()),
+            tx_descriptor_profile: Some("linux_monitor".to_string()),
+            wfb: RfQualityBaselineWfbReport {
+                link_id: Some(0x000001),
+                link_id_hex: Some("0x000001".to_string()),
+                radio_port: Some(0x23),
+                radio_port_hex: Some("0x23".to_string()),
+                fec_k: Some(1),
+                fec_n: Some(3),
+            },
+            payload_len: Some(1024),
+            source_payloads: Some(100),
+            recovered_payloads: Some(100),
+            submitted_datagrams: Some(300),
+            throughput_mbps: None,
+            receiver_artifacts: Vec::new(),
+            calibration_registers: Vec::new(),
+        };
+
+        let comparison = rf_quality_compare_profile_to_baseline(&profile, &macos, Some(&baseline));
+        let acceptance = rf_quality_acceptance(
+            DiagnosticResult::Pass,
+            &comparison,
+            &rf_quality_profile_gate_report(&args, &profile, None),
+        );
+
+        assert_eq!(comparison.status, RfQualityComparisonStatus::Matched);
+        assert_eq!(
+            comparison.outcome.acceptance_margin.status,
+            RfQualityOutcomeAcceptanceMarginStatus::OutsideMargin
+        );
+        assert_eq!(
+            comparison.outcome.acceptance_margin.failures,
+            vec!["Linux RF pcap included frames outside the requested channel"]
         );
         assert_eq!(
             acceptance.status,

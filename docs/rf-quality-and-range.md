@@ -38,6 +38,12 @@ NetworkManager scan bursts and catches cases where `wfb0` falls back to
 `type managed` after the normal WFB service is stopped. The generated
 `channel-state.json` records NetworkManager, monitor-mode, channel, and
 bandwidth evidence.
+The generated `pcap-channel-evidence.json` reads the Linux RF pcap with
+`tcpdump`, counts radiotap frequency tags, and records whether captured frames
+stayed on the requested frequency. `verified` means all frequency-tagged frames
+matched the requested channel; `off_channel_frames` and
+`requested_frequency_absent` mean the receiver evidence is not clean enough for
+production or range promotion.
 
 Restore:
 
@@ -63,6 +69,9 @@ when the Mac report, EFUSE report, Linux baseline, and receiver counter are
 available. The bridge writes a ready marker after init/calibration and before
 traffic starts; the default automation no longer sleeps after that marker unless
 `BRIDGE_START_DELAY` is explicitly set.
+The report embeds Linux peer channel state and RF pcap channel evidence under
+`macos.wfb_outcome.receiver_evidence`, so off-channel scanning can be diagnosed
+from JSON without manually replaying the pcap.
 
 Inspect the command plan without claiming USB or transmitting RF:
 
@@ -211,6 +220,11 @@ cargo run -p wfb-radio-diag -- --json \
 - `bandwidth_evidence.status=context_only_narrower_observed` means HT40/VHT80
   channel context was used but observed frames were narrower; do not claim wide
   PPDU range.
+- `macos.wfb_outcome.receiver_evidence.pcap_channel_evidence.status=verified`
+  means the Linux RF pcap stayed on the requested frequency when radiotap
+  frequency tags were present. `off_channel_frames` or
+  `requested_frequency_absent` marks the receiver-backed outcome outside the
+  production margin.
 
 ## Rollback
 

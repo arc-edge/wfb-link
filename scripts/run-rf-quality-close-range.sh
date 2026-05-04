@@ -1487,6 +1487,82 @@ print(json.loads(path.read_text()).get("recovered_payloads", ""))
 PY
 }
 
+generate_pcap_channel_evidence() {
+  local pcap_path=$1
+  local out_path=$2
+  python3 - "$pcap_path" "$out_path" "$CHANNEL" <<'PY'
+import collections
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+pcap_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+requested_channel = int(sys.argv[3], 0)
+
+def channel_frequency_mhz(channel):
+    if channel == 14:
+        return 2484
+    if 1 <= channel <= 13:
+        return 2407 + channel * 5
+    return 5000 + channel * 5
+
+requested_frequency_mhz = channel_frequency_mhz(requested_channel)
+report = {
+    "source": "scripts/run-rf-quality-close-range.sh",
+    "pcap_path": str(pcap_path),
+    "requested_channel": requested_channel,
+    "requested_frequency_mhz": requested_frequency_mhz,
+    "status": "unknown",
+    "frequency_counts": [],
+    "requested_frequency_frame_count": 0,
+    "off_requested_frequency_frame_count": 0,
+    "total_frequency_tagged_frames": 0,
+}
+
+if not pcap_path.exists():
+    report["status"] = "pcap_missing"
+elif shutil.which("tcpdump") is None:
+    report["status"] = "tcpdump_unavailable"
+else:
+    command = ["tcpdump", "-tttt", "-e", "-nn", "-r", str(pcap_path)]
+    proc = subprocess.run(command, text=True, capture_output=True)
+    report["tcpdump_returncode"] = proc.returncode
+    if proc.returncode != 0 and not proc.stdout:
+        report["status"] = "tcpdump_failed"
+        report["tcpdump_stderr"] = proc.stderr.strip()
+    else:
+        counts = collections.Counter()
+        for line in proc.stdout.splitlines():
+            match = re.search(r"\b(\d{4}) MHz\b", line)
+            if match:
+                counts[int(match.group(1))] += 1
+        total = sum(counts.values())
+        requested_count = counts.get(requested_frequency_mhz, 0)
+        off_count = total - requested_count
+        report["frequency_counts"] = [
+            {"frequency_mhz": freq, "count": count}
+            for freq, count in sorted(counts.items())
+        ]
+        report["requested_frequency_frame_count"] = requested_count
+        report["off_requested_frequency_frame_count"] = off_count
+        report["total_frequency_tagged_frames"] = total
+        if total == 0:
+            report["status"] = "no_frequency_tags"
+        elif requested_count == 0:
+            report["status"] = "requested_frequency_absent"
+        elif off_count > 0:
+            report["status"] = "off_channel_frames"
+        else:
+            report["status"] = "verified"
+
+out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+PY
+}
+
 generate_report() {
   if (( SKIP_REPORT == 1 )); then
     log "skipping rf-quality-report (--skip-report)"
@@ -1501,6 +1577,7 @@ generate_report() {
   local channel_state_report
   local recovered
   local datagram_evidence
+  local pcap_channel_evidence
   local receiver_args=()
 
   mac_report="$OUT_DIR/$(basename "${REMOTE_PREFIX}-listen.json")"
@@ -1525,7 +1602,9 @@ generate_report() {
   [[ -n "$recovered" ]] || die "counter report did not include recovered_payloads"
 
   datagram_evidence="$OUT_DIR/datagram-evidence.json"
-  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" "$restore_state_report" "$channel_state_report" <<'PY'
+  pcap_channel_evidence="$OUT_DIR/pcap-channel-evidence.json"
+  generate_pcap_channel_evidence "$OUT_DIR/$(basename "${REMOTE_PREFIX}-rf.pcap")" "$pcap_channel_evidence"
+  python3 - "$datagram_evidence" "$mac_report" "$counter_report" "$receiver_health_report" "$restore_state_report" "$channel_state_report" "$pcap_channel_evidence" <<'PY'
 import json
 import os
 import sys
@@ -1546,6 +1625,10 @@ channel_state_path = Path(sys.argv[6])
 channel_state = {}
 if channel_state_path.exists():
     channel_state = json.loads(channel_state_path.read_text())
+pcap_channel_evidence_path = Path(sys.argv[7])
+pcap_channel_evidence = {}
+if pcap_channel_evidence_path.exists():
+    pcap_channel_evidence = json.loads(pcap_channel_evidence_path.read_text())
 
 def env_int(name):
     value = os.environ.get(name)
@@ -1607,6 +1690,7 @@ report = {
     "receiver_status": receiver_health.get("status"),
     "receiver_unable_decrypt_count": receiver_health.get("unable_decrypt_count"),
     "channel_state": channel_state,
+    "pcap_channel_evidence": pcap_channel_evidence,
     "linux_restore": linux_restore,
     "note": "short smoke runs can emit one fewer WFB datagram than the FEC ceiling while still recovering every source payload",
 }
@@ -1618,6 +1702,7 @@ PY
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-rx.log")" \
     "$OUT_DIR/$(basename "${REMOTE_PREFIX}-tx.log")" \
     "$datagram_evidence" \
+    "$pcap_channel_evidence" \
     "$receiver_health_report" \
     "$channel_state_report" \
     "$restore_state_report" \

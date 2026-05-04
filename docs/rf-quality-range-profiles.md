@@ -470,6 +470,11 @@ receiver-backed WFB outcomes as the primary signal:
   `snr_usable=false`, so release checks can avoid treating it as a real 0 dB
   measurement. Outdoor promotion rejects `degraded`; RSSI/SNR values remain
   diagnostic field-note inputs rather than scored pass/fail margins.
+- RF pcap channel evidence: when `pcap_channel_evidence` is present, the
+  production margin rejects `off_channel_frames` and
+  `requested_frequency_absent`. A passing close-range gate for range promotion
+  should show `verified` so NetworkManager scan drift or a mistuned receiver
+  cannot masquerade as clean RF recovery.
 
 If the profile parameters match Linux but the payload or throughput margin is
 outside this envelope, the RF-quality report marks acceptance as a degraded
@@ -491,6 +496,9 @@ Do not classify a run as range-ready when any of the following are true:
   it is `degraded`.
 - The close-range gate includes `macos.wfb_outcome.channel_state` and its
   verification failed or observed frequency/width differs from the profile.
+- The close-range gate includes
+  `macos.wfb_outcome.receiver_evidence.pcap_channel_evidence.status` and it is
+  `off_channel_frames` or `requested_frequency_absent`.
 - The Linux baseline differs in channel, bandwidth, fixed rate/profile, WFB
   link/radio port, FEC, payload length, expected source payload count, antenna
   setup, or adapter class.
