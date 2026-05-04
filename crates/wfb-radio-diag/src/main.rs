@@ -1521,10 +1521,72 @@ struct BridgeRunRxForwardArg {
     aggregator: SocketAddr,
 }
 
+/// LED heartbeat flags. Flattened into the production-shape command
+/// argument groups so operators can opt out or change cadence. The
+/// heartbeat itself is a no-op on commands that never instantiate it.
+#[derive(Debug, Parser, Clone, Copy)]
+struct HeartbeatLedArgs {
+    /// Disable the heartbeat LED on the AWUS036ACH visible enclosure
+    /// LED. With the heartbeat off, a dark LED is no longer a signal
+    /// of "host stalled."
+    #[arg(long)]
+    no_heartbeat_led: bool,
+
+    /// Half-period (ms) for the heartbeat LED toggle. Default 500 ms
+    /// (1 Hz overall blink). Bounded to [50, 5000].
+    #[arg(long, default_value_t = wfb_radio_runtime::DEFAULT_HEARTBEAT_HALF_PERIOD_MS)]
+    heartbeat_led_half_period_ms: u64,
+}
+
+impl Default for HeartbeatLedArgs {
+    fn default() -> Self {
+        Self {
+            no_heartbeat_led: false,
+            heartbeat_led_half_period_ms: wfb_radio_runtime::DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+        }
+    }
+}
+
+impl HeartbeatLedArgs {
+    fn to_config(self) -> wfb_radio_runtime::LedHeartbeatConfig {
+        wfb_radio_runtime::LedHeartbeatConfig {
+            enabled: !self.no_heartbeat_led,
+            half_period_ms: self.heartbeat_led_half_period_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+struct HeartbeatLedReport {
+    enabled: bool,
+    half_period_ms: u64,
+    toggles_attempted: u64,
+    toggles_succeeded: u64,
+    toggles_failed: u64,
+}
+
+impl HeartbeatLedReport {
+    fn from_runtime(
+        config: wfb_radio_runtime::LedHeartbeatConfig,
+        counters: wfb_radio_runtime::LedHeartbeatCounters,
+    ) -> Self {
+        Self {
+            enabled: config.enabled,
+            half_period_ms: config.half_period_ms,
+            toggles_attempted: counters.toggles_attempted,
+            toggles_succeeded: counters.toggles_succeeded,
+            toggles_failed: counters.toggles_failed,
+        }
+    }
+}
+
 #[derive(Debug, Parser, Clone)]
 struct BridgeRunArgs {
     #[command(flatten)]
     tx: BridgeTxListenArgs,
+
+    #[command(flatten)]
+    heartbeat_led: HeartbeatLedArgs,
 
     /// Additional UDP addresses to bind for WFB distributor/injector datagrams.
     #[arg(long = "tx-bind", value_name = "ADDR")]
@@ -1636,6 +1698,9 @@ struct RadioRunArgs {
 
     #[command(flatten)]
     tx_calibration: TxCalibrationProfileArgs,
+
+    #[command(flatten)]
+    heartbeat_led: HeartbeatLedArgs,
 
     /// WFB link ID to match and optionally forward during RX.
     #[arg(long, value_parser = parse_u32)]
@@ -3563,6 +3628,8 @@ struct BridgeRunReport {
     tx_calibration_profile: Option<TxCalibrationProfileReport>,
     rf_calibration_pre_tx: Option<RfCalibrationProbeReport>,
     tx_status: Option<TxStatusProbeReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heartbeat_led: Option<HeartbeatLedReport>,
     bridge_counters: TxCounters,
     submit_counters: TxSubmitCounters,
     throughput: Option<BridgeTxListenThroughputReport>,
@@ -23423,6 +23490,7 @@ fn radio_run_bridge_args(
             pre_tx_rmw32: Vec::new(),
             pre_tx_rf_write: Vec::new(),
         },
+        heartbeat_led: args.heartbeat_led,
         tx_binds: loop_plan.tx_bind_addrs.iter().skip(1).copied().collect(),
         duration_ms: args.duration_ms,
         rx_timeout_ms: loop_plan.rx_timeout_ms,
@@ -24234,6 +24302,25 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     let mut datagram_bytes = 0u64;
     let mut frame_bytes = 0u64;
     let mut rx_buf = vec![0u8; 16 * 1024];
+
+    // Heartbeat LED — drives the visible enclosure LED at a slow steady
+    // cadence so an operator can see the radio is alive. Validation
+    // already happened at clap parse time for the half-period bounds;
+    // re-validate here so a hand-rolled BridgeRunArgs still fails fast.
+    let heartbeat_config = args.heartbeat_led.to_config();
+    if let Err(error) = heartbeat_config.validate() {
+        return bridge_run_failure(
+            report,
+            "argument_validation",
+            "heartbeat-led arguments did not pass local validation",
+            DiagnosticErrorReport {
+                code: "invalid_heartbeat_led_args",
+                message: error.message,
+            },
+        );
+    }
+    let mut heartbeat = wfb_radio_runtime::LedHeartbeat::new(heartbeat_config, started);
+
     #[derive(Debug)]
     struct BridgeRunLoopFailure {
         phase_id: &'static str,
@@ -24256,6 +24343,12 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 ProductionRuntimeBridgeLoopStepOutcome,
                 BridgeRunLoopFailure,
             > {
+                // Tick the LED heartbeat. No-op until the configured
+                // half-period elapses; idempotent across the burst+poll
+                // pattern (multiple closure calls per outer loop
+                // iteration won't cause extra USB writes). Failures are
+                // counted but never propagated.
+                heartbeat.maybe_toggle(&session.transport, Instant::now());
                 match step {
                     ProductionRuntimeBridgeLoopStep::TryTx => {
                         let queued = match tx_receiver.receiver.try_recv() {
@@ -24427,6 +24520,14 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 }
             },
         );
+    // Turn off the heartbeat LED and capture its counters before any
+    // success/failure branching below — both paths should leave the
+    // LED dark and the report populated.
+    heartbeat.turn_off(&session.transport);
+    report.heartbeat_led = Some(HeartbeatLedReport::from_runtime(
+        heartbeat.config(),
+        heartbeat.counters(),
+    ));
     let loop_outcome = match loop_result {
         Ok(outcome) => outcome,
         Err(failure) => {
@@ -24612,6 +24713,7 @@ fn bridge_run_base_report(
         tx_calibration_profile: None,
         rf_calibration_pre_tx: None,
         tx_status: None,
+        heartbeat_led: None,
         bridge_counters: TxCounters::default(),
         submit_counters: TxSubmitCounters::default(),
         throughput: None,
@@ -36485,6 +36587,7 @@ mod tests {
     fn bridge_run_args() -> BridgeRunArgs {
         BridgeRunArgs {
             tx: bridge_tx_listen_args(true),
+            heartbeat_led: HeartbeatLedArgs::default(),
             tx_binds: Vec::new(),
             duration_ms: 10,
             rx_timeout_ms: 1,

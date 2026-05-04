@@ -34,6 +34,12 @@ use wfb_bridge::{
 #[cfg(target_os = "macos")]
 pub mod macos_usbhost;
 
+pub mod led_heartbeat;
+pub use led_heartbeat::{
+    LedHeartbeat, LedHeartbeatConfig, LedHeartbeatConfigError, LedHeartbeatCounters,
+    DEFAULT_HEARTBEAT_HALF_PERIOD_MS, MAX_HEARTBEAT_HALF_PERIOD_MS, MIN_HEARTBEAT_HALF_PERIOD_MS,
+};
+
 mod tx_power;
 pub use tx_power::{
     plan_rtl8812au_efuse_tx_power, rtl8812au_tx_power_agc_registers, rtl8812au_tx_power_agc_value,
