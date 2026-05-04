@@ -49,6 +49,7 @@ use wfb_radio_runtime::{
     ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
     ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
     Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
+    Rtl8812auRfPath, Rtl8812auRuntimeIqkIqcValue, Rtl8812auRuntimeIqkMaskedBbWritePlan,
     RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeMacAddressExecution,
     RuntimeMonitorOpmodeExecution, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
     RuntimeSameSessionInitConfig, RuntimeSameSessionInitFailure,
@@ -3910,25 +3911,8 @@ struct TxRuntimeIqkAttemptReport {
     label: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TxRuntimeIqkIqcValue {
-    x: u32,
-    x_hex: String,
-    y: u32,
-    y_hex: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct TxRuntimeIqkMaskedBbWritePlan {
-    register_name: &'static str,
-    address: u16,
-    address_hex: String,
-    mask: u32,
-    mask_hex: String,
-    data: u32,
-    data_hex: String,
-    reason: &'static str,
-}
+type TxRuntimeIqkIqcValue = Rtl8812auRuntimeIqkIqcValue;
+type TxRuntimeIqkMaskedBbWritePlan = Rtl8812auRuntimeIqkMaskedBbWritePlan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -15589,15 +15573,25 @@ fn runtime_iqk_masked_bb_write_plan(
     data: u32,
     reason: &'static str,
 ) -> TxRuntimeIqkMaskedBbWritePlan {
-    TxRuntimeIqkMaskedBbWritePlan {
+    wfb_radio_runtime::rtl8812au_runtime_iqk_masked_bb_write_plan(
         register_name,
         address,
-        address_hex: format_address(address),
         mask,
-        mask_hex: format_value(mask, 8),
         data,
-        data_hex: format_value(data, 8),
         reason,
+    )
+}
+
+fn runtime_rf_path_from_tx_power_path(
+    path: TxPowerPathArg,
+) -> std::result::Result<Rtl8812auRfPath, DiagnosticErrorReport> {
+    match path {
+        TxPowerPathArg::A => Ok(Rtl8812auRfPath::A),
+        TxPowerPathArg::B => Ok(Rtl8812auRfPath::B),
+        TxPowerPathArg::Both => Err(DiagnosticErrorReport {
+            code: "rtl8812a_runtime_iqk_invalid_path",
+            message: "RTL8812A IQK helper requires path A or path B, not both".to_string(),
+        }),
     }
 }
 
@@ -15616,103 +15610,13 @@ fn rtl8812a_iqk_tx_fill_iqc_plan(
     tx_y: u32,
     dpk_done: bool,
 ) -> std::result::Result<Vec<TxRuntimeIqkMaskedBbWritePlan>, DiagnosticErrorReport> {
-    let _path_name = tx_power_path_name(path).ok_or_else(|| DiagnosticErrorReport {
-        code: "rtl8812a_runtime_iqk_invalid_path",
-        message: "RTL8812A IQK TX IQC fill requires path A or path B, not both".to_string(),
-    })?;
-    let mut plan = vec![runtime_iqk_masked_bb_write_plan(
-        "REG_AGC_TABLE_JAGUAR",
-        REG_AGC_TABLE_JAGUAR,
-        RTL8812A_IQK_PAGE_C1_SELECT_BIT,
-        1,
-        "_iqk_tx_fill_iqc_8812a selects BB page C1 before writing TX IQC latches",
-    )];
-
-    let (
-        tx_bb_ctrl_name,
-        tx_bb_ctrl,
-        tx_ctrl_name,
-        tx_ctrl,
-        tx_latch_name,
-        tx_latch,
-        tx_y_name,
-        tx_y_register,
-        tx_x_name,
-        tx_x_register,
-    ) = match path {
-        TxPowerPathArg::A => (
-            "rA_TxBbCtrl",
-            REG_TX_BB_CTRL_A_JAGUAR,
-            "R_0xcc4",
-            REG_IQK_TX_CTRL_A_CC4,
-            "R_0xcc8",
-            REG_IQK_TX_CTRL_A_CC8,
-            "R_0xccc_TX_Y",
-            REG_IQK_TX_Y_A_CCC,
-            "R_0xcd4_TX_X",
-            REG_IQK_TX_X_A_CD4,
-        ),
-        TxPowerPathArg::B => (
-            "rB_TxBbCtrl",
-            REG_TX_BB_CTRL_B_JAGUAR,
-            "R_0xec4",
-            REG_IQK_TX_CTRL_B_EC4,
-            "R_0xec8",
-            REG_IQK_TX_CTRL_B_EC8,
-            "R_0xecc_TX_Y",
-            REG_IQK_TX_Y_B_ECC,
-            "R_0xed4_TX_X",
-            REG_IQK_TX_X_B_ED4,
-        ),
-        TxPowerPathArg::Both => unreachable!("path validated above"),
-    };
-
-    plan.push(runtime_iqk_masked_bb_write_plan(
-        tx_bb_ctrl_name,
-        tx_bb_ctrl,
-        0x0000_0080,
-        1,
-        "_iqk_tx_fill_iqc_8812a enables TX IQC fill path",
-    ));
-    plan.push(runtime_iqk_masked_bb_write_plan(
-        tx_ctrl_name,
-        tx_ctrl,
-        0x0004_0000,
-        1,
-        "_iqk_tx_fill_iqc_8812a enables TX IQK correction latch",
-    ));
-    if !dpk_done {
-        plan.push(runtime_iqk_masked_bb_write_plan(
-            tx_ctrl_name,
-            tx_ctrl,
-            0x2000_0000,
-            1,
-            "_iqk_tx_fill_iqc_8812a enables IQK fill when DPK has not completed",
-        ));
-    }
-    plan.push(runtime_iqk_masked_bb_write_plan(
-        tx_latch_name,
-        tx_latch,
-        0x2000_0000,
-        1,
-        "_iqk_tx_fill_iqc_8812a arms the TX IQK result latch",
-    ));
-    plan.push(runtime_iqk_masked_bb_write_plan(
-        tx_y_name,
-        tx_y_register,
-        0x0000_07ff,
-        tx_y & 0x0000_07ff,
-        "_iqk_tx_fill_iqc_8812a writes selected TX_Y IQC",
-    ));
-    plan.push(runtime_iqk_masked_bb_write_plan(
-        tx_x_name,
-        tx_x_register,
-        0x0000_07ff,
-        tx_x & 0x0000_07ff,
-        "_iqk_tx_fill_iqc_8812a writes selected TX_X IQC",
-    ));
-
-    Ok(plan)
+    wfb_radio_runtime::rtl8812au_iqk_tx_fill_iqc_plan(
+        runtime_rf_path_from_tx_power_path(path)?,
+        tx_x,
+        tx_y,
+        dpk_done,
+    )
+    .map_err(runtime_radio_error)
 }
 
 #[allow(dead_code)]
@@ -15721,43 +15625,12 @@ fn rtl8812a_iqk_rx_fill_iqc_plan(
     rx_x: u32,
     rx_y: u32,
 ) -> std::result::Result<Vec<TxRuntimeIqkMaskedBbWritePlan>, DiagnosticErrorReport> {
-    let _path_name = tx_power_path_name(path).ok_or_else(|| DiagnosticErrorReport {
-        code: "rtl8812a_runtime_iqk_invalid_path",
-        message: "RTL8812A IQK RX IQC fill requires path A or path B, not both".to_string(),
-    })?;
-    let (register_name, register) = match path {
-        TxPowerPathArg::A => ("R_0xc10_RX_IQC_A", REG_IQK_RX_IQC_A_JAGUAR),
-        TxPowerPathArg::B => ("R_0xe10_RX_IQC_B", REG_IQK_RX_IQC_B_JAGUAR),
-        TxPowerPathArg::Both => unreachable!("path validated above"),
-    };
-    let shifted_x = rx_x >> 1;
-    let shifted_y = rx_y >> 1;
-    let uses_upstream_fallback = shifted_x >= 0x112 || (shifted_y >= 0x12 && shifted_y <= 0x3ee);
-    let (iqc_x, iqc_y, reason) = if uses_upstream_fallback {
-        (
-            0x100,
-            0,
-            "_iqk_rx_fill_iqc_8812a uses upstream fallback when shifted RX_X/RX_Y is out of range",
-        )
-    } else {
-        (
-            shifted_x & 0x03ff,
-            shifted_y & 0x03ff,
-            "_iqk_rx_fill_iqc_8812a writes selected shifted RX IQC",
-        )
-    };
-
-    Ok(vec![
-        runtime_iqk_masked_bb_write_plan(
-            "REG_AGC_TABLE_JAGUAR",
-            REG_AGC_TABLE_JAGUAR,
-            RTL8812A_IQK_PAGE_C1_SELECT_BIT,
-            0,
-            "_iqk_rx_fill_iqc_8812a selects BB page C before writing RX IQC latches",
-        ),
-        runtime_iqk_masked_bb_write_plan(register_name, register, 0x0000_03ff, iqc_x, reason),
-        runtime_iqk_masked_bb_write_plan(register_name, register, 0x03ff_0000, iqc_y, reason),
-    ])
+    wfb_radio_runtime::rtl8812au_iqk_rx_fill_iqc_plan(
+        runtime_rf_path_from_tx_power_path(path)?,
+        rx_x,
+        rx_y,
+    )
+    .map_err(runtime_radio_error)
 }
 
 #[allow(dead_code)]
@@ -16735,49 +16608,13 @@ impl RuntimeIqkOneShotPathState {
 }
 
 fn runtime_iqk_iqc_value(x: u32, y: u32) -> TxRuntimeIqkIqcValue {
-    let x = x & 0x0000_07ff;
-    let y = y & 0x0000_07ff;
-    TxRuntimeIqkIqcValue {
-        x,
-        x_hex: format_value(x, 3),
-        y,
-        y_hex: format_value(y, 3),
-    }
-}
-
-fn rtl8812a_iqk_component_to_signed(value: u32) -> i32 {
-    let value = (value & 0x0000_07ff) as i32;
-    if value & 0x0000_0400 != 0 {
-        value - 0x0000_0800
-    } else {
-        value
-    }
-}
-
-fn rtl8812a_iqk_signed_to_component(value: i32) -> u32 {
-    (value & 0x0000_07ff) as u32
+    wfb_radio_runtime::rtl8812au_runtime_iqk_iqc_value(x, y)
 }
 
 fn rtl8812a_iqk_select_candidate(
     candidates: &[TxRuntimeIqkIqcValue],
 ) -> Option<TxRuntimeIqkIqcValue> {
-    for (index, left) in candidates.iter().enumerate() {
-        for right in candidates.iter().skip(index + 1) {
-            let left_x = rtl8812a_iqk_component_to_signed(left.x);
-            let right_x = rtl8812a_iqk_component_to_signed(right.x);
-            let left_y = rtl8812a_iqk_component_to_signed(left.y);
-            let right_y = rtl8812a_iqk_component_to_signed(right.y);
-            let dx = left_x - right_x;
-            let dy = left_y - right_y;
-            if dx.abs() < 4 && dy.abs() < 4 {
-                return Some(runtime_iqk_iqc_value(
-                    rtl8812a_iqk_signed_to_component((left_x + right_x) / 2),
-                    rtl8812a_iqk_signed_to_component((left_y + right_y) / 2),
-                ));
-            }
-        }
-    }
-    None
+    wfb_radio_runtime::rtl8812au_iqk_select_candidate(candidates)
 }
 
 fn bb_masked_field(value: u32, mask: u32) -> u32 {

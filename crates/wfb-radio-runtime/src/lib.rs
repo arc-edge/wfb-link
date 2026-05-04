@@ -2230,22 +2230,33 @@ const REG_RCR: u16 = 0x0608;
 const REG_MACID: u16 = 0x0610;
 const REG_NAV_UPPER: u16 = 0x0652;
 const REG_RXFLTMAP2: u16 = 0x06a4;
+const REG_AGC_TABLE_JAGUAR: u16 = 0x082c;
 const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
+const REG_IQK_RX_IQC_A_JAGUAR: u16 = 0x0c10;
 const REG_RF_PI_READ_A_JAGUAR: u16 = 0x0d04;
 const REG_RF_SI_READ_A_JAGUAR: u16 = 0x0d08;
 const REG_RF_PATH_A_3WIRE: u16 = 0x0c90;
 const REG_TX_BB_CTRL_A_JAGUAR: u16 = REG_RF_PATH_A_3WIRE;
 const REG_TX_SCALE_A_JAGUAR: u16 = 0x0c1c;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
+const REG_IQK_TX_CTRL_A_CC4: u16 = 0x0cc4;
+const REG_IQK_TX_CTRL_A_CC8: u16 = 0x0cc8;
+const REG_IQK_TX_Y_A_CCC: u16 = 0x0ccc;
+const REG_IQK_TX_X_A_CD4: u16 = 0x0cd4;
 const REG_RF_PI_MODE_B_JAGUAR: u16 = 0x0e00;
+const REG_IQK_RX_IQC_B_JAGUAR: u16 = 0x0e10;
 const REG_RF_PATH_B_3WIRE: u16 = 0x0e90;
 const REG_TX_BB_CTRL_B_JAGUAR: u16 = REG_RF_PATH_B_3WIRE;
 const REG_TX_SCALE_B_JAGUAR: u16 = 0x0e1c;
 const REG_RFE_PINMUX_B_JAGUAR: u16 = 0x0eb0;
 const REG_RF_PI_READ_B_JAGUAR: u16 = 0x0d44;
 const REG_RF_SI_READ_B_JAGUAR: u16 = 0x0d48;
+const REG_IQK_TX_CTRL_B_EC4: u16 = 0x0ec4;
+const REG_IQK_TX_CTRL_B_EC8: u16 = 0x0ec8;
+const REG_IQK_TX_Y_B_ECC: u16 = 0x0ecc;
+const REG_IQK_TX_X_B_ED4: u16 = 0x0ed4;
 const REG_USB_HRPWM: u16 = 0xfe58;
 
 const RTL8812AU_EFUSE_REAL_CONTENT_LEN: usize = 512;
@@ -2275,6 +2286,7 @@ const RF_LCK_JAGUAR: u32 = 0xb4;
 const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
 const RF_LCK_MODE_BIT: u32 = 1 << 14;
 const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
+const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const MONITOR_RECEIVE_CONFIG: u32 = RCR_AAP
     | RCR_APM
     | RCR_AM
@@ -2330,6 +2342,26 @@ pub struct Rtl8812auRegisterWriteSpec {
     pub register_name: &'static str,
     pub address: u16,
     pub value: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkIqcValue {
+    pub x: u32,
+    pub x_hex: String,
+    pub y: u32,
+    pub y_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rtl8812auRuntimeIqkMaskedBbWritePlan {
+    pub register_name: &'static str,
+    pub address: u16,
+    pub address_hex: String,
+    pub mask: u32,
+    pub mask_hex: String,
+    pub data: u32,
+    pub data_hex: String,
+    pub reason: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2671,6 +2703,71 @@ fn register_read_report(
     }
 }
 
+pub fn rtl8812au_runtime_iqk_iqc_value(x: u32, y: u32) -> Rtl8812auRuntimeIqkIqcValue {
+    let x = x & 0x0000_07ff;
+    let y = y & 0x0000_07ff;
+    Rtl8812auRuntimeIqkIqcValue {
+        x,
+        x_hex: format_register_value(x, 3),
+        y,
+        y_hex: format_register_value(y, 3),
+    }
+}
+
+fn rtl8812au_iqk_component_to_signed(value: u32) -> i32 {
+    let value = (value & 0x0000_07ff) as i32;
+    if value & 0x0000_0400 != 0 {
+        value - 0x0000_0800
+    } else {
+        value
+    }
+}
+
+fn rtl8812au_iqk_signed_to_component(value: i32) -> u32 {
+    (value & 0x0000_07ff) as u32
+}
+
+pub fn rtl8812au_iqk_select_candidate(
+    candidates: &[Rtl8812auRuntimeIqkIqcValue],
+) -> Option<Rtl8812auRuntimeIqkIqcValue> {
+    for (index, left) in candidates.iter().enumerate() {
+        for right in candidates.iter().skip(index + 1) {
+            let left_x = rtl8812au_iqk_component_to_signed(left.x);
+            let right_x = rtl8812au_iqk_component_to_signed(right.x);
+            let left_y = rtl8812au_iqk_component_to_signed(left.y);
+            let right_y = rtl8812au_iqk_component_to_signed(right.y);
+            let dx = left_x - right_x;
+            let dy = left_y - right_y;
+            if dx.abs() < 4 && dy.abs() < 4 {
+                return Some(rtl8812au_runtime_iqk_iqc_value(
+                    rtl8812au_iqk_signed_to_component((left_x + right_x) / 2),
+                    rtl8812au_iqk_signed_to_component((left_y + right_y) / 2),
+                ));
+            }
+        }
+    }
+    None
+}
+
+pub fn rtl8812au_runtime_iqk_masked_bb_write_plan(
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    data: u32,
+    reason: &'static str,
+) -> Rtl8812auRuntimeIqkMaskedBbWritePlan {
+    Rtl8812auRuntimeIqkMaskedBbWritePlan {
+        register_name,
+        address,
+        address_hex: format_register_address(address),
+        mask,
+        mask_hex: format_register_value(mask, 8),
+        data,
+        data_hex: format_register_value(data, 8),
+        reason,
+    }
+}
+
 fn write8_register_report<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     register_name: &'static str,
@@ -2981,6 +3078,171 @@ where
         value_hex: format_register_value(value, 5),
         counters: counters.saturating_sub(before),
     })
+}
+
+pub fn rtl8812au_iqk_tx_fill_iqc_plan(
+    path: Rtl8812auRfPath,
+    tx_x: u32,
+    tx_y: u32,
+    dpk_done: bool,
+) -> Result<Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>, RuntimeRadioError> {
+    let _path_name = path.name().ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_invalid_path",
+            "RTL8812A IQK TX IQC fill requires path A or path B, not both",
+        )
+    })?;
+    let mut plan = vec![rtl8812au_runtime_iqk_masked_bb_write_plan(
+        "REG_AGC_TABLE_JAGUAR",
+        REG_AGC_TABLE_JAGUAR,
+        RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+        1,
+        "_iqk_tx_fill_iqc_8812a selects BB page C1 before writing TX IQC latches",
+    )];
+
+    let (
+        tx_bb_ctrl_name,
+        tx_bb_ctrl,
+        tx_ctrl_name,
+        tx_ctrl,
+        tx_latch_name,
+        tx_latch,
+        tx_y_name,
+        tx_y_register,
+        tx_x_name,
+        tx_x_register,
+    ) = match path {
+        Rtl8812auRfPath::A => (
+            "rA_TxBbCtrl",
+            REG_TX_BB_CTRL_A_JAGUAR,
+            "R_0xcc4",
+            REG_IQK_TX_CTRL_A_CC4,
+            "R_0xcc8",
+            REG_IQK_TX_CTRL_A_CC8,
+            "R_0xccc_TX_Y",
+            REG_IQK_TX_Y_A_CCC,
+            "R_0xcd4_TX_X",
+            REG_IQK_TX_X_A_CD4,
+        ),
+        Rtl8812auRfPath::B => (
+            "rB_TxBbCtrl",
+            REG_TX_BB_CTRL_B_JAGUAR,
+            "R_0xec4",
+            REG_IQK_TX_CTRL_B_EC4,
+            "R_0xec8",
+            REG_IQK_TX_CTRL_B_EC8,
+            "R_0xecc_TX_Y",
+            REG_IQK_TX_Y_B_ECC,
+            "R_0xed4_TX_X",
+            REG_IQK_TX_X_B_ED4,
+        ),
+        Rtl8812auRfPath::Both => unreachable!("path validated above"),
+    };
+
+    plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+        tx_bb_ctrl_name,
+        tx_bb_ctrl,
+        0x0000_0080,
+        1,
+        "_iqk_tx_fill_iqc_8812a enables TX IQC fill path",
+    ));
+    plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+        tx_ctrl_name,
+        tx_ctrl,
+        0x0004_0000,
+        1,
+        "_iqk_tx_fill_iqc_8812a enables TX IQK correction latch",
+    ));
+    if !dpk_done {
+        plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+            tx_ctrl_name,
+            tx_ctrl,
+            0x2000_0000,
+            1,
+            "_iqk_tx_fill_iqc_8812a enables IQK fill when DPK has not completed",
+        ));
+    }
+    plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+        tx_latch_name,
+        tx_latch,
+        0x2000_0000,
+        1,
+        "_iqk_tx_fill_iqc_8812a arms the TX IQK result latch",
+    ));
+    plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+        tx_y_name,
+        tx_y_register,
+        0x0000_07ff,
+        tx_y & 0x0000_07ff,
+        "_iqk_tx_fill_iqc_8812a writes selected TX_Y IQC",
+    ));
+    plan.push(rtl8812au_runtime_iqk_masked_bb_write_plan(
+        tx_x_name,
+        tx_x_register,
+        0x0000_07ff,
+        tx_x & 0x0000_07ff,
+        "_iqk_tx_fill_iqc_8812a writes selected TX_X IQC",
+    ));
+
+    Ok(plan)
+}
+
+pub fn rtl8812au_iqk_rx_fill_iqc_plan(
+    path: Rtl8812auRfPath,
+    rx_x: u32,
+    rx_y: u32,
+) -> Result<Vec<Rtl8812auRuntimeIqkMaskedBbWritePlan>, RuntimeRadioError> {
+    let _path_name = path.name().ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rtl8812a_runtime_iqk_invalid_path",
+            "RTL8812A IQK RX IQC fill requires path A or path B, not both",
+        )
+    })?;
+    let (register_name, register) = match path {
+        Rtl8812auRfPath::A => ("R_0xc10_RX_IQC_A", REG_IQK_RX_IQC_A_JAGUAR),
+        Rtl8812auRfPath::B => ("R_0xe10_RX_IQC_B", REG_IQK_RX_IQC_B_JAGUAR),
+        Rtl8812auRfPath::Both => unreachable!("path validated above"),
+    };
+    let shifted_x = rx_x >> 1;
+    let shifted_y = rx_y >> 1;
+    let uses_upstream_fallback = shifted_x >= 0x112 || (shifted_y >= 0x12 && shifted_y <= 0x3ee);
+    let (iqc_x, iqc_y, reason) = if uses_upstream_fallback {
+        (
+            0x100,
+            0,
+            "_iqk_rx_fill_iqc_8812a uses upstream fallback when shifted RX_X/RX_Y is out of range",
+        )
+    } else {
+        (
+            shifted_x & 0x03ff,
+            shifted_y & 0x03ff,
+            "_iqk_rx_fill_iqc_8812a writes selected shifted RX IQC",
+        )
+    };
+
+    Ok(vec![
+        rtl8812au_runtime_iqk_masked_bb_write_plan(
+            "REG_AGC_TABLE_JAGUAR",
+            REG_AGC_TABLE_JAGUAR,
+            RTL8812A_IQK_PAGE_C1_SELECT_BIT,
+            0,
+            "_iqk_rx_fill_iqc_8812a selects BB page C before writing RX IQC latches",
+        ),
+        rtl8812au_runtime_iqk_masked_bb_write_plan(
+            register_name,
+            register,
+            0x0000_03ff,
+            iqc_x,
+            reason,
+        ),
+        rtl8812au_runtime_iqk_masked_bb_write_plan(
+            register_name,
+            register,
+            0x03ff_0000,
+            iqc_y,
+            reason,
+        ),
+    ])
 }
 
 const LINUX_PARITY_CH36_HT20_CALIBRATION_WRITES: &[Rtl8812auRegisterWriteSpec] = &[
@@ -4503,6 +4765,105 @@ mod tests {
         assert_eq!(reports[2].written, 0x5433_7770);
         assert_eq!(counters.usb_control_reads, 12);
         assert_eq!(counters.usb_control_writes, 6);
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_tx_fill_iqc_plan_matches_upstream_masks() {
+        let plan =
+            super::rtl8812au_iqk_tx_fill_iqc_plan(super::Rtl8812auRfPath::A, 0x2aa, 0x155, false)
+                .expect("path A TX IQC plan");
+
+        assert_eq!(plan.len(), 7);
+        assert_eq!(plan[0].address, super::REG_AGC_TABLE_JAGUAR);
+        assert_eq!(plan[0].mask, super::RTL8812A_IQK_PAGE_C1_SELECT_BIT);
+        assert_eq!(plan[0].data, 1);
+        assert_eq!(plan[1].address, super::REG_TX_BB_CTRL_A_JAGUAR);
+        assert_eq!(plan[1].mask, 0x0000_0080);
+        assert_eq!(plan[2].address, super::REG_IQK_TX_CTRL_A_CC4);
+        assert_eq!(plan[2].mask, 0x0004_0000);
+        assert_eq!(plan[3].address, super::REG_IQK_TX_CTRL_A_CC4);
+        assert_eq!(plan[3].mask, 0x2000_0000);
+        assert_eq!(plan[4].address, super::REG_IQK_TX_CTRL_A_CC8);
+        assert_eq!(plan[4].mask, 0x2000_0000);
+        assert_eq!(plan[5].address, super::REG_IQK_TX_Y_A_CCC);
+        assert_eq!(plan[5].data, 0x155);
+        assert_eq!(plan[6].address, super::REG_IQK_TX_X_A_CD4);
+        assert_eq!(plan[6].data, 0x2aa);
+
+        let path_b_dpk_done =
+            super::rtl8812au_iqk_tx_fill_iqc_plan(super::Rtl8812auRfPath::B, 0x801, 0x802, true)
+                .expect("path B TX IQC plan");
+        assert_eq!(path_b_dpk_done.len(), 6);
+        assert!(!path_b_dpk_done.iter().any(
+            |write| write.address == super::REG_IQK_TX_CTRL_B_EC4 && write.mask == 0x2000_0000
+        ));
+        assert_eq!(
+            path_b_dpk_done
+                .iter()
+                .find(|write| write.address == super::REG_IQK_TX_Y_B_ECC)
+                .expect("path B TX_Y")
+                .data,
+            0x002
+        );
+        assert!(super::rtl8812au_iqk_tx_fill_iqc_plan(
+            super::Rtl8812auRfPath::Both,
+            0x200,
+            0,
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_rx_fill_iqc_plan_matches_upstream_fallback() {
+        let normal = super::rtl8812au_iqk_rx_fill_iqc_plan(super::Rtl8812auRfPath::B, 0x20, 0x10)
+            .expect("path B RX IQC plan");
+        assert_eq!(normal.len(), 3);
+        assert_eq!(normal[0].address, super::REG_AGC_TABLE_JAGUAR);
+        assert_eq!(normal[0].mask, super::RTL8812A_IQK_PAGE_C1_SELECT_BIT);
+        assert_eq!(normal[0].data, 0);
+        assert_eq!(normal[1].address, super::REG_IQK_RX_IQC_B_JAGUAR);
+        assert_eq!(normal[1].mask, 0x0000_03ff);
+        assert_eq!(normal[1].data, 0x10);
+        assert_eq!(normal[2].mask, 0x03ff_0000);
+        assert_eq!(normal[2].data, 0x08);
+
+        let fallback = super::rtl8812au_iqk_rx_fill_iqc_plan(super::Rtl8812auRfPath::A, 0x224, 0)
+            .expect("path A RX fallback plan");
+        assert_eq!(fallback[1].address, super::REG_IQK_RX_IQC_A_JAGUAR);
+        assert_eq!(fallback[1].data, 0x100);
+        assert_eq!(fallback[2].data, 0);
+        assert!(fallback[1].reason.contains("fallback"));
+        assert!(
+            super::rtl8812au_iqk_rx_fill_iqc_plan(super::Rtl8812auRfPath::Both, 0x200, 0).is_err()
+        );
+    }
+
+    #[test]
+    fn rtl8812au_runtime_iqk_candidate_selection_matches_upstream_tolerance() {
+        let selected = super::rtl8812au_iqk_select_candidate(&[
+            super::rtl8812au_runtime_iqk_iqc_value(0x120, 0x080),
+            super::rtl8812au_runtime_iqk_iqc_value(0x122, 0x083),
+            super::rtl8812au_runtime_iqk_iqc_value(0x180, 0x100),
+        ])
+        .expect("selected candidate");
+        assert_eq!(selected.x, 0x121);
+        assert_eq!(selected.y, 0x081);
+
+        assert!(super::rtl8812au_iqk_select_candidate(&[
+            super::rtl8812au_runtime_iqk_iqc_value(0x120, 0x080),
+            super::rtl8812au_runtime_iqk_iqc_value(0x124, 0x083),
+        ])
+        .is_none());
+
+        let signed_wrap_selected = super::rtl8812au_iqk_select_candidate(&[
+            super::rtl8812au_runtime_iqk_iqc_value(0x1f7, 0x7ff),
+            super::rtl8812au_runtime_iqk_iqc_value(0x1f5, 0x7ee),
+            super::rtl8812au_runtime_iqk_iqc_value(0x1fa, 0x001),
+        ])
+        .expect("selected signed-wrap candidate");
+        assert_eq!(signed_wrap_selected.x, 0x1f8);
+        assert_eq!(signed_wrap_selected.y, 0x000);
     }
 
     #[test]
