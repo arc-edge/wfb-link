@@ -78,3 +78,14 @@ metadata coverage counters. The run completed with
 reported 124 frames each for PHY status, valid RSSI, SNR, and derived noise.
 Artifact: `/tmp/wfb-runtime-flow-rxmeta.json` on the hardware Mac deploy
 checkout.
+
+## Latest Radio-Run Smoke
+
+On May 4, 2026, after the production cutover slice, a short hardware-Mac
+`radio-run --macos-usbhost --vid 0x0bda --pid 0x8812` smoke on channel 36/20
+MHz verified the production command and runtime-owned report. The run completed
+with `result=pass`, `stop_reason=duration_elapsed`, init readiness `ready`,
+14/14 init phases completed, 6 RX buffers/frames parsed, and 6 frames each for
+PHY status, valid RSSI, SNR, and derived noise. No TX datagrams were injected in
+that smoke. Artifact: `/tmp/wfb-radio-run-smoke.json` on the hardware Mac
+deploy checkout.
