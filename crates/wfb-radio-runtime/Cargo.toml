@@ -9,10 +9,8 @@ rust-version.workspace = true
 libc.workspace = true
 radio-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 wfb-bridge.workspace = true
 
 [build-dependencies]
 cc.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

@@ -38,6 +38,13 @@ hardware-Mac deployment and local-adapter execution from the active checkout.
   TX-positive production `radio-run` gates without SSH deployment, and validates
   clean TX submission plus runtime-owned RX outcome/frame-type telemetry
 
+#### Scenario: Runtime-owned ready marker
+- **WHEN** a production bridge loop reaches the point immediately before RX/TX
+  processing begins
+- **THEN** the runtime writes a JSON ready marker containing the source, channel,
+  bandwidth, loop bounds, init/calibration flags, and runtime timestamp for
+  automation that needs to start traffic only after radio initialization
+
 ### Requirement: Diagnostic Compatibility Boundary
 The system SHALL keep diagnostic commands available while making the production
 runtime path independent of diagnostic-only CLI and report structs.

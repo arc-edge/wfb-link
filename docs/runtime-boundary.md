@@ -62,6 +62,8 @@
   PHY/RSSI/SNR/noise metadata coverage, frame type counters, WFB RX forwarding
   socket lifecycle, forwarded byte counts, and report-neutral forward
   snapshots.
+- Runtime-owned production ready-marker JSON shape and file writing for
+  pre-loop automation gates.
 
 ## Production Command
 
@@ -86,6 +88,8 @@ threads, bridge-loop scheduling, queued TX datagram handling, parsed RX packet
 accounting, WFB RX forwarding, and TX-power register programming into runtime
 ownership. PCAP/JSONL output, EFUSE source file loading, and diagnostic report
 mutation still live in the diagnostic adapter while the boundary shifts.
+Production ready-marker file writing now uses a runtime-owned marker type and
+writer; diagnostic commands only populate command-specific field values.
 
 `radio-run` JSON now carries the runtime RX forwarding snapshots at
 `rx.rx_forwards[]` in addition to the aggregate `rx.forwarded_payloads`. The
@@ -105,8 +109,8 @@ receiver-backed calibration evidence.
   evidence formatting, and RF-quality automation while parity is still being
   hardened. Targeted parity, LCK execution, runtime IQK execution, and TX-power
   register execution now live behind runtime-owned APIs.
-- WFB bridge loop ready-marker file writing, PCAP/JSONL output, diagnostic
-  report mutation, TX status probes, and RF-quality automation.
+- PCAP/JSONL output, diagnostic report mutation, TX status probes, and
+  RF-quality automation.
 - CLI parsing and human-facing diagnostic reports, except for the thin
   production `radio-run` command adapter.
 - Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
@@ -332,3 +336,9 @@ of deploying over SSH. Local validation on May 5, 2026 passed at
 `24/43/1/0`; TX-positive submitted `64/64` synthetic WFB distributor datagrams,
 reported zero TX failures or drops, and preserved RX outcome telemetry with
 `rx_need_more=0` and frame-type counts `20/114/5/0`.
+
+After moving ready-marker writing into `wfb-radio-runtime`, the local smoke gate
+passed again at `/tmp/wfb-prod-radio-smoke-local-ready-runtime-20260505-095955`.
+Both ready files were emitted by the runtime writer with `source=bridge-run` and
+`ready_at_unix_ms`; RX-only passed with 33 parsed frames, and TX-positive
+submitted `64/64` with zero failed submissions or drops.

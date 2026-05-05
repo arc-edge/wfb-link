@@ -39,14 +39,15 @@ use wfb_radio_runtime::{
     production_rx_forward_snapshots, rtl8812au_tx_power_agc_value, run_production_bridge_loop,
     run_rtl8812au_efuse_tx_power, run_rtl8812au_manual_tx_power,
     run_rtl8812au_tx_calibration_profile, spawn_production_tx_ingress_receivers,
-    MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    write_production_runtime_ready_marker, MacosUsbHostConfig,
+    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
     ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowExecutionReport,
     ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
     ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
-    ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
+    ProductionRuntimeReadyMarker, ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
     ProductionRuntimeRxForwardSnapshot, ProductionRuntimeTxIngressReceiver,
     ProductionRuntimeTxIngressSocket, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
     Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auLckCalibrationReport,
@@ -23265,32 +23266,32 @@ fn bridge_tx_listen_write_ready_file(
     args: &BridgeTxListenArgs,
     report: &BridgeTxListenReport,
 ) -> std::result::Result<(), DiagnosticErrorReport> {
-    let Some(path) = args.ready_file.as_ref() else {
-        return Ok(());
-    };
-    let marker = serde_json::json!({
-        "source": "bridge-tx-listen",
-        "ready_at_unix_ms": started_at_unix_ms(),
-        "bind_addr": report.bind_addr,
-        "channel": report.channel.as_ref().map(|channel| channel.number),
-        "channel_frequency_mhz": report.channel.as_ref().map(|channel| channel.frequency_mhz),
-        "bandwidth_mhz": args.bandwidth.mhz(),
-        "max_datagrams": args.max_datagrams,
-        "idle_timeout_ms": args.idle_timeout_ms,
-        "init_before_tx": args.init_before_tx,
-        "same_session_init_result": report.same_session_init.as_ref().map(|init| init.result.as_str()),
-        "tx_power_control_applied": report.tx_power_control.is_some(),
-        "tx_calibration_profile_applied": report.tx_calibration_profile.is_some(),
-    });
-    let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| DiagnosticErrorReport {
-        code: "bridge_ready_marker_serialize_failed",
-        message: error.to_string(),
-    })?;
-    bytes.push(b'\n');
-    fs::write(path, bytes).map_err(|error| DiagnosticErrorReport {
-        code: "bridge_ready_marker_write_failed",
-        message: format!("{}: {error}", path.display()),
-    })
+    write_production_runtime_ready_marker(
+        args.ready_file.as_deref(),
+        ProductionRuntimeReadyMarker {
+            source: "bridge-tx-listen".to_string(),
+            ready_at_unix_ms: None,
+            bind_addr: report.bind_addr.clone(),
+            bind_addrs: Vec::new(),
+            channel: report.channel.as_ref().map(|channel| channel.number),
+            channel_frequency_mhz: report.channel.as_ref().map(|channel| channel.frequency_mhz),
+            bandwidth_mhz: args.bandwidth.mhz(),
+            max_datagrams: args.max_datagrams,
+            duration_ms: None,
+            idle_timeout_ms: Some(args.idle_timeout_ms),
+            rx_timeout_ms: None,
+            tx_burst_limit: None,
+            init_before_tx: args.init_before_tx,
+            same_session_init_result: report
+                .same_session_init
+                .as_ref()
+                .map(|init| init.result.as_str().to_string()),
+            monitor_opmode_applied: None,
+            tx_power_control_applied: report.tx_power_control.is_some(),
+            tx_calibration_profile_applied: report.tx_calibration_profile.is_some(),
+        },
+    )
+    .map_err(runtime_radio_error)
 }
 
 fn bridge_tx_listen_set_runtime_metrics(
@@ -24769,36 +24770,32 @@ fn bridge_run_write_ready_file(
     args: &BridgeRunArgs,
     report: &BridgeRunReport,
 ) -> std::result::Result<(), DiagnosticErrorReport> {
-    let Some(path) = args.tx.ready_file.as_ref() else {
-        return Ok(());
-    };
-    let marker = serde_json::json!({
-        "source": "bridge-run",
-        "ready_at_unix_ms": started_at_unix_ms(),
-        "bind_addr": report.bind_addr,
-        "bind_addrs": report.bind_addrs,
-        "channel": report.channel.as_ref().map(|channel| channel.number),
-        "channel_frequency_mhz": report.channel.as_ref().map(|channel| channel.frequency_mhz),
-        "bandwidth_mhz": args.tx.bandwidth.mhz(),
-        "duration_ms": args.duration_ms,
-        "max_datagrams": args.tx.max_datagrams,
-        "rx_timeout_ms": args.rx_timeout_ms,
-        "tx_burst_limit": args.tx_burst_limit,
-        "init_before_tx": args.tx.init_before_tx,
-        "same_session_init_result": report.same_session_init.as_ref().map(|init| init.result.as_str()),
-        "monitor_opmode_applied": report.monitor_opmode.is_some(),
-        "tx_power_control_applied": report.tx_power_control.is_some(),
-        "tx_calibration_profile_applied": report.tx_calibration_profile.is_some(),
-    });
-    let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| DiagnosticErrorReport {
-        code: "bridge_ready_marker_serialize_failed",
-        message: error.to_string(),
-    })?;
-    bytes.push(b'\n');
-    fs::write(path, bytes).map_err(|error| DiagnosticErrorReport {
-        code: "bridge_ready_marker_write_failed",
-        message: format!("{}: {error}", path.display()),
-    })
+    write_production_runtime_ready_marker(
+        args.tx.ready_file.as_deref(),
+        ProductionRuntimeReadyMarker {
+            source: "bridge-run".to_string(),
+            ready_at_unix_ms: None,
+            bind_addr: report.bind_addr.clone(),
+            bind_addrs: report.bind_addrs.clone(),
+            channel: report.channel.as_ref().map(|channel| channel.number),
+            channel_frequency_mhz: report.channel.as_ref().map(|channel| channel.frequency_mhz),
+            bandwidth_mhz: args.tx.bandwidth.mhz(),
+            max_datagrams: args.tx.max_datagrams,
+            duration_ms: Some(args.duration_ms),
+            idle_timeout_ms: None,
+            rx_timeout_ms: Some(args.rx_timeout_ms),
+            tx_burst_limit: Some(args.tx_burst_limit),
+            init_before_tx: args.tx.init_before_tx,
+            same_session_init_result: report
+                .same_session_init
+                .as_ref()
+                .map(|init| init.result.as_str().to_string()),
+            monitor_opmode_applied: Some(report.monitor_opmode.is_some()),
+            tx_power_control_applied: report.tx_power_control.is_some(),
+            tx_calibration_profile_applied: report.tx_calibration_profile.is_some(),
+        },
+    )
+    .map_err(runtime_radio_error)
 }
 
 fn bridge_run_update_counters(

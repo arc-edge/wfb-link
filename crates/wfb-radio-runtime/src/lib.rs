@@ -6,15 +6,15 @@
 
 use std::{
     error::Error,
-    fmt, io,
+    fmt, fs, io,
     net::{SocketAddr, UdpSocket},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use radio_core::{
@@ -1566,6 +1566,65 @@ impl ProductionRuntimeFlowConfig {
 pub struct ProductionRuntimeFlowValidation {
     pub calibration: RuntimeTxCalibrationDecision,
     pub wfb_loop: ProductionRuntimeWfbLoopPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeReadyMarker {
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at_unix_ms: Option<u64>,
+    pub bind_addr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind_addrs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_frequency_mhz: Option<u16>,
+    pub bandwidth_mhz: u16,
+    pub max_datagrams: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_burst_limit: Option<u32>,
+    pub init_before_tx: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_session_init_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_opmode_applied: Option<bool>,
+    pub tx_power_control_applied: bool,
+    pub tx_calibration_profile_applied: bool,
+}
+
+pub fn write_production_runtime_ready_marker(
+    path: Option<&Path>,
+    mut marker: ProductionRuntimeReadyMarker,
+) -> Result<(), RuntimeRadioError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    marker.ready_at_unix_ms = Some(runtime_unix_ms());
+    let mut bytes = serde_json::to_vec_pretty(&marker).map_err(|error| {
+        RuntimeRadioError::new("runtime_ready_marker_serialize_failed", error.to_string())
+    })?;
+    bytes.push(b'\n');
+    fs::write(path, bytes).map_err(|error| {
+        RuntimeRadioError::new(
+            "runtime_ready_marker_write_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })
+}
+
+fn runtime_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -7565,17 +7624,18 @@ mod tests {
         bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
         handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
         plan_production_wfb_loop, process_production_rx_packet_outcomes,
-        production_rx_forward_snapshots, run_production_bridge_loop,
-        spawn_production_tx_ingress_receivers, MacosUsbHostConfig,
-        ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+        production_rx_forward_snapshots, run_production_bridge_loop, runtime_unix_ms,
+        spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
+        MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
         ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
         ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
-        ProductionRuntimeQueuedDatagram, ProductionRuntimeRxForwardConfig,
-        ProductionRuntimeRxForwardPlan, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        ProductionRuntimeQueuedDatagram, ProductionRuntimeReadyMarker,
+        ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
+        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
+        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
+        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
         RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
         RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
         RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
@@ -9031,6 +9091,50 @@ mod tests {
             validation.wfb_loop.rx_forwards[1].config.channel_id.link_id,
             7669206
         );
+    }
+
+    #[test]
+    fn production_ready_marker_writer_records_runtime_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-ready-marker-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let marker = ProductionRuntimeReadyMarker {
+            source: "bridge-run".to_string(),
+            ready_at_unix_ms: None,
+            bind_addr: "127.0.0.1:5600".to_string(),
+            bind_addrs: vec!["127.0.0.1:5600".to_string(), "127.0.0.1:5601".to_string()],
+            channel: Some(36),
+            channel_frequency_mhz: Some(5180),
+            bandwidth_mhz: 20,
+            max_datagrams: 64,
+            duration_ms: Some(2500),
+            idle_timeout_ms: None,
+            rx_timeout_ms: Some(20),
+            tx_burst_limit: Some(8),
+            init_before_tx: true,
+            same_session_init_result: Some("pass".to_string()),
+            monitor_opmode_applied: Some(true),
+            tx_power_control_applied: false,
+            tx_calibration_profile_applied: true,
+        };
+
+        write_production_runtime_ready_marker(Some(path.as_path()), marker)
+            .expect("write ready marker");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("ready marker"))
+                .expect("ready marker JSON");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(value["source"], "bridge-run");
+        assert!(value["ready_at_unix_ms"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(value["bind_addrs"][1], "127.0.0.1:5601");
+        assert_eq!(value["channel"], 36);
+        assert_eq!(value["bandwidth_mhz"], 20);
+        assert_eq!(value["tx_burst_limit"], 8);
+        assert_eq!(value["same_session_init_result"], "pass");
+        assert_eq!(value["tx_calibration_profile_applied"], true);
     }
 
     #[test]
