@@ -1698,6 +1698,10 @@ struct RadioRunArgs {
     #[arg(long, value_name = "PATH")]
     ready_file: Option<PathBuf>,
 
+    /// Write this JSON health artifact at production service lifecycle boundaries.
+    #[arg(long, value_name = "PATH")]
+    health_file: Option<PathBuf>,
+
     /// Required acknowledgement for live RF TX submission.
     #[arg(long)]
     i_understand_this_transmits: bool,
@@ -23667,6 +23671,7 @@ fn radio_run_runtime_config(
         tx_burst_limit: args.tx_burst_limit,
         max_datagrams: args.max_datagrams,
         ready_file: args.ready_file.clone(),
+        health_file: args.health_file.clone(),
         tx_authorized: args.i_understand_this_transmits,
         live_register_write_authorized: args.i_understand_this_writes_registers,
         calibration_profile: RuntimeTxCalibrationProfile::from(
@@ -41566,6 +41571,8 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             "1",
             "--ready-file",
             "/tmp/radio-run-ready.json",
+            "--health-file",
+            "/tmp/radio-run-health.json",
             "--firmware",
             "/tmp/rtl8812a_fw.bin",
             "--i-understand-this-transmits",
@@ -41579,6 +41586,10 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                 assert_eq!(
                     args.ready_file.as_deref(),
                     Some(Path::new("/tmp/radio-run-ready.json"))
+                );
+                assert_eq!(
+                    args.health_file.as_deref(),
+                    Some(Path::new("/tmp/radio-run-health.json"))
                 );
                 assert_eq!(args.firmware, PathBuf::from("/tmp/rtl8812a_fw.bin"));
                 assert!(args.i_understand_this_transmits);
@@ -41778,6 +41789,7 @@ pre_tx_write32 = ["0x0522=0x00000000"]
         assert_eq!(config.rx_timeout_ms, 10);
         assert_eq!(config.tx_burst_limit, 4);
         assert_eq!(config.max_datagrams, 2);
+        assert!(config.health_file.is_none());
         assert_eq!(
             config.tx_binds,
             vec!["127.0.0.1:5601".parse::<SocketAddr>().unwrap()]
