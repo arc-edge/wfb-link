@@ -85,6 +85,12 @@ The system SHALL collect Mac and Linux run artifacts into a timestamped local ou
   summary, and a source-vs-RF-vs-decrypt assessment without claiming the radio
   device or transmitting RF
 
+#### Scenario: Profile matrix writes evidence summaries
+- **WHEN** a profile matrix run finishes writing ranked matrix summaries
+- **THEN** the matrix command MUST write Markdown and JSON evidence summaries
+  for the collected run artifacts, or explicit empty summaries when the matrix
+  was dry-run-only and no run evidence exists
+
 #### Scenario: Artifact collection is partial
 - **WHEN** a remote artifact cannot be copied
 - **THEN** the command records the failed artifact path and continues collecting remaining artifacts

@@ -651,6 +651,21 @@ print(json.dumps(result, indent=2, sort_keys=True))
 PY
 }
 
+write_evidence_summary() {
+  local summarizer=scripts/summarize-radio-run-evidence.py
+  if [[ ! -x "$summarizer" ]]; then
+    log "skipping evidence summary; missing executable $summarizer"
+    return
+  fi
+  log "writing evidence summary"
+  if ! "$summarizer" "$MATRIX_OUT_DIR" > "$MATRIX_OUT_DIR/evidence-summary.md"; then
+    printf 'No run evidence found.\n' > "$MATRIX_OUT_DIR/evidence-summary.md"
+  fi
+  if ! "$summarizer" --json "$MATRIX_OUT_DIR" > "$MATRIX_OUT_DIR/evidence-summary.json"; then
+    printf '{"run_count":0,"clean_count":0,"issue_count":0,"runs":[]}\n' > "$MATRIX_OUT_DIR/evidence-summary.json"
+  fi
+}
+
 if (( DRY_RUN == 1 )); then
   log "dry run; matrix artifacts will be skeletal under $MATRIX_OUT_DIR"
 else
@@ -673,4 +688,5 @@ if (( profile_count == 0 )); then
 fi
 
 write_matrix_summary
+write_evidence_summary
 log "done: $MATRIX_OUT_DIR"

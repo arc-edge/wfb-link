@@ -562,6 +562,8 @@ a remote hardware Mac, repeats each profile, pulls artifacts back, and writes:
 - `matrix-summary.json`: machine-readable ranked runs and profile groups.
 - `matrix-summary.md`: a compact table with pass status, recovery rates,
   decrypt failures, and artifact paths.
+- `evidence-summary.json` and `evidence-summary.md`: per-run source timing,
+  missing-sequence clusters, TX counters, signal summary, and loss assessment.
 - `runs/<profile>-rN/`: the underlying duplex smoke artifacts.
 
 Example short-range remote hardware run:
