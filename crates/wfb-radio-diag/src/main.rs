@@ -42102,6 +42102,40 @@ health_file = "/tmp/config-health.json"
     }
 
     #[test]
+    fn radio_run_checked_in_robust_short_range_config_is_valid() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/radio-run-robust-short-range.toml");
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in config radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let config = radio_run_runtime_config(&args).expect("runtime config");
+
+        assert_eq!(config.channel.number, 36);
+        assert_eq!(config.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(config.tx_burst_limit, 4);
+        assert_eq!(config.rx_timeout_ms, 20);
+        assert_eq!(config.max_datagrams, 0);
+        assert_eq!(config.rx_mcs_index, 1);
+        assert!(config.tx_authorized);
+        assert_eq!(
+            config.calibration_profile,
+            RuntimeTxCalibrationProfile::CurrentDefault
+        );
+        config
+            .validate()
+            .expect("valid checked-in robust short-range config");
+    }
+
+    #[test]
     fn radio_run_cli_flags_override_config_file_values() {
         let path = write_radio_run_config(
             "cli-overrides",

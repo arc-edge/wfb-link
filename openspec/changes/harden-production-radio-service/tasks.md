@@ -18,14 +18,14 @@
 
 ## 4. Production Service Smoke Automation
 
-- [ ] 4.1 Add a checked-in sample production config for the accepted robust short-range profile.
-- [ ] 4.2 Add or extend smoke automation so it can run `radio-run` from the config file with health-file, ready-marker, and final report artifacts.
-- [ ] 4.3 Add summary validation for service health final state, zero post-session decrypt failures, zero TX failures/drops, RX forwarding snapshots, source timing, and robust tuple peer recovery.
+- [x] 4.1 Add a checked-in sample production config for the accepted robust short-range profile.
+- [x] 4.2 Add or extend smoke automation so it can run `radio-run` from the config file with health-file, ready-marker, and final report artifacts.
+- [x] 4.3 Add summary validation for service health final state, zero post-session decrypt failures, zero TX failures/drops, RX forwarding snapshots, source timing, and robust tuple peer recovery.
 
 ## 5. Verification
 
-- [ ] 5.1 `cargo fmt` clean.
-- [ ] 5.2 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes.
-- [ ] 5.3 `openspec validate harden-production-radio-service --strict` and `openspec validate --specs --strict` pass.
+- [x] 5.1 `cargo fmt` clean.
+- [x] 5.2 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes.
+- [x] 5.3 `openspec validate harden-production-radio-service --strict` and `openspec validate --specs --strict` pass.
 - [ ] 5.4 Run local production smoke with config/health artifacts.
 - [ ] 5.5 Run receiver-backed robust tuple service smoke and confirm M2L/L2M recovery, decrypt gates, TX gates, RX forwarding, source timing, signal summaries, and health artifacts pass.

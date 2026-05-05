@@ -23,7 +23,7 @@ Configuration is via environment variables. Common overrides:
   SESSION_ACQUIRE_SETTLE_SECONDS=1
   M2L_SOURCE_PHASE_SEC=0 L2M_SOURCE_PHASE_SEC=0
   ENABLE_M2L=1 ENABLE_L2M=1
-  M2L_FEC_K=8 M2L_FEC_N=12 L2M_FEC_K=8 L2M_FEC_N=12
+  M2L_FEC_K=3 M2L_FEC_N=12 L2M_FEC_K=3 L2M_FEC_N=12
   M2L_MCS=1 L2M_MCS=1
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
   MAX_M2L_DECRYPT_FAILURES=0 MAX_L2M_DECRYPT_FAILURES=0
@@ -32,6 +32,7 @@ Configuration is via environment variables. Common overrides:
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   REQUIRE_CALIBRATION_SUCCESS=auto
   AUTO_EFUSE_DUMP=1
+  RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
 }
@@ -75,7 +76,7 @@ LINK_ID=${LINK_ID:-0x000001}
 WFB_CLI_LINK_ID=${WFB_CLI_LINK_ID:-$(printf '%d' "$((LINK_ID))")}
 M2L_RADIO_PORT=${M2L_RADIO_PORT:-0}
 L2M_RADIO_PORT=${L2M_RADIO_PORT:-1}
-FEC_K=${FEC_K:-8}
+FEC_K=${FEC_K:-3}
 FEC_N=${FEC_N:-12}
 M2L_FEC_K=${M2L_FEC_K:-$FEC_K}
 M2L_FEC_N=${M2L_FEC_N:-$FEC_N}
@@ -101,7 +102,7 @@ SESSION_ACQUIRE_TIMEOUT_SECONDS=${SESSION_ACQUIRE_TIMEOUT_SECONDS:-15}
 SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
 SESSION_ACQUIRE_SETTLE_SECONDS=${SESSION_ACQUIRE_SETTLE_SECONDS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
-PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
+PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.020}
 M2L_SOURCE_PHASE_SEC=${M2L_SOURCE_PHASE_SEC:-0}
 L2M_SOURCE_PHASE_SEC=${L2M_SOURCE_PHASE_SEC:-0}
 export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
@@ -118,6 +119,8 @@ AUTO_EFUSE_DUMP=${AUTO_EFUSE_DUMP:-1}
 TX_POWER_MODE=${TX_POWER_MODE:-current-default}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
+export RADIO_RUN_CONFIG
 
 RADIO_BIND_PORT=${RADIO_BIND_PORT:-5611}
 RADIO_BIND=${RADIO_BIND:-0.0.0.0:$RADIO_BIND_PORT}
@@ -132,6 +135,18 @@ RX_TIMEOUT_MS=${RX_TIMEOUT_MS:-20}
 TX_BURST_LIMIT=${TX_BURST_LIMIT:-4}
 COUNTER_SECONDS=${COUNTER_SECONDS:-50}
 PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-35}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    die "unknown argument: $1"
+    ;;
+esac
 
 for cmd in cargo python3 ssh scp; do
   require_command "$cmd"
@@ -202,6 +217,8 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
 mkdir -p "$OUT_DIR"
 OUT_DIR=$(cd "$OUT_DIR" && pwd)
+[[ -f "$RADIO_RUN_CONFIG" ]] || die "radio-run config not found: $RADIO_RUN_CONFIG"
+RADIO_RUN_CONFIG=$(cd "$(dirname "$RADIO_RUN_CONFIG")" && pwd)/$(basename "$RADIO_RUN_CONFIG")
 
 preflight_linux_peer
 resolve_linux_lan_ip
@@ -273,12 +290,12 @@ start_radio() {
   cargo run -p wfb-radio-diag -- --json \
     --report "$OUT_DIR/radio-run.json" \
     radio-run \
-    --macos-usbhost \
-    --vid 0x0bda --pid 0x8812 \
+    --config "$RADIO_RUN_CONFIG" \
     --firmware "$FIRMWARE" \
     --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
     --bind "$RADIO_BIND" \
     --ready-file "$OUT_DIR/radio-ready.json" \
+    --health-file "$OUT_DIR/radio-health.json" \
     --duration-ms "$RADIO_RUN_DURATION_MS" \
     --rx-timeout-ms "$RX_TIMEOUT_MS" \
     --tx-burst-limit "$TX_BURST_LIMIT" \
@@ -321,6 +338,7 @@ def tail(path, limit=120):
         return []
 
 report = load(run / "radio-run.json")
+health = load(run / "radio-health.json")
 calibration = report.get("tx_calibration_profile") or {}
 runtime_iqk = calibration.get("runtime_iqk") or {}
 require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
@@ -354,6 +372,7 @@ summary = {
     },
     "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
     "radio_result": report.get("result"),
+    "service_health": health,
     "stop_reason": report.get("stop_reason"),
     "calibration": {
         "profile": report.get("calibration_profile"),
@@ -828,6 +847,7 @@ def compact_counter(counter):
     }
 
 report = load(run / "radio-run.json")
+health = load(run / "radio-health.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
 source_gate = load(run / "peer" / "source-gate.json")
@@ -858,6 +878,8 @@ else:
     session_acquire_mode = "observed"
 m2l_enabled = os.environ.get("ENABLE_M2L", "1").lower() not in {"0", "false", "no"}
 l2m_enabled = os.environ.get("ENABLE_L2M", "1").lower() not in {"0", "false", "no"}
+expected_payloads = int(os.environ.get("EXPECTED_PAYLOADS", 0))
+expected_source_events = expected_payloads * int(m2l_enabled) + expected_payloads * int(l2m_enabled)
 m2l_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-m2l.log")
 l2m_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-l2m-agg.log")
 if decrypt_failure_gate == "total":
@@ -874,6 +896,12 @@ if require_calibration_success == "auto":
 failures = []
 if report.get("result") != "pass":
     failures.append(f"radio_result={report.get('result')}")
+if health.get("lifecycle") != "exited_pass":
+    failures.append(f"health_lifecycle={health.get('lifecycle')}")
+if health.get("result") != "pass":
+    failures.append(f"health_result={health.get('result')}")
+if health.get("operator_action") != "monitor":
+    failures.append(f"health_operator_action={health.get('operator_action')}")
 if (tx.get("failed_submissions") or 0) != 0:
     failures.append(f"tx_failed_submissions={tx.get('failed_submissions')}")
 if (tx.get("dropped_datagrams") or 0) != 0:
@@ -886,6 +914,12 @@ if l2m_enabled and radio_rx_forwarded < min_radio_rx_forwarded:
     failures.append(f"radio_rx_forwarded={radio_rx_forwarded}<{min_radio_rx_forwarded}")
 if session_acquire_mode == "observed" and source_gate.get("acquired") is not True:
     failures.append(f"source_session_gate={source_gate.get('status', 'missing')}")
+if expected_source_events and source_summary.get("marked_source_events") != expected_source_events:
+    failures.append(
+        f"source_marked_events={source_summary.get('marked_source_events')}!={expected_source_events}"
+    )
+if expected_source_events and not isinstance(source_summary.get("source_phase_sec"), dict):
+    failures.append("source_phase_sec=missing")
 if m2l_enabled and m2l_decrypt_failures > max_m2l_decrypt_failures:
     failures.append(f"m2l_decrypt_failures={m2l_decrypt_failures}>{max_m2l_decrypt_failures}")
 if l2m_enabled and l2m_decrypt_failures > max_l2m_decrypt_failures:
@@ -908,6 +942,7 @@ summary = {
         "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
     },
     "radio_result": report.get("result"),
+    "service_health": health,
     "stop_reason": report.get("stop_reason"),
     "tx": tx,
     "rx": rx,
@@ -926,7 +961,8 @@ summary = {
         "l2m_mcs": int(os.environ.get("L2M_MCS", 0)),
         "payload_interval_sec": float(os.environ.get("PAYLOAD_INTERVAL_SEC", 0)),
         "payload_len": int(os.environ.get("PAYLOAD_LEN", 0)),
-        "expected_payloads": int(os.environ.get("EXPECTED_PAYLOADS", 0)),
+        "expected_payloads": expected_payloads,
+        "radio_run_config": os.environ.get("RADIO_RUN_CONFIG"),
     },
     "calibration": {
         "profile": report.get("calibration_profile"),
@@ -971,18 +1007,6 @@ if failures:
     sys.exit(1)
 PY
 }
-
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    die "unknown argument: $1"
-    ;;
-esac
 
 log "output directory: $OUT_DIR"
 if ! prepare_peer; then
