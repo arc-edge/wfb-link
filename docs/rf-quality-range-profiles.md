@@ -585,6 +585,11 @@ The current short-range production smoke candidate is M2L `5/12` MCS1 plus L2M
 Across those three M2L `5/12` repeats, decrypt failures were zero, TX drops
 and failed submissions were zero, M2L recovery was `1000/1000`, `1000/1000`,
 and `988/1000`, and L2M recovery was `984/1000`, `999/1000`, and `997/1000`.
+The stronger 2000-payload gate also passed two of two repeats at
+`/tmp/wfb-radio-profile-matrix-remote-duplex-m2l5-l2m3-2000-repeat2-20260504-232305`:
+decrypt failures were zero, TX drops and failed submissions were zero, M2L
+recovery was `1993/2000` and `1990/2000`, and L2M recovery was `1987/2000` and
+`1978/2000`.
 
 Runtime IQK remains receiver-gated and is not promoted for this profile. The
 same M2L `5/12` plus L2M `3/12` 1000-payload A/B with
