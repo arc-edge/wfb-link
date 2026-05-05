@@ -87,3 +87,89 @@ handling.
   profile executes, init phase status, runtime-owned RX/TX flow counters, RX
   metadata coverage counters, RX outcome/frame-type counters, USB counters, and
   last error state through production-facing telemetry
+
+### Requirement: Runtime LED Heartbeat Toggle
+The runtime library SHALL provide an LED heartbeat helper that toggles a
+configured RTL8812AU LED register at a configurable half-period during a
+production session. The helper SHALL be opt-out via configuration, default to
+enabled, and SHALL drive the visible enclosure LED via `REG_LEDCFG0` using the
+operator-confirmed `0x28` on and `0x20` off values.
+
+#### Scenario: Heartbeat toggles after half-period elapses
+- **WHEN** the heartbeat is enabled and the configured half-period has elapsed
+  since the last toggle
+- **THEN** the runtime library issues exactly one USB control write to
+  `REG_LEDCFG0` with the next state value
+- **AND** the heartbeat alternates between on (`0x28`) and off (`0x20`) on
+  subsequent toggles
+
+#### Scenario: Heartbeat skips writes within half-period
+- **WHEN** the heartbeat is enabled and `maybe_toggle` is called before the
+  half-period has elapsed since the last toggle
+- **THEN** the runtime library does not issue any USB control write
+- **AND** the heartbeat counters do not change
+
+#### Scenario: Heartbeat is disabled
+- **WHEN** the heartbeat is configured with `enabled = false`
+- **THEN** `maybe_toggle` does not issue any USB control write
+- **AND** `turn_off` does not issue any USB control write
+
+#### Scenario: USB write failures are counted but not propagated
+- **WHEN** the heartbeat attempts a toggle and the underlying USB control write
+  returns an error
+- **THEN** `toggles_failed` is incremented
+- **AND** `toggles_succeeded` is not incremented
+- **AND** the failure is not returned to the caller
+
+### Requirement: Runtime LED Heartbeat Counters
+The runtime library SHALL expose toggle counters that reflect attempted,
+succeeded, and failed USB writes, so a calling production runtime can report
+them without sampling internal heartbeat state.
+
+#### Scenario: Counters reflect successful toggles
+- **WHEN** the heartbeat performs N successful toggles
+- **THEN** `toggles_attempted` equals N
+- **AND** `toggles_succeeded` equals N
+- **AND** `toggles_failed` equals 0
+
+#### Scenario: Counters distinguish failed toggles
+- **WHEN** the heartbeat attempts N toggles and M of them fail at the USB
+  control write
+- **THEN** `toggles_attempted` equals N
+- **AND** `toggles_succeeded` equals N - M
+- **AND** `toggles_failed` equals M
+
+### Requirement: Runtime LED Heartbeat Off On Session End
+The runtime library SHALL provide a best-effort `turn_off` method that issues a
+single USB control write to `REG_LEDCFG0` with the off value, intended to be
+called once when the production runtime flow exits.
+
+#### Scenario: Turn-off issues an off write when enabled
+- **WHEN** `turn_off` is called with the heartbeat enabled
+- **THEN** the runtime library issues exactly one USB control write with the
+  off value (`0x20`)
+
+#### Scenario: Turn-off is a no-op when disabled
+- **WHEN** `turn_off` is called with the heartbeat configured `enabled = false`
+- **THEN** the runtime library does not issue any USB control write
+
+### Requirement: Production Bridge Loop Iteration Tick Hook
+The runtime library SHALL expose a per-outer-iteration tick callback on the
+production bridge loop executor so consumers can drive periodic state such as
+LED heartbeat, watchdog kicks, or throttle pacing without taking their own
+clock reading. The callback SHALL fire once at the top of each outer iteration
+after stop and deadline checks pass and before any TX burst or RX poll work.
+
+#### Scenario: Iteration tick fires per outer iteration
+- **WHEN** the executor enters a new outer iteration that is not short-circuited
+  by signal stop, duration deadline, or TX-datagram limit
+- **THEN** the executor invokes the iteration-tick callback with the current
+  `Instant`
+- **AND** the callback is invoked before any `TryTx` or `ReadRx` step is
+  dispatched
+
+#### Scenario: Iteration tick is skipped on signal stop
+- **WHEN** the executor's stop-requested check returns true at the top of an
+  iteration
+- **THEN** the executor does not invoke the iteration-tick callback
+- **AND** the executor returns with `stop_reason = signal`
