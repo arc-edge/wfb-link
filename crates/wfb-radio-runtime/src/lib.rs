@@ -1607,6 +1607,32 @@ impl ProductionRuntimeFlowResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeFlowExecutionReport {
+    pub selector: DeviceSelector,
+    pub adapter: Option<UsbDeviceInfo>,
+    pub endpoints: Option<UsbEndpoints>,
+    pub channel: Option<Channel>,
+    pub bandwidth: Bandwidth,
+    pub duration_ms: u64,
+    pub ready_file: Option<PathBuf>,
+    pub stop_reason: &'static str,
+    pub bulk_in_endpoint: Option<u8>,
+    pub bulk_out_endpoint: Option<u8>,
+    pub calibration_profile: TxCalibrationProfile,
+    pub calibration_class: TxCalibrationClass,
+    pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
+    pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    pub receiver_backed_validation_required: bool,
+    pub init: ProductionRuntimeInitTelemetry,
+    pub rx: RuntimeFlowRxTelemetry,
+    pub tx: RuntimeFlowTxTelemetry,
+    pub counters: RuntimeRadioCounters,
+    pub result: ProductionRuntimeFlowResult,
+    pub error: Option<ProductionRuntimeFlowErrorReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowReport {
     pub schema_version: u8,
     pub command: &'static str,
@@ -1635,6 +1661,40 @@ pub struct ProductionRuntimeFlowReport {
 }
 
 impl ProductionRuntimeFlowReport {
+    pub fn from_execution(
+        config: &ProductionRuntimeFlowConfig,
+        execution: ProductionRuntimeFlowExecutionReport,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            command: "radio-run",
+            selector: execution.selector,
+            adapter: execution.adapter,
+            endpoints: execution.endpoints,
+            channel: execution.channel,
+            bandwidth: execution.bandwidth,
+            duration_ms: execution.duration_ms,
+            ready_file: execution.ready_file,
+            stop_reason: execution.stop_reason,
+            bulk_in_endpoint: execution.bulk_in_endpoint,
+            bulk_out_endpoint: execution.bulk_out_endpoint,
+            calibration_profile: execution.calibration_profile,
+            calibration_class: execution.calibration_class,
+            calibration_evidence_source: config
+                .calibration_profile
+                .evidence_source(config.captured_tail_applied),
+            tx_power_control: execution.tx_power_control,
+            tx_calibration_profile: execution.tx_calibration_profile,
+            receiver_backed_validation_required: execution.receiver_backed_validation_required,
+            init: execution.init,
+            rx: execution.rx,
+            tx: execution.tx,
+            counters: execution.counters,
+            result: execution.result,
+            error: execution.error,
+        }
+    }
+
     pub fn not_started(config: &ProductionRuntimeFlowConfig, error: RuntimeRadioError) -> Self {
         let calibration_class = config
             .calibration_profile
@@ -9605,36 +9665,40 @@ mod tests {
     #[test]
     fn production_runtime_types_serialize_without_diagnostic_register_fields() {
         let config = production_runtime_flow_config();
-        let report = ProductionRuntimeFlowReport {
-            schema_version: 1,
-            command: "radio-run",
-            selector: config.usb.selector,
-            adapter: None,
-            endpoints: None,
-            channel: Some(config.channel),
-            bandwidth: config.bandwidth,
-            duration_ms: config.duration_ms,
-            ready_file: config.ready_file.clone(),
-            stop_reason: "duration_elapsed",
-            bulk_in_endpoint: Some(0x81),
-            bulk_out_endpoint: Some(0x02),
-            calibration_profile: config.calibration_profile,
-            calibration_class: config
-                .calibration_profile
-                .before_tx_class(config.captured_tail_applied),
-            calibration_evidence_source: config
-                .calibration_profile
-                .evidence_source(config.captured_tail_applied),
-            tx_power_control: None,
-            tx_calibration_profile: None,
-            receiver_backed_validation_required: false,
-            init: Default::default(),
-            rx: RuntimeFlowRxTelemetry::default(),
-            tx: RuntimeFlowTxTelemetry::default(),
-            counters: RuntimeRadioCounters::default(),
-            result: ProductionRuntimeFlowResult::Pass,
-            error: None,
-        };
+        let report = ProductionRuntimeFlowReport::from_execution(
+            &config,
+            super::ProductionRuntimeFlowExecutionReport {
+                selector: config.usb.selector,
+                adapter: None,
+                endpoints: None,
+                channel: Some(config.channel),
+                bandwidth: config.bandwidth,
+                duration_ms: config.duration_ms,
+                ready_file: config.ready_file.clone(),
+                stop_reason: "duration_elapsed",
+                bulk_in_endpoint: Some(0x81),
+                bulk_out_endpoint: Some(0x02),
+                calibration_profile: config.calibration_profile,
+                calibration_class: config
+                    .calibration_profile
+                    .before_tx_class(config.captured_tail_applied),
+                tx_power_control: None,
+                tx_calibration_profile: None,
+                receiver_backed_validation_required: false,
+                init: Default::default(),
+                rx: RuntimeFlowRxTelemetry::default(),
+                tx: RuntimeFlowTxTelemetry::default(),
+                counters: RuntimeRadioCounters::default(),
+                result: ProductionRuntimeFlowResult::Pass,
+                error: None,
+            },
+        );
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.command, "radio-run");
+        assert_eq!(
+            report.calibration_evidence_source,
+            RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
+        );
         let config_json = serde_json::to_string(&config).expect("config JSON");
         let report_json = serde_json::to_string(&report).expect("report JSON");
         for field in [

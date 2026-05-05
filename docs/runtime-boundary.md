@@ -126,8 +126,11 @@ receiver-backed calibration evidence.
    behind one calibration profile API. The next calibration extraction target
    is production init/profile plumbing that can call those runtime APIs without
    diagnostic command ownership.
-4. Move remaining bridge-loop report adaptation and production command execution
-   harness code out of `wfb-radio-diag`.
+4. Move remaining bridge-loop production command execution harness code out of
+   `wfb-radio-diag`. Final `radio-run` production report assembly now happens
+   in `wfb-radio-runtime` through a report-neutral execution struct; the
+   diagnostic crate still adapts the legacy runtime-flow harness into that
+   runtime-owned shape.
 5. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
    `wfb-radio-runtime`; RX/TX flow counters, adapter-side RSSI/SNR/noise frame

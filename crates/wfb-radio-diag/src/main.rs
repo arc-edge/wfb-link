@@ -43,16 +43,17 @@ use wfb_radio_runtime::{
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
-    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
-    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
-    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig,
-    ProductionRuntimeRxForwardPlan, ProductionRuntimeRxForwardSnapshot,
-    ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
-    ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan, Rtl8812auInitOrder,
-    Rtl8812auInitPhase, Rtl8812auLckCalibrationReport, Rtl8812auRegisterWriteReport,
-    Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport, Rtl8812auRuntimeIqkMaskedBbWritePlan,
-    Rtl8812auRuntimeIqkSetupWritePlan, Rtl8812auTxCalibrationProfileReport,
-    Rtl8812auTxPowerControlMode, Rtl8812auTxPowerControlReport, Rtl8812auTxPowerEfusePlanReport,
+    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowExecutionReport,
+    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
+    ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
+    ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
+    ProductionRuntimeRxForwardSnapshot, ProductionRuntimeTxIngressReceiver,
+    ProductionRuntimeTxIngressSocket, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
+    Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auLckCalibrationReport,
+    Rtl8812auRegisterWriteReport, Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport,
+    Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkSetupWritePlan,
+    Rtl8812auTxCalibrationProfileReport, Rtl8812auTxPowerControlMode,
+    Rtl8812auTxPowerControlReport, Rtl8812auTxPowerEfusePlanReport,
     Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile, RuntimeFlowRxTelemetry,
     RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
     RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeRxSignalSummary,
@@ -23619,42 +23620,40 @@ fn production_report_from_runtime_flow(
     config: &ProductionRuntimeFlowConfig,
     report: RuntimeFlowReport,
 ) -> ProductionRuntimeFlowReport {
-    ProductionRuntimeFlowReport {
-        schema_version: 1,
-        command: "radio-run",
-        selector: report.selector,
-        adapter: report.adapter,
-        endpoints: report.endpoints,
-        channel: report.channel,
-        bandwidth: report.bandwidth,
-        duration_ms: report.duration_ms,
-        ready_file: report.ready_file,
-        stop_reason: report.stop_reason,
-        bulk_in_endpoint: report.bulk_in_endpoint,
-        bulk_out_endpoint: report.bulk_out_endpoint,
-        calibration_profile: RuntimeTxCalibrationProfile::from(report.calibration_profile),
-        calibration_class: report.calibration_class,
-        calibration_evidence_source: config
-            .calibration_profile
-            .evidence_source(config.captured_tail_applied),
-        tx_power_control: report
-            .tx_power_control
-            .map(tx_power_control_report_into_runtime),
-        tx_calibration_profile: report
-            .tx_calibration_profile
-            .map(tx_calibration_profile_report_into_runtime),
-        receiver_backed_validation_required: report.receiver_backed_validation_required,
-        init: ProductionRuntimeInitTelemetry {
-            readiness: production_runtime_init_readiness(report.init_readiness),
-            phase_count: report.init_phase_count,
-            completed_phase_count: report.init_completed_phase_count,
+    ProductionRuntimeFlowReport::from_execution(
+        config,
+        ProductionRuntimeFlowExecutionReport {
+            selector: report.selector,
+            adapter: report.adapter,
+            endpoints: report.endpoints,
+            channel: report.channel,
+            bandwidth: report.bandwidth,
+            duration_ms: report.duration_ms,
+            ready_file: report.ready_file,
+            stop_reason: report.stop_reason,
+            bulk_in_endpoint: report.bulk_in_endpoint,
+            bulk_out_endpoint: report.bulk_out_endpoint,
+            calibration_profile: RuntimeTxCalibrationProfile::from(report.calibration_profile),
+            calibration_class: report.calibration_class,
+            tx_power_control: report
+                .tx_power_control
+                .map(tx_power_control_report_into_runtime),
+            tx_calibration_profile: report
+                .tx_calibration_profile
+                .map(tx_calibration_profile_report_into_runtime),
+            receiver_backed_validation_required: report.receiver_backed_validation_required,
+            init: ProductionRuntimeInitTelemetry {
+                readiness: production_runtime_init_readiness(report.init_readiness),
+                phase_count: report.init_phase_count,
+                completed_phase_count: report.init_completed_phase_count,
+            },
+            rx: report.rx,
+            tx: report.tx,
+            counters: runtime_radio_counters_from_diagnostic(report.counters),
+            result: production_runtime_result(report.result),
+            error: production_error_from_diagnostic(report.error),
         },
-        rx: report.rx,
-        tx: report.tx,
-        counters: runtime_radio_counters_from_diagnostic(report.counters),
-        result: production_runtime_result(report.result),
-        error: production_error_from_diagnostic(report.error),
-    }
+    )
 }
 
 fn radio_run_failure_report(
