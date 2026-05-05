@@ -554,6 +554,14 @@ The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
 (default `200`), the wrapped smoke passes, no decrypt failures occur, and TX
 reports no dropped datagrams or failed submissions.
 
+May 5, 2026 local-Mac poor-SNR evidence adds one stricter smoke tuple for the
+current adapter placement: M2L `4/12` MCS1, L2M `3/12` MCS2, 20 ms source
+pacing, 100 unmeasured warmup payloads, and `SESSION_ACQUIRE_SETTLE_SECONDS=1`.
+It passed at `/tmp/wfb-radio-run-duplex-local-m2l4-l2m3-settle-20260505-101147`
+with `200/200` recovered in both directions, zero decrypt failures, zero TX
+drops/failures, and average Mac RX SNR around 10 dB. Treat this as a local
+poor-SNR smoke profile, not a long-distance acceptance.
+
 Remote hardware currently requires the hardware Mac to reach the Linux peer
 over SSH and UDP, and `LINUX_LAN_IP` must be the peer address reachable from
 that hardware Mac. In the current remote-Mac topology, the Linux peer is

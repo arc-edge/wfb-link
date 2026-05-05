@@ -41,6 +41,12 @@ The system SHALL support unmeasured source-payload warmup before marked payload 
 - **WHEN** an automated run configures nonzero source warmup payloads
 - **THEN** the command MUST send warmup payloads before marked payloads, exclude warmup markers from recovered-payload accounting, increase the expected total WFB datagram budget by the warmup FEC estimate, and record warmup payload/datagram counts in the run evidence
 
+#### Scenario: Session acquisition settle is configured
+- **WHEN** an automated duplex run observes required WFB receiver sessions after
+  warmup
+- **THEN** the command MAY wait a configured settle interval before marked
+  payloads and MUST record that interval in the source-gate evidence
+
 #### Scenario: Warmup is disabled
 - **WHEN** an automated run sets source warmup payloads to zero
 - **THEN** the command MUST preserve first-session acquisition evidence and allow receiver decrypt errors to mark the generated RF-quality report outside the production acceptance margin
@@ -95,6 +101,12 @@ The system SHALL perform a Linux peer command preflight before starting automate
 #### Scenario: Required command is missing
 - **WHEN** the Linux peer preflight cannot find a required command such as `python3`, `sudo`, `timeout`, `wfb_rx`, or `wfb_tx`
 - **THEN** the automation MUST fail before RF transmission and MUST record the missing command in the preflight artifact
+
+#### Scenario: Duplex smoke peer preflight fails
+- **WHEN** the production duplex smoke runner cannot reach the Linux peer or
+  cannot find the commands required for its monitor/radiotap setup
+- **THEN** the runner MUST fail before claiming the Mac radio and MUST write
+  peer-preflight evidence when the peer is reachable
 
 #### Scenario: Optional command is missing
 - **WHEN** an optional Linux command such as `iw`, `tcpdump`, `docker`, `ip`, or `ps` is unavailable

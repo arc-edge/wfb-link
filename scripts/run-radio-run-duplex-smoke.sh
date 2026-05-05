@@ -19,6 +19,7 @@ Configuration is via environment variables. Common overrides:
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
+  SESSION_ACQUIRE_SETTLE_SECONDS=1
   ENABLE_M2L=1 ENABLE_L2M=1
   M2L_FEC_K=8 M2L_FEC_N=12 L2M_FEC_K=8 L2M_FEC_N=12
   M2L_MCS=1 L2M_MCS=1
@@ -95,9 +96,10 @@ SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
 SESSION_ACQUIRE_MODE=${SESSION_ACQUIRE_MODE:-observed}
 SESSION_ACQUIRE_TIMEOUT_SECONDS=${SESSION_ACQUIRE_TIMEOUT_SECONDS:-15}
 SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
+SESSION_ACQUIRE_SETTLE_SECONDS=${SESSION_ACQUIRE_SETTLE_SECONDS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
-export SOURCE_WARMUP_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC
+export SOURCE_WARMUP_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
@@ -143,6 +145,36 @@ if [[ "$TX_POWER_MODE" == "efuse-derived" ]]; then
   [[ -f "$EFUSE_REPORT" ]] || die "EFUSE report not found: $EFUSE_REPORT"
 fi
 
+preflight_linux_peer() {
+  log "preflighting Linux peer $LINUX_HOST"
+  local probe
+  if ! probe=$(ssh -n "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
+    "LINUX_REMOTE_PATH=$(quote "$LINUX_REMOTE_PATH") IFACE=$(quote "$IFACE") bash -s" <<'REMOTE_PREFLIGHT' 2>&1
+set -euo pipefail
+export PATH="$LINUX_REMOTE_PATH:$PATH"
+missing=""
+for cmd in sudo iw ip tcpdump python3 timeout wfb_rx wfb_tx; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    missing="$missing $cmd"
+  fi
+done
+if [[ ! -e "/sys/class/net/$IFACE" ]]; then
+  missing="$missing iface:$IFACE"
+fi
+if [[ -n "$missing" ]]; then
+  printf 'missing_required=%s\n' "$missing"
+  exit 42
+fi
+printf 'hostname=%s\n' "$(hostname)"
+ip -br link show "$IFACE" 2>/dev/null || true
+REMOTE_PREFLIGHT
+  ); then
+    die "Linux peer preflight failed for $LINUX_HOST: $probe"
+  fi
+  printf '%s\n' "$probe" > "$OUT_DIR/peer-preflight.txt"
+  log "Linux peer preflight passed: $(printf '%s\n' "$probe" | head -n 1)"
+}
+
 resolve_linux_lan_ip() {
   if [[ "$LINUX_LAN_IP" != "auto" ]]; then
     return
@@ -159,13 +191,14 @@ resolve_linux_lan_ip() {
   log "resolved LINUX_LAN_IP=$LINUX_LAN_IP from Linux route to MAC_LAN_IP=$MAC_LAN_IP"
 }
 
-resolve_linux_lan_ip
-export LINUX_HOST MAC_LAN_IP LINUX_LAN_IP LINUX_LAN_IP_REQUESTED
-
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
 mkdir -p "$OUT_DIR"
 OUT_DIR=$(cd "$OUT_DIR" && pwd)
+
+preflight_linux_peer
+resolve_linux_lan_ip
+export LINUX_HOST MAC_LAN_IP LINUX_LAN_IP LINUX_LAN_IP_REQUESTED
 
 RADIO_PID=
 cleanup() {
@@ -364,7 +397,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 enabled() {
@@ -543,6 +576,7 @@ interval = float(os.environ["PAYLOAD_INTERVAL_SEC"])
 session_mode = os.environ.get("SESSION_ACQUIRE_MODE", "observed")
 session_timeout = float(os.environ.get("SESSION_ACQUIRE_TIMEOUT_SECONDS", "15"))
 session_poll = float(os.environ.get("SESSION_ACQUIRE_POLL_SECONDS", "0.2"))
+session_settle = float(os.environ.get("SESSION_ACQUIRE_SETTLE_SECONDS", "1"))
 enable_m2l = enabled("ENABLE_M2L")
 enable_l2m = enabled("ENABLE_L2M")
 source_m2l = ("127.0.0.1", int(os.environ["LINUX_M2L_SOURCE_PORT"]))
@@ -603,6 +637,8 @@ if session_mode == "observed" and missing_sessions:
                 break
     observed_sessions, missing_sessions = session_state()
     timed_out = bool(missing_sessions)
+if not timed_out and not missing_sessions and session_settle > 0:
+    time.sleep(session_settle)
 measured_started_at = time.time()
 (remote_prefix / "source-gate.json").write_text(json.dumps({
     "mode": session_mode,
@@ -617,6 +653,7 @@ measured_started_at = time.time()
     "expected_payloads": expected,
     "timeout_sec": session_timeout,
     "poll_sec": session_poll,
+    "settle_sec": session_settle if not timed_out and not missing_sessions else 0,
     "delay_after_warmup_sec": measured_started_at - warmup_completed_at,
 }, indent=2, sort_keys=True) + "\n")
 for seq in range(expected):
