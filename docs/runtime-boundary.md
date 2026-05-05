@@ -323,3 +323,12 @@ completed with `result=pass`, `stop_reason=duration_elapsed`, 68 RX
 buffers/frames, and zero TX datagrams. The TX-positive run completed with
 `result=pass`, submitted `64/64` synthetic WFB distributor datagrams, and
 reported zero TX failures or drops.
+
+When the adapter is attached to the local Mac, the same production smoke runner
+now supports `LOCAL_HW=1` or `--local` and runs from the current checkout instead
+of deploying over SSH. Local validation on May 5, 2026 passed at
+`/tmp/wfb-prod-radio-smoke-local-hw-20260505-095112`: RX-only completed with
+`result=pass`, 68 RX buffers/frames, `rx_need_more=0`, and RX frame-type counts
+`24/43/1/0`; TX-positive submitted `64/64` synthetic WFB distributor datagrams,
+reported zero TX failures or drops, and preserved RX outcome telemetry with
+`rx_need_more=0` and frame-type counts `20/114/5/0`.

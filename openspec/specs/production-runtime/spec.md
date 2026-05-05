@@ -27,6 +27,17 @@ than diagnostic bridge argument or report types.
   metadata coverage, RX outcome/frame-type counters, USB counters, stop reason,
   and error state
 
+### Requirement: Production Smoke Automation
+The system SHALL provide repeatable production smoke automation for both remote
+hardware-Mac deployment and local-adapter execution from the active checkout.
+
+#### Scenario: Local adapter production smoke
+- **WHEN** an operator runs the production smoke automation with local hardware
+  mode enabled
+- **THEN** the automation builds the current checkout, runs the RX-only and
+  TX-positive production `radio-run` gates without SSH deployment, and validates
+  clean TX submission plus runtime-owned RX outcome/frame-type telemetry
+
 ### Requirement: Diagnostic Compatibility Boundary
 The system SHALL keep diagnostic commands available while making the production
 runtime path independent of diagnostic-only CLI and report structs.

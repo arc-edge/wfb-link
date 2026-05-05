@@ -4,13 +4,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-production-radio-smoke.sh [--mode rx-only|tx-positive|both] [--dry-run] [--skip-deploy]
+Usage: scripts/run-production-radio-smoke.sh [--mode rx-only|tx-positive|both] [--dry-run] [--skip-deploy] [--local]
 
 Runs repeatable `radio-run` production smokes on the hardware Mac.
 
 Configuration is via environment variables:
   HW_MAC_HOST=rownd@100.104.12.123
   HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-snr-deploy
+  LOCAL_HW=1              # run on this checkout instead of SSH deployment
   FIRMWARE=/tmp/rtl8812aefw.bin
   VID=0x0bda PID=0x8812 CHANNEL=36 BANDWIDTH_MHZ=20
   DURATION_MS=2500 RX_TIMEOUT_MS=20 TX_BURST_LIMIT=8
@@ -35,6 +36,7 @@ die() {
 MODE=both
 DRY_RUN=0
 DEPLOY=1
+LOCAL_HW=${LOCAL_HW:-0}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +50,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --skip-deploy)
+      DEPLOY=0
+      shift
+      ;;
+    --local)
+      LOCAL_HW=1
       DEPLOY=0
       shift
       ;;
@@ -71,6 +78,7 @@ cd "$REPO_ROOT"
 
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)}
 HW_MAC_HOST=${HW_MAC_HOST:-rownd@100.104.12.123}
+HW_DEPLOY_PATH_WAS_SET=${HW_DEPLOY_PATH+x}
 HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-snr-deploy}
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 VID=${VID:-0x0bda}
@@ -92,12 +100,31 @@ PAYLOAD_LEN=${PAYLOAD_LEN:-256}
 PAYLOAD_MARKER=${PAYLOAD_MARKER:-PRODSMOK}
 REMOTE_OUT_DIR=${REMOTE_OUT_DIR:-/tmp/wfb-prod-radio-smoke-$RUN_ID}
 
+LOCAL_RUN=0
+case "$HW_MAC_HOST" in
+  local|localhost|127.0.0.1) LOCAL_RUN=1 ;;
+esac
+if [[ "$LOCAL_HW" == "1" ]]; then
+  LOCAL_RUN=1
+fi
+if (( LOCAL_RUN == 1 )); then
+  DEPLOY=0
+  if [[ -z "${HW_DEPLOY_PATH_WAS_SET:-}" ]]; then
+    HW_DEPLOY_PATH=$REPO_ROOT
+  fi
+fi
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
 if (( DRY_RUN == 0 )); then
-  require_command ssh
+  if (( LOCAL_RUN == 1 )); then
+    require_command cargo
+    require_command python3
+  else
+    require_command ssh
+  fi
   if (( DEPLOY == 1 )); then
     require_command rsync
   fi
@@ -115,11 +142,11 @@ read -r -d '' remote_script <<'REMOTE' || true
 set -euo pipefail
 
 log() {
-  printf '[prod-smoke:remote] %s\n' "$*" >&2
+  printf '[prod-smoke:runner] %s\n' "$*" >&2
 }
 
 die() {
-  printf '[prod-smoke:remote] error: %s\n' "$*" >&2
+  printf '[prod-smoke:runner] error: %s\n' "$*" >&2
   exit 1
 }
 
@@ -338,7 +365,18 @@ log "artifacts in $REMOTE_OUT_DIR"
 REMOTE
 
 if (( DRY_RUN == 1 )); then
-  cat <<EOF
+  if (( LOCAL_RUN == 1 )); then
+    cat <<EOF
+local bash with:
+MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") \\
+FIRMWARE=$(printf '%q' "$FIRMWARE") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
+DURATION_MS=$(printf '%q' "$DURATION_MS") RX_TIMEOUT_MS=$(printf '%q' "$RX_TIMEOUT_MS") TX_BURST_LIMIT=$(printf '%q' "$TX_BURST_LIMIT") \\
+TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX_INTERVAL_SEC=$(printf '%q' "$TX_INTERVAL_SEC") READY_WAIT_SECONDS=$(printf '%q' "$READY_WAIT_SECONDS") \\
+WFB_LINK_ID=$(printf '%q' "$WFB_LINK_ID") WFB_RADIO_PORT=$(printf '%q' "$WFB_RADIO_PORT") FWMARK=$(printf '%q' "$FWMARK") MCS=$(printf '%q' "$MCS") PAYLOAD_LEN=$(printf '%q' "$PAYLOAD_LEN") PAYLOAD_MARKER=$(printf '%q' "$PAYLOAD_MARKER") bash -s
+$remote_script
+EOF
+  else
+    cat <<EOF
 ssh $HW_MAC_HOST with:
 MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") \\
 FIRMWARE=$(printf '%q' "$FIRMWARE") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
@@ -347,6 +385,35 @@ TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX
 WFB_LINK_ID=$(printf '%q' "$WFB_LINK_ID") WFB_RADIO_PORT=$(printf '%q' "$WFB_RADIO_PORT") FWMARK=$(printf '%q' "$FWMARK") MCS=$(printf '%q' "$MCS") PAYLOAD_LEN=$(printf '%q' "$PAYLOAD_LEN") PAYLOAD_MARKER=$(printf '%q' "$PAYLOAD_MARKER") bash -s
 $remote_script
 EOF
+  fi
+  exit 0
+fi
+
+if (( LOCAL_RUN == 1 )); then
+  log "running $MODE smoke locally from $HW_DEPLOY_PATH"
+  MODE="$MODE" \
+  RUN_ID="$RUN_ID" \
+  HW_DEPLOY_PATH="$HW_DEPLOY_PATH" \
+  REMOTE_OUT_DIR="$REMOTE_OUT_DIR" \
+  FIRMWARE="$FIRMWARE" \
+  VID="$VID" \
+  PID="$PID" \
+  CHANNEL="$CHANNEL" \
+  BANDWIDTH_MHZ="$BANDWIDTH_MHZ" \
+  DURATION_MS="$DURATION_MS" \
+  RX_TIMEOUT_MS="$RX_TIMEOUT_MS" \
+  TX_BURST_LIMIT="$TX_BURST_LIMIT" \
+  TX_DATAGRAMS="$TX_DATAGRAMS" \
+  TX_BIND="$TX_BIND" \
+  TX_INTERVAL_SEC="$TX_INTERVAL_SEC" \
+  READY_WAIT_SECONDS="$READY_WAIT_SECONDS" \
+  WFB_LINK_ID="$WFB_LINK_ID" \
+  WFB_RADIO_PORT="$WFB_RADIO_PORT" \
+  FWMARK="$FWMARK" \
+  MCS="$MCS" \
+  PAYLOAD_LEN="$PAYLOAD_LEN" \
+  PAYLOAD_MARKER="$PAYLOAD_MARKER" \
+  bash -s <<<"$remote_script"
   exit 0
 fi
 
