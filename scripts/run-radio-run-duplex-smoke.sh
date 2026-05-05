@@ -377,7 +377,8 @@ report = {
     "last_peer": None,
     "marker": marker,
     "matched_datagrams": 0,
-    "missing_sequences": list(range(expected)),
+    "missing_sequences": [],
+    "missing_sequences_omitted": True,
     "packets": 0,
     "unique_sequences": 0,
 }

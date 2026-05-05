@@ -19,6 +19,7 @@ Common configuration:
   LINUX_LAN_IP=10.42.0.1    # Linux peer LAN IP visible to remote hardware Mac
   MAC_LAN_IP=10.42.0.162     # remote Mac LAN IP visible to Linux peer
   PROFILE_SET=short          # short, range, or minimal
+  ENABLE_M2L=1 ENABLE_L2M=1
   REPEATS=1
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
   MATRIX_OUT_DIR=/tmp/wfb-radio-profile-matrix
@@ -117,6 +118,8 @@ TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
+ENABLE_M2L=${ENABLE_M2L:-1}
+ENABLE_L2M=${ENABLE_L2M:-1}
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 COUNTER_SECONDS=${COUNTER_SECONDS:-55}
@@ -178,14 +181,15 @@ EOF
       cat <<'EOF'
 baseline-8x12-mcs1|Default production smoke profile|8|12|8|12|1|1|0.003|95|95
 symmetric-4x12-mcs1-20ms|Symmetric stronger FEC and slower source cadence|4|12|4|12|1|1|0.020|95|90
-asym-4x12-3x12-mcs2-20ms|Accepted short-range sustained candidate with warmup|4|12|3|12|1|2|0.020|95|90
+duplex-m2l5x12-l2m3x12-mcs2-20ms|Accepted short-range duplex sustained candidate|5|12|3|12|1|2|0.020|95|90
 EOF
       ;;
     range)
       cat <<'EOF'
 baseline-8x12-mcs1|Default production smoke profile|8|12|8|12|1|1|0.003|95|95
 symmetric-4x12-mcs1-20ms|Symmetric stronger FEC and slower source cadence|4|12|4|12|1|1|0.020|95|90
-asym-4x12-3x12-mcs2-20ms|Accepted short-range sustained candidate with warmup|4|12|3|12|1|2|0.020|95|90
+duplex-m2l5x12-l2m3x12-mcs2-20ms|Accepted short-range duplex sustained candidate|5|12|3|12|1|2|0.020|95|90
+asym-4x12-3x12-mcs2-20ms|Higher-overhead Mac TX candidate; failed one sustained repeat|4|12|3|12|1|2|0.020|95|90
 asym-4x12-4x10-mcs2-20ms|Lower-overhead reverse MCS2 candidate|4|12|4|10|1|2|0.020|95|85
 EOF
       ;;
@@ -228,6 +232,7 @@ keys = [
     "remote_out_dir", "local_hw", "hw_mac_host", "linux_host",
     "linux_lan_ip", "mac_lan_ip",
     "channel", "bandwidth_mhz", "tx_power_mode", "tx_calibration_profile",
+    "enable_m2l", "enable_l2m",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
     "l2m_mcs", "payload_interval_sec", "expected_payloads",
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
@@ -296,8 +301,8 @@ run_one_profile() {
   L2M_MIN_UNIQUE=$l2m_min_unique
   export PROFILE_NAME PROFILE_DESCRIPTION REPEAT_INDEX OUT_DIR REMOTE_OUT_DIR
   export LOCAL_HW HW_MAC_HOST LINUX_HOST LINUX_LAN_IP MAC_LAN_IP CHANNEL BANDWIDTH_MHZ
-  export TX_POWER_MODE TX_CALIBRATION_PROFILE M2L_FEC_K M2L_FEC_N L2M_FEC_K
-  export L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
+  export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
+  export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
   export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS
   write_run_meta "$local_run_dir/matrix-run-meta.json"
@@ -331,6 +336,8 @@ run_one_profile() {
       M2L_MCS="$M2L_MCS" \
       L2M_MCS="$L2M_MCS" \
       EXPECTED_PAYLOADS="$EXPECTED_PAYLOADS" \
+      ENABLE_M2L="$ENABLE_M2L" \
+      ENABLE_L2M="$ENABLE_L2M" \
       SOURCE_WARMUP_PAYLOADS="$SOURCE_WARMUP_PAYLOADS" \
       PAYLOAD_LEN="$PAYLOAD_LEN" \
       PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
@@ -362,7 +369,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -401,9 +408,12 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
     m2l = summary.get("m2l_counter") or {}
     l2m = summary.get("l2m_counter") or {}
     dec = summary.get("peer_wfb_rx") or {}
+    directions = summary.get("directions") or {}
     rx = summary.get("rx") or {}
     signal = rx.get("signal") or {}
     network = summary.get("network") or {}
+    m2l_enabled = bool(directions.get("m2l_enabled", str(meta.get("enable_m2l", "1")).lower() not in {"0", "false", "no"}))
+    l2m_enabled = bool(directions.get("l2m_enabled", str(meta.get("enable_l2m", "1")).lower() not in {"0", "false", "no"}))
     run = {
         "run_dir": str(run_dir),
         "profile": meta.get("profile_name") or run_dir.name,
@@ -414,6 +424,10 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
         "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
         "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
+        "enable_m2l": meta.get("enable_m2l"),
+        "enable_l2m": meta.get("enable_l2m"),
+        "m2l_enabled": m2l_enabled,
+        "l2m_enabled": l2m_enabled,
         "linux_lan_ip": network.get("linux_lan_ip") or meta.get("linux_lan_ip"),
         "linux_lan_ip_requested": network.get("linux_lan_ip_requested") or meta.get("linux_lan_ip"),
         "mac_lan_ip": network.get("mac_lan_ip") or meta.get("mac_lan_ip"),
@@ -437,9 +451,13 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "signal": signal,
     }
     expected = max(run["expected_payloads"], 1)
-    run["m2l_recovery"] = run["m2l_unique"] / expected
-    run["l2m_recovery"] = run["l2m_unique"] / expected
-    run["min_recovery"] = min(run["m2l_recovery"], run["l2m_recovery"])
+    run["m2l_recovery"] = run["m2l_unique"] / expected if m2l_enabled else None
+    run["l2m_recovery"] = run["l2m_unique"] / expected if l2m_enabled else None
+    enabled_recoveries = [
+        value for value in [run["m2l_recovery"], run["l2m_recovery"]]
+        if value is not None
+    ]
+    run["min_recovery"] = min(enabled_recoveries) if enabled_recoveries else 0.0
     run["decrypt_failures"] = run["m2l_decrypt_failures"] + run["l2m_decrypt_failures"]
     run["is_sustained"] = run["expected_payloads"] >= sustained_payloads
     run["accepted"] = (
@@ -467,8 +485,8 @@ for profile, items in groups.items():
     pass_count = sum(1 for item in items if item["smoke_result"] == "pass")
     accepted_count = sum(1 for item in items if item["accepted"])
     short_pass_count = sum(1 for item in items if item["short_smoke_pass"])
-    m2l_values = [item["m2l_recovery"] for item in items]
-    l2m_values = [item["l2m_recovery"] for item in items]
+    m2l_values = [item["m2l_recovery"] for item in items if item["m2l_recovery"] is not None]
+    l2m_values = [item["l2m_recovery"] for item in items if item["l2m_recovery"] is not None]
     min_values = [item["min_recovery"] for item in items]
     profile_summary = {
         "profile": profile,
@@ -477,6 +495,8 @@ for profile, items in groups.items():
         "pass_count": pass_count,
         "accepted_count": accepted_count,
         "short_smoke_pass_count": short_pass_count,
+        "m2l_enabled_runs": len(m2l_values),
+        "l2m_enabled_runs": len(l2m_values),
         "expected_payloads": sorted(set(expected_values)),
         "avg_m2l_recovery": statistics.fmean(m2l_values) if m2l_values else 0.0,
         "avg_l2m_recovery": statistics.fmean(l2m_values) if l2m_values else 0.0,
@@ -522,17 +542,20 @@ lines = [
     "| Rank | Profile | Status | Runs | Avg M2L | Avg L2M | Worst M2L | Worst L2M | Decrypt Failures |",
     "|---:|---|---|---:|---:|---:|---:|---:|---:|",
 ]
+def pct(value):
+    return "n/a" if value is None else f"{value:.1%}"
+
 for item in profiles:
     lines.append(
-        "| {rank} | `{profile}` | {status} | {runs} | {avg_m2l:.1%} | {avg_l2m:.1%} | {worst_m2l:.1%} | {worst_l2m:.1%} | {decrypt} |".format(
+        "| {rank} | `{profile}` | {status} | {runs} | {avg_m2l} | {avg_l2m} | {worst_m2l} | {worst_l2m} | {decrypt} |".format(
             rank=item["rank"],
             profile=item["profile"],
             status=item["status"],
             runs=item["runs"],
-            avg_m2l=item["avg_m2l_recovery"],
-            avg_l2m=item["avg_l2m_recovery"],
-            worst_m2l=item["worst_m2l_recovery"],
-            worst_l2m=item["worst_l2m_recovery"],
+            avg_m2l=pct(item["avg_m2l_recovery"] if item["m2l_enabled_runs"] else None),
+            avg_l2m=pct(item["avg_l2m_recovery"] if item["l2m_enabled_runs"] else None),
+            worst_m2l=pct(item["worst_m2l_recovery"] if item["m2l_enabled_runs"] else None),
+            worst_l2m=pct(item["worst_l2m_recovery"] if item["l2m_enabled_runs"] else None),
             decrypt=item["decrypt_failures"],
         )
     )

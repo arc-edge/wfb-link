@@ -513,8 +513,9 @@ scripts/run-radio-run-profile-matrix.sh
 
 `PROFILE_SET=short` currently covers the default `8/12` MCS1 profile,
 symmetric `4/12` MCS1 at a 20 ms source interval, and the current accepted
-short-range sustained candidate: M2L `4/12` MCS1 plus L2M `3/12` MCS2 at
-20 ms. `PROFILE_SET=range` adds one lower-overhead reverse-link candidate. For
+short-range sustained candidate: M2L `5/12` MCS1 plus L2M `3/12` MCS2 at
+20 ms. `PROFILE_SET=range` also keeps the older higher-overhead M2L `4/12`
+candidate and one lower-overhead reverse-link candidate for comparison. For
 operator-defined experiments, set `PROFILE_FILE` to a pipe-delimited list:
 
 ```text
@@ -538,7 +539,7 @@ validated at
 resolved `auto` to `10.42.0.1`, recovered `80/80` both directions, and logged
 zero decrypt failures.
 
-On May 4, 2026, after local reachability was restored, the remote matrix
+On May 4, 2026, after local reachability was restored, the remote matrix first
 accepted the asymmetric short-range sustained profile only after increasing
 unmeasured source warmup to 100 payloads:
 
@@ -554,17 +555,42 @@ unmeasured source warmup to 100 payloads:
   `/tmp/wfb-radio-profile-matrix-remote-asym-200-repeat2-20260504-184700`.
   The failed repeat recovered L2M `172/200` with missing measured sequences
   `0..27`, matching startup acquisition rather than steady-state loss.
-- Sustained 200-payload asymmetric run with 100 warmup passed two of two
+- Sustained 200-payload M2L `4/12` plus L2M `3/12` run with 100 warmup passed two of two
   repeats at
   `/tmp/wfb-radio-profile-matrix-remote-asym-200-warm100-repeat2-20260504-185114`:
   both directions recovered `200/200`, decrypt failures were zero, TX drops and
   failed submissions were zero, and Mac-side average SNR was about `11 dB`.
 
-This accepts the asymmetric profile as the current short-range production smoke
-default. `scripts/run-radio-run-duplex-smoke.sh` now also defaults to
+The longer 1000-payload gate showed that M2L `4/12` was still not a production
+default: `/tmp/wfb-radio-profile-matrix-remote-asym-1000-repeat3-20260504-221757`
+accepted two of three repeats, but one repeat logged 132 L2M decrypt failures.
+Direction isolation then showed L2M by itself was clean:
+`/tmp/wfb-radio-profile-matrix-remote-l2m-only-1000-repeat2-20260504-222709`
+accepted MCS0, MCS1, and MCS2 L2M-only profiles with zero decrypt failures.
+That points to bidirectional interaction/load, not a simple reverse-link MCS2
+limit.
+
+The current short-range production smoke candidate is M2L `5/12` MCS1 plus L2M
+`3/12` MCS2 at 20 ms:
+
+- M2L `8/12` reduced Mac TX airtime but failed every 1000-payload repeat on
+  M2L recovery:
+  `/tmp/wfb-radio-profile-matrix-remote-duplex-m2l8-l2m3-1000-repeat3-20260504-224434`.
+- M2L `6/12` passed one repeat but failed another with 465 L2M decrypt
+  failures:
+  `/tmp/wfb-radio-profile-matrix-remote-duplex-midfec-1000-repeat2-20260504-225255`.
+- M2L `5/12` accepted both repeats in that same matrix, then accepted one
+  additional 1000-payload repeat at
+  `/tmp/wfb-radio-profile-matrix-remote-duplex-m2l5-l2m3-1000-extra-20260504-230344`.
+  Across those three M2L `5/12` repeats, decrypt failures were zero, TX drops
+  and failed submissions were zero, M2L recovery was `1000/1000`, `1000/1000`,
+  and `988/1000`, and L2M recovery was `984/1000`, `999/1000`, and `997/1000`.
+
+`scripts/run-radio-run-duplex-smoke.sh` defaults to
 `SOURCE_WARMUP_PAYLOADS=100`; set it lower only when deliberately testing
-first-acquisition behavior. This does not overturn the earlier 100 ft result,
-where the same profile failed a 200-payload acceptance gate.
+first-acquisition behavior. These short-range results do not overturn the
+earlier 100 ft result, where the older M2L `4/12` profile failed a 200-payload
+acceptance gate.
 
 ## Acceptance Margins
 
