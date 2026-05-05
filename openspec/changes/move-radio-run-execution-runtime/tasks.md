@@ -13,14 +13,14 @@
 
 ## 3. Thin Diagnostic Adapter
 
-- [ ] 3.1 Update `radio_run_report` so it maps CLI/file inputs into runtime-owned execution inputs and calls the runtime execution API directly.
-- [ ] 3.2 Keep `runtime-flow` and `bridge-run` diagnostic commands working through their existing diagnostic report paths.
-- [ ] 3.3 Confirm `radio-run` still rejects diagnostic-only register pokes, TX status probes, PCAP/JSONL output, and trace replay from its command surface.
+- [x] 3.1 Update `radio_run_report` so it maps CLI/file inputs into runtime-owned execution inputs and calls the runtime execution API directly.
+- [x] 3.2 Keep `runtime-flow` and `bridge-run` diagnostic commands working through their existing diagnostic report paths.
+- [x] 3.3 Confirm `radio-run` still rejects diagnostic-only register pokes, TX status probes, PCAP/JSONL output, and trace replay from its command surface.
 
 ## 4. Tests And Smokes
 
-- [ ] 4.1 `cargo fmt` clean.
-- [ ] 4.2 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes.
-- [ ] 4.3 `openspec validate move-radio-run-execution-runtime --strict` and `openspec validate --specs --strict` pass.
-- [ ] 4.4 Run `scripts/run-production-radio-smoke.sh --mode both` locally or on the hardware Mac and verify RX-only plus TX-positive gates still pass.
-- [ ] 4.5 Run a short receiver-backed duplex `radio-run` smoke and verify peer recovery, decrypt gates, TX failures/drops, RX forwarding snapshots, source timing, signal summaries, and heartbeat reporting remain compatible.
+- [x] 4.1 `cargo fmt` clean.
+- [x] 4.2 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes.
+- [x] 4.3 `openspec validate move-radio-run-execution-runtime --strict` and `openspec validate --specs --strict` pass.
+- [x] 4.4 Run `scripts/run-production-radio-smoke.sh --mode both` locally or on the hardware Mac and verify RX-only plus TX-positive gates still pass.
+- [x] 4.5 Run a short receiver-backed duplex `radio-run` smoke and verify peer recovery, decrypt gates, TX failures/drops, RX forwarding snapshots, source timing, signal summaries, and heartbeat reporting remain compatible.

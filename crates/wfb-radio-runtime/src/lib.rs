@@ -1614,6 +1614,7 @@ impl ProductionRuntimeFlowExecutionInputs {
 
 #[derive(Debug, Default)]
 struct ProductionRuntimePreLoopReports {
+    monitor_opmode_applied: bool,
     tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
 }
@@ -2018,6 +2019,25 @@ where
     let init_telemetry = production_runtime_init_telemetry(&init);
 
     let mut pre_loop = ProductionRuntimePreLoopReports::default();
+    match apply_production_runtime_monitor_opmode(&session.transport, &mut session.counters) {
+        Ok(()) => {
+            pre_loop.monitor_opmode_applied = true;
+        }
+        Err(error) => {
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                init_telemetry,
+                pre_loop,
+                None,
+                RuntimeFlowRxTelemetry::default(),
+                RuntimeFlowTxTelemetry::default(),
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            )
+        }
+    }
     match apply_production_runtime_tx_power_control(
         &session.transport,
         &mut session.counters,
@@ -2097,6 +2117,7 @@ where
             &config,
             &validation,
             &init,
+            pre_loop.monitor_opmode_applied,
             pre_loop.tx_power_control.is_some(),
             pre_loop.tx_calibration_profile.is_some(),
         ),
@@ -2324,11 +2345,8 @@ where
         heartbeat_led,
         rx,
         tx,
-        ProductionRuntimeFlowResult::Fail,
-        Some(RuntimeRadioError::new(
-            "production_runtime_flow_post_loop_finalization_not_implemented",
-            "production runtime flow ran init, ready marker, heartbeat, TX ingress, RX processing, and bridge TX handlers, but post-loop production success gates have not moved from the diagnostic adapter yet",
-        )),
+        ProductionRuntimeFlowResult::Pass,
+        None,
     )
 }
 
@@ -2336,6 +2354,7 @@ fn production_runtime_ready_marker(
     config: &ProductionRuntimeFlowConfig,
     validation: &ProductionRuntimeFlowValidation,
     init: &RuntimeSameSessionInitResult,
+    monitor_opmode_applied: bool,
     tx_power_control_applied: bool,
     tx_calibration_profile_applied: bool,
 ) -> ProductionRuntimeReadyMarker {
@@ -2365,10 +2384,21 @@ fn production_runtime_ready_marker(
             }
             .to_string(),
         ),
-        monitor_opmode_applied: Some(false),
+        monitor_opmode_applied: Some(monitor_opmode_applied),
         tx_power_control_applied,
         tx_calibration_profile_applied,
     }
+}
+
+fn apply_production_runtime_monitor_opmode<T>(
+    transport: &T,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(transport);
+    run_rtl8812au_monitor_opmode(&registers, counters).map(|_| ())
 }
 
 fn apply_production_runtime_tx_power_control<T>(
@@ -10071,10 +10101,8 @@ mod tests {
                 .unwrap_or(false),
             "heartbeat should be turned off once on flow exit"
         );
-        assert_eq!(
-            report.error.as_ref().map(|error| error.code),
-            Some("production_runtime_flow_post_loop_finalization_not_implemented")
-        );
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Pass);
+        assert!(report.error.is_none());
         assert_eq!(marker["source"], "bridge-run");
         assert_eq!(marker["same_session_init_result"], "pass");
         assert_eq!(marker["bind_addrs"][0], "127.0.0.1:0");
@@ -10082,7 +10110,7 @@ mod tests {
         assert_eq!(marker["channel"], 36);
         assert_eq!(marker["bandwidth_mhz"], 20);
         assert_eq!(marker["tx_burst_limit"], 8);
-        assert_eq!(marker["monitor_opmode_applied"], false);
+        assert_eq!(marker["monitor_opmode_applied"], true);
     }
 
     #[test]

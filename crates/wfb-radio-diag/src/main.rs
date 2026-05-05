@@ -38,25 +38,24 @@ use wfb_radio_runtime::{
     create_production_rx_forward_runtimes, handle_production_bridge_tx_datagram,
     plan_rtl8812au_efuse_tx_power, process_production_rx_packet_outcomes,
     production_rx_forward_snapshots, rtl8812au_tx_power_agc_value, run_production_bridge_loop,
-    run_rtl8812au_efuse_tx_power, run_rtl8812au_manual_tx_power,
-    run_rtl8812au_tx_calibration_profile, spawn_production_tx_ingress_receivers,
-    write_production_runtime_ready_marker, MacosUsbHostConfig,
-    ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
+    run_production_runtime_flow_with_session, run_rtl8812au_efuse_tx_power,
+    run_rtl8812au_manual_tx_power, run_rtl8812au_tx_calibration_profile,
+    spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
+    MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
     ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
-    ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowExecutionReport,
-    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeHeartbeatLedReport,
-    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
+    ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+    ProductionRuntimeHeartbeatLedReport, ProductionRuntimeInitTelemetry,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeReadyMarker,
-    ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
-    ProductionRuntimeRxForwardSnapshot, ProductionRuntimeTxIngressReceiver,
-    ProductionRuntimeTxIngressSocket, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
+    ProductionRuntimeRtl8812auInitInputs, ProductionRuntimeRxForwardConfig,
+    ProductionRuntimeRxForwardPlan, ProductionRuntimeRxForwardSnapshot,
+    ProductionRuntimeTxIngressReceiver, ProductionRuntimeTxIngressSocket,
+    ProductionRuntimeTxPowerControlInput, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
     Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auLckCalibrationReport,
     Rtl8812auRegisterWriteReport, Rtl8812auRfPath, Rtl8812auRuntimeIqkCalibrationReport,
     Rtl8812auRuntimeIqkMaskedBbWritePlan, Rtl8812auRuntimeIqkSetupWritePlan,
-    Rtl8812auTxCalibrationProfileReport, Rtl8812auTxPowerControlMode,
-    Rtl8812auTxPowerControlReport, Rtl8812auTxPowerEfusePlanReport,
+    Rtl8812auTxCalibrationProfileReport, Rtl8812auTxPowerEfusePlanReport,
     Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile, RuntimeFlowRxTelemetry,
     RuntimeFlowTxTelemetry, RuntimeMacAddressExecution, RuntimeMonitorOpmodeExecution,
     RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeRxSignalSummary,
@@ -23618,54 +23617,490 @@ fn radio_run_bridge_args(
     }
 }
 
-fn production_error_from_diagnostic(
-    error: Option<DiagnosticErrorReport>,
-) -> Option<ProductionRuntimeFlowErrorReport> {
-    error.map(|error| ProductionRuntimeFlowErrorReport {
-        code: error.code,
-        message: error.message,
-        timeout: false,
-    })
-}
+fn radio_run_tx_power_input(
+    args: &TxPowerControlArgs,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> std::result::Result<ProductionRuntimeTxPowerControlInput, RuntimeRadioError> {
+    let Some(mode) = resolve_tx_power_control_mode(args).map_err(|error| {
+        let runtime_error = runtime_radio_error_from_diagnostic(&error);
+        runtime_error
+    })?
+    else {
+        return Ok(ProductionRuntimeTxPowerControlInput::None);
+    };
 
-fn production_runtime_result(result: DiagnosticResult) -> ProductionRuntimeFlowResult {
-    match result {
-        DiagnosticResult::Pass => ProductionRuntimeFlowResult::Pass,
-        DiagnosticResult::Fail | DiagnosticResult::NotImplemented => {
-            ProductionRuntimeFlowResult::Fail
+    match mode {
+        TxPowerControlModeArg::ManualIndex => {
+            let index = args.tx_power_index.ok_or_else(|| {
+                RuntimeRadioError::new(
+                    "tx_power_manual_index_missing",
+                    "--tx-power-mode manual-index requires --tx-power-index",
+                )
+            })?;
+            Ok(ProductionRuntimeTxPowerControlInput::ManualIndex {
+                path: runtime_tx_power_path(args.tx_power_path),
+                index,
+            })
+        }
+        TxPowerControlModeArg::EfuseDerived => {
+            let source = load_tx_power_efuse_source(args)
+                .map_err(|error| runtime_radio_error_from_diagnostic(&error))?;
+            let plan = plan_rtl8812au_efuse_tx_power(
+                &source.tx_power_data,
+                channel,
+                bandwidth,
+                runtime_tx_power_path(args.tx_power_path),
+                runtime_tx_power_safety_profile(args.tx_power_safety_profile),
+                args.tx_power_max_index,
+            )?;
+            Ok(ProductionRuntimeTxPowerControlInput::EfuseDerived {
+                source: tx_power_efuse_source_report_into_runtime(source.report),
+                plan,
+            })
         }
     }
 }
 
-fn production_runtime_init_readiness(readiness: &str) -> ProductionRuntimeInitReadiness {
-    match readiness {
-        "ready" => ProductionRuntimeInitReadiness::Ready,
-        "failed" => ProductionRuntimeInitReadiness::Failed,
-        _ => ProductionRuntimeInitReadiness::NotStarted,
+fn radio_run_execution_inputs(
+    args: &RadioRunArgs,
+    channel: Channel,
+    init_args: &BridgeTxBenchArgs,
+) -> std::result::Result<
+    (
+        ProductionRuntimeFlowExecutionInputs,
+        BridgeTxBenchInitAssets,
+    ),
+    RuntimeRadioError,
+> {
+    let init_assets = match load_bridge_tx_bench_init_assets(init_args)
+        .map_err(|error| runtime_radio_error_from_diagnostic(&error))?
+    {
+        Some(assets) => assets,
+        None => {
+            return Err(RuntimeRadioError::new(
+                "missing_init_assets",
+                "radio-run requires parsed same-session init assets",
+            ))
+        }
+    };
+    let init_order = if init_args.linux_init_order {
+        Rtl8812auInitOrder::Linux
+    } else {
+        Rtl8812auInitOrder::Default
+    };
+    let inputs = ProductionRuntimeFlowExecutionInputs {
+        rtl8812au_init: Some(ProductionRuntimeRtl8812auInitInputs {
+            firmware_image: init_assets.firmware_image.clone(),
+            mac_plan: init_assets.mac_plan.clone(),
+            phy_plan: init_assets.phy_plan.clone(),
+            agc_plan: init_assets.agc_plan.clone(),
+            radioa_plan: init_assets.radioa_plan.clone(),
+            radiob_plan: init_assets.radiob_plan.clone(),
+            init_order,
+            rfe_type: init_args.rfe_type,
+            init_timeout: Duration::from_millis(init_args.init_timeout_ms),
+        }),
+        tx_power_control: radio_run_tx_power_input(&args.tx_power, channel, args.bandwidth)?,
+        heartbeat_led: args.heartbeat_led.to_config(),
+    };
+    Ok((inputs, init_assets))
+}
+
+fn radio_run_open_session(
+    config: &ProductionRuntimeFlowConfig,
+) -> std::result::Result<RuntimeRadioSession<RuntimeUsbTransport>, RuntimeRadioError> {
+    RuntimeRadioSession::open(config.usb.to_runtime_open_config()).map_err(|error| {
+        RuntimeRadioError::new(error.code, format!("{}: {}", error.code, error.message))
+    })
+}
+
+struct RadioRunSameSessionInitState {
+    firmware_payload_offset: usize,
+    firmware_payload_len: usize,
+    firmware_signature: Option<u16>,
+    firmware_payload_bytes: Vec<u8>,
+    llt_stats: LltRunStats,
+    queue_layout: Option<QueueLayout>,
+    bb_stats: BbSmokeStats,
+    rf_stats: RfSmokeStats,
+}
+
+impl RadioRunSameSessionInitState {
+    fn new(assets: &BridgeTxBenchInitAssets) -> Self {
+        let payload = assets.firmware_image.realtek_download_payload();
+        Self {
+            firmware_payload_offset: payload.offset,
+            firmware_payload_len: payload.bytes.len(),
+            firmware_signature: payload.signature,
+            firmware_payload_bytes: payload.bytes.to_vec(),
+            llt_stats: LltRunStats::default(),
+            queue_layout: None,
+            bb_stats: BbSmokeStats::default(),
+            rf_stats: RfSmokeStats::default(),
+        }
     }
 }
 
-fn tx_calibration_profile_report_into_runtime(
-    report: TxCalibrationProfileReport,
-) -> Rtl8812auTxCalibrationProfileReport {
-    Rtl8812auTxCalibrationProfileReport {
-        semantics: report.semantics,
-        upstream_basis: report.upstream_basis,
-        profile: RuntimeTxCalibrationProfile::from(report.profile),
-        channel: report.channel,
-        bandwidth_mhz: report.bandwidth_mhz,
-        register_count: report.register_count,
-        writes: report.writes,
-        lck: report.lck,
-        runtime_iqk: report.runtime_iqk,
-    }
-}
+fn run_radio_run_same_session_phase<T>(
+    session: &mut RuntimeRadioSession<T>,
+    phase: Rtl8812auInitPhase,
+    state: &mut RadioRunSameSessionInitState,
+    args: &BridgeTxBenchArgs,
+    channel: Channel,
+    assets: &BridgeTxBenchInitAssets,
+) -> std::result::Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure>
+where
+    for<'a> &'a T: radio_core::rtl8812au::Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(&session.transport)
+        .with_timeout(Duration::from_millis(args.init_timeout_ms));
+    let mut counters = diagnostic_counters_from_runtime(session.counters);
+    let before = counters;
+    let power_args = PowerOnSmokeArgs {
+        adapter: args.adapter.clone(),
+        timeout_ms: args.init_timeout_ms,
+        poll_attempts: 200,
+        poll_delay_us: 10,
+        i_understand_this_writes_registers: true,
+    };
+    let firmware_args = FirmwareSmokeArgs {
+        adapter: args.adapter.clone(),
+        firmware: assets.firmware_path.clone(),
+        timeout_ms: args.init_timeout_ms,
+        download_attempts: 3,
+        checksum_min_attempts: 5,
+        checksum_timeout_ms: 50,
+        ready_min_attempts: 10,
+        ready_timeout_ms: 200,
+        poll_delay_us: 1000,
+        i_understand_this_writes_registers: true,
+    };
+    let llt_args = LltSmokeArgs {
+        adapter: args.adapter.clone(),
+        timeout_ms: args.init_timeout_ms,
+        poll_attempts: 25,
+        poll_delay_us: 10,
+        i_understand_this_writes_registers: true,
+    };
+    let bb_args = BbSmokeArgs {
+        adapter: args.adapter.clone(),
+        bb_source: args.bb_source.clone(),
+        timeout_ms: args.init_timeout_ms,
+        cut_version: args.cut_version,
+        package_type: args.package_type,
+        support_interface: args.support_interface,
+        support_platform: args.support_platform,
+        board_type: args.board_type,
+        type_glna: args.type_glna,
+        type_gpa: args.type_gpa,
+        type_alna: args.type_alna,
+        type_apa: args.type_apa,
+        crystal_cap: args.crystal_cap,
+        i_understand_this_writes_registers: true,
+    };
 
-fn tx_power_control_mode_into_runtime(mode: TxPowerControlModeArg) -> Rtl8812auTxPowerControlMode {
-    match mode {
-        TxPowerControlModeArg::ManualIndex => Rtl8812auTxPowerControlMode::ManualIndex,
-        TxPowerControlModeArg::EfuseDerived => Rtl8812auTxPowerControlMode::EfuseDerived,
-    }
+    let phase_result = match phase {
+        Rtl8812auInitPhase::PowerOn => {
+            let mut power_steps = Vec::new();
+            match run_power_on_sequence(&registers, &power_args, &mut counters, &mut power_steps) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!("completed {} power-on/RF-reset steps", power_steps.len()),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} steps", error.message, power_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::Firmware => {
+            let mut firmware_steps = Vec::new();
+            let mut firmware_stats = FirmwareRunStats {
+                firmware_payload_offset: Some(state.firmware_payload_offset),
+                firmware_payload_len: Some(state.firmware_payload_len),
+                firmware_signature: state.firmware_signature,
+                ..FirmwareRunStats::default()
+            };
+            match run_firmware_sequence(
+                &registers,
+                &firmware_args,
+                &state.firmware_payload_bytes,
+                &mut counters,
+                &mut firmware_steps,
+                &mut firmware_stats,
+            ) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!(
+                        "downloaded {} payload bytes in {} control writes",
+                        state.firmware_payload_len, firmware_stats.firmware_control_writes
+                    ),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} steps", error.message, firmware_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::Llt => {
+            let mut llt_steps = Vec::new();
+            match run_llt_sequence(
+                &registers,
+                &llt_args,
+                &mut counters,
+                &mut llt_steps,
+                &mut state.llt_stats,
+            ) {
+                Ok(()) => Ok(runtime_same_session_phase_completed_with_writes(
+                    phase,
+                    format!("wrote {} LLT entries", state.llt_stats.entries_written),
+                    usize::try_from(state.llt_stats.entries_written).unwrap_or(usize::MAX),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} steps", error.message, llt_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::MacTable => {
+            match run_mac_table_plan(&registers, &mut counters, &assets.mac_plan) {
+                Ok(writes) => Ok(runtime_same_session_phase_completed_with_writes(
+                    phase,
+                    format!("applied {writes} generated MAC register writes"),
+                    writes,
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    error.message.clone(),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::QueueDma => {
+            let layout = match queue_layout_from_endpoints(&session.endpoints) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    return Err(runtime_same_session_phase_failure(
+                        phase,
+                        error.message.clone(),
+                        before,
+                        counters,
+                        &error,
+                    ))
+                }
+            };
+            state.queue_layout = Some(layout);
+            let mut queue_steps = Vec::new();
+            match run_queue_dma_sequence(&registers, &layout, &mut counters, &mut queue_steps) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!(
+                        "programmed queue/DMA layout for {} bulk OUT endpoints",
+                        layout.bulk_out_endpoint_count
+                    ),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} steps", error.message, queue_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::Mac => {
+            let mut mac_steps = Vec::new();
+            match run_mac_sequence(&registers, &mut counters, &mut mac_steps) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!("completed {} MAC/WMAC setup steps", mac_steps.len()),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} steps", error.message, mac_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::MacAddr => match program_efuse_macid(&registers, &mut counters) {
+            Ok(Some(report)) => Ok(runtime_same_session_phase_completed(
+                phase,
+                format!(
+                    "programmed REG_MACID from EFUSE MAC {} (was {})",
+                    report.written, report.before
+                ),
+                before,
+                counters,
+            )),
+            Ok(None) => Ok(runtime_same_session_phase_completed(
+                phase,
+                "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged",
+                before,
+                counters,
+            )),
+            Err(error) => Err(runtime_same_session_phase_failure(
+                phase,
+                error.message.clone(),
+                before,
+                counters,
+                &error,
+            )),
+        },
+        Rtl8812auInitPhase::Bb => {
+            let mut bb_steps = Vec::new();
+            match run_bb_sequence(
+                &registers,
+                &bb_args,
+                &assets.phy_plan,
+                &assets.agc_plan,
+                &mut counters,
+                &mut bb_steps,
+                &mut state.bb_stats,
+            ) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!(
+                        "applied {} PHY writes, {} AGC writes, and {} delays",
+                        state.bb_stats.phy_writes_applied,
+                        state.bb_stats.agc_writes_applied,
+                        state.bb_stats.delays_applied
+                    ),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} setup steps", error.message, bb_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::Rf => {
+            let mut rf_steps = Vec::new();
+            match run_rf_sequence(
+                &registers,
+                &assets.radioa_plan,
+                &assets.radiob_plan,
+                &mut counters,
+                &mut rf_steps,
+                &mut state.rf_stats,
+            ) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!(
+                        "applied {} radioA writes, {} radioB writes, and {} delays",
+                        state.rf_stats.radioa_writes_applied,
+                        state.rf_stats.radiob_writes_applied,
+                        state.rf_stats.delays_applied
+                    ),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!("{} after {} setup steps", error.message, rf_steps.len()),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::Channel => {
+            let mut channel_steps = Vec::new();
+            match run_channel_sequence(
+                &registers,
+                channel,
+                args.bandwidth,
+                args.rfe_type,
+                &assets.radioa_plan,
+                &assets.radiob_plan,
+                &mut counters,
+                &mut channel_steps,
+            ) {
+                Ok(()) => Ok(runtime_same_session_phase_completed(
+                    phase,
+                    format!(
+                        "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {} steps",
+                        channel.number,
+                        channel.frequency_mhz,
+                        args.bandwidth.mhz(),
+                        format_value(args.rfe_type, 2),
+                        channel_steps.len()
+                    ),
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    format!(
+                        "{} after {} channel steps",
+                        error.message,
+                        channel_steps.len()
+                    ),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::TxSchedulerTail => {
+            match run_tx_scheduler_tail_sequence(&registers, &mut counters) {
+                Ok(steps) => Ok(runtime_same_session_phase_completed_with_writes(
+                    phase,
+                    format!("applied {steps} late Linux USB TX scheduler writes"),
+                    steps,
+                    before,
+                    counters,
+                )),
+                Err(error) => Err(runtime_same_session_phase_failure(
+                    phase,
+                    error.message.clone(),
+                    before,
+                    counters,
+                    &error,
+                )),
+            }
+        }
+        Rtl8812auInitPhase::RfCalibrationBeforeChannel
+        | Rtl8812auInitPhase::RfCalibrationAfterChannel
+        | Rtl8812auInitPhase::RfCalibrationBeforeTx => Ok(runtime_same_session_phase_completed(
+            phase,
+            "skipped diagnostic-only RF calibration probe in direct production runtime path",
+            before,
+            counters,
+        )),
+    };
+
+    session.counters = runtime_radio_counters_from_diagnostic(counters);
+    phase_result
 }
 
 fn tx_power_efuse_source_report_into_runtime(
@@ -23679,69 +24114,6 @@ fn tx_power_efuse_source_report_into_runtime(
         tx_power_data_hex: report.tx_power_data_hex,
         non_ff_bytes: report.non_ff_bytes,
     }
-}
-
-fn tx_power_control_report_into_runtime(
-    report: TxPowerControlReport,
-) -> Rtl8812auTxPowerControlReport {
-    Rtl8812auTxPowerControlReport {
-        semantics: report.semantics,
-        mode: tx_power_control_mode_into_runtime(report.mode),
-        manual_index: report.manual_index,
-        manual_index_hex: report.manual_index_hex,
-        path: runtime_tx_power_path(report.path),
-        register_count: report.register_count,
-        repeated_value: report.repeated_value,
-        repeated_value_hex: report.repeated_value_hex,
-        efuse_source: report
-            .efuse_source
-            .map(tx_power_efuse_source_report_into_runtime),
-        efuse_plan: report.efuse_plan,
-        writes: report.writes,
-    }
-}
-
-fn production_report_from_runtime_flow(
-    config: &ProductionRuntimeFlowConfig,
-    report: RuntimeFlowReport,
-) -> ProductionRuntimeFlowReport {
-    ProductionRuntimeFlowReport::from_execution(
-        config,
-        ProductionRuntimeFlowExecutionReport {
-            selector: report.selector,
-            adapter: report.adapter,
-            endpoints: report.endpoints,
-            channel: report.channel,
-            bandwidth: report.bandwidth,
-            duration_ms: report.duration_ms,
-            ready_file: report.ready_file,
-            stop_reason: report.stop_reason,
-            bulk_in_endpoint: report.bulk_in_endpoint,
-            bulk_out_endpoint: report.bulk_out_endpoint,
-            calibration_profile: RuntimeTxCalibrationProfile::from(report.calibration_profile),
-            calibration_class: report.calibration_class,
-            tx_power_control: report
-                .tx_power_control
-                .map(tx_power_control_report_into_runtime),
-            tx_calibration_profile: report
-                .tx_calibration_profile
-                .map(tx_calibration_profile_report_into_runtime),
-            heartbeat_led: report
-                .heartbeat_led
-                .map(ProductionRuntimeHeartbeatLedReport::from),
-            receiver_backed_validation_required: report.receiver_backed_validation_required,
-            init: ProductionRuntimeInitTelemetry {
-                readiness: production_runtime_init_readiness(report.init_readiness),
-                phase_count: report.init_phase_count,
-                completed_phase_count: report.init_completed_phase_count,
-            },
-            rx: report.rx,
-            tx: report.tx,
-            counters: runtime_radio_counters_from_diagnostic(report.counters),
-            result: production_runtime_result(report.result),
-            error: production_error_from_diagnostic(report.error),
-        },
-    )
 }
 
 fn radio_run_failure_report(
@@ -23792,11 +24164,29 @@ fn radio_run_report(args: RadioRunArgs) -> ProductionRuntimeFlowReport {
         Ok(validation) => validation,
         Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
     };
+    let channel = config.channel;
+    let bridge_args = radio_run_bridge_args(&args, &validation.wfb_loop);
+    let init_args = bridge_tx_listen_init_bridge_args(&bridge_args.tx);
+    let (inputs, init_assets) = match radio_run_execution_inputs(&args, channel, &init_args) {
+        Ok(inputs) => inputs,
+        Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
+    };
+    let mut session = match radio_run_open_session(&config) {
+        Ok(session) => session,
+        Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
+    };
+    let mut init_state = RadioRunSameSessionInitState::new(&init_assets);
 
-    let runtime_flow = runtime_flow_report(RuntimeFlowArgs {
-        bridge: radio_run_bridge_args(&args, &validation.wfb_loop),
-    });
-    production_report_from_runtime_flow(&config, runtime_flow)
+    run_production_runtime_flow_with_session(config, inputs, &mut session, |session, phase| {
+        run_radio_run_same_session_phase(
+            session,
+            phase,
+            &mut init_state,
+            &init_args,
+            channel,
+            &init_assets,
+        )
+    })
 }
 
 fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
@@ -41202,7 +41592,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert_eq!(report.counters.usb_control_reads, 0);
         assert_eq!(
             report.init.readiness,
-            ProductionRuntimeInitReadiness::NotStarted
+            wfb_radio_runtime::ProductionRuntimeInitReadiness::NotStarted
         );
     }
 
