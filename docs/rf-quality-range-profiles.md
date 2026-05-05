@@ -21,6 +21,48 @@ treated as valid.
 | Stepped or attenuated | `stepped-attenuated` | Measure margin changes under repeatable loss, separation, or attenuator steps before field range work. | Must stay within the documented Mac-vs-Linux acceptance margin or identify the calibration/power gap being tested. |
 | Outdoor long-distance | `outdoor-long-distance` | Validate the operating profile in the actual field geometry. | Requires a passing close-range run with receiver RX_ANT MCS/RSSI/SNR telemetry, plus companion notes with distance/geometry, antenna orientation, adapter placement, environment, and artifacts. |
 
+## Indoor 50 ft Exploration
+
+Explored on May 5, 2026 with the adapter on the local Mac, the Linux receiver
+reachable as `pi@drone-2f389`, channel 36 / 20 MHz, current-default TX power
+and current-default stop-gap calibration. The placement was approximately
+50 ft indoors from the receiver.
+
+This is not an accepted range profile yet. The main result is that the radio
+loop stayed healthy while the RF path showed low-rate erasures:
+
+- Radio-side health stayed clean across the matrix: `radio_result=pass`, zero
+  TX drops, zero TX failed submissions, and zero post-session decrypt failures.
+- A 200-payload duplex profile passed at
+  `/tmp/wfb-radio-run-range50ft-m2lmcs0-l2mmcs1-sym2-200-slow40-20260505-103755`:
+  M2L `2/12` MCS0, L2M `2/12` MCS1, 40 ms payload interval, `200/200` both
+  directions.
+- The same profile did not sustain the 1000-payload gate at
+  `/tmp/wfb-radio-run-range50ft-m2lmcs0-l2mmcs1-sym2-1000-slow40-20260505-103940`:
+  M2L `998/1000`, L2M `999/1000`.
+- Direction isolation at the same 40 ms interval passed both ways:
+  `/tmp/wfb-radio-run-range50ft-m2l-only-mcs0-k2n12-1000-40ms-20260505-105249`
+  recovered M2L `1000/1000`, and
+  `/tmp/wfb-radio-run-range50ft-l2m-only-mcs1-k2n12-1000-40ms-20260505-105709`
+  recovered L2M `1000/1000`.
+- Stronger or differently shaped duplex protection did not yet produce a
+  strict 1000-payload pass. `2/16`, `1/6`, `1/12`, slower 60/80/100 ms
+  intervals, symmetric MCS0, and measured-source phase offsets all still
+  missed payloads in at least one direction.
+- The closest conservative duplex retry was
+  `/tmp/wfb-radio-run-range50ft-sym-mcs0-k1n12-1000-slow100-phase50-20260505-111956`:
+  M2L `1000/1000`, L2M `998/1000`, zero decrypt failures, Mac RX average SNR
+  `22 dB`, RSSI average `-54 dBm`, and zero radio TX failures.
+
+Interpretation: this evidence points at receive-window/airtime interaction,
+environmental fades, or remaining RF calibration/antenna margin rather than
+Mac USB submission or encrypted-payload corruption. Do not promote an indoor
+50 ft profile until a strict 1000-payload duplex run recovers both directions
+with zero post-session decrypt failures. The duplex runner now records
+per-direction measured-source phase offsets in `source-gate.json`; use that
+knob for future TDMA/scheduling experiments, but do not treat phase-offset
+near-passes as accepted range evidence.
+
 ## Close-Range Sanity
 
 Run this whenever the TX power mode, calibration mode, descriptor profile,

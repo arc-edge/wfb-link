@@ -47,6 +47,13 @@ The system SHALL support unmeasured source-payload warmup before marked payload 
 - **THEN** the command MAY wait a configured settle interval before marked
   payloads and MUST record that interval in the source-gate evidence
 
+#### Scenario: Measured duplex source phase is configured
+- **WHEN** an automated duplex run configures per-direction measured source
+  phase offsets
+- **THEN** the command MUST apply those offsets only to measured marked payloads
+  after warmup/session acquisition and MUST record the M2L and L2M phase values
+  in source-gate evidence
+
 #### Scenario: Warmup is disabled
 - **WHEN** an automated run sets source warmup payloads to zero
 - **THEN** the command MUST preserve first-session acquisition evidence and allow receiver decrypt errors to mark the generated RF-quality report outside the production acceptance margin
