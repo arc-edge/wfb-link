@@ -17,8 +17,8 @@
 ## 3. Report integration
 
 - [x] 3.1 Add `heartbeat_led: HeartbeatLedReport { enabled, half_period_ms, toggles_attempted, toggles_succeeded, toggles_failed }` to the `BridgeRunReport` JSON shape (surfaces directly in `bridge-run` JSON output and via the embedded bridge report from any caller).
-- [ ] 3.2 Promote the field through `RuntimeFlowReport` and `ProductionRuntimeFlowReport` so `radio-run` exposes it as a top-level field in its JSON output. _(Deferred: today the heartbeat counters appear inside the `bridge-run` report payload but not at the runtime-flow level. Behavior is unaffected.)_
-- [ ] 3.3 Render a single human-readable line in the `radio-run` text output summarizing the heartbeat (`heartbeat-led: enabled, 500 ms, 14 toggles (14 ok, 0 failed)`). _(Deferred: paired with 3.2 since the human print path is at the runtime-flow level.)_
+- [x] 3.2 Promote the field through `RuntimeFlowReport` and `ProductionRuntimeFlowReport` so `radio-run` exposes it as a top-level field in its JSON output.
+- [x] 3.3 Render a single human-readable line in the `radio-run` text output summarizing the heartbeat (`heartbeat-led: enabled, 500 ms, 14 toggles (14 ok, 0 failed)`).
 
 ## 4. Tests
 
@@ -39,3 +39,4 @@
 - [x] 5.3 `cargo build -p wfb-radio-runtime -p wfb-radio-diag` clean.
 - [x] 5.4 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes including the new tests.
 - [ ] 5.5 Operator verification on the hardware Mac: run `radio-run --macos-usbhost --channel 36 --bandwidth 20 ... --duration-ms 5000 --i-understand-this-writes-registers` and visually confirm the AWUS036ACH enclosure LED blinks at the configured cadence; `heartbeat_led.toggles_succeeded` ≥ 8 at 500 ms half-period over 5 s.
+  - Counter-backed hardware run completed at `/tmp/wfb-radio-run-led-heartbeat-20260505-125727.json`: `heartbeat_led.toggles_succeeded=10`, `toggles_failed=0`. Physical visual confirmation remains operator-pending.

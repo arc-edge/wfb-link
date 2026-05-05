@@ -1686,6 +1686,16 @@ impl ProductionRuntimeFlowResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeHeartbeatLedReport {
+    pub enabled: bool,
+    pub half_period_ms: u64,
+    pub toggles_attempted: u64,
+    pub toggles_succeeded: u64,
+    pub toggles_failed: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowExecutionReport {
@@ -1703,6 +1713,7 @@ pub struct ProductionRuntimeFlowExecutionReport {
     pub calibration_class: TxCalibrationClass,
     pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
     pub rx: RuntimeFlowRxTelemetry,
@@ -1732,6 +1743,8 @@ pub struct ProductionRuntimeFlowReport {
     pub calibration_evidence_source: RuntimeTxCalibrationEvidenceSource,
     pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
     pub rx: RuntimeFlowRxTelemetry,
@@ -1766,6 +1779,7 @@ impl ProductionRuntimeFlowReport {
                 .evidence_source(config.captured_tail_applied),
             tx_power_control: execution.tx_power_control,
             tx_calibration_profile: execution.tx_calibration_profile,
+            heartbeat_led: execution.heartbeat_led,
             receiver_backed_validation_required: execution.receiver_backed_validation_required,
             init: execution.init,
             rx: execution.rx,
@@ -1801,6 +1815,7 @@ impl ProductionRuntimeFlowReport {
             calibration_evidence_source,
             tx_power_control: None,
             tx_calibration_profile: None,
+            heartbeat_led: None,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init: ProductionRuntimeInitTelemetry::default(),
             rx: RuntimeFlowRxTelemetry::default(),
@@ -7647,16 +7662,17 @@ mod tests {
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
         ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
-        ProductionRuntimeFlowResult, ProductionRuntimePrimaryRxForwardConfig,
-        ProductionRuntimeQueuedDatagram, ProductionRuntimeReadyMarker,
-        ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
-        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
-        Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters,
-        RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
+        ProductionRuntimeFlowResult, ProductionRuntimeHeartbeatLedReport,
+        ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeQueuedDatagram,
+        ProductionRuntimeReadyMarker, ProductionRuntimeRxForwardConfig,
+        ProductionRuntimeRxForwardPlan, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
+        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
         RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
         RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
         RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
-        TxCalibrationClass, TxCalibrationProfile, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+        TxCalibrationClass, TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+        PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
     use wfb_bridge::{build_wfb_data_header, RxForwardConfig, TxCounters, WfbChannelId};
@@ -9870,6 +9886,13 @@ mod tests {
                     .before_tx_class(config.captured_tail_applied),
                 tx_power_control: None,
                 tx_calibration_profile: None,
+                heartbeat_led: Some(ProductionRuntimeHeartbeatLedReport {
+                    enabled: true,
+                    half_period_ms: DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+                    toggles_attempted: 4,
+                    toggles_succeeded: 4,
+                    toggles_failed: 0,
+                }),
                 receiver_backed_validation_required: false,
                 init: Default::default(),
                 rx: RuntimeFlowRxTelemetry::default(),
@@ -9885,8 +9908,19 @@ mod tests {
             report.calibration_evidence_source,
             RuntimeTxCalibrationEvidenceSource::CapturedLinuxTail
         );
+        assert_eq!(
+            report.heartbeat_led.as_ref().map(|heartbeat| (
+                heartbeat.enabled,
+                heartbeat.half_period_ms,
+                heartbeat.toggles_attempted,
+                heartbeat.toggles_succeeded,
+                heartbeat.toggles_failed,
+            )),
+            Some((true, DEFAULT_HEARTBEAT_HALF_PERIOD_MS, 4, 4, 0))
+        );
         let config_json = serde_json::to_string(&config).expect("config JSON");
         let report_json = serde_json::to_string(&report).expect("report JSON");
+        assert!(report_json.contains("heartbeat_led"));
         for field in [
             "pre_tx_write",
             "pre_tx_rmw",

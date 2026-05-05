@@ -54,3 +54,17 @@ The other results prove userspace LED register control and readback, but they do
 `tx-once` and `tx-repeat` now support an explicit `--tx-led` hook. On the attached unit it uses `--tx-led-pin led0 --tx-led-mode normal` by default, turns the LED on around software bulk-OUT submission activity, holds it for `--tx-led-hold-ms`, then turns it off.
 
 This LED means the host submitted TX work over USB. It does not claim RF success; true RF TX indication still needs either firmware TX-status evidence or an independent receiver.
+
+## Production Heartbeat
+
+`radio-run` drives the same visible `REG_LEDCFG0` LED as a default-on runtime
+heartbeat. Operators can disable it with `--no-heartbeat-led` or tune the
+cadence with `--heartbeat-led-half-period-ms`; the accepted range is
+50-5000 ms.
+
+The heartbeat is a host-alive indicator, not RF TX proof. It writes the LED
+register from the production bridge loop and reports top-level counters in
+`heartbeat_led`. A May 5, 2026 hardware run at
+`/tmp/wfb-radio-run-led-heartbeat-20260505-125727.json` completed
+`radio-run --macos-usbhost` for 5 s with `heartbeat_led.enabled=true`,
+`half_period_ms=500`, `toggles_succeeded=10`, and `toggles_failed=0`.

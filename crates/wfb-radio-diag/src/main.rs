@@ -46,9 +46,10 @@ use wfb_radio_runtime::{
     ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
     ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
     ProductionRuntimeFlowErrorReport, ProductionRuntimeFlowExecutionReport,
-    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeInitReadiness,
-    ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
-    ProductionRuntimeReadyMarker, ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
+    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, ProductionRuntimeHeartbeatLedReport,
+    ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeReadyMarker,
+    ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
     ProductionRuntimeRxForwardSnapshot, ProductionRuntimeTxIngressReceiver,
     ProductionRuntimeTxIngressSocket, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopPlan,
     Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auLckCalibrationReport,
@@ -1580,6 +1581,18 @@ impl HeartbeatLedReport {
             toggles_attempted: counters.toggles_attempted,
             toggles_succeeded: counters.toggles_succeeded,
             toggles_failed: counters.toggles_failed,
+        }
+    }
+}
+
+impl From<HeartbeatLedReport> for ProductionRuntimeHeartbeatLedReport {
+    fn from(report: HeartbeatLedReport) -> Self {
+        Self {
+            enabled: report.enabled,
+            half_period_ms: report.half_period_ms,
+            toggles_attempted: report.toggles_attempted,
+            toggles_succeeded: report.toggles_succeeded,
+            toggles_failed: report.toggles_failed,
         }
     }
 }
@@ -3669,6 +3682,8 @@ struct RuntimeFlowReport {
     calibration_evidence_source: &'static str,
     tx_power_control: Option<TxPowerControlReport>,
     tx_calibration_profile: Option<TxCalibrationProfileReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heartbeat_led: Option<HeartbeatLedReport>,
     receiver_backed_validation_required: bool,
     init_readiness: &'static str,
     init_phase_count: usize,
@@ -23711,6 +23726,9 @@ fn production_report_from_runtime_flow(
             tx_calibration_profile: report
                 .tx_calibration_profile
                 .map(tx_calibration_profile_report_into_runtime),
+            heartbeat_led: report
+                .heartbeat_led
+                .map(ProductionRuntimeHeartbeatLedReport::from),
             receiver_backed_validation_required: report.receiver_backed_validation_required,
             init: ProductionRuntimeInitTelemetry {
                 readiness: production_runtime_init_readiness(report.init_readiness),
@@ -23754,6 +23772,7 @@ fn radio_run_failure_report(
         calibration_evidence_source: runtime_profile.evidence_source(captured_tail_applied),
         tx_power_control: None,
         tx_calibration_profile: None,
+        heartbeat_led: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init: ProductionRuntimeInitTelemetry::default(),
         rx: RuntimeFlowRxTelemetry::default(),
@@ -23854,6 +23873,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
         calibration_evidence_source,
         tx_power_control: bridge.tx_power_control,
         tx_calibration_profile: bridge.tx_calibration_profile,
+        heartbeat_led: bridge.heartbeat_led,
         receiver_backed_validation_required,
         init_readiness,
         init_phase_count,
@@ -23970,6 +23990,7 @@ fn runtime_flow_failure_report(
         ),
         tx_power_control: None,
         tx_calibration_profile: None,
+        heartbeat_led: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init_readiness: "not_started",
         init_phase_count: 0,
@@ -35018,6 +35039,15 @@ fn print_runtime_flow_human(report: &RuntimeFlowReport) {
         report.tx.dropped_datagrams,
         report.tx.bytes_written
     );
+    if let Some(heartbeat) = &report.heartbeat_led {
+        print_heartbeat_led_human(
+            heartbeat.enabled,
+            heartbeat.half_period_ms,
+            heartbeat.toggles_attempted,
+            heartbeat.toggles_succeeded,
+            heartbeat.toggles_failed,
+        );
+    }
     println!("Stop reason: {}", report.stop_reason);
     if let Some(path) = &report.ready_file {
         println!("Ready file: {}", path.display());
@@ -35072,6 +35102,15 @@ fn print_radio_run_human(report: &ProductionRuntimeFlowReport) {
         report.tx.dropped_datagrams,
         report.tx.bytes_written
     );
+    if let Some(heartbeat) = &report.heartbeat_led {
+        print_heartbeat_led_human(
+            heartbeat.enabled,
+            heartbeat.half_period_ms,
+            heartbeat.toggles_attempted,
+            heartbeat.toggles_succeeded,
+            heartbeat.toggles_failed,
+        );
+    }
     println!("Stop reason: {}", report.stop_reason);
     if let Some(path) = &report.ready_file {
         println!("Ready file: {}", path.display());
@@ -35079,6 +35118,19 @@ fn print_radio_run_human(report: &ProductionRuntimeFlowReport) {
     if let Some(error) = &report.error {
         println!("Error: {} - {}", error.code, error.message);
     }
+}
+
+fn print_heartbeat_led_human(
+    enabled: bool,
+    half_period_ms: u64,
+    toggles_attempted: u64,
+    toggles_succeeded: u64,
+    toggles_failed: u64,
+) {
+    let state = if enabled { "enabled" } else { "disabled" };
+    println!(
+        "heartbeat-led: {state}, {half_period_ms} ms, {toggles_attempted} toggles ({toggles_succeeded} ok, {toggles_failed} failed)"
+    );
 }
 
 fn print_runtime_rx_forward_snapshots_human(forwards: &[ProductionRuntimeRxForwardSnapshot]) {
