@@ -1613,7 +1613,7 @@ impl ProductionRuntimeFlowExecutionInputs {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct ProductionRuntimePreLoopReports {
     monitor_opmode_applied: bool,
     tx_power_control: Option<Rtl8812auTxPowerControlReport>,
@@ -1985,6 +1985,7 @@ impl ProductionRuntimeServiceHealth {
     pub fn from_report(
         report: &ProductionRuntimeFlowReport,
         lifecycle: ProductionRuntimeServiceLifecycle,
+        health_file: Option<PathBuf>,
         report_file: Option<PathBuf>,
     ) -> Self {
         let stop_reason = Some(report.stop_reason.to_string());
@@ -2008,7 +2009,7 @@ impl ProductionRuntimeServiceHealth {
             bandwidth: report.bandwidth,
             duration_ms: report.duration_ms,
             ready_file: report.ready_file.clone(),
-            health_file: None,
+            health_file,
             report_file,
             stop_reason,
             result: Some(report.result),
@@ -2145,19 +2146,53 @@ pub fn run_production_runtime_flow(
     config: ProductionRuntimeFlowConfig,
     inputs: ProductionRuntimeFlowExecutionInputs,
 ) -> ProductionRuntimeFlowReport {
-    if let Err(error) = config.validate() {
+    if let Err(error) = write_production_runtime_service_health(
+        config.health_file.as_deref(),
+        &ProductionRuntimeServiceHealth::from_config(
+            &config,
+            ProductionRuntimeServiceLifecycle::Validating,
+            None,
+            None,
+        ),
+    ) {
         return ProductionRuntimeFlowReport::not_started(&config, error);
     }
+    if let Err(error) = config.validate() {
+        return production_runtime_report_with_health(
+            &config,
+            ProductionRuntimeFlowReport::not_started(&config, error),
+            ProductionRuntimeServiceLifecycle::ExitedFail,
+        );
+    }
     if let Err(error) = inputs.validate() {
+        return production_runtime_report_with_health(
+            &config,
+            ProductionRuntimeFlowReport::not_started(&config, error),
+            ProductionRuntimeServiceLifecycle::ExitedFail,
+        );
+    }
+    if let Err(error) = write_production_runtime_service_health(
+        config.health_file.as_deref(),
+        &ProductionRuntimeServiceHealth::from_config(
+            &config,
+            ProductionRuntimeServiceLifecycle::Initializing,
+            None,
+            None,
+        ),
+    ) {
         return ProductionRuntimeFlowReport::not_started(&config, error);
     }
 
-    ProductionRuntimeFlowReport::not_started(
+    production_runtime_report_with_health(
         &config,
-        RuntimeRadioError::new(
-            "production_runtime_flow_not_implemented",
-            "production runtime flow execution has not moved from the diagnostic adapter yet",
+        ProductionRuntimeFlowReport::not_started(
+            &config,
+            RuntimeRadioError::new(
+                "production_runtime_flow_not_implemented",
+                "production runtime flow execution has not moved from the diagnostic adapter yet",
+            ),
         ),
+        ProductionRuntimeServiceLifecycle::ExitedFail,
     )
 }
 
@@ -2175,11 +2210,43 @@ where
         Rtl8812auInitPhase,
     ) -> Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure>,
 {
+    if let Err(error) = write_production_runtime_service_health(
+        config.health_file.as_deref(),
+        &ProductionRuntimeServiceHealth::from_config(
+            &config,
+            ProductionRuntimeServiceLifecycle::Validating,
+            None,
+            None,
+        ),
+    ) {
+        return ProductionRuntimeFlowReport::not_started(&config, error);
+    }
     let validation = match config.validate() {
         Ok(validation) => validation,
-        Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
+        Err(error) => {
+            return production_runtime_report_with_health(
+                &config,
+                ProductionRuntimeFlowReport::not_started(&config, error),
+                ProductionRuntimeServiceLifecycle::ExitedFail,
+            )
+        }
     };
     if let Err(error) = inputs.validate() {
+        return production_runtime_report_with_health(
+            &config,
+            ProductionRuntimeFlowReport::not_started(&config, error),
+            ProductionRuntimeServiceLifecycle::ExitedFail,
+        );
+    }
+    if let Err(error) = write_production_runtime_service_health(
+        config.health_file.as_deref(),
+        &ProductionRuntimeServiceHealth::from_config(
+            &config,
+            ProductionRuntimeServiceLifecycle::Initializing,
+            None,
+            None,
+        ),
+    ) {
         return ProductionRuntimeFlowReport::not_started(&config, error);
     }
     let init_inputs = inputs
@@ -2202,7 +2269,7 @@ where
     let init = match init_result {
         Ok(result) => result,
         Err(RuntimeSameSessionInitFailure { result, error }) => {
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2224,7 +2291,7 @@ where
             pre_loop.monitor_opmode_applied = true;
         }
         Err(error) => {
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2247,7 +2314,7 @@ where
             pre_loop.tx_power_control = report;
         }
         Err(error) => {
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2271,7 +2338,7 @@ where
             pre_loop.tx_calibration_profile = report;
         }
         Err(error) => {
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2295,7 +2362,7 @@ where
                 pre_loop.tx_power_control = report;
             }
             Err(error) => {
-                return production_runtime_flow_report_from_state(
+                return production_runtime_flow_report_from_state_with_health(
                     &config,
                     session,
                     "not_started",
@@ -2322,6 +2389,40 @@ where
             pre_loop.tx_calibration_profile.is_some(),
         ),
     ) {
+        return production_runtime_flow_report_from_state_with_health(
+            &config,
+            session,
+            "not_started",
+            init_telemetry,
+            pre_loop,
+            None,
+            RuntimeFlowRxTelemetry::default(),
+            RuntimeFlowTxTelemetry::default(),
+            ProductionRuntimeFlowResult::Fail,
+            Some(error),
+        );
+    }
+    let ready_report = production_runtime_flow_report_from_state(
+        &config,
+        session,
+        "ready",
+        init_telemetry,
+        pre_loop.clone(),
+        None,
+        RuntimeFlowRxTelemetry::default(),
+        RuntimeFlowTxTelemetry::default(),
+        ProductionRuntimeFlowResult::Pass,
+        None,
+    );
+    if let Err(error) = write_production_runtime_service_health(
+        config.health_file.as_deref(),
+        &ProductionRuntimeServiceHealth::from_report(
+            &ready_report,
+            ProductionRuntimeServiceLifecycle::Ready,
+            config.health_file.clone(),
+            None,
+        ),
+    ) {
         return production_runtime_flow_report_from_state(
             &config,
             session,
@@ -2342,7 +2443,7 @@ where
     ) {
         Ok(sockets) => sockets,
         Err(error) => {
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2360,7 +2461,7 @@ where
         match spawn_production_tx_ingress_receivers(tx_sockets, PRODUCTION_TX_RECEIVE_TIMEOUT) {
             Ok(receiver) => receiver,
             Err(error) => {
-                return production_runtime_flow_report_from_state(
+                return production_runtime_flow_report_from_state_with_health(
                     &config,
                     session,
                     "not_started",
@@ -2378,7 +2479,7 @@ where
         match create_production_rx_forward_runtimes(&validation.wfb_loop.rx_forwards) {
             Ok(runtimes) => runtimes,
             Err(error) => {
-                return production_runtime_flow_report_from_state(
+                return production_runtime_flow_report_from_state_with_health(
                     &config,
                     session,
                     "not_started",
@@ -2514,7 +2615,7 @@ where
                 .map(|forward| forward.counters.forwarded)
                 .sum();
             apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
-            return production_runtime_flow_report_from_state(
+            return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
                 "not_started",
@@ -2536,7 +2637,7 @@ where
         .sum();
     apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
 
-    production_runtime_flow_report_from_state(
+    production_runtime_flow_report_from_state_with_health(
         &config,
         session,
         loop_outcome.stop_reason.as_str(),
@@ -2757,6 +2858,57 @@ fn production_runtime_init_telemetry(
             .filter(|phase| matches!(phase.status, RuntimeSameSessionInitPhaseStatus::Completed))
             .count(),
     }
+}
+
+fn production_runtime_report_with_health(
+    config: &ProductionRuntimeFlowConfig,
+    mut report: ProductionRuntimeFlowReport,
+    lifecycle: ProductionRuntimeServiceLifecycle,
+) -> ProductionRuntimeFlowReport {
+    let health = ProductionRuntimeServiceHealth::from_report(
+        &report,
+        lifecycle,
+        config.health_file.clone(),
+        None,
+    );
+    if let Err(error) =
+        write_production_runtime_service_health(config.health_file.as_deref(), &health)
+    {
+        report.result = ProductionRuntimeFlowResult::Fail;
+        report.error = Some(error.into());
+    }
+    report
+}
+
+fn production_runtime_flow_report_from_state_with_health<T>(
+    config: &ProductionRuntimeFlowConfig,
+    session: &RuntimeRadioSession<T>,
+    stop_reason: &'static str,
+    init: ProductionRuntimeInitTelemetry,
+    pre_loop: ProductionRuntimePreLoopReports,
+    heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    rx: RuntimeFlowRxTelemetry,
+    tx: RuntimeFlowTxTelemetry,
+    result: ProductionRuntimeFlowResult,
+    error: Option<RuntimeRadioError>,
+) -> ProductionRuntimeFlowReport {
+    let lifecycle = match result {
+        ProductionRuntimeFlowResult::Pass => ProductionRuntimeServiceLifecycle::ExitedPass,
+        ProductionRuntimeFlowResult::Fail => ProductionRuntimeServiceLifecycle::ExitedFail,
+    };
+    let report = production_runtime_flow_report_from_state(
+        config,
+        session,
+        stop_reason,
+        init,
+        pre_loop,
+        heartbeat_led,
+        rx,
+        tx,
+        result,
+        error,
+    );
+    production_runtime_report_with_health(config, report, lifecycle)
 }
 
 fn production_runtime_flow_report_from_state<T>(
@@ -8595,19 +8747,21 @@ mod tests {
         ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeQueuedDatagram,
         ProductionRuntimeReadyMarker, ProductionRuntimeRtl8812auInitInputs,
         ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
-        ProductionRuntimeServiceHealth, ProductionRuntimeServiceLifecycle,
-        ProductionRuntimeServiceOperatorAction, ProductionRuntimeUsbConfig,
-        ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder, Rtl8812auInitPhase,
-        Rtl8812auTxPowerControlMode, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-        RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
-        RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
-        RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
-        TxCalibrationClass, TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
-        PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+        ProductionRuntimeRxForwardSnapshot, ProductionRuntimeServiceHealth,
+        ProductionRuntimeServiceLifecycle, ProductionRuntimeServiceOperatorAction,
+        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
+        Rtl8812auInitPhase, Rtl8812auTxPowerControlMode, RuntimeFlowRxTelemetry,
+        RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+        RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
+        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
+        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
+        DEFAULT_HEARTBEAT_HALF_PERIOD_MS, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
-    use wfb_bridge::{build_wfb_data_header, RxForwardConfig, TxCounters, WfbChannelId};
+    use wfb_bridge::{
+        build_wfb_data_header, RxCounters, RxForwardConfig, TxCounters, WfbChannelId,
+    };
 
     #[derive(Debug, Default)]
     struct MockTransport {
@@ -10013,7 +10167,7 @@ mod tests {
             tx_burst_limit: 8,
             max_datagrams: 0,
             ready_file: Some(PathBuf::from("/tmp/radio-run-ready.json")),
-            health_file: Some(PathBuf::from("/tmp/radio-run-health.json")),
+            health_file: None,
             tx_authorized: true,
             live_register_write_authorized: false,
             calibration_profile: TxCalibrationProfile::CurrentDefault,
@@ -10262,6 +10416,103 @@ mod tests {
     }
 
     #[test]
+    fn production_runtime_flow_invalid_config_writes_failed_health() {
+        let health_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-invalid-health-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_flow_config();
+        config.health_file = Some(health_path.clone());
+        config.tx_authorized = false;
+
+        let report =
+            run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
+        let health: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&health_path).expect("health artifact"))
+                .expect("health JSON");
+        let _ = std::fs::remove_file(&health_path);
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_tx_authorization")
+        );
+        assert_eq!(health["lifecycle"], "exited_fail");
+        assert_eq!(health["operator_action"], "restart");
+        assert_eq!(health["result"], "fail");
+        assert_eq!(health["error"]["code"], "missing_tx_authorization");
+    }
+
+    #[test]
+    fn production_runtime_flow_health_write_failure_fails_closed() {
+        let mut config = production_runtime_flow_config();
+        config.health_file = Some(std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-missing-dir-{}-{}/health.json",
+            std::process::id(),
+            runtime_unix_ms()
+        )));
+
+        let report =
+            run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(report.stop_reason, "not_started");
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("runtime_health_write_failed")
+        );
+    }
+
+    #[test]
+    fn production_runtime_flow_init_failure_writes_failed_health() {
+        let health_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-init-failure-health-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_short_flow_config();
+        config.health_file = Some(health_path.clone());
+        let inputs = production_runtime_execution_inputs();
+        let mut session = runtime_tx_session(MockTransport::default());
+
+        let report = run_production_runtime_flow_with_session(
+            config,
+            inputs,
+            &mut session,
+            |session, phase| {
+                let before = session.counters;
+                Err(RuntimeSameSessionInitPhaseFailure::new(
+                    RuntimeSameSessionInitPhaseSummary::blocked(
+                        phase,
+                        "synthetic init block",
+                        before,
+                        session.counters,
+                    ),
+                    RuntimeRadioError::new("test_init_failed", "synthetic init failure"),
+                ))
+            },
+        );
+        let health: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&health_path).expect("health artifact"))
+                .expect("health JSON");
+        let _ = std::fs::remove_file(&health_path);
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(report.stop_reason, "not_started");
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("test_init_failed")
+        );
+        assert_eq!(health["lifecycle"], "exited_fail");
+        assert_eq!(health["operator_action"], "restart");
+        assert_eq!(health["init"]["readiness"], "failed");
+        assert_eq!(health["init"]["phase_count"], 1);
+        assert_eq!(health["init"]["completed_phase_count"], 0);
+        assert_eq!(health["error"]["code"], "test_init_failed");
+    }
+
+    #[test]
     fn production_service_health_from_config_reports_wait_state() {
         let config = production_runtime_flow_config();
 
@@ -10334,6 +10585,7 @@ mod tests {
         let healthy = ProductionRuntimeServiceHealth::from_report(
             &report,
             ProductionRuntimeServiceLifecycle::ExitedPass,
+            Some(PathBuf::from("/tmp/radio-health.json")),
             None,
         );
         assert_eq!(
@@ -10345,6 +10597,88 @@ mod tests {
         let degraded = ProductionRuntimeServiceHealth::from_report(
             &report,
             ProductionRuntimeServiceLifecycle::ExitedPass,
+            Some(PathBuf::from("/tmp/radio-health.json")),
+            None,
+        );
+        assert_eq!(
+            degraded.operator_action,
+            ProductionRuntimeServiceOperatorAction::Investigate
+        );
+    }
+
+    #[test]
+    fn production_service_health_from_report_classifies_signal_stop_and_rx_forward_degradation() {
+        let config = production_runtime_flow_config();
+        let mut report = ProductionRuntimeFlowReport::from_execution(
+            &config,
+            super::ProductionRuntimeFlowExecutionReport {
+                selector: config.usb.selector,
+                adapter: None,
+                endpoints: None,
+                channel: Some(config.channel),
+                bandwidth: config.bandwidth,
+                duration_ms: config.duration_ms,
+                ready_file: config.ready_file.clone(),
+                stop_reason: "signal",
+                bulk_in_endpoint: Some(0x81),
+                bulk_out_endpoint: Some(0x02),
+                calibration_profile: config.calibration_profile,
+                calibration_class: config
+                    .calibration_profile
+                    .before_tx_class(config.captured_tail_applied),
+                tx_power_control: None,
+                tx_calibration_profile: None,
+                heartbeat_led: None,
+                receiver_backed_validation_required: false,
+                init: ProductionRuntimeInitTelemetry {
+                    readiness: ProductionRuntimeInitReadiness::Ready,
+                    phase_count: 1,
+                    completed_phase_count: 1,
+                },
+                rx: RuntimeFlowRxTelemetry::default(),
+                tx: RuntimeFlowTxTelemetry {
+                    datagrams_received: 1,
+                    submitted_frames: 1,
+                    failed_submissions: 0,
+                    dropped_datagrams: 0,
+                    bytes_written: 64,
+                },
+                counters: RuntimeRadioCounters::default(),
+                result: ProductionRuntimeFlowResult::Pass,
+                error: None,
+            },
+        );
+
+        let signal = ProductionRuntimeServiceHealth::from_report(
+            &report,
+            ProductionRuntimeServiceLifecycle::ExitedPass,
+            Some(PathBuf::from("/tmp/radio-health.json")),
+            None,
+        );
+        assert_eq!(
+            signal.operator_action,
+            ProductionRuntimeServiceOperatorAction::Stopped
+        );
+
+        report.stop_reason = "duration_elapsed";
+        report.rx.rx_forwards = vec![ProductionRuntimeRxForwardSnapshot {
+            config: RxForwardConfig {
+                channel_id: WfbChannelId::new(0x00123456, 0x23).expect("channel id"),
+                wlan_idx: 0,
+                mcs_index: 1,
+                bandwidth_mhz: 20,
+            },
+            aggregator: Some("127.0.0.1:5603".parse().expect("aggregator")),
+            forwarded_bytes: 0,
+            counters: RxCounters {
+                send_failed: 1,
+                ..RxCounters::default()
+            },
+        }];
+        let degraded = ProductionRuntimeServiceHealth::from_report(
+            &report,
+            ProductionRuntimeServiceLifecycle::ExitedPass,
+            Some(PathBuf::from("/tmp/radio-health.json")),
             None,
         );
         assert_eq!(
@@ -10398,8 +10732,14 @@ mod tests {
             std::process::id(),
             runtime_unix_ms()
         ));
+        let health_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-flow-health-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
         let mut config = production_runtime_short_flow_config();
         config.ready_file = Some(ready_path.clone());
+        config.health_file = Some(health_path.clone());
         let inputs = production_runtime_execution_inputs();
         let mut session = runtime_tx_session(MockTransport::default());
         let mut observed_phases = Vec::new();
@@ -10416,7 +10756,11 @@ mod tests {
         let marker: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&ready_path).expect("ready marker"))
                 .expect("ready marker JSON");
-        let _ = std::fs::remove_file(ready_path);
+        let health: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&health_path).expect("health artifact"))
+                .expect("health JSON");
+        let _ = std::fs::remove_file(&ready_path);
+        let _ = std::fs::remove_file(&health_path);
 
         assert!(!observed_phases.is_empty());
         assert_eq!(report.init.readiness, ProductionRuntimeInitReadiness::Ready);
@@ -10445,6 +10789,21 @@ mod tests {
         assert_eq!(marker["bandwidth_mhz"], 20);
         assert_eq!(marker["tx_burst_limit"], 8);
         assert_eq!(marker["monitor_opmode_applied"], true);
+        assert_eq!(health["lifecycle"], "exited_pass");
+        assert_eq!(health["operator_action"], "monitor");
+        assert_eq!(health["result"], "pass");
+        assert_eq!(health["stop_reason"], "duration_elapsed");
+        assert_eq!(health["ready_file"], ready_path.to_string_lossy().as_ref());
+        assert_eq!(
+            health["health_file"],
+            health_path.to_string_lossy().as_ref()
+        );
+        assert!(
+            health["heartbeat_led"]["toggles_attempted"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
     }
 
     #[test]

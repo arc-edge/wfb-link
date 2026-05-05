@@ -13,8 +13,8 @@
 ## 3. radio-run Health Integration
 
 - [x] 3.1 Add `radio-run --health-file <path>` and thread the path through the production runtime execution inputs/config.
-- [ ] 3.2 Write health artifacts at startup/validation, ready, and final exit boundaries without changing ready-marker semantics.
-- [ ] 3.3 Ensure success, signal stop, init failure, health-write failure, TX failure/drop, and RX-forward degradation produce useful health states and final reports.
+- [x] 3.2 Write health artifacts at startup/validation, ready, and final exit boundaries without changing ready-marker semantics.
+- [x] 3.3 Ensure success, signal stop, init failure, health-write failure, TX failure/drop, and RX-forward degradation produce useful health states and final reports.
 
 ## 4. Production Service Smoke Automation
 
