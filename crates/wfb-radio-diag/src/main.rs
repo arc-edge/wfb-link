@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     fs,
     fs::File,
@@ -24330,6 +24331,14 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         set_runtime_metrics: bool,
     }
 
+    // Wrap the session for the duration of the bridge loop so the
+    // executor's per-iteration LED heartbeat tick can read
+    // `&session.transport` while the step handler still mutably borrows
+    // the session for TX submission and RX reads. The two closures take
+    // RefCell borrows sequentially (the executor holds them mutably one
+    // at a time), so the runtime borrow check never panics.
+    let session_cell = RefCell::new(session);
+
     let loop_result =
         run_production_bridge_loop(
             ProductionRuntimeBridgeLoopRunConfig::from_bounds(
@@ -24338,17 +24347,17 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 args.tx_burst_limit,
                 u64::from(args.tx.max_datagrams),
             ),
+            |now| {
+                // Tick the LED heartbeat once per outer iteration. No-op
+                // until the configured half-period elapses; failures are
+                // counted but never propagated.
+                heartbeat.maybe_toggle(&session_cell.borrow().transport, now);
+            },
             || BRIDGE_RUN_STOP_REQUESTED.load(Ordering::SeqCst),
             |step| -> std::result::Result<
                 ProductionRuntimeBridgeLoopStepOutcome,
                 BridgeRunLoopFailure,
             > {
-                // Tick the LED heartbeat. No-op until the configured
-                // half-period elapses; idempotent across the burst+poll
-                // pattern (multiple closure calls per outer loop
-                // iteration won't cause extra USB writes). Failures are
-                // counted but never propagated.
-                heartbeat.maybe_toggle(&session.transport, Instant::now());
                 match step {
                     ProductionRuntimeBridgeLoopStep::TryTx => {
                         let queued = match tx_receiver.receiver.try_recv() {
@@ -24375,7 +24384,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                         }
 
                         let tx_result = handle_production_bridge_tx_datagram(
-                            &mut session,
+                            &mut *session_cell.borrow_mut(),
                             &queued,
                             ProductionRuntimeBridgeTxConfig {
                                 channel,
@@ -24442,7 +24451,11 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                         }
                     }
                     ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => {
-                        match session.read_rx_packets(channel, &mut rx_buf, timeout) {
+                        match session_cell.borrow_mut().read_rx_packets(
+                            channel,
+                            &mut rx_buf,
+                            timeout,
+                        ) {
                             Ok(read) if read.bytes_read == 0 => {
                                 report.rx.buffers_read += 1;
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
@@ -24520,6 +24533,10 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 }
             },
         );
+    // Unwrap the bridge-loop RefCell so the post-loop code paths can
+    // continue using `session` and `&session.transport` in the same
+    // shape they used before the loop wrapper was introduced.
+    let session = session_cell.into_inner();
     // Turn off the heartbeat LED and capture its counters before any
     // success/failure branching below — both paths should leave the
     // LED dark and the report populated.

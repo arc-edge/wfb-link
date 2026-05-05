@@ -76,3 +76,29 @@ intended to be called once when the production runtime flow exits.
 - **WHEN** `turn_off` is called with the heartbeat configured
   `enabled = false`
 - **THEN** the runtime library SHALL NOT issue any USB control write
+
+### Requirement: Production Bridge Loop Iteration Tick Hook
+
+The runtime library SHALL expose a per-outer-iteration tick callback on
+the production bridge loop executor so consumers can drive periodic
+state (LED heartbeat, watchdog kicks, throttle pacing) without taking
+their own clock reading. The callback SHALL fire once at the top of
+each outer iteration after stop and deadline checks pass and before
+any TX burst or RX poll work.
+
+#### Scenario: Iteration tick fires per outer iteration
+
+- **WHEN** the executor enters a new outer iteration that is not
+  short-circuited by signal stop, duration deadline, or TX-datagram
+  limit
+- **THEN** the executor SHALL invoke the iteration-tick callback with
+  the current `Instant`
+- **AND** the callback SHALL be invoked before any `TryTx` or `ReadRx`
+  step is dispatched
+
+#### Scenario: Iteration tick is skipped on signal stop
+
+- **WHEN** the executor's stop-requested check returns true at the top
+  of an iteration
+- **THEN** the executor SHALL NOT invoke the iteration-tick callback
+- **AND** the executor SHALL return with `stop_reason = signal`

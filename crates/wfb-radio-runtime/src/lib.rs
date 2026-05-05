@@ -1052,12 +1052,21 @@ pub struct ProductionRuntimeBridgeLoopOutcome {
     pub rx_polls: u64,
 }
 
-pub fn run_production_bridge_loop<E, StopRequested, HandleStep>(
+/// Run the production bridge loop with a per-iteration tick hook.
+///
+/// `on_iteration_start` is invoked once at the top of each outer iteration
+/// after the stop/deadline checks pass and before TX burst/RX poll work.
+/// It receives the same `Instant::now()` value the loop will reuse for
+/// scheduling, so a consumer can drive periodic state (LED heartbeat,
+/// watchdog kicks, throttle pacing) without taking its own clock reading.
+pub fn run_production_bridge_loop<E, OnIterationStart, StopRequested, HandleStep>(
     config: ProductionRuntimeBridgeLoopRunConfig,
+    mut on_iteration_start: OnIterationStart,
     mut stop_requested: StopRequested,
     mut handle_step: HandleStep,
 ) -> Result<ProductionRuntimeBridgeLoopOutcome, E>
 where
+    OnIterationStart: FnMut(std::time::Instant),
     StopRequested: FnMut() -> bool,
     HandleStep:
         FnMut(ProductionRuntimeBridgeLoopStep) -> Result<ProductionRuntimeBridgeLoopStepOutcome, E>,
@@ -1100,6 +1109,8 @@ where
                 rx_polls,
             });
         }
+
+        on_iteration_start(std::time::Instant::now());
 
         let mut tx_burst_count = 0u32;
         while (unlimited_datagrams || tx_datagrams_processed < config.max_datagrams)
@@ -9062,6 +9073,7 @@ mod tests {
 
         let outcome = run_production_bridge_loop(
             config,
+            |_| {},
             || false,
             |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
                 match step {
@@ -9100,6 +9112,7 @@ mod tests {
 
         let outcome = run_production_bridge_loop(
             config,
+            |_| panic!("signal stop should avoid iteration tick"),
             || true,
             |_step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
                 panic!("signal stop should avoid loop work")
@@ -9123,6 +9136,7 @@ mod tests {
 
         let outcome = run_production_bridge_loop(
             config,
+            |_| {},
             || false,
             |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
                 match step {
@@ -9161,6 +9175,7 @@ mod tests {
 
         let outcome = run_production_bridge_loop(
             config,
+            |_| {},
             || false,
             |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
                 match step {
@@ -9185,6 +9200,52 @@ mod tests {
         assert!(
             observed_timeout.expect("observed timeout") < Duration::from_secs(1),
             "bounded run should clamp RX timeout to remaining duration"
+        );
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_fires_iteration_tick_per_outer_iteration() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(0, 1, 4, 2);
+        let mut tx_remaining = 2u64;
+        let mut tick_count = 0u32;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            |_now| {
+                tick_count += 1;
+            },
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx if tx_remaining > 0 => {
+                        tx_remaining -= 1;
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                    }
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { .. } => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::TxDatagramLimit
+        );
+        // Tick fires once per outer loop iteration. Two TX bursts of one
+        // each plus a final iteration that hits the TX-datagram limit
+        // before the tick: at minimum, tick_count should equal the
+        // number of fully-entered iterations (i.e. iterations that ran
+        // any work).
+        assert!(
+            u64::from(tick_count) >= outcome.iterations.saturating_sub(1),
+            "iteration tick should fire on every iteration that does work; \
+             got tick_count={tick_count}, iterations={iterations}",
+            iterations = outcome.iterations
         );
     }
 

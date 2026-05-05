@@ -12,6 +12,7 @@
 - [x] 2.2 Translate CLI flags into `LedHeartbeatConfig` during runtime config validation; reject out-of-bounds half-period before opening the radio.
 - [x] 2.3 Instantiate `LedHeartbeat` in the bridge run setup; pass `&session.transport` and `Instant::now()` to `maybe_toggle` once per bridge loop iteration.
 - [x] 2.4 Call `LedHeartbeat::turn_off` exactly once before the runtime session is dropped at the end of `bridge_run_report`.
+- [x] 2.5 Add a per-outer-iteration tick callback to `run_production_bridge_loop` so the executor itself drives periodic state. Wrap the bridge-run session in `RefCell` for the loop body so the heartbeat tick and the step handler can take disjoint borrows; move the heartbeat tick from inside the step handler into the executor's iteration-tick callback.
 
 ## 3. Report integration
 
@@ -29,6 +30,7 @@
 - [x] 4.6 Unit test: `turn_off` issues one off write when enabled.
 - [x] 4.7 Unit test: `LedHeartbeatConfig::validate` rejects half-periods below 50 ms and above 5000 ms.
 - [x] 4.8 Unit test: `RadioRunArgs` parses the new flags with reasonable defaults and rejects out-of-bounds half-period.
+- [x] 4.9 Unit test: `run_production_bridge_loop` invokes the iteration-tick callback once per outer iteration that does work, and skips it when stop is requested before any iteration runs.
 
 ## 5. Validation
 
