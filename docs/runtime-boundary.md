@@ -393,3 +393,10 @@ at `/tmp/wfb-prod-radio-smoke-rf-profile-20260505-182021`: EFUSE-derived TX
 power programmed 22 TXAGC registers, `64/64` TX datagrams were submitted, TX
 failures/drops were zero, and the summary recorded
 `effective_tx_power_mode=efuse-derived`.
+
+After a one-off cold-run `REG_RSV_CTRL` masked readback mismatch, production
+runtime masked write/read helpers now retry readback verification briefly before
+failing with the final observed value. The hardened path passed a remote
+service tx-positive EFUSE smoke at
+`/tmp/wfb-prod-radio-smoke-readback-retry-20260505-182344`, again submitting
+`64/64` TX datagrams with zero TX failures/drops and 22 TXAGC writes.

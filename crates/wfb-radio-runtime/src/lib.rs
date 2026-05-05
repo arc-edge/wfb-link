@@ -2478,6 +2478,108 @@ fn production_readback_error(
     )
 }
 
+const PRODUCTION_READBACK_VERIFY_ATTEMPTS: u32 = 5;
+const PRODUCTION_READBACK_VERIFY_DELAY: Duration = Duration::from_millis(1);
+
+fn production_verify8_readback<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u8,
+    expected: u8,
+    phase: &'static str,
+) -> Result<u8, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let expected = expected & mask;
+    let mut actual = 0;
+    for attempt in 1..=PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+        let after = read8_with_counter(registers, counters, address, register_name, phase)?;
+        actual = after & mask;
+        if actual == expected {
+            return Ok(after);
+        }
+        if attempt < PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+            thread::sleep(PRODUCTION_READBACK_VERIFY_DELAY);
+        }
+    }
+    Err(production_readback_error(
+        register_name,
+        mask,
+        expected,
+        actual,
+        2,
+    ))
+}
+
+fn production_verify16_readback<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u16,
+    expected: u16,
+    phase: &'static str,
+) -> Result<u16, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let expected = expected & mask;
+    let mut actual = 0;
+    for attempt in 1..=PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+        let after = read16_with_counter(registers, counters, address, register_name, phase)?;
+        actual = after & mask;
+        if actual == expected {
+            return Ok(after);
+        }
+        if attempt < PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+            thread::sleep(PRODUCTION_READBACK_VERIFY_DELAY);
+        }
+    }
+    Err(production_readback_error(
+        register_name,
+        mask,
+        expected,
+        actual,
+        4,
+    ))
+}
+
+fn production_verify32_readback<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    expected: u32,
+    phase: &'static str,
+) -> Result<u32, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let expected = expected & mask;
+    let mut actual = 0;
+    for attempt in 1..=PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+        let after = read32_with_counter(registers, counters, address, register_name, phase)?;
+        actual = after & mask;
+        if actual == expected {
+            return Ok(after);
+        }
+        if attempt < PRODUCTION_READBACK_VERIFY_ATTEMPTS {
+            thread::sleep(PRODUCTION_READBACK_VERIFY_DELAY);
+        }
+    }
+    Err(production_readback_error(
+        register_name,
+        mask,
+        expected,
+        actual,
+        8,
+    ))
+}
+
 fn production_rmw8<T>(
     registers: &Rtl8812auRegisterAccess<T>,
     counters: &mut RuntimeRadioCounters,
@@ -2495,17 +2597,15 @@ where
     let written = (before & !mask) | (value & mask);
     write8_with_counter(registers, counters, address, written, register_name, phase)?;
     if verify_readback {
-        let after = read8_with_counter(registers, counters, address, register_name, phase)?;
-        let expected = value & mask;
-        if (after & mask) != expected {
-            return Err(production_readback_error(
-                register_name,
-                mask,
-                expected,
-                after & mask,
-                2,
-            ));
-        }
+        production_verify8_readback(
+            registers,
+            counters,
+            register_name,
+            address,
+            mask,
+            value,
+            phase,
+        )?;
     }
     Ok(())
 }
@@ -2526,17 +2626,15 @@ where
     let before = read8_with_counter(registers, counters, address, register_name, phase)?;
     let written = (before & preserve_mask) | (value & value_mask);
     write8_with_counter(registers, counters, address, written, register_name, phase)?;
-    let after = read8_with_counter(registers, counters, address, register_name, phase)?;
-    let expected = value & value_mask;
-    if (after & value_mask) != expected {
-        return Err(production_readback_error(
-            register_name,
-            value_mask,
-            expected,
-            after & value_mask,
-            2,
-        ));
-    }
+    production_verify8_readback(
+        registers,
+        counters,
+        register_name,
+        address,
+        value_mask,
+        value,
+        phase,
+    )?;
     Ok(())
 }
 
@@ -2556,17 +2654,15 @@ where
     let before = read16_with_counter(registers, counters, address, register_name, phase)?;
     let written = (before & preserve_mask) | (value & value_mask);
     write16_with_counter(registers, counters, address, written, register_name, phase)?;
-    let after = read16_with_counter(registers, counters, address, register_name, phase)?;
-    let expected = value & value_mask;
-    if (after & value_mask) != expected {
-        return Err(production_readback_error(
-            register_name,
-            value_mask,
-            expected,
-            after & value_mask,
-            4,
-        ));
-    }
+    production_verify16_readback(
+        registers,
+        counters,
+        register_name,
+        address,
+        value_mask,
+        value,
+        phase,
+    )?;
     Ok(())
 }
 
@@ -2586,17 +2682,15 @@ where
     let before = read32_with_counter(registers, counters, address, register_name, phase)?;
     let written = (before & preserve_mask) | (value & value_mask);
     write32_with_counter(registers, counters, address, written, register_name, phase)?;
-    let after = read32_with_counter(registers, counters, address, register_name, phase)?;
-    let expected = value & value_mask;
-    if (after & value_mask) != expected {
-        return Err(production_readback_error(
-            register_name,
-            value_mask,
-            expected,
-            after & value_mask,
-            8,
-        ));
-    }
+    production_verify32_readback(
+        registers,
+        counters,
+        register_name,
+        address,
+        value_mask,
+        value,
+        phase,
+    )?;
     Ok(())
 }
 
@@ -2615,16 +2709,15 @@ where
 {
     write8_with_counter(registers, counters, address, value, register_name, phase)?;
     if verify_mask != 0 {
-        let after = read8_with_counter(registers, counters, address, register_name, phase)?;
-        if (after & verify_mask) != (verify_value & verify_mask) {
-            return Err(production_readback_error(
-                register_name,
-                verify_mask,
-                verify_value & verify_mask,
-                after & verify_mask,
-                2,
-            ));
-        }
+        production_verify8_readback(
+            registers,
+            counters,
+            register_name,
+            address,
+            verify_mask,
+            verify_value,
+            phase,
+        )?;
     }
     Ok(())
 }
@@ -2644,16 +2737,15 @@ where
 {
     write16_with_counter(registers, counters, address, value, register_name, phase)?;
     if verify_mask != 0 {
-        let after = read16_with_counter(registers, counters, address, register_name, phase)?;
-        if (after & verify_mask) != (verify_value & verify_mask) {
-            return Err(production_readback_error(
-                register_name,
-                verify_mask,
-                verify_value & verify_mask,
-                after & verify_mask,
-                4,
-            ));
-        }
+        production_verify16_readback(
+            registers,
+            counters,
+            register_name,
+            address,
+            verify_mask,
+            verify_value,
+            phase,
+        )?;
     }
     Ok(())
 }
@@ -2673,16 +2765,15 @@ where
 {
     write32_with_counter(registers, counters, address, value, register_name, phase)?;
     if verify_mask != 0 {
-        let after = read32_with_counter(registers, counters, address, register_name, phase)?;
-        if (after & verify_mask) != (verify_value & verify_mask) {
-            return Err(production_readback_error(
-                register_name,
-                verify_mask,
-                verify_value & verify_mask,
-                after & verify_mask,
-                8,
-            ));
-        }
+        production_verify32_readback(
+            registers,
+            counters,
+            register_name,
+            address,
+            verify_mask,
+            verify_value,
+            phase,
+        )?;
     }
     Ok(())
 }
@@ -12444,6 +12535,80 @@ mod tests {
             self.bulk_writes.push((endpoint, data[..written].to_vec()));
             Ok(written)
         }
+    }
+
+    #[derive(Debug)]
+    struct TransientReadbackTransport {
+        value: RefCell<u8>,
+        stale_next_read: RefCell<Option<u8>>,
+        stale_after_write: u8,
+    }
+
+    impl TransientReadbackTransport {
+        fn new(initial: u8, stale_after_write: u8) -> Self {
+            Self {
+                value: RefCell::new(initial),
+                stale_next_read: RefCell::new(None),
+                stale_after_write,
+            }
+        }
+    }
+
+    impl Rtl8812auUsbTransport for &TransientReadbackTransport {
+        fn read_vendor(
+            &self,
+            _value: u16,
+            _index: u16,
+            data: &mut [u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            data.fill(0);
+            if !data.is_empty() {
+                data[0] = self
+                    .stale_next_read
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_else(|| *self.value.borrow());
+            }
+            Ok(data.len())
+        }
+
+        fn write_vendor(
+            &self,
+            _value: u16,
+            _index: u16,
+            data: &[u8],
+            _timeout: Duration,
+        ) -> std::result::Result<usize, UsbError> {
+            if let Some(value) = data.first() {
+                *self.value.borrow_mut() = *value;
+                *self.stale_next_read.borrow_mut() = Some(self.stale_after_write);
+            }
+            Ok(data.len())
+        }
+    }
+
+    #[test]
+    fn production_masked_readback_retries_transient_stale_value() {
+        let transport = TransientReadbackTransport::new(0x20, 0x20);
+        let registers = Rtl8812auRegisterAccess::new(&transport);
+        let mut counters = RuntimeRadioCounters::default();
+
+        super::production_rmw8_preserve(
+            &registers,
+            &mut counters,
+            "REG_RSV_CTRL",
+            super::REG_RSV_CTRL,
+            !(super::BIT5 | super::BIT6),
+            super::BIT5 | super::BIT6,
+            super::BIT5 | super::BIT6,
+            "test",
+        )
+        .expect("transient stale readback should retry");
+
+        assert_eq!(*transport.value.borrow(), super::BIT5 | super::BIT6);
+        assert_eq!(counters.usb_control_writes, 1);
+        assert_eq!(counters.usb_control_reads, 3);
     }
 
     #[test]
