@@ -1743,6 +1743,134 @@ struct RadioRunArgs {
     rx_mcs_index: u8,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunConfigFile {
+    adapter: Option<RadioRunAdapterConfig>,
+    macos_usbhost: Option<RadioRunMacosUsbHostConfig>,
+    radio: Option<RadioRunRadioConfig>,
+    wfb: Option<RadioRunWfbConfig>,
+    tx_power: Option<RadioRunTxPowerConfig>,
+    calibration: Option<RadioRunCalibrationConfig>,
+    heartbeat: Option<RadioRunHeartbeatConfig>,
+    authorization: Option<RadioRunAuthorizationConfig>,
+    artifacts: Option<RadioRunArtifactConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunAdapterConfig {
+    vid: Option<u16>,
+    pid: Option<u16>,
+    bus: Option<u8>,
+    address: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunMacosUsbHostConfig {
+    enabled: Option<bool>,
+    configuration_value: Option<u8>,
+    interface_number: Option<u8>,
+    bulk_in_endpoint: Option<u8>,
+    bulk_out_endpoint: Option<u8>,
+    bulk_out_endpoint_count: Option<usize>,
+    poll_attempts: Option<u32>,
+    poll_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunRadioConfig {
+    channel: Option<u8>,
+    bandwidth_mhz: Option<u16>,
+    firmware: Option<PathBuf>,
+    duration_ms: Option<u64>,
+    rx_timeout_ms: Option<u64>,
+    tx_burst_limit: Option<u32>,
+    max_datagrams: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunWfbConfig {
+    bind: Option<SocketAddr>,
+    tx_binds: Option<Vec<SocketAddr>>,
+    link_id: Option<u32>,
+    radio_port: Option<u8>,
+    rx_aggregator: Option<SocketAddr>,
+    rx_forwards: Option<Vec<String>>,
+    rx_wlan_idx: Option<u8>,
+    rx_mcs_index: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunTxPowerConfig {
+    mode: Option<TxPowerControlModeArg>,
+    index: Option<u8>,
+    path: Option<TxPowerPathArg>,
+    efuse_report: Option<PathBuf>,
+    efuse_logical_map: Option<PathBuf>,
+    safety_profile: Option<TxPowerSafetyProfileArg>,
+    max_index: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunCalibrationConfig {
+    profile: Option<TxCalibrationProfileArg>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunHeartbeatConfig {
+    enabled: Option<bool>,
+    half_period_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunAuthorizationConfig {
+    transmit: Option<bool>,
+    live_register_writes: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct RadioRunArtifactConfig {
+    ready_file: Option<PathBuf>,
+    health_file: Option<PathBuf>,
+}
+
+#[allow(dead_code)]
+fn load_radio_run_config_file(
+    path: &Path,
+) -> std::result::Result<RadioRunConfigFile, RuntimeRadioError> {
+    let input = fs::read_to_string(path).map_err(|error| {
+        RuntimeRadioError::new(
+            "radio_run_config_read_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    toml::from_str(&input).map_err(|error| {
+        RuntimeRadioError::new(
+            "radio_run_config_parse_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })
+}
+
 #[derive(Debug, Parser, Clone)]
 struct RuntimeFlowArgs {
     #[command(flatten)]
@@ -2170,7 +2298,7 @@ impl Default for TxCalibrationProfileArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum TxCalibrationProfileArg {
     CurrentDefault,
@@ -2192,21 +2320,21 @@ impl From<TxCalibrationProfileArg> for RuntimeTxCalibrationProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum TxPowerControlModeArg {
     ManualIndex,
     EfuseDerived,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum TxPowerSafetyProfileArg {
     MaxIndex,
     LinuxCh36Ht20,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum TxPowerPathArg {
     A,
@@ -41457,6 +41585,139 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn radio_run_config_file_deserializes_service_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "wfb-radio-run-config-{}-{}.toml",
+            std::process::id(),
+            started_at_unix_ms()
+        ));
+        fs::write(
+            &path,
+            r#"
+[adapter]
+vid = 3034
+pid = 34834
+
+[macos_usbhost]
+enabled = true
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/rtl8812aefw.bin"
+duration_ms = 2500
+tx_burst_limit = 8
+
+[wfb]
+bind = "127.0.0.1:5600"
+tx_binds = ["127.0.0.1:5601"]
+link_id = 1
+radio_port = 35
+rx_aggregator = "127.0.0.1:5801"
+rx_forwards = ["1:35=127.0.0.1:5801"]
+
+[tx_power]
+mode = "efuse_derived"
+path = "both"
+efuse_report = "/tmp/wfb-efuse.json"
+safety_profile = "linux_ch36_ht20"
+max_index = 63
+
+[calibration]
+profile = "current_default"
+
+[heartbeat]
+enabled = true
+half_period_ms = 500
+
+[authorization]
+transmit = true
+live_register_writes = false
+
+[artifacts]
+ready_file = "/tmp/radio-ready.json"
+health_file = "/tmp/radio-health.json"
+"#,
+        )
+        .expect("write config");
+
+        let config = load_radio_run_config_file(&path).expect("load config");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(
+            config.adapter.as_ref().and_then(|adapter| adapter.vid),
+            Some(0x0bda)
+        );
+        assert_eq!(
+            config.adapter.as_ref().and_then(|adapter| adapter.pid),
+            Some(0x8812)
+        );
+        assert_eq!(
+            config.radio.as_ref().and_then(|radio| radio.channel),
+            Some(36)
+        );
+        assert_eq!(
+            config.radio.as_ref().and_then(|radio| radio.bandwidth_mhz),
+            Some(20)
+        );
+        assert_eq!(
+            config
+                .wfb
+                .as_ref()
+                .and_then(|wfb| wfb.tx_binds.as_ref())
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            config.tx_power.as_ref().and_then(|tx_power| tx_power.mode),
+            Some(TxPowerControlModeArg::EfuseDerived)
+        );
+        assert_eq!(
+            config
+                .calibration
+                .as_ref()
+                .and_then(|calibration| calibration.profile),
+            Some(TxCalibrationProfileArg::CurrentDefault)
+        );
+        assert_eq!(
+            config
+                .artifacts
+                .as_ref()
+                .and_then(|artifacts| artifacts.health_file.as_deref()),
+            Some(Path::new("/tmp/radio-health.json"))
+        );
+    }
+
+    #[test]
+    fn radio_run_config_file_rejects_diagnostic_only_fields() {
+        let path = std::env::temp_dir().join(format!(
+            "wfb-radio-run-bad-config-{}-{}.toml",
+            std::process::id(),
+            started_at_unix_ms()
+        ));
+        fs::write(
+            &path,
+            r#"
+[radio]
+channel = 36
+firmware = "/tmp/rtl8812aefw.bin"
+
+[diagnostic]
+pre_tx_write32 = ["0x0522=0x00000000"]
+"#,
+        )
+        .expect("write config");
+
+        let error = load_radio_run_config_file(&path).expect_err("unknown field rejected");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(error.code, "radio_run_config_parse_failed");
+        assert!(error.message.contains("unknown field"));
     }
 
     #[test]
