@@ -1,15 +1,15 @@
 ## 1. Runtime Execution API
 
-- [ ] 1.1 Add a runtime-owned production flow execution input type that carries parsed firmware/table/calibration inputs needed after CLI/file loading.
-- [ ] 1.2 Add a runtime-owned production flow execution function that validates config and returns `ProductionRuntimeFlowReport` on pre-USB failures without opening the adapter.
-- [ ] 1.3 Add unit tests proving invalid production config fails before USB claim and serializes the existing production report shape.
+- [x] 1.1 Add a runtime-owned production flow execution input type that carries parsed firmware/table/calibration inputs needed after CLI/file loading.
+- [x] 1.2 Add a runtime-owned production flow execution function that validates config and returns `ProductionRuntimeFlowReport` on pre-USB failures without opening the adapter.
+- [x] 1.3 Add unit tests proving invalid production config fails before USB claim and serializes the existing production report shape.
 
 ## 2. Move Runtime Flow Orchestration
 
-- [ ] 2.1 Move same-session init orchestration and ready-marker writing from the diagnostic adapter path into the runtime execution function.
-- [ ] 2.2 Move TX ingress receiver setup, bridge-loop invocation, heartbeat lifecycle, and stop-reason handling into the runtime execution function.
-- [ ] 2.3 Move RX/TX telemetry aggregation into runtime execution so it returns `ProductionRuntimeFlowReport` directly without diagnostic `RuntimeFlowReport` adaptation.
-- [ ] 2.4 Preserve runtime-owned TX power, targeted parity, LCK, runtime IQK, RX forwarding, source-ready, and heartbeat report fields.
+- [x] 2.1 Move same-session init orchestration and ready-marker writing from the diagnostic adapter path into the runtime execution function.
+- [x] 2.2 Move TX ingress receiver setup, bridge-loop invocation, heartbeat lifecycle, and stop-reason handling into the runtime execution function.
+- [x] 2.3 Move RX/TX telemetry aggregation into runtime execution so it returns `ProductionRuntimeFlowReport` directly without diagnostic `RuntimeFlowReport` adaptation.
+- [x] 2.4 Preserve runtime-owned TX power, targeted parity, LCK, runtime IQK, RX forwarding, source-ready, and heartbeat report fields.
 
 ## 3. Thin Diagnostic Adapter
 

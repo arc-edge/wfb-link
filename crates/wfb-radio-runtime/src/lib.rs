@@ -5,6 +5,7 @@
 //! without depending on `wfb-radio-diag`.
 
 use std::{
+    cell::RefCell,
     error::Error,
     fmt, fs, io,
     net::{SocketAddr, UdpSocket},
@@ -21,9 +22,10 @@ use radio_core::{
     build_tx_packet, frame_type, list_usb_devices, parse_rx_packet,
     rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
     submit_tx_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
-    FrameType, InterfaceInfo, ParsedRxPacket, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
-    Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
-    UsbDeviceInfo, UsbEndpoints, UsbError,
+    FirmwareImage, FrameType, InterfaceInfo, ParsedRxPacket, RealtekTablePlan,
+    Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError, RxFrame,
+    RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints,
+    UsbError,
 };
 use serde::Serialize;
 use wfb_bridge::{
@@ -1557,6 +1559,65 @@ pub struct ProductionRuntimeFlowConfig {
     pub rx_mcs_index: u8,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProductionRuntimeRtl8812auInitInputs {
+    pub firmware_image: FirmwareImage,
+    pub mac_plan: RealtekTablePlan,
+    pub phy_plan: RealtekTablePlan,
+    pub agc_plan: RealtekTablePlan,
+    pub radioa_plan: RealtekTablePlan,
+    pub radiob_plan: RealtekTablePlan,
+    pub init_order: Rtl8812auInitOrder,
+    pub rfe_type: u8,
+    pub init_timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProductionRuntimeTxPowerControlInput {
+    None,
+    ManualIndex {
+        path: Rtl8812auRfPath,
+        index: u8,
+    },
+    EfuseDerived {
+        source: Rtl8812auTxPowerEfuseSourceReport,
+        plan: Rtl8812auTxPowerEfusePlanReport,
+    },
+}
+
+impl Default for ProductionRuntimeTxPowerControlInput {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProductionRuntimeFlowExecutionInputs {
+    pub rtl8812au_init: Option<ProductionRuntimeRtl8812auInitInputs>,
+    pub tx_power_control: ProductionRuntimeTxPowerControlInput,
+    pub heartbeat_led: LedHeartbeatConfig,
+}
+
+impl ProductionRuntimeFlowExecutionInputs {
+    pub fn validate(&self) -> Result<(), RuntimeRadioError> {
+        if self.rtl8812au_init.is_none() {
+            return Err(RuntimeRadioError::new(
+                "missing_runtime_init_assets",
+                "production radio run requires parsed firmware and RTL8812AU table plans",
+            ));
+        }
+        self.heartbeat_led.validate().map_err(|error| {
+            RuntimeRadioError::new("invalid_heartbeat_led_config", error.to_string())
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProductionRuntimePreLoopReports {
+    tx_power_control: Option<Rtl8812auTxPowerControlReport>,
+    tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+}
+
 impl ProductionRuntimeFlowConfig {
     pub fn validate(&self) -> Result<ProductionRuntimeFlowValidation, RuntimeRadioError> {
         validate_production_runtime_flow_config(self)
@@ -1877,6 +1938,639 @@ pub fn validate_production_runtime_flow_config(
         calibration,
         wfb_loop,
     })
+}
+
+pub fn run_production_runtime_flow(
+    config: ProductionRuntimeFlowConfig,
+    inputs: ProductionRuntimeFlowExecutionInputs,
+) -> ProductionRuntimeFlowReport {
+    if let Err(error) = config.validate() {
+        return ProductionRuntimeFlowReport::not_started(&config, error);
+    }
+    if let Err(error) = inputs.validate() {
+        return ProductionRuntimeFlowReport::not_started(&config, error);
+    }
+
+    ProductionRuntimeFlowReport::not_started(
+        &config,
+        RuntimeRadioError::new(
+            "production_runtime_flow_not_implemented",
+            "production runtime flow execution has not moved from the diagnostic adapter yet",
+        ),
+    )
+}
+
+pub fn run_production_runtime_flow_with_session<T, F>(
+    config: ProductionRuntimeFlowConfig,
+    inputs: ProductionRuntimeFlowExecutionInputs,
+    session: &mut RuntimeRadioSession<T>,
+    mut run_phase: F,
+) -> ProductionRuntimeFlowReport
+where
+    T: UsbBulkTransfer,
+    for<'a> &'a T: Rtl8812auUsbTransport,
+    F: FnMut(
+        &mut RuntimeRadioSession<T>,
+        Rtl8812auInitPhase,
+    ) -> Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure>,
+{
+    let validation = match config.validate() {
+        Ok(validation) => validation,
+        Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
+    };
+    if let Err(error) = inputs.validate() {
+        return ProductionRuntimeFlowReport::not_started(&config, error);
+    }
+    let init_inputs = inputs
+        .rtl8812au_init
+        .as_ref()
+        .expect("validated production runtime inputs include init assets");
+    let init_config = RuntimeSameSessionInitConfig {
+        init_order: init_inputs.init_order,
+        channel: config.channel,
+        bandwidth: config.bandwidth,
+        rfe_type: init_inputs.rfe_type,
+        tx_calibration_profile: config.calibration_profile,
+        live_write_authorized: config.live_register_write_authorized,
+        captured_tail_applied: config.captured_tail_applied,
+    };
+    let init_result = run_rtl8812au_same_session_init(session, init_config, |session, phase| {
+        run_phase(session, phase)
+    });
+
+    let init = match init_result {
+        Ok(result) => result,
+        Err(RuntimeSameSessionInitFailure { result, error }) => {
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                production_runtime_init_telemetry(&result),
+                ProductionRuntimePreLoopReports::default(),
+                None,
+                RuntimeFlowRxTelemetry::default(),
+                RuntimeFlowTxTelemetry::default(),
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            )
+        }
+    };
+    let init_telemetry = production_runtime_init_telemetry(&init);
+
+    let mut pre_loop = ProductionRuntimePreLoopReports::default();
+    match apply_production_runtime_tx_power_control(
+        &session.transport,
+        &mut session.counters,
+        &inputs.tx_power_control,
+    ) {
+        Ok(report) => {
+            pre_loop.tx_power_control = report;
+        }
+        Err(error) => {
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                init_telemetry,
+                pre_loop,
+                None,
+                RuntimeFlowRxTelemetry::default(),
+                RuntimeFlowTxTelemetry::default(),
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            )
+        }
+    }
+    match apply_production_runtime_tx_calibration_profile(
+        &session.transport,
+        &mut session.counters,
+        &config,
+        init_inputs.rfe_type,
+    ) {
+        Ok(report) => {
+            pre_loop.tx_calibration_profile = report;
+        }
+        Err(error) => {
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                init_telemetry,
+                pre_loop,
+                None,
+                RuntimeFlowRxTelemetry::default(),
+                RuntimeFlowTxTelemetry::default(),
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            )
+        }
+    }
+    if pre_loop.tx_power_control.is_some() && pre_loop.tx_calibration_profile.is_some() {
+        match apply_production_runtime_tx_power_control(
+            &session.transport,
+            &mut session.counters,
+            &inputs.tx_power_control,
+        ) {
+            Ok(report) => {
+                pre_loop.tx_power_control = report;
+            }
+            Err(error) => {
+                return production_runtime_flow_report_from_state(
+                    &config,
+                    session,
+                    "not_started",
+                    init_telemetry,
+                    pre_loop,
+                    None,
+                    RuntimeFlowRxTelemetry::default(),
+                    RuntimeFlowTxTelemetry::default(),
+                    ProductionRuntimeFlowResult::Fail,
+                    Some(error),
+                )
+            }
+        }
+    }
+
+    if let Err(error) = write_production_runtime_ready_marker(
+        config.ready_file.as_deref(),
+        production_runtime_ready_marker(
+            &config,
+            &validation,
+            &init,
+            pre_loop.tx_power_control.is_some(),
+            pre_loop.tx_calibration_profile.is_some(),
+        ),
+    ) {
+        return production_runtime_flow_report_from_state(
+            &config,
+            session,
+            "not_started",
+            init_telemetry,
+            pre_loop,
+            None,
+            RuntimeFlowRxTelemetry::default(),
+            RuntimeFlowTxTelemetry::default(),
+            ProductionRuntimeFlowResult::Fail,
+            Some(error),
+        );
+    }
+
+    let tx_sockets = match bind_production_tx_ingress_sockets(
+        &validation.wfb_loop.tx_bind_addrs,
+        PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+    ) {
+        Ok(sockets) => sockets,
+        Err(error) => {
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                init_telemetry,
+                pre_loop,
+                None,
+                RuntimeFlowRxTelemetry::default(),
+                RuntimeFlowTxTelemetry::default(),
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            )
+        }
+    };
+    let tx_receiver =
+        match spawn_production_tx_ingress_receivers(tx_sockets, PRODUCTION_TX_RECEIVE_TIMEOUT) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                return production_runtime_flow_report_from_state(
+                    &config,
+                    session,
+                    "not_started",
+                    init_telemetry,
+                    pre_loop,
+                    None,
+                    RuntimeFlowRxTelemetry::default(),
+                    RuntimeFlowTxTelemetry::default(),
+                    ProductionRuntimeFlowResult::Fail,
+                    Some(error),
+                )
+            }
+        };
+    let mut rx_forwards =
+        match create_production_rx_forward_runtimes(&validation.wfb_loop.rx_forwards) {
+            Ok(runtimes) => runtimes,
+            Err(error) => {
+                return production_runtime_flow_report_from_state(
+                    &config,
+                    session,
+                    "not_started",
+                    init_telemetry,
+                    pre_loop,
+                    None,
+                    RuntimeFlowRxTelemetry::default(),
+                    RuntimeFlowTxTelemetry::default(),
+                    ProductionRuntimeFlowResult::Fail,
+                    Some(error),
+                )
+            }
+        };
+    let mut rx = RuntimeFlowRxTelemetry::default();
+    let mut tx = RuntimeFlowTxTelemetry::default();
+    let mut bridge_counters = TxCounters::default();
+    let mut submit_counters = TxSubmitCounters::default();
+    let mut rx_buf = vec![0u8; 16 * 1024];
+    let session_cell = RefCell::new(session);
+    let mut heartbeat = LedHeartbeat::new(inputs.heartbeat_led, std::time::Instant::now());
+    let loop_outcome = run_production_bridge_loop(
+        ProductionRuntimeBridgeLoopRunConfig::from_bounds(
+            config.duration_ms,
+            config.rx_timeout_ms,
+            config.tx_burst_limit,
+            u64::from(config.max_datagrams),
+        ),
+        |now| {
+            heartbeat.maybe_toggle(&&session_cell.borrow().transport, now);
+        },
+        || false,
+        |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, RuntimeRadioError> {
+            match step {
+                ProductionRuntimeBridgeLoopStep::TryTx => match tx_receiver.receiver.try_recv() {
+                    Ok(queued) => {
+                        tx.datagrams_received = tx.datagrams_received.saturating_add(1);
+                        match handle_production_bridge_tx_datagram(
+                            &mut **session_cell.borrow_mut(),
+                            &queued,
+                            ProductionRuntimeBridgeTxConfig {
+                                channel: config.channel,
+                                channel_bandwidth: config.bandwidth,
+                                overrides: ProductionRuntimeBridgeTxOverrides::default(),
+                            },
+                            &mut bridge_counters,
+                            &mut submit_counters,
+                        ) {
+                            Ok(outcome) => {
+                                bridge_counters = outcome.bridge_counters;
+                                submit_counters = outcome.submit_counters;
+                                apply_production_runtime_tx_telemetry(
+                                    &mut tx,
+                                    &bridge_counters,
+                                    &submit_counters,
+                                );
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                            }
+                            Err(error) => {
+                                bridge_counters = error.bridge_counters;
+                                submit_counters = error.submit_counters;
+                                apply_production_runtime_tx_telemetry(
+                                    &mut tx,
+                                    &bridge_counters,
+                                    &submit_counters,
+                                );
+                                Err(RuntimeRadioError::new(
+                                    "bridge_tx_submit_failed",
+                                    error.message,
+                                ))
+                            }
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected)
+                    }
+                },
+                ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => match session_cell
+                    .borrow_mut()
+                    .read_rx_packets(config.channel, &mut rx_buf, timeout)
+                {
+                    Ok(read) if read.bytes_read == 0 => {
+                        rx.buffers_read = rx.buffers_read.saturating_add(1);
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
+                    }
+                    Ok(read) => {
+                        rx.buffers_read = rx.buffers_read.saturating_add(1);
+                        match process_production_rx_packet_outcomes(&read.packets, &mut rx_forwards)
+                        {
+                            Ok(outcome) => {
+                                apply_production_runtime_rx_packet_telemetry(
+                                    &mut rx,
+                                    outcome.telemetry,
+                                );
+                                rx.rx_forwards = outcome.rx_forwards;
+                                rx.forwarded_payloads = rx
+                                    .rx_forwards
+                                    .iter()
+                                    .map(|forward| forward.counters.forwarded)
+                                    .sum();
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) if error.timeout => {
+                        rx.read_timeouts = rx.read_timeouts.saturating_add(1);
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                    Err(error) => Err(error),
+                },
+            }
+        },
+    );
+    let session = session_cell.into_inner();
+    heartbeat.turn_off(&&session.transport);
+    let heartbeat_led = Some(ProductionRuntimeHeartbeatLedReport {
+        enabled: heartbeat.config().enabled,
+        half_period_ms: heartbeat.config().half_period_ms,
+        toggles_attempted: heartbeat.counters().toggles_attempted,
+        toggles_succeeded: heartbeat.counters().toggles_succeeded,
+        toggles_failed: heartbeat.counters().toggles_failed,
+    });
+    let loop_outcome = match loop_outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            rx.rx_forwards = production_rx_forward_snapshots(&rx_forwards);
+            rx.forwarded_payloads = rx
+                .rx_forwards
+                .iter()
+                .map(|forward| forward.counters.forwarded)
+                .sum();
+            apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
+            return production_runtime_flow_report_from_state(
+                &config,
+                session,
+                "not_started",
+                init_telemetry,
+                pre_loop,
+                heartbeat_led,
+                rx,
+                tx,
+                ProductionRuntimeFlowResult::Fail,
+                Some(error),
+            );
+        }
+    };
+    rx.rx_forwards = production_rx_forward_snapshots(&rx_forwards);
+    rx.forwarded_payloads = rx
+        .rx_forwards
+        .iter()
+        .map(|forward| forward.counters.forwarded)
+        .sum();
+    apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
+
+    production_runtime_flow_report_from_state(
+        &config,
+        session,
+        loop_outcome.stop_reason.as_str(),
+        init_telemetry,
+        pre_loop,
+        heartbeat_led,
+        rx,
+        tx,
+        ProductionRuntimeFlowResult::Fail,
+        Some(RuntimeRadioError::new(
+            "production_runtime_flow_post_loop_finalization_not_implemented",
+            "production runtime flow ran init, ready marker, heartbeat, TX ingress, RX processing, and bridge TX handlers, but post-loop production success gates have not moved from the diagnostic adapter yet",
+        )),
+    )
+}
+
+fn production_runtime_ready_marker(
+    config: &ProductionRuntimeFlowConfig,
+    validation: &ProductionRuntimeFlowValidation,
+    init: &RuntimeSameSessionInitResult,
+    tx_power_control_applied: bool,
+    tx_calibration_profile_applied: bool,
+) -> ProductionRuntimeReadyMarker {
+    ProductionRuntimeReadyMarker {
+        source: "bridge-run".to_string(),
+        ready_at_unix_ms: None,
+        bind_addr: config.bind_addr.to_string(),
+        bind_addrs: validation
+            .wfb_loop
+            .tx_bind_addrs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        channel: Some(config.channel.number),
+        channel_frequency_mhz: Some(config.channel.frequency_mhz),
+        bandwidth_mhz: config.bandwidth.mhz(),
+        max_datagrams: config.max_datagrams,
+        duration_ms: Some(config.duration_ms),
+        idle_timeout_ms: None,
+        rx_timeout_ms: Some(config.rx_timeout_ms),
+        tx_burst_limit: Some(config.tx_burst_limit),
+        init_before_tx: true,
+        same_session_init_result: Some(
+            match init.readiness {
+                RuntimeSameSessionInitReadiness::Ready => "pass",
+                RuntimeSameSessionInitReadiness::Failed => "fail",
+            }
+            .to_string(),
+        ),
+        monitor_opmode_applied: Some(false),
+        tx_power_control_applied,
+        tx_calibration_profile_applied,
+    }
+}
+
+fn apply_production_runtime_tx_power_control<T>(
+    transport: &T,
+    counters: &mut RuntimeRadioCounters,
+    input: &ProductionRuntimeTxPowerControlInput,
+) -> Result<Option<Rtl8812auTxPowerControlReport>, RuntimeRadioError>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(transport);
+    match input {
+        ProductionRuntimeTxPowerControlInput::None => Ok(None),
+        ProductionRuntimeTxPowerControlInput::ManualIndex { path, index } => {
+            let value = rtl8812au_tx_power_agc_value(*index);
+            let writes = run_rtl8812au_manual_tx_power(&registers, counters, *path, *index)?;
+            Ok(Some(Rtl8812auTxPowerControlReport {
+                semantics: "explicit runtime TXAGC manual override; writes the selected index to every byte lane of each selected per-rate TX power register after init and before TX",
+                mode: Rtl8812auTxPowerControlMode::ManualIndex,
+                manual_index: Some(*index),
+                manual_index_hex: Some(format_register_value(*index, 2)),
+                path: *path,
+                register_count: writes.len(),
+                repeated_value: Some(value),
+                repeated_value_hex: Some(format_register_value(value, 8)),
+                efuse_source: None,
+                efuse_plan: None,
+                writes,
+            }))
+        }
+        ProductionRuntimeTxPowerControlInput::EfuseDerived { source, plan } => {
+            let writes = run_rtl8812au_efuse_tx_power(&registers, counters, plan)?;
+            Ok(Some(Rtl8812auTxPowerControlReport {
+                semantics: "explicit guarded runtime EFUSE-derived TXAGC programming; computes per-path/per-rate indexes from the EFUSE TX-power region, default PHY_REG_PG by-rate offsets, and the selected safety clamp",
+                mode: Rtl8812auTxPowerControlMode::EfuseDerived,
+                manual_index: None,
+                manual_index_hex: None,
+                path: plan.selected_path,
+                register_count: writes.len(),
+                repeated_value: None,
+                repeated_value_hex: None,
+                efuse_source: Some(source.clone()),
+                efuse_plan: Some(plan.clone()),
+                writes,
+            }))
+        }
+    }
+}
+
+fn apply_production_runtime_tx_calibration_profile<T>(
+    transport: &T,
+    counters: &mut RuntimeRadioCounters,
+    config: &ProductionRuntimeFlowConfig,
+    rfe_type: u8,
+) -> Result<Option<Rtl8812auTxCalibrationProfileReport>, RuntimeRadioError>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(transport);
+    let report = run_rtl8812au_tx_calibration_profile(
+        &registers,
+        counters,
+        config.calibration_profile,
+        config.channel,
+        config.bandwidth,
+        rfe_type,
+    )?;
+    if let Some(report) = report.as_ref() {
+        validate_production_runtime_tx_calibration_profile_ready_for_tx(report)?;
+    }
+    Ok(report)
+}
+
+fn validate_production_runtime_tx_calibration_profile_ready_for_tx(
+    profile: &Rtl8812auTxCalibrationProfileReport,
+) -> Result<(), RuntimeRadioError> {
+    let Some(iqk) = profile.runtime_iqk.as_ref() else {
+        return Ok(());
+    };
+    if iqk.cleanup_status != "restored" {
+        return Err(RuntimeRadioError::new(
+            "runtime_iqk_cleanup_not_restored",
+            format!(
+                "runtime IQK cleanup status is {}; refusing live TX",
+                iqk.cleanup_status
+            ),
+        ));
+    }
+    if iqk.status != "completed" {
+        return Err(RuntimeRadioError::new(
+            "runtime_iqk_not_completed",
+            format!(
+                "runtime IQK status is {} after {}/{} sweeps; refusing live TX because fallback IQK has produced receiver decrypt failures on hardware",
+                iqk.status, iqk.sweep_count, iqk.max_sweeps
+            ),
+        ));
+    }
+    if !iqk.selected_iqc_fill_applied {
+        return Err(RuntimeRadioError::new(
+            "runtime_iqk_fill_not_applied",
+            "runtime IQK completed but selected IQC fill was not applied after cleanup; refusing live TX",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_production_runtime_rx_packet_telemetry(
+    rx: &mut RuntimeFlowRxTelemetry,
+    telemetry: ProductionRuntimeRxPacketTelemetry,
+) {
+    rx.parsed_frames = rx.parsed_frames.saturating_add(telemetry.parsed_frames);
+    rx.phy_status_frames = rx
+        .phy_status_frames
+        .saturating_add(telemetry.phy_status_frames);
+    rx.rssi_valid_frames = rx
+        .rssi_valid_frames
+        .saturating_add(telemetry.rssi_valid_frames);
+    rx.snr_frames = rx.snr_frames.saturating_add(telemetry.snr_frames);
+    rx.noise_frames = rx.noise_frames.saturating_add(telemetry.noise_frames);
+    rx.signal.merge(&telemetry.signal);
+    rx.dropped_packets = rx.dropped_packets.saturating_add(telemetry.dropped_packets);
+    rx.need_more_data = rx.need_more_data.saturating_add(telemetry.need_more_data);
+    rx.management_frames = rx
+        .management_frames
+        .saturating_add(telemetry.management_frames);
+    rx.control_frames = rx.control_frames.saturating_add(telemetry.control_frames);
+    rx.data_frames = rx.data_frames.saturating_add(telemetry.data_frames);
+    rx.extension_frames = rx
+        .extension_frames
+        .saturating_add(telemetry.extension_frames);
+}
+
+fn apply_production_runtime_tx_telemetry(
+    tx: &mut RuntimeFlowTxTelemetry,
+    bridge_counters: &TxCounters,
+    submit_counters: &TxSubmitCounters,
+) {
+    tx.submitted_frames = submit_counters.submitted;
+    tx.failed_submissions = submit_counters.failed;
+    tx.dropped_datagrams = bridge_counters.dropped;
+    tx.bytes_written = submit_counters.bytes_written;
+}
+
+fn production_runtime_init_telemetry(
+    init: &RuntimeSameSessionInitResult,
+) -> ProductionRuntimeInitTelemetry {
+    ProductionRuntimeInitTelemetry {
+        readiness: match init.readiness {
+            RuntimeSameSessionInitReadiness::Ready => ProductionRuntimeInitReadiness::Ready,
+            RuntimeSameSessionInitReadiness::Failed => ProductionRuntimeInitReadiness::Failed,
+        },
+        phase_count: init.phase_summaries.len(),
+        completed_phase_count: init
+            .phase_summaries
+            .iter()
+            .filter(|phase| matches!(phase.status, RuntimeSameSessionInitPhaseStatus::Completed))
+            .count(),
+    }
+}
+
+fn production_runtime_flow_report_from_state<T>(
+    config: &ProductionRuntimeFlowConfig,
+    session: &RuntimeRadioSession<T>,
+    stop_reason: &'static str,
+    init: ProductionRuntimeInitTelemetry,
+    pre_loop: ProductionRuntimePreLoopReports,
+    heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    rx: RuntimeFlowRxTelemetry,
+    tx: RuntimeFlowTxTelemetry,
+    result: ProductionRuntimeFlowResult,
+    error: Option<RuntimeRadioError>,
+) -> ProductionRuntimeFlowReport {
+    let calibration_class = config
+        .calibration_profile
+        .before_tx_class(config.captured_tail_applied);
+    ProductionRuntimeFlowReport::from_execution(
+        config,
+        ProductionRuntimeFlowExecutionReport {
+            selector: config.usb.selector,
+            adapter: Some(session.adapter.clone()),
+            endpoints: Some(session.endpoints.clone()),
+            channel: Some(config.channel),
+            bandwidth: config.bandwidth,
+            duration_ms: config.duration_ms,
+            ready_file: config.ready_file.clone(),
+            stop_reason,
+            bulk_in_endpoint: session.selected_bulk_in_endpoint(),
+            bulk_out_endpoint: session.selected_bulk_out_endpoint(),
+            calibration_profile: config.calibration_profile,
+            calibration_class,
+            tx_power_control: pre_loop.tx_power_control,
+            tx_calibration_profile: pre_loop.tx_calibration_profile,
+            heartbeat_led,
+            receiver_backed_validation_required: !config.calibration_profile.is_default(),
+            init,
+            rx,
+            tx,
+            counters: session.counters,
+            result,
+            error: error.map(Into::into),
+        },
+    )
 }
 
 pub struct RuntimeRadioSession<T = RuntimeUsbTransport> {
@@ -7648,31 +8342,36 @@ mod tests {
 
     use radio_core::{
         rtl8812au::{Rtl8812auUsbTransport, TxQueue},
-        Band, Bandwidth, Channel, DeviceSelector, ParsedRxPacket, Rtl8812auRegisterAccess, RxFrame,
-        RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
+        Band, Bandwidth, Channel, DeviceSelector, FirmwareImage, FirmwareSource, ParsedRxPacket,
+        RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, RxFrame, RxParseOutcome,
+        TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbEndpoints, UsbError,
     };
 
     use super::{
         bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
         handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
         plan_production_wfb_loop, process_production_rx_packet_outcomes,
-        production_rx_forward_snapshots, run_production_bridge_loop, runtime_unix_ms,
+        production_rx_forward_snapshots, run_production_bridge_loop, run_production_runtime_flow,
+        run_production_runtime_flow_with_session, runtime_unix_ms,
         spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
         MacosUsbHostConfig, ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
-        ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig, ProductionRuntimeFlowReport,
+        ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
+        ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
         ProductionRuntimeFlowResult, ProductionRuntimeHeartbeatLedReport,
+        ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
         ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeQueuedDatagram,
-        ProductionRuntimeReadyMarker, ProductionRuntimeRxForwardConfig,
-        ProductionRuntimeRxForwardPlan, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
-        Rtl8812auInitOrder, Rtl8812auInitPhase, RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry,
-        RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession, RuntimeSameSessionInitConfig,
-        RuntimeSameSessionInitPhaseFailure, RuntimeSameSessionInitPhaseStatus,
-        RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitReadiness,
-        RuntimeTxCalibrationEvidenceSource, RuntimeTxCalibrationValidationStatus,
-        TxCalibrationClass, TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
-        PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+        ProductionRuntimeReadyMarker, ProductionRuntimeRtl8812auInitInputs,
+        ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
+        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
+        Rtl8812auInitPhase, Rtl8812auTxPowerControlMode, RuntimeFlowRxTelemetry,
+        RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
+        RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
+        RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
+        RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
+        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
+        DEFAULT_HEARTBEAT_HALF_PERIOD_MS, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
     use wfb_bridge::{build_wfb_data_header, RxForwardConfig, TxCounters, WfbChannelId};
@@ -9100,6 +9799,62 @@ mod tests {
         }
     }
 
+    fn empty_realtek_table_plan(kind: RealtekTableKind) -> RealtekTablePlan {
+        RealtekTablePlan {
+            array_name: format!("test_{kind:?}"),
+            kind,
+            raw_value_count: 0,
+            raw_pair_count: 0,
+            condition_marker_pairs: 0,
+            skipped_write_pairs: 0,
+            actions: Vec::new(),
+        }
+    }
+
+    fn production_runtime_execution_inputs() -> ProductionRuntimeFlowExecutionInputs {
+        ProductionRuntimeFlowExecutionInputs {
+            rtl8812au_init: Some(ProductionRuntimeRtl8812auInitInputs {
+                firmware_image: FirmwareImage::from_bytes(
+                    FirmwareSource::External(PathBuf::from("/tmp/test-fw.bin")),
+                    vec![0x00, 0x01, 0x02, 0x03],
+                )
+                .expect("firmware image"),
+                mac_plan: empty_realtek_table_plan(RealtekTableKind::Mac),
+                phy_plan: empty_realtek_table_plan(RealtekTableKind::BbPhy),
+                agc_plan: empty_realtek_table_plan(RealtekTableKind::BbAgc),
+                radioa_plan: empty_realtek_table_plan(RealtekTableKind::RfRadioA),
+                radiob_plan: empty_realtek_table_plan(RealtekTableKind::RfRadioB),
+                init_order: Rtl8812auInitOrder::Default,
+                rfe_type: 0,
+                init_timeout: Duration::from_millis(500),
+            }),
+            ..ProductionRuntimeFlowExecutionInputs::default()
+        }
+    }
+
+    fn production_runtime_short_flow_config() -> ProductionRuntimeFlowConfig {
+        let mut config = production_runtime_flow_config();
+        config.bind_addr = "127.0.0.1:0".parse().expect("bind addr");
+        config.tx_binds = vec!["127.0.0.1:0".parse().expect("tx bind")];
+        config.duration_ms = 1;
+        config.rx_timeout_ms = 1;
+        config
+    }
+
+    fn complete_runtime_init_phase(
+        session: &mut RuntimeRadioSession<MockTransport>,
+        phase: Rtl8812auInitPhase,
+    ) -> Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure> {
+        let before = session.counters;
+        session.counters.usb_control_writes = session.counters.usb_control_writes.saturating_add(1);
+        Ok(RuntimeSameSessionInitPhaseSummary::completed(
+            phase,
+            format!("test completed {phase:?}"),
+            before,
+            session.counters,
+        ))
+    }
+
     #[test]
     fn production_runtime_flow_config_validates_before_usb() {
         let config = production_runtime_flow_config();
@@ -9199,6 +9954,213 @@ mod tests {
         let error = config.validate().expect_err("invalid tx burst");
 
         assert_eq!(error.code, "invalid_tx_burst_limit");
+    }
+
+    #[test]
+    fn production_runtime_flow_execution_rejects_invalid_config_before_inputs() {
+        let mut config = production_runtime_flow_config();
+        config.tx_authorized = false;
+
+        let report =
+            run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(report.stop_reason, "not_started");
+        assert!(report.adapter.is_none());
+        assert!(report.endpoints.is_none());
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_tx_authorization")
+        );
+    }
+
+    #[test]
+    fn production_runtime_flow_execution_rejects_missing_init_assets_before_usb() {
+        let config = production_runtime_flow_config();
+
+        let report =
+            run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
+
+        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
+        assert_eq!(report.stop_reason, "not_started");
+        assert!(report.adapter.is_none());
+        assert_eq!(report.init, ProductionRuntimeInitTelemetry::default());
+        assert_eq!(report.rx, RuntimeFlowRxTelemetry::default());
+        assert_eq!(report.tx, RuntimeFlowTxTelemetry::default());
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("missing_runtime_init_assets")
+        );
+    }
+
+    #[test]
+    fn production_runtime_flow_execution_failure_serializes_runtime_report_shape() {
+        let mut config = production_runtime_flow_config();
+        config.tx_burst_limit = 0;
+
+        let report =
+            run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
+        let report_json = serde_json::to_string(&report).expect("report JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(&report_json).expect("report JSON value");
+
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["command"], "radio-run");
+        assert_eq!(value["stop_reason"], "not_started");
+        assert_eq!(value["result"], "fail");
+        assert_eq!(value["error"]["code"], "invalid_tx_burst_limit");
+        assert!(value["adapter"].is_null());
+        assert!(value["endpoints"].is_null());
+        assert_eq!(value["rx"]["buffers_read"], 0);
+        assert_eq!(value["tx"]["submitted_frames"], 0);
+        for field in [
+            "pre_tx_write",
+            "pre_tx_register_writes",
+            "tx_status",
+            "rx_pcap_path",
+            "rx_frame_jsonl_path",
+        ] {
+            assert!(
+                !report_json.contains(field),
+                "production runtime report should not expose diagnostic field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_runtime_flow_session_runs_init_and_writes_ready_marker() {
+        let ready_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-flow-ready-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_short_flow_config();
+        config.ready_file = Some(ready_path.clone());
+        let inputs = production_runtime_execution_inputs();
+        let mut session = runtime_tx_session(MockTransport::default());
+        let mut observed_phases = Vec::new();
+
+        let report = run_production_runtime_flow_with_session(
+            config,
+            inputs,
+            &mut session,
+            |session, phase| {
+                observed_phases.push(phase);
+                complete_runtime_init_phase(session, phase)
+            },
+        );
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&ready_path).expect("ready marker"))
+                .expect("ready marker JSON");
+        let _ = std::fs::remove_file(ready_path);
+
+        assert!(!observed_phases.is_empty());
+        assert_eq!(report.init.readiness, ProductionRuntimeInitReadiness::Ready);
+        assert_eq!(report.init.phase_count, observed_phases.len());
+        assert_eq!(report.init.completed_phase_count, observed_phases.len());
+        assert!(report.adapter.is_some());
+        assert!(report.endpoints.is_some());
+        assert_eq!(report.bulk_in_endpoint, Some(0x81));
+        assert_eq!(report.bulk_out_endpoint, Some(0x02));
+        assert_eq!(report.stop_reason, "duration_elapsed");
+        assert!(
+            report
+                .heartbeat_led
+                .as_ref()
+                .map(|heartbeat| heartbeat.toggles_attempted >= 1)
+                .unwrap_or(false),
+            "heartbeat should be turned off once on flow exit"
+        );
+        assert_eq!(
+            report.error.as_ref().map(|error| error.code),
+            Some("production_runtime_flow_post_loop_finalization_not_implemented")
+        );
+        assert_eq!(marker["source"], "bridge-run");
+        assert_eq!(marker["same_session_init_result"], "pass");
+        assert_eq!(marker["bind_addrs"][0], "127.0.0.1:0");
+        assert_eq!(marker["bind_addrs"][1], "127.0.0.1:0");
+        assert_eq!(marker["channel"], 36);
+        assert_eq!(marker["bandwidth_mhz"], 20);
+        assert_eq!(marker["tx_burst_limit"], 8);
+        assert_eq!(marker["monitor_opmode_applied"], false);
+    }
+
+    #[test]
+    fn production_runtime_flow_session_preserves_tx_power_report_and_marker() {
+        let ready_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-flow-tx-power-ready-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_short_flow_config();
+        config.ready_file = Some(ready_path.clone());
+        let mut inputs = production_runtime_execution_inputs();
+        inputs.tx_power_control = super::ProductionRuntimeTxPowerControlInput::ManualIndex {
+            path: super::Rtl8812auRfPath::Both,
+            index: 0x12,
+        };
+        let mut session = runtime_tx_session(MockTransport::default());
+
+        let report = run_production_runtime_flow_with_session(
+            config,
+            inputs,
+            &mut session,
+            complete_runtime_init_phase,
+        );
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&ready_path).expect("ready marker"))
+                .expect("ready marker JSON");
+        let _ = std::fs::remove_file(ready_path);
+        let tx_power = report.tx_power_control.as_ref().expect("tx power report");
+
+        assert_eq!(tx_power.mode, Rtl8812auTxPowerControlMode::ManualIndex);
+        assert_eq!(tx_power.manual_index, Some(0x12));
+        assert_eq!(tx_power.repeated_value, Some(0x1212_1212));
+        assert!(tx_power.register_count > 0);
+        assert_eq!(marker["tx_power_control_applied"], true);
+        assert_eq!(marker["tx_calibration_profile_applied"], false);
+    }
+
+    #[test]
+    fn production_runtime_flow_session_preserves_tx_calibration_report_and_marker() {
+        let ready_path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-flow-calibration-ready-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_short_flow_config();
+        config.ready_file = Some(ready_path.clone());
+        config.live_register_write_authorized = true;
+        config.calibration_profile = TxCalibrationProfile::LinuxParityCh36Ht20;
+        let inputs = production_runtime_execution_inputs();
+        let mut session = runtime_tx_session(MockTransport::default());
+
+        let report = run_production_runtime_flow_with_session(
+            config,
+            inputs,
+            &mut session,
+            complete_runtime_init_phase,
+        );
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&ready_path).expect("ready marker"))
+                .expect("ready marker JSON");
+        let _ = std::fs::remove_file(ready_path);
+        let calibration = report
+            .tx_calibration_profile
+            .as_ref()
+            .expect("calibration report");
+
+        assert_eq!(
+            calibration.profile,
+            TxCalibrationProfile::LinuxParityCh36Ht20
+        );
+        assert!(calibration.register_count > 0);
+        assert_eq!(
+            report.calibration_class,
+            TxCalibrationClass::TargetedLinuxParity
+        );
+        assert_eq!(marker["tx_power_control_applied"], false);
+        assert_eq!(marker["tx_calibration_profile_applied"], true);
     }
 
     fn production_wfb_loop_config() -> ProductionRuntimeWfbLoopConfig {
