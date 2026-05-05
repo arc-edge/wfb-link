@@ -495,6 +495,11 @@ pub struct RuntimeFlowRxTelemetry {
     pub forwarded_payloads: u64,
     pub rx_forwards: Vec<ProductionRuntimeRxForwardSnapshot>,
     pub dropped_packets: u64,
+    pub need_more_data: u64,
+    pub management_frames: u64,
+    pub control_frames: u64,
+    pub data_frames: u64,
+    pub extension_frames: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -8942,6 +8947,11 @@ mod tests {
             forwarded_payloads: 3,
             rx_forwards: Vec::new(),
             dropped_packets: 4,
+            need_more_data: 1,
+            management_frames: 2,
+            control_frames: 3,
+            data_frames: 4,
+            extension_frames: 5,
         };
         let tx = RuntimeFlowTxTelemetry {
             datagrams_received: 5,
@@ -8954,6 +8964,11 @@ mod tests {
         assert_eq!(rx.forwarded_payloads, 3);
         assert_eq!(rx.snr_frames, 5);
         assert_eq!(rx.noise_frames, 5);
+        assert_eq!(rx.need_more_data, 1);
+        assert_eq!(rx.management_frames, 2);
+        assert_eq!(rx.control_frames, 3);
+        assert_eq!(rx.data_frames, 4);
+        assert_eq!(rx.extension_frames, 5);
         assert_eq!(tx.bytes_written, 4096);
         assert_eq!(RuntimeFlowRxTelemetry::default().buffers_read, 0);
         assert_eq!(RuntimeFlowRxTelemetry::default().snr_frames, 0);

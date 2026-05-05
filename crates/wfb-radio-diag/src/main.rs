@@ -23800,6 +23800,11 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             forwarded_payloads,
             rx_forwards,
             dropped_packets: bridge.rx.dropped_packets,
+            need_more_data: bridge.rx.need_more_data,
+            management_frames: bridge.rx.management_frames,
+            control_frames: bridge.rx.control_frames,
+            data_frames: bridge.rx.data_frames,
+            extension_frames: bridge.rx.extension_frames,
         },
         tx: RuntimeFlowTxTelemetry {
             datagrams_received: bridge.datagrams_received,

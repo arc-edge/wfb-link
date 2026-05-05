@@ -266,6 +266,15 @@ is present in both diagnostic bridge reports and runtime-owned `radio-run`
 reports. Live validation at
 `/tmp/wfb-radio-run-duplex-signal-summary-20260504-155712` populated
 `rx.signal` over `6991` samples while both peer counters recovered `20/20`.
+The production-shaped RX report also carries runtime-owned RX outcome detail
+for incomplete tails and management/control/data/extension frame counts, so
+release gates can distinguish metadata loss, malformed traffic, and actual WFB
+payload loss without reading diagnostic-only PCAP/JSONL side outputs.
+Hardware smoke after adding those fields passed at
+`/tmp/wfb-prod-radio-smoke-rx-telemetry-report-20260505-012413`: RX-only
+reported `need_more_data=0` and frame counts `85/2/1/0`; TX-positive submitted
+`64/64`, reported zero TX failures/drops, `need_more_data=0`, and frame counts
+`93/12/4/0`.
 
 After archiving the runtime cutover specs on May 4, 2026,
 `scripts/run-production-radio-smoke.sh --mode both` was run on the hardware Mac
