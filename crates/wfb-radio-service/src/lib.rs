@@ -12,12 +12,14 @@ use radio_core::{
 };
 use serde::Deserialize;
 use wfb_radio_runtime::{
-    run_production_runtime_flow, LedHeartbeatConfig, MacosUsbHostConfig,
-    ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
-    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRtl8812auInitInputs,
-    ProductionRuntimeRxForwardConfig, ProductionRuntimeTxPowerControlInput,
-    ProductionRuntimeUsbConfig, Rtl8812auInitOrder, RuntimeRadioError, TxCalibrationProfile,
-    DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+    plan_rtl8812au_efuse_tx_power, run_production_runtime_flow, LedHeartbeatConfig,
+    MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
+    ProductionRuntimeFlowReport, ProductionRuntimePrimaryRxForwardConfig,
+    ProductionRuntimeRtl8812auInitInputs, ProductionRuntimeRxForwardConfig,
+    ProductionRuntimeTxPowerControlInput, ProductionRuntimeUsbConfig, Rtl8812auInitOrder,
+    Rtl8812auRfPath, Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile,
+    RuntimeRadioError, TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+    RTL8812AU_EFUSE_TX_POWER_LEN, RTL8812AU_EFUSE_TX_POWER_START, RTL8812AU_TX_POWER_INDEX_MAX,
 };
 
 const MAC_REG_ARRAY: &str = "array_mp_8812a_mac_reg";
@@ -144,6 +146,34 @@ pub struct ServiceCli {
     #[arg(long)]
     pub i_understand_this_writes_registers: bool,
 
+    /// Explicit RTL8812AU TXAGC power index to write to all per-rate TX power registers.
+    #[arg(long, value_parser = parse_tx_power_index)]
+    pub tx_power_index: Option<u8>,
+
+    /// TX power programming mode. Manual mode requires --tx-power-index; EFUSE mode requires an EFUSE source.
+    #[arg(long, value_enum)]
+    pub tx_power_mode: Option<ServiceTxPowerControlMode>,
+
+    /// RF path set affected by TX power programming.
+    #[arg(long, value_enum)]
+    pub tx_power_path: Option<ServiceTxPowerPath>,
+
+    /// efuse-dump JSON report used by --tx-power-mode efuse-derived.
+    #[arg(long, value_name = "PATH")]
+    pub tx_power_efuse_report: Option<PathBuf>,
+
+    /// Binary EFUSE logical map or 84-byte TX-power region used by --tx-power-mode efuse-derived.
+    #[arg(long, value_name = "PATH")]
+    pub tx_power_efuse_logical_map: Option<PathBuf>,
+
+    /// Safety clamp profile for EFUSE-derived TXAGC indexes.
+    #[arg(long, value_enum)]
+    pub tx_power_safety_profile: Option<ServiceTxPowerSafetyProfile>,
+
+    /// Absolute maximum RTL8812AU TX power index allowed after EFUSE calculation.
+    #[arg(long, value_parser = parse_tx_power_index)]
+    pub tx_power_max_index: Option<u8>,
+
     /// Guarded RF/TX calibration profile applied after init and before TX.
     #[arg(long, value_enum)]
     pub tx_calibration_profile: Option<ServiceTxCalibrationProfile>,
@@ -188,6 +218,7 @@ pub struct ServiceConfigFile {
     pub macos_usbhost: Option<ServiceMacosUsbHostConfig>,
     pub radio: Option<ServiceRadioConfig>,
     pub wfb: Option<ServiceWfbConfig>,
+    pub tx_power: Option<ServiceTxPowerConfig>,
     pub calibration: Option<ServiceCalibrationConfig>,
     pub heartbeat: Option<ServiceHeartbeatConfig>,
     pub authorization: Option<ServiceAuthorizationConfig>,
@@ -243,6 +274,18 @@ pub struct ServiceWfbConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ServiceTxPowerConfig {
+    pub mode: Option<ServiceTxPowerControlMode>,
+    pub index: Option<u8>,
+    pub path: Option<ServiceTxPowerPath>,
+    pub efuse_report: Option<PathBuf>,
+    pub efuse_logical_map: Option<PathBuf>,
+    pub safety_profile: Option<ServiceTxPowerSafetyProfile>,
+    pub max_index: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceCalibrationConfig {
     pub profile: Option<ServiceTxCalibrationProfile>,
 }
@@ -266,6 +309,28 @@ pub struct ServiceAuthorizationConfig {
 pub struct ServiceArtifactConfig {
     pub ready_file: Option<PathBuf>,
     pub health_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTxPowerControlMode {
+    ManualIndex,
+    EfuseDerived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTxPowerSafetyProfile {
+    MaxIndex,
+    LinuxCh36Ht20,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTxPowerPath {
+    A,
+    B,
+    Both,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
@@ -296,6 +361,7 @@ pub struct ResolvedServiceRun {
     pub health_file: Option<PathBuf>,
     pub tx_authorized: bool,
     pub live_register_write_authorized: bool,
+    pub tx_power: ResolvedServiceTxPowerControl,
     pub calibration_profile: ServiceTxCalibrationProfile,
     pub heartbeat_enabled: bool,
     pub heartbeat_half_period_ms: u64,
@@ -305,6 +371,17 @@ pub struct ResolvedServiceRun {
     pub rx_forwards: Vec<String>,
     pub rx_wlan_idx: u8,
     pub rx_mcs_index: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedServiceTxPowerControl {
+    pub mode: Option<ServiceTxPowerControlMode>,
+    pub index: Option<u8>,
+    pub path: ServiceTxPowerPath,
+    pub efuse_report: Option<PathBuf>,
+    pub efuse_logical_map: Option<PathBuf>,
+    pub safety_profile: ServiceTxPowerSafetyProfile,
+    pub max_index: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,6 +427,7 @@ pub fn resolve_service_run(
     let macos = file.macos_usbhost.as_ref();
     let radio = file.radio.as_ref();
     let wfb = file.wfb.as_ref();
+    let tx_power = file.tx_power.as_ref();
     let calibration = file.calibration.as_ref();
     let heartbeat = file.heartbeat.as_ref();
     let authorization = file.authorization.as_ref();
@@ -464,6 +542,34 @@ pub fn resolve_service_run(
             || authorization
                 .and_then(|authorization| authorization.live_register_writes)
                 .unwrap_or(false),
+        tx_power: ResolvedServiceTxPowerControl {
+            mode: cli
+                .tx_power_mode
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.mode)),
+            index: cli
+                .tx_power_index
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.index)),
+            path: cli
+                .tx_power_path
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.path))
+                .unwrap_or(ServiceTxPowerPath::Both),
+            efuse_report: cli
+                .tx_power_efuse_report
+                .clone()
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.efuse_report.clone())),
+            efuse_logical_map: cli
+                .tx_power_efuse_logical_map
+                .clone()
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.efuse_logical_map.clone())),
+            safety_profile: cli
+                .tx_power_safety_profile
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.safety_profile))
+                .unwrap_or(ServiceTxPowerSafetyProfile::LinuxCh36Ht20),
+            max_index: cli
+                .tx_power_max_index
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.max_index))
+                .unwrap_or(RTL8812AU_TX_POWER_INDEX_MAX),
+        },
         calibration_profile: cli
             .tx_calibration_profile
             .or_else(|| calibration.and_then(|calibration| calibration.profile))
@@ -501,7 +607,7 @@ pub fn run_service(
 ) -> std::result::Result<ProductionRuntimeFlowReport, RuntimeRadioError> {
     let resolved = resolve_service_run(cli)?;
     let config = service_runtime_config_from_resolved(&resolved)?;
-    let inputs = match service_runtime_inputs_from_resolved(&resolved) {
+    let inputs = match service_runtime_inputs_from_resolved(&resolved, config.channel) {
         Ok(inputs) => inputs,
         Err(error) => return Ok(ProductionRuntimeFlowReport::not_started(&config, error)),
     };
@@ -560,6 +666,7 @@ pub fn service_runtime_config_from_resolved(
 
 pub fn service_runtime_inputs_from_resolved(
     resolved: &ResolvedServiceRun,
+    channel: Channel,
 ) -> std::result::Result<ProductionRuntimeFlowExecutionInputs, RuntimeRadioError> {
     let firmware_image = FirmwareImage::load_external(&resolved.firmware).map_err(|error| {
         RuntimeRadioError::new(
@@ -611,7 +718,11 @@ pub fn service_runtime_inputs_from_resolved(
             rfe_type: DEFAULT_RFE_TYPE,
             init_timeout: Duration::from_millis(DEFAULT_INIT_TIMEOUT_MS),
         }),
-        tx_power_control: ProductionRuntimeTxPowerControlInput::None,
+        tx_power_control: service_runtime_tx_power_input(
+            &resolved.tx_power,
+            channel,
+            resolved.bandwidth,
+        )?,
         heartbeat_led: LedHeartbeatConfig {
             enabled: resolved.heartbeat_enabled,
             half_period_ms: resolved.heartbeat_half_period_ms,
@@ -690,6 +801,213 @@ fn service_macos_usbhost_config(config: &ServiceMacosUsbHostConfig) -> MacosUsbH
 
 fn service_should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
     channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+}
+
+fn service_runtime_tx_power_input(
+    tx_power: &ResolvedServiceTxPowerControl,
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> std::result::Result<ProductionRuntimeTxPowerControlInput, RuntimeRadioError> {
+    let Some(mode) = service_tx_power_control_mode(tx_power)? else {
+        return Ok(ProductionRuntimeTxPowerControlInput::None);
+    };
+
+    match mode {
+        ServiceTxPowerControlMode::ManualIndex => {
+            let index = tx_power.index.ok_or_else(|| {
+                RuntimeRadioError::new(
+                    "service_tx_power_manual_index_missing",
+                    "--tx-power-mode manual-index requires --tx-power-index",
+                )
+            })?;
+            Ok(ProductionRuntimeTxPowerControlInput::ManualIndex {
+                path: Rtl8812auRfPath::from(tx_power.path),
+                index,
+            })
+        }
+        ServiceTxPowerControlMode::EfuseDerived => {
+            let source = service_load_tx_power_efuse_source(tx_power)?;
+            let plan = plan_rtl8812au_efuse_tx_power(
+                &source.tx_power_data,
+                channel,
+                bandwidth,
+                Rtl8812auRfPath::from(tx_power.path),
+                Rtl8812auTxPowerSafetyProfile::from(tx_power.safety_profile),
+                tx_power.max_index,
+            )?;
+            Ok(ProductionRuntimeTxPowerControlInput::EfuseDerived {
+                source: source.report,
+                plan,
+            })
+        }
+    }
+}
+
+fn service_tx_power_control_mode(
+    tx_power: &ResolvedServiceTxPowerControl,
+) -> std::result::Result<Option<ServiceTxPowerControlMode>, RuntimeRadioError> {
+    match (tx_power.mode, tx_power.index) {
+        (Some(ServiceTxPowerControlMode::EfuseDerived), Some(_)) => Err(RuntimeRadioError::new(
+            "service_tx_power_mode_conflict",
+            "--tx-power-mode efuse-derived cannot be combined with --tx-power-index; use one explicit mode",
+        )),
+        (Some(ServiceTxPowerControlMode::ManualIndex), None) => Err(RuntimeRadioError::new(
+            "service_tx_power_manual_index_missing",
+            "--tx-power-mode manual-index requires --tx-power-index",
+        )),
+        (Some(mode), _) => Ok(Some(mode)),
+        (None, Some(_)) => Ok(Some(ServiceTxPowerControlMode::ManualIndex)),
+        (None, None) => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ServiceTxPowerEfuseSource {
+    report: Rtl8812auTxPowerEfuseSourceReport,
+    tx_power_data: Vec<u8>,
+}
+
+fn service_load_tx_power_efuse_source(
+    tx_power: &ResolvedServiceTxPowerControl,
+) -> std::result::Result<ServiceTxPowerEfuseSource, RuntimeRadioError> {
+    match (
+        tx_power.efuse_report.as_deref(),
+        tx_power.efuse_logical_map.as_deref(),
+    ) {
+        (Some(_), Some(_)) => Err(RuntimeRadioError::new(
+            "service_tx_power_efuse_source_conflict",
+            "use only one of --tx-power-efuse-report or --tx-power-efuse-logical-map",
+        )),
+        (Some(path), None) => service_load_tx_power_efuse_report(path),
+        (None, Some(path)) => {
+            let bytes = fs::read(path).map_err(|error| {
+                RuntimeRadioError::new(
+                    "service_tx_power_efuse_logical_map_read_failed",
+                    format!("{}: {error}", path.display()),
+                )
+            })?;
+            service_tx_power_efuse_source_from_bytes(
+                bytes,
+                "efuse_logical_map_or_tx_power_region_binary",
+                Some(path.to_path_buf()),
+            )
+        }
+        (None, None) => Err(RuntimeRadioError::new(
+            "service_tx_power_efuse_source_missing",
+            "--tx-power-mode efuse-derived requires --tx-power-efuse-report or --tx-power-efuse-logical-map",
+        )),
+    }
+}
+
+fn service_load_tx_power_efuse_report(
+    path: &Path,
+) -> std::result::Result<ServiceTxPowerEfuseSource, RuntimeRadioError> {
+    let input = fs::read_to_string(path).map_err(|error| {
+        RuntimeRadioError::new(
+            "service_tx_power_efuse_report_read_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&input).map_err(|error| {
+        RuntimeRadioError::new(
+            "service_tx_power_efuse_report_parse_failed",
+            format!("{}: {error}", path.display()),
+        )
+    })?;
+    let (source_kind, hex) = service_json_string(&json, &["efuse", "logical_map_hex"])
+        .map(|hex| ("efuse_report_logical_map", hex))
+        .or_else(|| {
+            service_json_string(&json, &["efuse", "summary", "tx_power", "data_hex"])
+                .map(|hex| ("efuse_report_tx_power_region", hex))
+        })
+        .or_else(|| {
+            service_json_string(&json, &["tx_power_data_hex"])
+                .map(|hex| ("efuse_report_tx_power_region", hex))
+        })
+        .ok_or_else(|| {
+            RuntimeRadioError::new(
+                "service_tx_power_efuse_report_missing_hex",
+                format!(
+                    "{} does not contain efuse.logical_map_hex, efuse.summary.tx_power.data_hex, or tx_power_data_hex",
+                    path.display()
+                ),
+            )
+        })?;
+    let bytes = parse_service_hex_bytes(hex).map_err(|message| {
+        RuntimeRadioError::new(
+            "service_tx_power_efuse_report_hex_invalid",
+            format!("{}: {message}", path.display()),
+        )
+    })?;
+    service_tx_power_efuse_source_from_bytes(bytes, source_kind, Some(path.to_path_buf()))
+}
+
+fn service_tx_power_efuse_source_from_bytes(
+    bytes: Vec<u8>,
+    source_kind: &'static str,
+    source_path: Option<PathBuf>,
+) -> std::result::Result<ServiceTxPowerEfuseSource, RuntimeRadioError> {
+    let tx_power_data = if bytes.len() == RTL8812AU_EFUSE_TX_POWER_LEN {
+        bytes
+    } else if bytes.len() >= RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN {
+        bytes[RTL8812AU_EFUSE_TX_POWER_START
+            ..RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN]
+            .to_vec()
+    } else {
+        return Err(RuntimeRadioError::new(
+                "service_tx_power_efuse_source_too_short",
+                format!(
+                    "EFUSE source has {} bytes; expected an 84-byte TX-power region or a logical map at least {} bytes long",
+                    bytes.len(),
+                    RTL8812AU_EFUSE_TX_POWER_START + RTL8812AU_EFUSE_TX_POWER_LEN
+                ),
+            ));
+    };
+    let non_ff_bytes = tx_power_data.iter().filter(|byte| **byte != 0xff).count();
+    Ok(ServiceTxPowerEfuseSource {
+        report: Rtl8812auTxPowerEfuseSourceReport {
+            source_kind,
+            source_path,
+            tx_power_start_offset: RTL8812AU_EFUSE_TX_POWER_START,
+            tx_power_length: tx_power_data.len(),
+            tx_power_data_hex: encode_service_hex(&tx_power_data),
+            non_ff_bytes,
+        },
+        tx_power_data,
+    })
+}
+
+fn service_json_string<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |cursor, key| cursor.get(*key))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn parse_service_hex_bytes(input: &str) -> std::result::Result<Vec<u8>, String> {
+    let compact: String = input
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != ':' && *ch != '-' && *ch != '_')
+        .collect();
+    if compact.len() % 2 != 0 {
+        return Err("hex string must contain an even number of digits".to_string());
+    }
+
+    (0..compact.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&compact[index..index + 2], 16)
+                .map_err(|error| format!("invalid hex byte at offset {index}: {error}"))
+        })
+        .collect()
+}
+
+fn encode_service_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn load_service_realtek_table_plan(
@@ -784,6 +1102,35 @@ impl From<ServiceTxCalibrationProfile> for TxCalibrationProfile {
     }
 }
 
+impl From<ServiceTxPowerPath> for Rtl8812auRfPath {
+    fn from(path: ServiceTxPowerPath) -> Self {
+        match path {
+            ServiceTxPowerPath::A => Self::A,
+            ServiceTxPowerPath::B => Self::B,
+            ServiceTxPowerPath::Both => Self::Both,
+        }
+    }
+}
+
+impl From<ServiceTxPowerSafetyProfile> for Rtl8812auTxPowerSafetyProfile {
+    fn from(profile: ServiceTxPowerSafetyProfile) -> Self {
+        match profile {
+            ServiceTxPowerSafetyProfile::MaxIndex => Self::MaxIndex,
+            ServiceTxPowerSafetyProfile::LinuxCh36Ht20 => Self::LinuxCh36Ht20,
+        }
+    }
+}
+
+fn parse_tx_power_index(input: &str) -> std::result::Result<u8, String> {
+    let value = parse_u8(input)?;
+    if value > RTL8812AU_TX_POWER_INDEX_MAX {
+        return Err(format!(
+            "TX power index {value} exceeds RTL8812AU maximum {RTL8812AU_TX_POWER_INDEX_MAX}"
+        ));
+    }
+    Ok(value)
+}
+
 fn parse_u16(input: &str) -> std::result::Result<u16, String> {
     parse_prefixed_int(input)
         .and_then(|value| u16::try_from(value).map_err(|_| format!("{input} does not fit in u16")))
@@ -830,6 +1177,10 @@ mod tests {
         path
     }
 
+    fn write_temp_file(name: &str, contents: &str) -> PathBuf {
+        write_config(name, contents)
+    }
+
     #[test]
     fn service_config_only_resolves_runtime_profile() {
         let path = write_config(
@@ -863,6 +1214,16 @@ rx_mcs_index = 1
 [authorization]
 transmit = true
 
+[tx_power]
+mode = "efuse_derived"
+path = "b"
+efuse_report = "/tmp/config-efuse.json"
+safety_profile = "max_index"
+max_index = 42
+
+[calibration]
+profile = "rtl8812a_lck"
+
 [artifacts]
 ready_file = "/tmp/config-ready.json"
 health_file = "/tmp/config-health.json"
@@ -891,6 +1252,24 @@ health_file = "/tmp/config-health.json"
         assert_eq!(resolved.rx_mcs_index, 1);
         assert!(resolved.tx_authorized);
         assert!(resolved.heartbeat_enabled);
+        assert_eq!(
+            resolved.tx_power.mode,
+            Some(ServiceTxPowerControlMode::EfuseDerived)
+        );
+        assert_eq!(resolved.tx_power.path, ServiceTxPowerPath::B);
+        assert_eq!(
+            resolved.tx_power.efuse_report.as_deref(),
+            Some(Path::new("/tmp/config-efuse.json"))
+        );
+        assert_eq!(
+            resolved.tx_power.safety_profile,
+            ServiceTxPowerSafetyProfile::MaxIndex
+        );
+        assert_eq!(resolved.tx_power.max_index, 42);
+        assert_eq!(
+            resolved.calibration_profile,
+            ServiceTxCalibrationProfile::Rtl8812aLck
+        );
     }
 
     #[test]
@@ -913,6 +1292,16 @@ tx_binds = ["127.0.0.1:5611"]
 
 [authorization]
 transmit = false
+
+[tx_power]
+mode = "efuse_derived"
+path = "b"
+efuse_report = "/tmp/config-efuse.json"
+safety_profile = "linux_ch36_ht20"
+max_index = 63
+
+[calibration]
+profile = "current_default"
 "#,
         );
         let cli = ServiceCli::try_parse_from([
@@ -939,6 +1328,18 @@ transmit = false
             "/tmp/cli-ready.json",
             "--health-file",
             "/tmp/cli-health.json",
+            "--tx-power-mode",
+            "manual-index",
+            "--tx-power-index",
+            "0x1a",
+            "--tx-power-path",
+            "a",
+            "--tx-power-safety-profile",
+            "max-index",
+            "--tx-power-max-index",
+            "0x2a",
+            "--tx-calibration-profile",
+            "linux-parity-ch36-ht20",
             "--i-understand-this-transmits",
         ])
         .expect("parse service");
@@ -963,6 +1364,100 @@ transmit = false
             Some(Path::new("/tmp/cli-health.json"))
         );
         assert!(resolved.tx_authorized);
+        assert_eq!(
+            resolved.tx_power.mode,
+            Some(ServiceTxPowerControlMode::ManualIndex)
+        );
+        assert_eq!(resolved.tx_power.index, Some(0x1a));
+        assert_eq!(resolved.tx_power.path, ServiceTxPowerPath::A);
+        assert_eq!(
+            resolved.tx_power.safety_profile,
+            ServiceTxPowerSafetyProfile::MaxIndex
+        );
+        assert_eq!(resolved.tx_power.max_index, 0x2a);
+        assert_eq!(
+            resolved.calibration_profile,
+            ServiceTxCalibrationProfile::LinuxParityCh36Ht20
+        );
+    }
+
+    #[test]
+    fn service_efuse_tx_power_input_plans_before_usb_open() {
+        let efuse_hex =
+            include_str!("../../../fixtures/rf-quality/awus036ach-ch36-efuse-tx-power.hex").trim();
+        let efuse_path = write_temp_file(
+            "efuse-report",
+            &format!(r#"{{"tx_power_data_hex":"{efuse_hex}"}}"#),
+        );
+        let tx_power = ResolvedServiceTxPowerControl {
+            mode: Some(ServiceTxPowerControlMode::EfuseDerived),
+            index: None,
+            path: ServiceTxPowerPath::Both,
+            efuse_report: Some(efuse_path.clone()),
+            efuse_logical_map: None,
+            safety_profile: ServiceTxPowerSafetyProfile::LinuxCh36Ht20,
+            max_index: RTL8812AU_TX_POWER_INDEX_MAX,
+        };
+        let input = service_runtime_tx_power_input(
+            &tx_power,
+            Channel::from_number(36).expect("channel"),
+            Bandwidth::Mhz20,
+        )
+        .expect("tx power input");
+        let _ = fs::remove_file(efuse_path);
+
+        match input {
+            ProductionRuntimeTxPowerControlInput::EfuseDerived { source, plan } => {
+                assert_eq!(source.tx_power_length, RTL8812AU_EFUSE_TX_POWER_LEN);
+                assert_eq!(plan.channel, 36);
+                assert_eq!(plan.bandwidth_mhz, 20);
+                assert_eq!(plan.writes.len(), 22);
+            }
+            other => panic!("expected efuse-derived input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_tx_power_mode_conflict_is_rejected_before_usb_open() {
+        let tx_power = ResolvedServiceTxPowerControl {
+            mode: Some(ServiceTxPowerControlMode::EfuseDerived),
+            index: Some(0x1a),
+            path: ServiceTxPowerPath::Both,
+            efuse_report: None,
+            efuse_logical_map: None,
+            safety_profile: ServiceTxPowerSafetyProfile::LinuxCh36Ht20,
+            max_index: RTL8812AU_TX_POWER_INDEX_MAX,
+        };
+
+        let error = service_runtime_tx_power_input(
+            &tx_power,
+            Channel::from_number(36).expect("channel"),
+            Bandwidth::Mhz20,
+        )
+        .expect_err("mode conflict");
+
+        assert_eq!(error.code, "service_tx_power_mode_conflict");
+    }
+
+    #[test]
+    fn service_config_rejects_invalid_profile_names() {
+        let path = write_config(
+            "bad-profile",
+            r#"
+[radio]
+channel = 36
+firmware = "/tmp/rtl8812aefw.bin"
+
+[calibration]
+profile = "does_not_exist"
+"#,
+        );
+
+        let error = load_service_config_file(&path).expect_err("invalid profile rejected");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(error.code, "service_config_parse_failed");
+        assert!(error.message.contains("does_not_exist"));
     }
 
     #[test]

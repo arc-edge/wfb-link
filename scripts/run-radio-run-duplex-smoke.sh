@@ -388,9 +388,6 @@ start_radio() {
 
   case "$RADIO_COMMAND" in
     service)
-      if [[ "$TX_POWER_MODE" != "current-default" ]]; then
-        die "RADIO_COMMAND=service does not support TX_POWER_MODE=$TX_POWER_MODE yet; use RADIO_COMMAND=diagnostic for tx-power experiments"
-      fi
       cargo run -p wfb-radio-service -- \
         --json \
         --report "$OUT_DIR/radio-run.json" \
@@ -404,6 +401,7 @@ start_radio() {
         --rx-timeout-ms "$RX_TIMEOUT_MS" \
         --tx-burst-limit "$TX_BURST_LIMIT" \
         --max-datagrams 0 \
+        ${tx_power_args[@]+"${tx_power_args[@]}"} \
         --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
         ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
         --wfb-link-id "$LINK_ID" \
@@ -500,6 +498,9 @@ summary = {
     },
     "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
     "radio_command": os.environ.get("RADIO_COMMAND"),
+    "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
+    "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
     "radio_result": report.get("result"),
     "service_health": health,
     "stop_reason": report.get("stop_reason"),
@@ -1072,6 +1073,9 @@ summary = {
     },
     "radio_result": report.get("result"),
     "radio_command": os.environ.get("RADIO_COMMAND"),
+    "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
+    "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
     "service_health": health,
     "stop_reason": report.get("stop_reason"),
     "tx": tx,

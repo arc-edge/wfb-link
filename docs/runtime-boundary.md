@@ -71,8 +71,8 @@
 config-first (`--config`), accepts bounded operator overrides for adapter
 selection, channel, bandwidth, firmware path, TX UDP bind addresses, optional
 WFB RX forwarding, runtime bounds, calibration profile, macOS USBHost backend
-settings, ready/health/report artifact paths, and the explicit live TX/register
-write acknowledgements.
+settings, ready/health/report artifact paths, guarded TX-power controls, and
+the explicit live TX/register write acknowledgements.
 
 The service always maps into
 `wfb-radio-runtime::ProductionRuntimeFlowConfig`, validates that config before
@@ -108,19 +108,22 @@ Smoke automation records which command surface it exercised. Use
 `RADIO_COMMAND=service` for production gates and `RADIO_COMMAND=diagnostic` for
 the `wfb-radio-diag radio-run` compatibility path. The close-range RF-quality
 harness can also use `MAC_RADIO_COMMAND=radio-service` when the standalone
-service should be tested instead of the diagnostic adapter.
+service should be tested instead of the diagnostic adapter, including
+`TX_POWER_MODE=efuse-derived` and `TX_CALIBRATION_PROFILE=<profile>` RF profile
+runs.
 
 ## Still Diagnostic-Owned
 
 - Diagnostic phase-report formatting and legacy bring-up command surfaces for
   RTL8812AU init. The production service owns its runtime init execution path;
   diagnostic commands still keep richer per-step reports for bench work.
-- TX calibration CLI authorization, the read-only IQK probe marker, diagnostic
-  evidence formatting, and RF-quality automation while parity is still being
-  hardened. Targeted parity, LCK execution, runtime IQK execution, and TX-power
-  register execution now live behind runtime-owned APIs.
+- Diagnostic calibration evidence formatting, the read-only IQK probe command
+  surface, and exploratory RF-quality report adapters while parity is still
+  being hardened. Targeted parity, LCK execution, runtime IQK execution, and
+  TX-power register execution now live behind runtime-owned APIs and can be
+  selected from the production service.
 - PCAP/JSONL output, diagnostic report mutation, TX status probes, and
-  RF-quality automation.
+  generic register experiments.
 - CLI parsing and human-facing diagnostic reports, except for the shared
   production config support reused by the compatibility `radio-run` adapter.
 - Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
@@ -368,3 +371,11 @@ or drops, forwarded `452` Linux-to-Mac WFB payloads through the runtime RX
 handler, recovered `40/40` measured payloads in both directions, logged zero
 post-session decrypt failures, and exited with service health `exited_pass` /
 `monitor`.
+
+After adding service RF profile controls, non-transmitting automation dry-runs
+verified that the service command path accepts the same TX-power/profile tuple
+used by RF-quality runs. `MAC_RADIO_COMMAND=radio-service`,
+`TX_POWER_MODE=efuse-derived`, and `TX_CALIBRATION_PROFILE=rtl8812a-lck`
+generated a close-range command plan at `/tmp/wfb-rfq-service-txpower-dryrun`,
+and `RADIO_COMMAND=service` with the same TX-power mode propagated through the
+profile matrix dry-run at `/tmp/wfb-matrix-service-txpower-dryrun`.

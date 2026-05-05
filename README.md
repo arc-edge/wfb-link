@@ -218,6 +218,10 @@ directly. Diagnostic-only register experiments, TX-status probes, PCAP/JSONL
 capture, trace replay, and generic bring-up commands are absent from this
 binary. The compatibility command `wfb-radio-diag radio-run` remains available
 during migration and uses the same production config/report semantics.
+Production RF profile controls are service-native: `--tx-power-mode`,
+`--tx-power-efuse-report`, `--tx-power-safety-profile`, `--tx-power-index`,
+`--tx-power-path`, and `--tx-calibration-profile` resolve before USB open and
+map directly into runtime TX-power/calibration policy.
 
 ```sh
 cargo run -p wfb-radio-service -- \
@@ -225,6 +229,10 @@ cargo run -p wfb-radio-service -- \
   --report /tmp/wfb-radio-service.json \
   --ready-file /tmp/wfb-radio-service-ready.json \
   --health-file /tmp/wfb-radio-service-health.json \
+  --tx-power-mode efuse-derived \
+  --tx-power-efuse-report /tmp/wfb-remote-macos-efuse-dump.json \
+  --tx-power-safety-profile linux-ch36-ht20 \
+  --tx-calibration-profile current-default \
   --i-understand-this-transmits
 ```
 

@@ -76,6 +76,12 @@ The report embeds Linux peer channel state and RF pcap channel evidence under
 `macos.wfb_outcome.receiver_evidence`, so off-channel scanning can be diagnosed
 from JSON without manually replaying the pcap.
 
+Set `MAC_RADIO_COMMAND=radio-service` to exercise the standalone production
+service instead of the diagnostic bridge command. The service path accepts the
+same `TX_POWER_MODE`, `TX_POWER_SAFETY_PROFILE`, and
+`TX_CALIBRATION_PROFILE` controls as `radio-run`, and the run summary records
+the selected command plus RF profile tuple.
+
 Inspect the command plan without claiming USB or transmitting RF:
 
 ```sh

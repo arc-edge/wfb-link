@@ -323,7 +323,7 @@ Configuration written to:
 Hardware Mac:
   LOCAL_HW=$LOCAL_HW HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
   MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND RADIO_RUN_CONFIG=$RADIO_RUN_CONFIG RADIO_RUN_DURATION_MS=$RADIO_RUN_DURATION_MS
-  TX_POWER_MODE=$TX_POWER_MODE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
+  TX_POWER_MODE=$TX_POWER_MODE TX_POWER_SAFETY_PROFILE=$TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
   $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'run relay/radio locally from %s\n' "$dry_bridge_path"; elif [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
   $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<cd $dry_bridge_path && cargo run ... $MAC_RADIO_COMMAND --macos-usbhost --channel $CHANNEL --bandwidth $BANDWIDTH_MHZ --bind $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT --max-datagrams $MAX_DATAGRAMS>'
@@ -546,10 +546,6 @@ case "$MAC_RADIO_COMMAND" in
       > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
     ;;
   radio-service)
-    if [[ "$TX_POWER_MODE" != "current-default" ]]; then
-      echo "MAC_RADIO_COMMAND=radio-service does not support TX_POWER_MODE=$TX_POWER_MODE yet; use MAC_RADIO_COMMAND=radio-run for tx-power experiments" >&2
-      exit 2
-    fi
     nohup cargo run -p wfb-radio-service -- \
       --json \
       --report "${REMOTE_PREFIX}-listen.json" \
@@ -562,6 +558,7 @@ case "$MAC_RADIO_COMMAND" in
       --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
       --max-datagrams "$MAX_DATAGRAMS" \
       --duration-ms "$RADIO_RUN_DURATION_MS" \
+      ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
@@ -1401,6 +1398,10 @@ if channel_state_path.exists():
     channel_state = json.loads(channel_state_path.read_text())
 summary = {
     "mac_radio_command": os.environ.get("MAC_RADIO_COMMAND"),
+    "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
+    "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
+    "calibration_mode": os.environ.get("CALIBRATION_MODE"),
     "preflight": preflight,
     "counter": counter,
     "receiver_health": receiver_health,
@@ -1698,6 +1699,11 @@ within_tolerance = (
 
 report = {
     "source": "scripts/run-rf-quality-close-range.sh",
+    "mac_radio_command": os.environ.get("MAC_RADIO_COMMAND"),
+    "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
+    "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
+    "calibration_mode": os.environ.get("CALIBRATION_MODE"),
     "link_id": os.environ.get("LINK_ID"),
     "wfb_cli_link_id": env_int("WFB_CLI_LINK_ID"),
     "theoretical_max_datagrams": theoretical,
