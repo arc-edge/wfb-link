@@ -28,4 +28,4 @@
 - [x] 5.2 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes.
 - [x] 5.3 `openspec validate harden-production-radio-service --strict` and `openspec validate --specs --strict` pass.
 - [x] 5.4 Run local production smoke with config/health artifacts.
-- [ ] 5.5 Run receiver-backed robust tuple service smoke and confirm M2L/L2M recovery, decrypt gates, TX gates, RX forwarding, source timing, signal summaries, and health artifacts pass.
+- [x] 5.5 Run receiver-backed robust tuple service smoke and confirm M2L/L2M recovery, decrypt gates, TX gates, RX forwarding, source timing, signal summaries, and health artifacts pass.

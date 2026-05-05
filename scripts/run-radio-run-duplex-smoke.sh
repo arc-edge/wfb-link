@@ -32,6 +32,7 @@ Configuration is via environment variables. Common overrides:
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   REQUIRE_CALIBRATION_SUCCESS=auto
   AUTO_EFUSE_DUMP=1
+  M2L_INGRESS_MODE=ssh-udp-relay
   RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
@@ -123,7 +124,26 @@ RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
 export RADIO_RUN_CONFIG
 
 RADIO_BIND_PORT=${RADIO_BIND_PORT:-5611}
-RADIO_BIND=${RADIO_BIND:-0.0.0.0:$RADIO_BIND_PORT}
+M2L_INGRESS_MODE=${M2L_INGRESS_MODE:-ssh-udp-relay}
+case "$M2L_INGRESS_MODE" in
+  direct|ssh-udp-relay) ;;
+  *) die "unsupported M2L_INGRESS_MODE=$M2L_INGRESS_MODE" ;;
+esac
+if [[ -z "${RADIO_BIND+x}" ]]; then
+  if [[ "$M2L_INGRESS_MODE" == "ssh-udp-relay" ]]; then
+    RADIO_BIND="127.0.0.1:$RADIO_BIND_PORT"
+  else
+    RADIO_BIND="0.0.0.0:$RADIO_BIND_PORT"
+  fi
+fi
+if [[ -z "${M2L_DISTRIBUTOR_HOST+x}" ]]; then
+  if [[ "$M2L_INGRESS_MODE" == "ssh-udp-relay" ]]; then
+    M2L_DISTRIBUTOR_HOST=127.0.0.1
+  else
+    M2L_DISTRIBUTOR_HOST=$MAC_LAN_IP
+  fi
+fi
+export M2L_INGRESS_MODE M2L_DISTRIBUTOR_HOST
 LINUX_M2L_SOURCE_PORT=${LINUX_M2L_SOURCE_PORT:-5600}
 LINUX_L2M_SOURCE_PORT=${LINUX_L2M_SOURCE_PORT:-5621}
 M2L_COUNTER_PORT=${M2L_COUNTER_PORT:-5900}
@@ -225,14 +245,22 @@ resolve_linux_lan_ip
 export LINUX_HOST MAC_LAN_IP LINUX_LAN_IP LINUX_LAN_IP_REQUESTED
 
 RADIO_PID=
+M2L_RELAY_PID=
 cleanup() {
   set +e
   if [[ -n "${RADIO_PID:-}" ]]; then
     kill "$RADIO_PID" >/dev/null 2>&1 || true
   fi
-  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" "REMOTE_PREFIX='$REMOTE_PREFIX' IFACE='$IFACE' WFB_SERVICE='$WFB_SERVICE' bash -s" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || true
+  if [[ -n "${M2L_RELAY_PID:-}" ]]; then
+    kill "$M2L_RELAY_PID" >/dev/null 2>&1 || true
+    wait "$M2L_RELAY_PID" >/dev/null 2>&1 || true
+    M2L_RELAY_PID=
+  fi
+  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" "REMOTE_PREFIX='$REMOTE_PREFIX' IFACE='$IFACE' WFB_SERVICE='$WFB_SERVICE' RADIO_BIND_PORT='$RADIO_BIND_PORT' bash -s" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || true
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 sudo -n pkill -f "$REMOTE_PREFIX" || true
+sudo -n pkill -f "[w]fb-m2l-udp-relay-" || true
+sudo -n pkill -f "[p]ython3 -u - $RADIO_BIND_PORT" || true
 sudo -n pkill -x wfb_rx || true
 sudo -n pkill -x wfb_tx || true
 sudo -n pkill -f "tcpdump -i $IFACE" || true
@@ -240,6 +268,69 @@ sudo -n docker start "$WFB_SERVICE" || true
 REMOTE_CLEANUP
 }
 trap cleanup EXIT INT TERM
+
+start_m2l_ingress_relay() {
+  if [[ "$M2L_INGRESS_MODE" != "ssh-udp-relay" || "$ENABLE_M2L" != "1" ]]; then
+    return 0
+  fi
+  log "starting M2L SSH UDP relay $LINUX_HOST:127.0.0.1:$RADIO_BIND_PORT -> 127.0.0.1:$RADIO_BIND_PORT"
+  ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
+    "RADIO_BIND_PORT=$(quote "$RADIO_BIND_PORT") bash -s" <<'REMOTE_RELAY_CLEANUP' >/dev/null 2>&1 || true
+set +e
+sudo -n pkill -f "[w]fb-m2l-udp-relay-" || true
+sudo -n pkill -f "[p]ython3 -u - $RADIO_BIND_PORT" || true
+REMOTE_RELAY_CLEANUP
+  local remote_py="$OUT_DIR/m2l-udp-relay-remote.py"
+  local local_py="$OUT_DIR/m2l-udp-relay-local.py"
+  local remote_title="wfb-m2l-udp-relay-$RUN_ID"
+  cat > "$remote_py" <<'PY'
+import socket
+import struct
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", port))
+out = sys.stdout.buffer
+while True:
+    data, _peer = sock.recvfrom(65535)
+    out.write(struct.pack("!H", len(data)))
+    out.write(data)
+    out.flush()
+PY
+  cat > "$local_py" <<'PY'
+import socket
+import struct
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+target = ("127.0.0.1", port)
+inp = sys.stdin.buffer
+while True:
+    header = inp.read(2)
+    if not header:
+        break
+    if len(header) != 2:
+        raise SystemExit("truncated relay frame header")
+    length = struct.unpack("!H", header)[0]
+    data = inp.read(length)
+    if len(data) != length:
+        raise SystemExit("truncated relay frame payload")
+    sock.sendto(data, target)
+PY
+  (
+    ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
+      "LINUX_REMOTE_PATH=$(quote "$LINUX_REMOTE_PATH") bash -c 'export PATH=\"\$0:\$PATH\"; exec -a \"\$1\" python3 -u - \"\$2\"' $(quote "$LINUX_REMOTE_PATH") $(quote "$remote_title") $(quote "$RADIO_BIND_PORT")" < "$remote_py" |
+      python3 -u "$local_py" "$RADIO_BIND_PORT"
+  ) > "$OUT_DIR/m2l-udp-relay.log" 2>&1 &
+  M2L_RELAY_PID=$!
+  sleep 1
+  if ! kill -0 "$M2L_RELAY_PID" >/dev/null 2>&1; then
+    cat "$OUT_DIR/m2l-udp-relay.log" >&2 || true
+    die "M2L SSH UDP relay failed to start"
+  fi
+}
 
 prepare_peer() {
   log "preparing Linux peer $LINUX_HOST on channel $CHANNEL"
@@ -423,7 +514,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' M2L_DISTRIBUTOR_HOST='$M2L_DISTRIBUTOR_HOST' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 enabled() {
@@ -582,7 +673,7 @@ if enabled "$ENABLE_M2L" && grep -qi "unknown encapsulation" "$REMOTE_PREFIX/wfb
   exit 22
 fi
 if enabled "$ENABLE_M2L"; then
-  sudo -n timeout "$COUNTER_SECONDS" wfb_tx -d -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -B 20 -M "$M2L_MCS" -k "$M2L_FEC_K" -n "$M2L_FEC_N" -u "$LINUX_M2L_SOURCE_PORT" "$MAC_LAN_IP:$RADIO_BIND_PORT" > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log" 2>&1 &
+  sudo -n timeout "$COUNTER_SECONDS" wfb_tx -d -K "$WFB_KEY" -i "$WFB_CLI_LINK_ID" -p "$M2L_RADIO_PORT" -B 20 -M "$M2L_MCS" -k "$M2L_FEC_K" -n "$M2L_FEC_N" -u "$LINUX_M2L_SOURCE_PORT" "$M2L_DISTRIBUTOR_HOST:$RADIO_BIND_PORT" > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log" 2>&1 &
   echo $! > "$REMOTE_PREFIX/wfb-tx-m2l-dist.pid"
 else
   : > "$REMOTE_PREFIX/wfb-tx-m2l-dist.log"
@@ -963,6 +1054,8 @@ summary = {
         "payload_len": int(os.environ.get("PAYLOAD_LEN", 0)),
         "expected_payloads": expected_payloads,
         "radio_run_config": os.environ.get("RADIO_RUN_CONFIG"),
+        "m2l_ingress_mode": os.environ.get("M2L_INGRESS_MODE"),
+        "m2l_distributor_host": os.environ.get("M2L_DISTRIBUTOR_HOST"),
     },
     "calibration": {
         "profile": report.get("calibration_profile"),
@@ -1014,6 +1107,7 @@ if ! prepare_peer; then
   write_radio_startup_failure_summary "linux_peer_preparation_failed" || true
   die "Linux peer preparation failed; partial artifacts copied to $OUT_DIR/peer"
 fi
+start_m2l_ingress_relay
 start_radio
 wait_for_radio_ready
 if ! run_peer_traffic; then
