@@ -280,11 +280,16 @@ def signal_summary(summary: dict[str, Any]) -> dict[str, Any]:
     for key in ("rssi_dbm", "snr_db", "noise_dbm"):
         value = signal.get(key)
         if isinstance(value, dict):
-            result[key] = {
+            item = {
                 field: value.get(field)
-                for field in ("avg", "min", "max", "samples")
+                for field in ("avg", "average", "min", "max", "samples", "sample_count")
                 if field in value
             }
+            if "avg" not in item and "average" in item:
+                item["avg"] = item["average"]
+            if "samples" not in item and "sample_count" in item:
+                item["samples"] = item["sample_count"]
+            result[key] = item
     return result
 
 
