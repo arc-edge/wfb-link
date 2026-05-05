@@ -674,6 +674,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfb-radio-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "radio-core",
+ "serde",
+ "serde_json",
+ "toml",
+ "wfb-bridge",
+ "wfb-radio-runtime",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

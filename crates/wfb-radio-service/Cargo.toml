@@ -1,0 +1,16 @@
+[package]
+name = "wfb-radio-service"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+radio-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+wfb-bridge.workspace = true
+wfb-radio-runtime.workspace = true
