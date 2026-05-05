@@ -222,6 +222,12 @@ Production RF profile controls are service-native: `--tx-power-mode`,
 `--tx-power-efuse-report`, `--tx-power-safety-profile`, `--tx-power-index`,
 `--tx-power-path`, and `--tx-calibration-profile` resolve before USB open and
 map directly into runtime TX-power/calibration policy.
+`scripts/run-production-radio-smoke.sh` can exercise the same service path with
+`RADIO_COMMAND=service`, `TX_POWER_MODE=efuse-derived`,
+`EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json`,
+`TX_POWER_SAFETY_PROFILE=linux-ch36-ht20`, and
+`TX_CALIBRATION_PROFILE=current-default`; its smoke summaries record the RF
+profile tuple and the resulting TX power evidence.
 
 ```sh
 cargo run -p wfb-radio-service -- \

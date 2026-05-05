@@ -15,6 +15,14 @@ Configuration is via environment variables:
   RADIO_COMMAND=service    # service or diagnostic
   FIRMWARE=/tmp/rtl8812aefw.bin
   RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
+  EFUSE_REPORT=/tmp/wfb-remote-macos-efuse-dump.json
+  TX_POWER_MODE=current-default     # current-default, efuse-derived, or manual-index
+  TX_POWER_INDEX=0x18               # required for manual-index
+  TX_POWER_PATH=both                # a, b, or both
+  TX_POWER_EFUSE_LOGICAL_MAP=/tmp/wfb-efuse-logical.bin
+  TX_POWER_SAFETY_PROFILE=linux-ch36-ht20
+  TX_POWER_MAX_INDEX=0x3f
+  TX_CALIBRATION_PROFILE=current-default
   VID=0x0bda PID=0x8812 CHANNEL=36 BANDWIDTH_MHZ=20
   DURATION_MS=2500 RX_TIMEOUT_MS=20 TX_BURST_LIMIT=8
   TX_DATAGRAMS=64 TX_BIND=127.0.0.1:5600 TX_INTERVAL_SEC=0.001
@@ -85,6 +93,14 @@ HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-snr-deploy}
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
 RADIO_COMMAND=${RADIO_COMMAND:-service}
+EFUSE_REPORT=${EFUSE_REPORT:-/tmp/wfb-remote-macos-efuse-dump.json}
+TX_POWER_MODE=${TX_POWER_MODE:-current-default}
+TX_POWER_INDEX=${TX_POWER_INDEX:-}
+TX_POWER_PATH=${TX_POWER_PATH:-both}
+TX_POWER_EFUSE_LOGICAL_MAP=${TX_POWER_EFUSE_LOGICAL_MAP:-}
+TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
+TX_POWER_MAX_INDEX=${TX_POWER_MAX_INDEX:-}
+TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 VID=${VID:-0x0bda}
 PID=${PID:-0x8812}
 CHANNEL=${CHANNEL:-36}
@@ -174,6 +190,79 @@ wait_for_file() {
   done
 }
 
+build_rf_profile_args() {
+  TX_POWER_ARGS=()
+  WRITE_AUTH_ARGS=()
+  local requires_write_auth=0
+  local tx_power_mode=$TX_POWER_MODE
+  local tx_calibration_profile=$TX_CALIBRATION_PROFILE
+
+  if [[ "$tx_power_mode" == "current_default" ]]; then
+    tx_power_mode=current-default
+  fi
+  if [[ "$tx_calibration_profile" == "current_default" ]]; then
+    tx_calibration_profile=current-default
+  fi
+  TX_CALIBRATION_ARGS=(--tx-calibration-profile "$tx_calibration_profile")
+
+  if [[ "$tx_power_mode" == "current-default" && -n "$TX_POWER_INDEX" ]]; then
+    tx_power_mode=manual-index
+  fi
+  EFFECTIVE_TX_POWER_MODE=$tx_power_mode
+  EFFECTIVE_TX_CALIBRATION_PROFILE=$tx_calibration_profile
+
+  if [[ "$tx_power_mode" != "current-default" ]]; then
+    requires_write_auth=1
+    TX_POWER_ARGS+=(--tx-power-mode "$tx_power_mode")
+    if [[ -n "$TX_POWER_PATH" ]]; then
+      TX_POWER_ARGS+=(--tx-power-path "$TX_POWER_PATH")
+    fi
+    case "$tx_power_mode" in
+      efuse-derived)
+        if [[ -n "$EFUSE_REPORT" && -n "$TX_POWER_EFUSE_LOGICAL_MAP" ]]; then
+          die "use only one of EFUSE_REPORT or TX_POWER_EFUSE_LOGICAL_MAP"
+        fi
+        if [[ -n "$EFUSE_REPORT" ]]; then
+          [[ -f "$EFUSE_REPORT" ]] || die "EFUSE report not found: $EFUSE_REPORT"
+          TX_POWER_ARGS+=(--tx-power-efuse-report "$EFUSE_REPORT")
+        elif [[ -n "$TX_POWER_EFUSE_LOGICAL_MAP" ]]; then
+          [[ -f "$TX_POWER_EFUSE_LOGICAL_MAP" ]] || die "EFUSE logical map not found: $TX_POWER_EFUSE_LOGICAL_MAP"
+          TX_POWER_ARGS+=(--tx-power-efuse-logical-map "$TX_POWER_EFUSE_LOGICAL_MAP")
+        else
+          die "TX_POWER_MODE=efuse-derived requires EFUSE_REPORT or TX_POWER_EFUSE_LOGICAL_MAP"
+        fi
+        if [[ -n "$TX_POWER_SAFETY_PROFILE" ]]; then
+          TX_POWER_ARGS+=(--tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE")
+        fi
+        if [[ -n "$TX_POWER_MAX_INDEX" ]]; then
+          TX_POWER_ARGS+=(--tx-power-max-index "$TX_POWER_MAX_INDEX")
+        fi
+        ;;
+      manual-index)
+        [[ -n "$TX_POWER_INDEX" ]] || die "TX_POWER_MODE=manual-index requires TX_POWER_INDEX"
+        TX_POWER_ARGS+=(--tx-power-index "$TX_POWER_INDEX")
+        ;;
+      *)
+        die "invalid TX_POWER_MODE=$TX_POWER_MODE"
+        ;;
+    esac
+  fi
+
+  case "$tx_calibration_profile" in
+    current-default|current_default|rtl8812a-iqk-probe) ;;
+    linux-parity-ch36-ht20|rtl8812a-lck|rtl8812a-runtime-iqk)
+      requires_write_auth=1
+      ;;
+    *)
+      die "invalid TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE"
+      ;;
+  esac
+
+  if (( requires_write_auth == 1 )); then
+    WRITE_AUTH_ARGS=(--i-understand-this-writes-registers)
+  fi
+}
+
 run_radio_smoke() {
   local smoke_mode=$1
   local report="$REMOTE_OUT_DIR/radio-run-$smoke_mode.json"
@@ -189,8 +278,9 @@ run_radio_smoke() {
     max_datagrams=$TX_DATAGRAMS
     duration_ms=$((DURATION_MS < 3500 ? 3500 : DURATION_MS))
   fi
+  build_rf_profile_args
 
-  log "starting $RADIO_COMMAND radio-run $smoke_mode report=$report"
+  log "starting $RADIO_COMMAND radio-run $smoke_mode report=$report rf=$EFFECTIVE_TX_POWER_MODE/$TX_POWER_SAFETY_PROFILE/$EFFECTIVE_TX_CALIBRATION_PROFILE"
   set +e
   case "$RADIO_COMMAND" in
     service)
@@ -210,6 +300,9 @@ run_radio_smoke() {
         --max-datagrams "$max_datagrams" \
         --ready-file "$ready" \
         --health-file "$health" \
+        ${TX_POWER_ARGS[@]+"${TX_POWER_ARGS[@]}"} \
+        ${TX_CALIBRATION_ARGS[@]+"${TX_CALIBRATION_ARGS[@]}"} \
+        ${WRITE_AUTH_ARGS[@]+"${WRITE_AUTH_ARGS[@]}"} \
         --i-understand-this-transmits \
         >"$log_file" 2>&1 &
       ;;
@@ -228,6 +321,9 @@ run_radio_smoke() {
         --max-datagrams "$max_datagrams" \
         --ready-file "$ready" \
         --health-file "$health" \
+        ${TX_POWER_ARGS[@]+"${TX_POWER_ARGS[@]}"} \
+        ${TX_CALIBRATION_ARGS[@]+"${TX_CALIBRATION_ARGS[@]}"} \
+        ${WRITE_AUTH_ARGS[@]+"${WRITE_AUTH_ARGS[@]}"} \
         --i-understand-this-transmits \
         >"$log_file" 2>&1 &
       ;;
@@ -301,7 +397,8 @@ PY
   fi
 
   SMOKE_MODE="$smoke_mode" RADIO_COMMAND="$RADIO_COMMAND" REPORT="$report" HEALTH="$health" SUMMARY="$summary" EXPECT_TX="$([[ "$smoke_mode" == "tx-positive" ]] && echo 1 || echo 0)" \
-    TX_DATAGRAMS="$TX_DATAGRAMS" python3 - <<'PY'
+    TX_DATAGRAMS="$TX_DATAGRAMS" TX_POWER_MODE="$TX_POWER_MODE" EFFECTIVE_TX_POWER_MODE="$EFFECTIVE_TX_POWER_MODE" TX_POWER_INDEX="$TX_POWER_INDEX" TX_POWER_PATH="$TX_POWER_PATH" EFUSE_REPORT="$EFUSE_REPORT" TX_POWER_EFUSE_LOGICAL_MAP="$TX_POWER_EFUSE_LOGICAL_MAP" \
+    TX_POWER_SAFETY_PROFILE="$TX_POWER_SAFETY_PROFILE" TX_POWER_MAX_INDEX="$TX_POWER_MAX_INDEX" TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" EFFECTIVE_TX_CALIBRATION_PROFILE="$EFFECTIVE_TX_CALIBRATION_PROFILE" python3 - <<'PY'
 import json
 import os
 import sys
@@ -321,6 +418,23 @@ with open(health_path, "r", encoding="utf-8") as handle:
 result = report.get("result")
 tx = report.get("tx", {})
 rx = report.get("rx", {})
+tx_power_control = report.get("tx_power_control")
+tx_calibration_report = report.get("tx_calibration_profile")
+rf_profile = {
+    "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "effective_tx_power_mode": os.environ.get("EFFECTIVE_TX_POWER_MODE"),
+    "tx_power_index": os.environ.get("TX_POWER_INDEX") or None,
+    "tx_power_path": os.environ.get("TX_POWER_PATH"),
+    "efuse_report": os.environ.get("EFUSE_REPORT") or None,
+    "tx_power_efuse_logical_map": os.environ.get("TX_POWER_EFUSE_LOGICAL_MAP") or None,
+    "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE") or None,
+    "tx_power_max_index": os.environ.get("TX_POWER_MAX_INDEX") or None,
+    "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
+    "effective_tx_calibration_profile": os.environ.get("EFFECTIVE_TX_CALIBRATION_PROFILE"),
+}
+tx_power_register_count = 0
+if isinstance(tx_power_control, dict):
+    tx_power_register_count = int(tx_power_control.get("register_count") or 0)
 datagrams = int(tx.get("datagrams_received", 0))
 submitted = int(tx.get("submitted_frames", 0))
 failed = int(tx.get("failed_submissions", 0))
@@ -353,6 +467,9 @@ summary = {
     "stop_reason": report.get("stop_reason"),
     "health_lifecycle": health.get("lifecycle"),
     "health_operator_action": health.get("operator_action"),
+    "rf_profile": rf_profile,
+    "tx_power_control": tx_power_control,
+    "tx_calibration_profile": tx_calibration_report,
     "tx": tx,
     "rx": rx,
 }
@@ -362,6 +479,8 @@ with open(summary_path, "w", encoding="utf-8") as handle:
 
 print(
     f"{mode}: command={radio_command} result={result} stop={report.get('stop_reason')} "
+    f"rf={rf_profile['effective_tx_power_mode']}/{rf_profile['tx_power_safety_profile']}/"
+    f"{rf_profile['effective_tx_calibration_profile']} tx_power_regs={tx_power_register_count} "
     f"health={health.get('lifecycle')}/{health.get('operator_action')} "
     f"tx_datagrams={datagrams} submitted={submitted} failed={failed} dropped={dropped} "
     f"rx_buffers={rx.get('buffers_read', 0)} rx_frames={parsed_frames} "
@@ -375,6 +494,21 @@ print(
 if result != "pass":
     print(json.dumps(report.get("error"), indent=2), file=sys.stderr)
     sys.exit(2)
+normalized_tx_power_mode = (rf_profile["effective_tx_power_mode"] or "current-default").replace("_", "-")
+normalized_calibration = (rf_profile["effective_tx_calibration_profile"] or "current-default").replace("_", "-")
+if normalized_tx_power_mode != "current-default" and tx_power_register_count <= 0:
+    print(
+        f"expected TX power evidence for TX_POWER_MODE={rf_profile['tx_power_mode']}, "
+        f"got register_count={tx_power_register_count}",
+        file=sys.stderr,
+    )
+    sys.exit(4)
+if normalized_calibration != "current-default" and not isinstance(tx_calibration_report, dict):
+    print(
+        f"expected calibration evidence for TX_CALIBRATION_PROFILE={rf_profile['tx_calibration_profile']}",
+        file=sys.stderr,
+    )
+    sys.exit(4)
 if health.get("lifecycle") != "exited_pass" or health.get("result") != "pass":
     print(f"unexpected health final state: {json.dumps(health, indent=2)}", file=sys.stderr)
     sys.exit(4)
@@ -437,7 +571,9 @@ if (( DRY_RUN == 1 )); then
     cat <<EOF
 local bash with:
 MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") RADIO_COMMAND=$(printf '%q' "$RADIO_COMMAND") \\
-FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
+FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") EFUSE_REPORT=$(printf '%q' "$EFUSE_REPORT") TX_POWER_MODE=$(printf '%q' "$TX_POWER_MODE") TX_POWER_INDEX=$(printf '%q' "$TX_POWER_INDEX") TX_POWER_PATH=$(printf '%q' "$TX_POWER_PATH") \\
+TX_POWER_EFUSE_LOGICAL_MAP=$(printf '%q' "$TX_POWER_EFUSE_LOGICAL_MAP") TX_POWER_SAFETY_PROFILE=$(printf '%q' "$TX_POWER_SAFETY_PROFILE") TX_POWER_MAX_INDEX=$(printf '%q' "$TX_POWER_MAX_INDEX") TX_CALIBRATION_PROFILE=$(printf '%q' "$TX_CALIBRATION_PROFILE") \\
+VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
 DURATION_MS=$(printf '%q' "$DURATION_MS") RX_TIMEOUT_MS=$(printf '%q' "$RX_TIMEOUT_MS") TX_BURST_LIMIT=$(printf '%q' "$TX_BURST_LIMIT") \\
 TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX_INTERVAL_SEC=$(printf '%q' "$TX_INTERVAL_SEC") READY_WAIT_SECONDS=$(printf '%q' "$READY_WAIT_SECONDS") \\
 WFB_LINK_ID=$(printf '%q' "$WFB_LINK_ID") WFB_RADIO_PORT=$(printf '%q' "$WFB_RADIO_PORT") FWMARK=$(printf '%q' "$FWMARK") MCS=$(printf '%q' "$MCS") PAYLOAD_LEN=$(printf '%q' "$PAYLOAD_LEN") PAYLOAD_MARKER=$(printf '%q' "$PAYLOAD_MARKER") bash -s
@@ -447,7 +583,9 @@ EOF
     cat <<EOF
 ssh $HW_MAC_HOST with:
 MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") RADIO_COMMAND=$(printf '%q' "$RADIO_COMMAND") \\
-FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
+FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") EFUSE_REPORT=$(printf '%q' "$EFUSE_REPORT") TX_POWER_MODE=$(printf '%q' "$TX_POWER_MODE") TX_POWER_INDEX=$(printf '%q' "$TX_POWER_INDEX") TX_POWER_PATH=$(printf '%q' "$TX_POWER_PATH") \\
+TX_POWER_EFUSE_LOGICAL_MAP=$(printf '%q' "$TX_POWER_EFUSE_LOGICAL_MAP") TX_POWER_SAFETY_PROFILE=$(printf '%q' "$TX_POWER_SAFETY_PROFILE") TX_POWER_MAX_INDEX=$(printf '%q' "$TX_POWER_MAX_INDEX") TX_CALIBRATION_PROFILE=$(printf '%q' "$TX_CALIBRATION_PROFILE") \\
+VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
 DURATION_MS=$(printf '%q' "$DURATION_MS") RX_TIMEOUT_MS=$(printf '%q' "$RX_TIMEOUT_MS") TX_BURST_LIMIT=$(printf '%q' "$TX_BURST_LIMIT") \\
 TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX_INTERVAL_SEC=$(printf '%q' "$TX_INTERVAL_SEC") READY_WAIT_SECONDS=$(printf '%q' "$READY_WAIT_SECONDS") \\
 WFB_LINK_ID=$(printf '%q' "$WFB_LINK_ID") WFB_RADIO_PORT=$(printf '%q' "$WFB_RADIO_PORT") FWMARK=$(printf '%q' "$FWMARK") MCS=$(printf '%q' "$MCS") PAYLOAD_LEN=$(printf '%q' "$PAYLOAD_LEN") PAYLOAD_MARKER=$(printf '%q' "$PAYLOAD_MARKER") bash -s
@@ -466,6 +604,14 @@ if (( LOCAL_RUN == 1 )); then
   RADIO_COMMAND="$RADIO_COMMAND" \
   FIRMWARE="$FIRMWARE" \
   RADIO_RUN_CONFIG="$RADIO_RUN_CONFIG" \
+  EFUSE_REPORT="$EFUSE_REPORT" \
+  TX_POWER_MODE="$TX_POWER_MODE" \
+  TX_POWER_INDEX="$TX_POWER_INDEX" \
+  TX_POWER_PATH="$TX_POWER_PATH" \
+  TX_POWER_EFUSE_LOGICAL_MAP="$TX_POWER_EFUSE_LOGICAL_MAP" \
+  TX_POWER_SAFETY_PROFILE="$TX_POWER_SAFETY_PROFILE" \
+  TX_POWER_MAX_INDEX="$TX_POWER_MAX_INDEX" \
+  TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
   VID="$VID" \
   PID="$PID" \
   CHANNEL="$CHANNEL" \
@@ -496,6 +642,14 @@ ssh "$HW_MAC_HOST" \
   RADIO_COMMAND="$RADIO_COMMAND" \
   FIRMWARE="$FIRMWARE" \
   RADIO_RUN_CONFIG="$RADIO_RUN_CONFIG" \
+  EFUSE_REPORT="$EFUSE_REPORT" \
+  TX_POWER_MODE="$TX_POWER_MODE" \
+  TX_POWER_INDEX="$TX_POWER_INDEX" \
+  TX_POWER_PATH="$TX_POWER_PATH" \
+  TX_POWER_EFUSE_LOGICAL_MAP="$TX_POWER_EFUSE_LOGICAL_MAP" \
+  TX_POWER_SAFETY_PROFILE="$TX_POWER_SAFETY_PROFILE" \
+  TX_POWER_MAX_INDEX="$TX_POWER_MAX_INDEX" \
+  TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
   VID="$VID" \
   PID="$PID" \
   CHANNEL="$CHANNEL" \

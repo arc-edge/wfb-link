@@ -379,3 +379,17 @@ used by RF-quality runs. `MAC_RADIO_COMMAND=radio-service`,
 generated a close-range command plan at `/tmp/wfb-rfq-service-txpower-dryrun`,
 and `RADIO_COMMAND=service` with the same TX-power mode propagated through the
 profile matrix dry-run at `/tmp/wfb-matrix-service-txpower-dryrun`.
+
+The production smoke runner also accepts the same guarded RF profile tuple. Set
+`TX_POWER_MODE`, `EFUSE_REPORT` or `TX_POWER_EFUSE_LOGICAL_MAP`,
+`TX_POWER_SAFETY_PROFILE`, `TX_POWER_INDEX`, `TX_POWER_PATH`,
+`TX_POWER_MAX_INDEX`, and `TX_CALIBRATION_PROFILE` when running
+`scripts/run-production-radio-smoke.sh`; non-default TX power and live
+calibration profiles add the required register-write authorization and the
+generated summaries include `rf_profile`, `tx_power_control`, and
+`tx_calibration_profile`.
+Remote service validation with the adapter attached to the hardware Mac passed
+at `/tmp/wfb-prod-radio-smoke-rf-profile-20260505-182021`: EFUSE-derived TX
+power programmed 22 TXAGC registers, `64/64` TX datagrams were submitted, TX
+failures/drops were zero, and the summary recorded
+`effective_tx_power_mode=efuse-derived`.
