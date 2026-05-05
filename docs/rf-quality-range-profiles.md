@@ -555,11 +555,15 @@ The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
 reports no dropped datagrams or failed submissions.
 
 May 5, 2026 local-Mac poor-SNR evidence adds one stricter smoke tuple for the
-current adapter placement: M2L `4/12` MCS1, L2M `3/12` MCS2, 20 ms source
-pacing, 100 unmeasured warmup payloads, and `SESSION_ACQUIRE_SETTLE_SECONDS=1`.
-It passed at `/tmp/wfb-radio-run-duplex-local-m2l4-l2m3-settle-20260505-101147`
-with `200/200` recovered in both directions, zero decrypt failures, zero TX
-drops/failures, and average Mac RX SNR around 10 dB. Treat this as a local
+current adapter placement. M2L `4/12` MCS1 plus L2M `3/12` MCS2 passed the
+200-payload gate at `/tmp/wfb-radio-run-duplex-local-m2l4-l2m3-settle-20260505-101147`
+but missed `4/1000` L2M payloads in the sustained rerun. Lowering only L2M to
+MCS1 fixed L2M but missed `2/1000` M2L payloads. The accepted sustained tuple is
+symmetric `3/12` MCS1, 20 ms source pacing, 100 unmeasured warmup payloads, and
+`SESSION_ACQUIRE_SETTLE_SECONDS=1`; it passed at
+`/tmp/wfb-radio-run-duplex-local-sym3-mcs1-settle-1000-20260505-101900` with
+`1000/1000` recovered in both directions, zero decrypt failures, zero TX
+drops/failures, and average Mac RX SNR around 13 dB. Treat this as a local
 poor-SNR smoke profile, not a long-distance acceptance.
 
 Remote hardware currently requires the hardware Mac to reach the Linux peer
