@@ -23,9 +23,11 @@ Configuration is via environment variables. Common overrides:
   M2L_MCS=1 L2M_MCS=1
   M2L_MIN_UNIQUE=80 L2M_MIN_UNIQUE=80
   MAX_M2L_DECRYPT_FAILURES=0 MAX_L2M_DECRYPT_FAILURES=0
+  DECRYPT_FAILURE_GATE=post-session
   TX_POWER_MODE=current-default
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   REQUIRE_CALIBRATION_SUCCESS=auto
+  AUTO_EFUSE_DUMP=1
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
 }
@@ -85,8 +87,9 @@ L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
 MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
 MAX_M2L_DECRYPT_FAILURES=${MAX_M2L_DECRYPT_FAILURES:-0}
 MAX_L2M_DECRYPT_FAILURES=${MAX_L2M_DECRYPT_FAILURES:-0}
+DECRYPT_FAILURE_GATE=${DECRYPT_FAILURE_GATE:-post-session}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
-export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES REQUIRE_CALIBRATION_SUCCESS
+export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES DECRYPT_FAILURE_GATE REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
@@ -98,6 +101,7 @@ L2M_WARMUP_MARKER=${L2M_WARMUP_MARKER:-L2MWARM1}
 
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 EFUSE_REPORT=${EFUSE_REPORT:-/tmp/wfb-remote-macos-efuse-dump.json}
+AUTO_EFUSE_DUMP=${AUTO_EFUSE_DUMP:-1}
 TX_POWER_MODE=${TX_POWER_MODE:-current-default}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
@@ -120,7 +124,20 @@ for cmd in cargo python3 ssh scp; do
   require_command "$cmd"
 done
 [[ -f "$FIRMWARE" ]] || die "firmware not found: $FIRMWARE"
-[[ -f "$EFUSE_REPORT" ]] || die "EFUSE report not found: $EFUSE_REPORT"
+if [[ "$TX_POWER_MODE" == "efuse-derived" ]]; then
+  if [[ ! -f "$EFUSE_REPORT" && "$AUTO_EFUSE_DUMP" == "1" ]]; then
+    log "EFUSE report missing; capturing $EFUSE_REPORT"
+    cargo run -p wfb-radio-diag -- --json \
+      --report "$EFUSE_REPORT" \
+      macos-efuse-dump \
+      --vid 0x0bda \
+      --pid 0x8812 \
+      --raw-out /tmp/wfb-remote-macos-efuse-raw.bin \
+      --logical-map-out /tmp/wfb-remote-macos-efuse-logical.bin \
+      --i-understand-this-writes-control-registers
+  fi
+  [[ -f "$EFUSE_REPORT" ]] || die "EFUSE report not found: $EFUSE_REPORT"
+fi
 
 resolve_linux_lan_ip() {
   if [[ "$LINUX_LAN_IP" != "auto" ]]; then
@@ -577,6 +594,29 @@ def count_lines(path, needle):
     except Exception:
         return 0
 
+def decrypt_stats(path):
+    stats = {
+        "total": 0,
+        "before_session": 0,
+        "after_session": 0,
+        "session_observed": False,
+    }
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except Exception:
+        return stats
+    for line in lines:
+        if "\tSESSION" in line or " SESSION" in line:
+            stats["session_observed"] = True
+        if "Unable to decrypt" not in line:
+            continue
+        stats["total"] += 1
+        if stats["session_observed"]:
+            stats["after_session"] += 1
+        else:
+            stats["before_session"] += 1
+    return stats
+
 report = load(run / "radio-run.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
@@ -598,10 +638,17 @@ l2m_min_unique = int(os.environ["L2M_MIN_UNIQUE"])
 min_radio_rx_forwarded = int(os.environ["MIN_RADIO_RX_FORWARDED"])
 max_m2l_decrypt_failures = int(os.environ["MAX_M2L_DECRYPT_FAILURES"])
 max_l2m_decrypt_failures = int(os.environ["MAX_L2M_DECRYPT_FAILURES"])
+decrypt_failure_gate = os.environ.get("DECRYPT_FAILURE_GATE", "post-session")
 m2l_enabled = os.environ.get("ENABLE_M2L", "1").lower() not in {"0", "false", "no"}
 l2m_enabled = os.environ.get("ENABLE_L2M", "1").lower() not in {"0", "false", "no"}
-m2l_decrypt_failures = count_lines(run / "peer" / "wfb-rx-m2l.log", "Unable to decrypt")
-l2m_decrypt_failures = count_lines(run / "peer" / "wfb-rx-l2m-agg.log", "Unable to decrypt")
+m2l_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-m2l.log")
+l2m_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-l2m-agg.log")
+if decrypt_failure_gate == "total":
+    m2l_decrypt_failures = m2l_decrypt_stats["total"]
+    l2m_decrypt_failures = l2m_decrypt_stats["total"]
+else:
+    m2l_decrypt_failures = m2l_decrypt_stats["after_session"]
+    l2m_decrypt_failures = l2m_decrypt_stats["after_session"]
 m2l_unknown_encapsulation = count_lines(run / "peer" / "wfb-rx-m2l.log", "unknown encapsulation")
 require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
 calibration_success_required = require_calibration_success in {"1", "true", "yes"}
@@ -680,9 +727,18 @@ summary = {
     "l2m_min_unique": l2m_min_unique,
     "max_m2l_decrypt_failures": max_m2l_decrypt_failures,
     "max_l2m_decrypt_failures": max_l2m_decrypt_failures,
+    "decrypt_failure_gate": decrypt_failure_gate,
     "peer_wfb_rx": {
         "m2l_decrypt_failures": m2l_decrypt_failures,
+        "m2l_decrypt_failures_total": m2l_decrypt_stats["total"],
+        "m2l_decrypt_failures_before_session": m2l_decrypt_stats["before_session"],
+        "m2l_decrypt_failures_after_session": m2l_decrypt_stats["after_session"],
+        "m2l_session_observed": m2l_decrypt_stats["session_observed"],
         "l2m_decrypt_failures": l2m_decrypt_failures,
+        "l2m_decrypt_failures_total": l2m_decrypt_stats["total"],
+        "l2m_decrypt_failures_before_session": l2m_decrypt_stats["before_session"],
+        "l2m_decrypt_failures_after_session": l2m_decrypt_stats["after_session"],
+        "l2m_session_observed": l2m_decrypt_stats["session_observed"],
         "m2l_unknown_encapsulation": m2l_unknown_encapsulation,
     },
     "m2l_counter": m2l,

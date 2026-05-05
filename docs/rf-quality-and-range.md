@@ -112,8 +112,10 @@ when overwriting that destination is intentional.
 
 ## Mac Close-Range Command
 
-The accepted close-range profile uses EFUSE-derived TX power and the current
-stop-gap captured calibration label:
+The current production-smoke default uses the retained captured/default TX power
+and calibration state. EFUSE-derived TX power and runtime IQK are explicit A/B
+profiles only until they pass sustained receiver-backed regression matrices with
+zero decrypt failures.
 
 ```sh
 cargo run -p wfb-radio-diag -- --json \
@@ -127,9 +129,6 @@ cargo run -p wfb-radio-diag -- --json \
   --bind 127.0.0.1:5611 \
   --max-datagrams 3000 \
   --idle-timeout-ms 60000 \
-  --tx-power-mode efuse-derived \
-  --tx-power-efuse-report /tmp/wfb-remote-macos-efuse-dump.json \
-  --tx-power-safety-profile linux-ch36-ht20 \
   --i-understand-this-transmits
 ```
 
@@ -188,14 +187,14 @@ Build the accepted close-range envelope:
 
 ```sh
 cargo run -p wfb-radio-diag -- --json \
-  --report /tmp/wfb-rfq-close-efuse-quality.json \
+  --report /tmp/wfb-rfq-close-current-default-quality.json \
   rf-quality-report \
-  --profile-name close-range-ch36-ht20-efuse-20260502 \
+  --profile-name close-range-ch36-ht20-current-default \
   --profile-kind close-range \
   --channel 36 --bandwidth 20 \
   --tx-rate mcs1 \
   --tx-profile linux-monitor \
-  --tx-power-mode efuse-derived \
+  --tx-power-mode current-default \
   --calibration-mode stop-gap-captured \
   --wfb-link-id 0x000001 \
   --wfb-radio-port 0x00 \
@@ -203,12 +202,12 @@ cargo run -p wfb-radio-diag -- --json \
   --payload-len 1000 \
   --expected-payloads 2000 \
   --recovered-payloads 2000 \
-  --mac-report /tmp/wfb-rfq-close-efuse-listen.json \
+  --mac-report /tmp/wfb-rfq-close-current-default-listen.json \
   --efuse-report /tmp/wfb-remote-macos-efuse-dump.json \
   --linux-baseline fixtures/rf-quality/current-close-range-20mhz-linux-baseline.json \
-  --receiver-artifact /tmp/rfq-close-efuse-rf.pcap \
-  --receiver-artifact /tmp/rfq-close-efuse-rx.log \
-  --receiver-artifact /tmp/rfq-close-efuse-tx.log
+  --receiver-artifact /tmp/rfq-close-current-default-rf.pcap \
+  --receiver-artifact /tmp/rfq-close-current-default-rx.log \
+  --receiver-artifact /tmp/rfq-close-current-default-tx.log
 ```
 
 ## Interpretation
@@ -228,12 +227,21 @@ cargo run -p wfb-radio-diag -- --json \
   frequency tags were present. `off_channel_frames` or
   `requested_frequency_absent` marks the receiver-backed outcome outside the
   production margin.
+- Runtime IQK and EFUSE-derived TX power are quarantined when a sustained
+  receiver-backed matrix logs post-session WFB decrypt failures or fails
+  measured payload recovery. Pre-session decrypt failures are acquisition
+  evidence and must remain visible, but they do not by themselves prove payload
+  corruption after the receiver has established a WFB session. Use
+  `scripts/run-calibration-regression-matrix.sh` to isolate those modes before
+  considering them for range work.
 
 ## Rollback
 
 All RF-quality controls are explicit. To roll back:
 
 - Omit `--tx-power-mode efuse-derived` and use the existing bridge default.
+- Omit `--tx-calibration-profile rtl8812a-runtime-iqk` and use
+  `current-default`.
 - Omit `--observed-ppdu-*` fields when no wide-bandwidth evidence is being
   recorded.
 - Restore the Linux WFB container after controlled runs.

@@ -106,7 +106,20 @@ evidence, and the final Linux-derived channel 36 HT20 values such as
 `0x0c24=0x1b1b1b1b`, `0x0c2c=0x17171717`, `0x0c34=0x15151515`,
 `0x0e24=0x1d1d1d1d`, `0x0e2c=0x1c1c1c1c`, and `0x0e34=0x1a1a1a1a`.
 
-This close-range result proves that the EFUSE-derived mode does not regress
-basic WFB recovery on the bench. It is not yet a long-distance RF-quality
-acceptance result; the next work is calibration-state evidence and stepped or
-outdoor comparison against the Linux baseline.
+This close-range result proved that the EFUSE-derived mode did not regress a
+short single-direction bench run. It is not a long-distance RF-quality
+acceptance result.
+
+Follow-up production `radio-run` evidence on May 4, 2026 found a
+state-sensitive duplex acquisition issue. The current-default M2L `5/12` MCS1
+plus L2M `3/12` MCS2 profile passed two 2,000-payload repeats with zero
+post-session decrypt failures at
+`/tmp/wfb-radio-profile-matrix-remote-duplex-m2l5-l2m3-2000-repeat2-20260504-232305`.
+With `TX_POWER_MODE=efuse-derived`, the same tuple failed the original
+total-decrypt gate in one of two 1,000-payload repeats at
+`/tmp/wfb-radio-profile-matrix-remote-efuse-m2l5-l2m3-1000-repeat2-20260504-231630`
+with `117` Linux-to-Mac decrypt failures. Follow-up parsing showed those
+decrypt failures were all before the receiver logged its first `SESSION`, so
+they are acquisition evidence rather than proven post-session byte corruption.
+EFUSE-derived TX power therefore remains opt-in for A/B diagnostics until it
+passes sustained post-session-gated receiver-backed matrices.

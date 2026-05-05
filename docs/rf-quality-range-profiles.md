@@ -44,12 +44,14 @@ Required settings:
 
 - Channel 36, 20 MHz until another channel has a matching Linux baseline.
 - Fixed `mcs1` / `linux-monitor` TX profile.
-- Current preferred Mac power mode: `efuse-derived` with
-  `linux-ch36-ht20` safety clamp.
+- Current preferred Mac power mode: `current-default`. EFUSE-derived TX power
+  remains opt-in and receiver-gated because sustained duplex runs have shown
+  state-sensitive decrypt failures.
 - Current accepted calibration label: `stop-gap-captured`. The guarded
   `rtl8812a-runtime-iqk` profile is available for experimental A/B runs, but it
-  is not a long-distance accepted calibration mode until it has a passing
-  receiver-backed close-range comparison and stepped or outdoor evidence.
+  is not a long-distance accepted calibration mode until it has passing
+  sustained receiver-backed close-range regression matrices and stepped or
+  outdoor evidence.
 - At least 120 source payloads for quick checks; use 2,000 source payloads for
   an accepted reference.
 - Linux baseline or Linux receiver artifact paths attached to the report.
@@ -241,6 +243,26 @@ Runtime IQK validation on May 2, 2026:
   recovered `2000/2000` with zero decrypt failures on the same local production
   flow, so runtime IQK remains an experimental A/B profile until controlled
   distance or attenuation shows a margin advantage.
+- Remote sustained duplex regression gate:
+  `/tmp/wfb-radio-profile-matrix-remote-iqk-m2l5-l2m3-1000-repeat2-20260504-231004`
+  used the currently accepted production-smoke tuple
+  (`current-default` TX power, M2L `5/12` MCS1, L2M `3/12` MCS2, 20 ms source
+  interval) but enabled `rtl8812a-runtime-iqk`. Runtime IQK completed in both
+  repeats, and the original total-decrypt gate rejected one repeat with `94`
+  Mac-to-Linux decrypt failures plus another with `128` Linux-to-Mac decrypt
+  failures. Follow-up log parsing showed those decrypt failures all occurred
+  before the receiver's first `SESSION`; after session acquisition there were
+  zero decrypt failures. This supersedes the earlier "byte corruption" framing:
+  runtime IQK remains experimental, but the repeatable issue to solve is WFB
+  session acquisition and measured-payload stability under duplex load, not
+  proven post-session payload corruption.
+- EFUSE-derived TX-power regression gate:
+  `/tmp/wfb-radio-profile-matrix-remote-efuse-m2l5-l2m3-1000-repeat2-20260504-231630`
+  originally failed one of two repeats with `117` Linux-to-Mac decrypt failures
+  under the same accepted duplex tuple. Follow-up parsing likewise showed the
+  decrypt failures were all pre-session acquisition events. EFUSE-derived power
+  remains an explicit A/B mode, not a default, until it passes sustained
+  post-session-gated matrices with stable measured-payload recovery.
 - No-warmup runtime-IQK profile evidence remains useful only for session
   acquisition debugging. The successful no-warmup A/B run at
   `/tmp/wfb-rfq-runtime-cal-profile-api-runtime-iqk-a2/rf-quality-report.json`

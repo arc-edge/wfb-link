@@ -156,3 +156,12 @@ The system SHALL support repeatable RF-quality comparisons across default, targe
 #### Scenario: Runtime IQK needs receiver-backed validation
 - **WHEN** runtime IQK completes successfully on hardware
 - **THEN** the profile MUST remain experimental until a receiver-backed close-range and long-distance A/B run compares default, captured IQK, LCK, and runtime IQK under the same channel, bandwidth, rate, power mode, payload, and antenna geometry
+
+#### Scenario: Experimental calibration is quarantined on post-session failures
+- **WHEN** a sustained receiver-backed A/B run for an experimental TX power or
+  calibration mode logs post-session WFB decrypt failures or fails measured
+  payload recovery
+- **THEN** the system MUST keep that mode out of production defaults and provide
+  direction-isolated regression evidence before the mode can be reconsidered for
+  range work, while reporting pre-session decrypt failures separately as
+  acquisition evidence

@@ -93,6 +93,12 @@ HW_DEPLOY=${HW_DEPLOY:-1}
 HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-deploy}
 HW_DEPLOY_DELETE=${HW_DEPLOY_DELETE:-0}
 HW_REPO_PATH=${HW_REPO_PATH:-projects/arc/wfb-mac-radio-agent}
+SYNC_REALTEK_REF=${SYNC_REALTEK_REF:-1}
+AUTO_FETCH_REALTEK_REF=${AUTO_FETCH_REALTEK_REF:-1}
+REALTEK_REF_LOCAL_PATH=${REALTEK_REF_LOCAL_PATH:-/tmp/wfb-ref-rtl8812au}
+REALTEK_REF_REMOTE_PATH=${REALTEK_REF_REMOTE_PATH:-/tmp/wfb-ref-rtl8812au}
+REALTEK_REF_REPO=${REALTEK_REF_REPO:-https://github.com/aircrack-ng/rtl8812au.git}
+REALTEK_REF_REQUIRED_FILE=${REALTEK_REF_REQUIRED_FILE:-hal/phydm/rtl8812a/halhwimg8812a_mac.c}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"}
 # shellcheck disable=SC2206
 SSH_OPTS_ARRAY=($SSH_OPTS)
@@ -117,6 +123,8 @@ TX_POWER_MODE=${TX_POWER_MODE:-current-default}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
+DECRYPT_FAILURE_GATE=${DECRYPT_FAILURE_GATE:-post-session}
+AUTO_EFUSE_DUMP=${AUTO_EFUSE_DUMP:-1}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
 ENABLE_M2L=${ENABLE_M2L:-1}
 ENABLE_L2M=${ENABLE_L2M:-1}
@@ -211,6 +219,35 @@ deploy_remote_repo() {
   fi
   rsync -e "ssh $SSH_OPTS" "${rsync_args[@]}" "$REPO_ROOT/" "$HW_MAC_HOST:$HW_DEPLOY_PATH/"
   HW_REPO_PATH=$HW_DEPLOY_PATH
+  sync_realtek_ref
+}
+
+ensure_local_realtek_ref() {
+  if [[ -f "$REALTEK_REF_LOCAL_PATH/$REALTEK_REF_REQUIRED_FILE" ]]; then
+    return
+  fi
+  if [[ "$AUTO_FETCH_REALTEK_REF" != "1" ]]; then
+    die "missing Realtek reference file: $REALTEK_REF_LOCAL_PATH/$REALTEK_REF_REQUIRED_FILE"
+  fi
+  require_command git
+  local tmp_path="${REALTEK_REF_LOCAL_PATH}.tmp.$$"
+  log "fetching Realtek reference source into $REALTEK_REF_LOCAL_PATH"
+  rm -rf "$tmp_path"
+  git clone --depth 100 "$REALTEK_REF_REPO" "$tmp_path"
+  [[ -f "$tmp_path/$REALTEK_REF_REQUIRED_FILE" ]] || die "fetched Realtek reference is missing $REALTEK_REF_REQUIRED_FILE"
+  rm -rf "$REALTEK_REF_LOCAL_PATH"
+  mv "$tmp_path" "$REALTEK_REF_LOCAL_PATH"
+}
+
+sync_realtek_ref() {
+  if [[ "$SYNC_REALTEK_REF" != "1" ]]; then
+    return
+  fi
+  ensure_local_realtek_ref
+  log "syncing Realtek reference to $HW_MAC_HOST:$REALTEK_REF_REMOTE_PATH"
+  ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "mkdir -p $(quote "$REALTEK_REF_REMOTE_PATH")"
+  rsync -e "ssh $SSH_OPTS" -az --delete --exclude .git \
+    "$REALTEK_REF_LOCAL_PATH/" "$HW_MAC_HOST:$REALTEK_REF_REMOTE_PATH/"
 }
 
 ceil_percent() {
@@ -237,7 +274,7 @@ keys = [
     "l2m_mcs", "payload_interval_sec", "expected_payloads",
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
     "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
-    "radio_run_duration_ms",
+    "radio_run_duration_ms", "decrypt_failure_gate",
 ]
 data = {key: os.environ.get(key.upper(), os.environ.get(key)) for key in keys}
 for key in [
@@ -304,7 +341,7 @@ run_one_profile() {
   export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
   export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
-  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS
+  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
   log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs} interval=${payload_interval_sec}s"
@@ -355,6 +392,8 @@ run_one_profile() {
       TX_POWER_SAFETY_PROFILE="$TX_POWER_SAFETY_PROFILE" \
       TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
       REQUIRE_CALIBRATION_SUCCESS="$REQUIRE_CALIBRATION_SUCCESS" \
+      DECRYPT_FAILURE_GATE="$DECRYPT_FAILURE_GATE" \
+      AUTO_EFUSE_DUMP="$AUTO_EFUSE_DUMP" \
       RADIO_BIND_PORT="$RADIO_BIND_PORT" \
       LINUX_M2L_SOURCE_PORT="$LINUX_M2L_SOURCE_PORT" \
       LINUX_L2M_SOURCE_PORT="$LINUX_L2M_SOURCE_PORT" \
@@ -369,7 +408,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -435,6 +474,12 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "l2m_unique": int(l2m.get("unique_sequences") or 0),
         "m2l_decrypt_failures": int(dec.get("m2l_decrypt_failures") or 0),
         "l2m_decrypt_failures": int(dec.get("l2m_decrypt_failures") or 0),
+        "m2l_decrypt_failures_total": int(dec.get("m2l_decrypt_failures_total") or dec.get("m2l_decrypt_failures") or 0),
+        "l2m_decrypt_failures_total": int(dec.get("l2m_decrypt_failures_total") or dec.get("l2m_decrypt_failures") or 0),
+        "m2l_decrypt_failures_before_session": int(dec.get("m2l_decrypt_failures_before_session") or 0),
+        "l2m_decrypt_failures_before_session": int(dec.get("l2m_decrypt_failures_before_session") or 0),
+        "m2l_decrypt_failures_after_session": int(dec.get("m2l_decrypt_failures_after_session") or dec.get("m2l_decrypt_failures") or 0),
+        "l2m_decrypt_failures_after_session": int(dec.get("l2m_decrypt_failures_after_session") or dec.get("l2m_decrypt_failures") or 0),
         "tx_submitted_frames": int(((summary.get("tx") or {}).get("submitted_frames")) or 0),
         "tx_failed_submissions": int(((summary.get("tx") or {}).get("failed_submissions")) or 0),
         "tx_dropped_datagrams": int(((summary.get("tx") or {}).get("dropped_datagrams")) or 0),
@@ -459,6 +504,15 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
     ]
     run["min_recovery"] = min(enabled_recoveries) if enabled_recoveries else 0.0
     run["decrypt_failures"] = run["m2l_decrypt_failures"] + run["l2m_decrypt_failures"]
+    run["decrypt_failures_total"] = run["m2l_decrypt_failures_total"] + run["l2m_decrypt_failures_total"]
+    run["pre_session_decrypt_failures"] = (
+        run["m2l_decrypt_failures_before_session"]
+        + run["l2m_decrypt_failures_before_session"]
+    )
+    run["post_session_decrypt_failures"] = (
+        run["m2l_decrypt_failures_after_session"]
+        + run["l2m_decrypt_failures_after_session"]
+    )
     run["is_sustained"] = run["expected_payloads"] >= sustained_payloads
     run["accepted"] = (
         run["smoke_result"] == "pass"
@@ -504,6 +558,9 @@ for profile, items in groups.items():
         "worst_m2l_recovery": min(m2l_values) if m2l_values else 0.0,
         "worst_l2m_recovery": min(l2m_values) if l2m_values else 0.0,
         "decrypt_failures": decrypt_total,
+        "decrypt_failures_total": sum(item.get("decrypt_failures_total", item["decrypt_failures"]) for item in items),
+        "pre_session_decrypt_failures": sum(item.get("pre_session_decrypt_failures", 0) for item in items),
+        "post_session_decrypt_failures": sum(item.get("post_session_decrypt_failures", item["decrypt_failures"]) for item in items),
         "tx_failed_submissions": sum(item["tx_failed_submissions"] for item in items),
         "tx_dropped_datagrams": sum(item["tx_dropped_datagrams"] for item in items),
         "representative_link_profile": items[0].get("link_profile"),
