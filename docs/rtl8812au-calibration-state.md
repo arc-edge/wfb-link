@@ -391,6 +391,23 @@ Hardware validation on May 2, 2026:
   first-class `channel_state.verify_status=verified` and
   `receiver_signal.status=usable`, so it is the current production-gate shape
   for runtime IQK close-range validation.
+- Session-gated production matrix evidence on May 5, 2026 first quarantined
+  runtime IQK at
+  `/tmp/wfb-radio-calibration-active-sessiongate-duplex-repeat3-20260505-004506`:
+  current-default and EFUSE-derived both passed 3/3, but runtime IQK passed 2/3
+  and one repeat failed before live TX with `runtime_iqk_not_completed` after
+  path-A RX fell back in all three sweeps. The failed artifact showed useful
+  path-A RX candidates that narrowly missed the strict signed tolerance in the
+  first three collected samples.
+- The RX IQK loop now keeps the strict upstream signed candidate tolerance but
+  allows up to five RX candidates before fallback. The follow-up matrix at
+  `/tmp/wfb-radio-calibration-runtime-iqk-rx5-duplex-repeat3-20260505-010136`
+  passed current-default, runtime-IQK, and EFUSE-derived duplex variants 3/3.
+  Runtime IQK completed in sweep 1 for all three repeats, restored cleanup,
+  applied 20 selected-IQC fill writes, logged zero post-session decrypt
+  failures, and recovered worst-case `993/1000` Mac-to-Linux plus `987/1000`
+  Linux-to-Mac. This moves runtime IQK back to
+  `experimental-pass-needs-soak`, not production default.
 - Runtime IQK cleanup restored successfully in each run. TX IQK succeeded on
   paths A and B, RX IQK succeeded on path B, and the latest RX-trigger parity
   runs completed RX IQK on path A in the receiver-backed flow. Keep this
@@ -402,12 +419,14 @@ Hardware validation on May 2, 2026:
   quality or sequence sensitivity rather than a ready-poll timeout.
 - Candidate selection now compares IQK X/Y components as signed 11-bit values,
   matching the Linux driver's left-shift/arithmetic-right-shift behavior before
-  tolerance checks. Follow-up one-frame smokes still often saw path-A RX
-  fallback because no two of the three path-A RX candidates were within the
-  upstream signed tolerance on both X and Y. The captured Linux final-state map
-  also shows RX IQC fallback-shaped values at `0x0c10` and `0x0e10`, so this
-  may be normal Linux-parity behavior for this adapter/channel rather than a
-  ready-poll bug.
+  tolerance checks. Earlier follow-up one-frame smokes still often saw path-A
+  RX fallback because no two of the first three path-A RX candidates were
+  within the upstream signed tolerance on both X and Y. The RX stage now
+  collects up to five candidates before fallback while preserving that
+  tolerance. The captured Linux final-state map also shows RX IQC
+  fallback-shaped values at `0x0c10` and `0x0e10`, so occasional path-A RX
+  instability may be normal Linux-parity behavior for this adapter/channel
+  rather than a ready-poll bug.
 - In the receiver-backed signed-selection run, both RX paths completed:
   path A selected `0x1fc/0x006` after five retries and path B selected
   `0x1fb/0x003` after one retry. This proves the signed candidate-selection fix

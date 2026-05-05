@@ -2476,6 +2476,7 @@ const RF_LCK_MODE_BIT: u32 = 1 << 14;
 const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
+const RTL8812A_IQK_MAX_RX_CANDIDATES: usize = 5;
 const RTL8812A_IQK_READY_POLL_LIMIT: u8 = 20;
 const RTL8812A_IQK_MAX_SWEEPS: u8 = 3;
 const RTL8812A_IQK_READY_MASK: u32 = 1 << 10;
@@ -4562,8 +4563,8 @@ where
         }
         if path_a.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
             || path_b.attempts() >= RTL8812A_IQK_MAX_ATTEMPTS
-            || path_a.candidate_count() == 3
-            || path_b.candidate_count() == 3
+            || path_a.candidate_count() >= RTL8812A_IQK_MAX_RX_CANDIDATES
+            || path_b.candidate_count() >= RTL8812A_IQK_MAX_RX_CANDIDATES
         {
             break;
         }
@@ -8203,6 +8204,16 @@ mod tests {
         .expect("selected signed-wrap candidate");
         assert_eq!(signed_wrap_selected.x, 0x1f8);
         assert_eq!(signed_wrap_selected.y, 0x000);
+
+        let delayed_pair_selected = super::rtl8812au_iqk_select_candidate(&[
+            super::rtl8812au_runtime_iqk_iqc_value(0x1fc, 0x7fc),
+            super::rtl8812au_runtime_iqk_iqc_value(0x201, 0x7f9),
+            super::rtl8812au_runtime_iqk_iqc_value(0x1f5, 0x001),
+            super::rtl8812au_runtime_iqk_iqc_value(0x1ff, 0x7fb),
+        ])
+        .expect("selected delayed path-A RX candidate pair");
+        assert_eq!(delayed_pair_selected.x, 0x1fd);
+        assert_eq!(delayed_pair_selected.y, 0x7fc);
     }
 
     #[test]
