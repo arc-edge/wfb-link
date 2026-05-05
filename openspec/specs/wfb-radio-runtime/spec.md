@@ -85,5 +85,5 @@ handling.
 - **THEN** the production runtime flow reports adapter identity, channel,
   bandwidth, calibration class, selected calibration profile evidence when a
   profile executes, init phase status, runtime-owned RX/TX flow counters, RX
-  metadata coverage counters, USB counters, and last error state through
-  production-facing telemetry
+  metadata coverage counters, RX outcome/frame-type counters, USB counters, and
+  last error state through production-facing telemetry

@@ -24,7 +24,8 @@ than diagnostic bridge argument or report types.
 - **WHEN** the production runtime command exits
 - **THEN** it emits a runtime-owned report containing adapter identity,
   endpoints, init readiness, calibration classification, RX/TX telemetry, RX
-  metadata coverage, USB counters, stop reason, and error state
+  metadata coverage, RX outcome/frame-type counters, USB counters, stop reason,
+  and error state
 
 ### Requirement: Diagnostic Compatibility Boundary
 The system SHALL keep diagnostic commands available while making the production

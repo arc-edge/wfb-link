@@ -57,8 +57,9 @@ depending on diagnostic command argument structs.
 
 ### Requirement: Runtime Loop Telemetry
 The runtime library SHALL own production bridge-loop telemetry types for RX/TX
-counts, RX forward snapshots, TX datagram metadata, TX submission outcomes, and
-loop execution outcomes used by production reports.
+counts, RX metadata coverage, RX outcome/frame-type counters, RX forward
+snapshots, TX datagram metadata, TX submission outcomes, and loop execution
+outcomes used by production reports.
 
 #### Scenario: Executor reports stop reason
 - **WHEN** a runtime-owned bridge loop exits normally
@@ -68,7 +69,7 @@ loop execution outcomes used by production reports.
 #### Scenario: Telemetry is report-neutral
 - **WHEN** a production loop finishes or is adapted from a diagnostic execution
   harness
-- **THEN** runtime telemetry records RX metadata coverage, RX forwarding
-  counters, TX datagrams, submitted frames, failures, drops, byte counts, last
-  TX datagram facts, loop stop reason, and USB counters without depending on
-  diagnostic report structs
+- **THEN** runtime telemetry records RX metadata coverage, incomplete-tail
+  counters, frame-type counters, RX forwarding counters, TX datagrams,
+  submitted frames, failures, drops, byte counts, last TX datagram facts, loop
+  stop reason, and USB counters without depending on diagnostic report structs
