@@ -1,8 +1,8 @@
 ## 1. Config File Support
 
 - [x] 1.1 Add production `radio-run` config structs and deserialization for the service-oriented settings in the delta spec.
-- [ ] 1.2 Add `radio-run --config <path>` and merge config values with existing CLI flags, with CLI flags taking precedence.
-- [ ] 1.3 Add unit tests for config-only, CLI-only, CLI-overrides-config, missing required settings, and diagnostic-only field rejection.
+- [x] 1.2 Add `radio-run --config <path>` and merge config values with existing CLI flags, with CLI flags taking precedence.
+- [x] 1.3 Add unit tests for config-only, CLI-only, CLI-overrides-config, missing required settings, and diagnostic-only field rejection.
 
 ## 2. Runtime Health Model
 

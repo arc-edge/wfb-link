@@ -1655,44 +1655,48 @@ struct BridgeRunArgs {
 
 #[derive(Debug, Parser, Clone)]
 struct RadioRunArgs {
+    /// Service-oriented TOML config file for production radio-run settings.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     #[command(flatten)]
     adapter: AdapterArgs,
 
     /// Channel to run the WFB radio on.
     #[arg(long)]
-    channel: u8,
+    channel: Option<u8>,
 
     /// Channel bandwidth used for init, RX parsing metadata, and TX descriptors.
-    #[arg(long, default_value = "20", value_parser = parse_bandwidth)]
-    bandwidth: Bandwidth,
+    #[arg(long, value_parser = parse_bandwidth)]
+    bandwidth: Option<Bandwidth>,
 
     /// RTL8812A firmware image path.
     #[arg(long)]
-    firmware: PathBuf,
+    firmware: Option<PathBuf>,
 
     /// UDP address to bind for WFB distributor/injector datagrams.
-    #[arg(long, default_value = "127.0.0.1:5600")]
-    bind: SocketAddr,
+    #[arg(long)]
+    bind: Option<SocketAddr>,
 
     /// Additional UDP addresses to bind for WFB distributor/injector datagrams.
     #[arg(long = "tx-bind", value_name = "ADDR")]
     tx_binds: Vec<SocketAddr>,
 
     /// Bounded production runtime in milliseconds after init completes; 0 runs without a time bound.
-    #[arg(long, default_value_t = 10000)]
-    duration_ms: u64,
+    #[arg(long)]
+    duration_ms: Option<u64>,
 
     /// Per bulk-IN read timeout while interleaving RX and TX.
-    #[arg(long, default_value_t = 20)]
-    rx_timeout_ms: u64,
+    #[arg(long)]
+    rx_timeout_ms: Option<u64>,
 
     /// Maximum TX datagrams to drain before returning to one bulk-IN RX read.
-    #[arg(long, default_value_t = 8)]
-    tx_burst_limit: u32,
+    #[arg(long)]
+    tx_burst_limit: Option<u32>,
 
     /// Maximum datagrams to receive before exiting; 0 is unlimited.
-    #[arg(long, default_value_t = 0)]
-    max_datagrams: u32,
+    #[arg(long)]
+    max_datagrams: Option<u32>,
 
     /// Write this JSON marker after init/calibration and immediately before runtime loops.
     #[arg(long, value_name = "PATH")]
@@ -1739,12 +1743,12 @@ struct RadioRunArgs {
     rx_forwards: Vec<BridgeRunRxForwardArg>,
 
     /// WFB forwarding WLAN index metadata.
-    #[arg(long, default_value_t = 0)]
-    rx_wlan_idx: u8,
+    #[arg(long)]
+    rx_wlan_idx: Option<u8>,
 
     /// WFB forwarding MCS metadata.
-    #[arg(long, default_value_t = 0)]
-    rx_mcs_index: u8,
+    #[arg(long)]
+    rx_mcs_index: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1873,6 +1877,34 @@ fn load_radio_run_config_file(
             format!("{}: {error}", path.display()),
         )
     })
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRadioRunArgs {
+    adapter: AdapterArgs,
+    macos_usbhost: MacosUsbHostArgs,
+    tx_power: TxPowerControlArgs,
+    tx_calibration: TxCalibrationProfileArgs,
+    heartbeat_led: HeartbeatLedArgs,
+    channel: u8,
+    bandwidth: Bandwidth,
+    firmware: PathBuf,
+    bind: SocketAddr,
+    tx_binds: Vec<SocketAddr>,
+    duration_ms: u64,
+    rx_timeout_ms: u64,
+    tx_burst_limit: u32,
+    max_datagrams: u32,
+    ready_file: Option<PathBuf>,
+    health_file: Option<PathBuf>,
+    i_understand_this_transmits: bool,
+    i_understand_this_writes_registers: bool,
+    wfb_link_id: Option<u32>,
+    wfb_radio_port: Option<u8>,
+    rx_aggregator: Option<SocketAddr>,
+    rx_forwards: Vec<BridgeRunRxForwardArg>,
+    rx_wlan_idx: u8,
+    rx_mcs_index: u8,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -23631,8 +23663,287 @@ fn rtl8812a_rf_source_default() -> PathBuf {
     PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c")
 }
 
+fn radio_run_missing_required(field: &'static str) -> RuntimeRadioError {
+    RuntimeRadioError::new(
+        "radio_run_config_missing_required",
+        format!("radio-run requires {field} from CLI or --config"),
+    )
+}
+
+fn radio_run_invalid_config_field(
+    field: &'static str,
+    message: impl Into<String>,
+) -> RuntimeRadioError {
+    RuntimeRadioError::new(
+        "radio_run_config_invalid_field",
+        format!("{field}: {}", message.into()),
+    )
+}
+
+fn radio_run_default_bind() -> SocketAddr {
+    "127.0.0.1:5600"
+        .parse()
+        .expect("radio-run default bind address")
+}
+
+fn radio_run_config_bandwidth(
+    bandwidth_mhz: Option<u16>,
+) -> std::result::Result<Option<Bandwidth>, RuntimeRadioError> {
+    bandwidth_mhz
+        .map(|mhz| {
+            parse_bandwidth(&mhz.to_string())
+                .map_err(|error| radio_run_invalid_config_field("radio.bandwidth_mhz", error))
+        })
+        .transpose()
+}
+
+fn radio_run_config_rx_forwards(
+    forwards: Option<&Vec<String>>,
+) -> std::result::Result<Vec<BridgeRunRxForwardArg>, RuntimeRadioError> {
+    forwards
+        .into_iter()
+        .flatten()
+        .map(|forward| {
+            parse_bridge_run_rx_forward_arg(forward)
+                .map_err(|error| radio_run_invalid_config_field("wfb.rx_forwards", error))
+        })
+        .collect()
+}
+
+fn cli_or_config_or_default<T: Copy + PartialEq>(cli: T, default: T, config: Option<T>) -> T {
+    if cli != default {
+        cli
+    } else {
+        config.unwrap_or(default)
+    }
+}
+
+fn radio_run_resolved_args(
+    args: &RadioRunArgs,
+) -> std::result::Result<ResolvedRadioRunArgs, RuntimeRadioError> {
+    let file = match args.config.as_deref() {
+        Some(path) => load_radio_run_config_file(path)?,
+        None => RadioRunConfigFile::default(),
+    };
+    let adapter = file.adapter.as_ref();
+    let macos = file.macos_usbhost.as_ref();
+    let radio = file.radio.as_ref();
+    let wfb = file.wfb.as_ref();
+    let tx_power = file.tx_power.as_ref();
+    let calibration = file.calibration.as_ref();
+    let heartbeat = file.heartbeat.as_ref();
+    let authorization = file.authorization.as_ref();
+    let artifacts = file.artifacts.as_ref();
+    let default_macos = MacosUsbHostArgs::default();
+    let default_tx_power = TxPowerControlArgs::default();
+    let default_heartbeat = HeartbeatLedArgs::default();
+
+    let channel = args
+        .channel
+        .or_else(|| radio.and_then(|radio| radio.channel))
+        .ok_or_else(|| radio_run_missing_required("radio.channel"))?;
+    let bandwidth = args
+        .bandwidth
+        .or(radio_run_config_bandwidth(
+            radio.and_then(|radio| radio.bandwidth_mhz),
+        )?)
+        .unwrap_or(Bandwidth::Mhz20);
+    let firmware = args
+        .firmware
+        .clone()
+        .or_else(|| radio.and_then(|radio| radio.firmware.clone()))
+        .ok_or_else(|| radio_run_missing_required("radio.firmware"))?;
+    let rx_forwards = if args.rx_forwards.is_empty() {
+        radio_run_config_rx_forwards(wfb.and_then(|wfb| wfb.rx_forwards.as_ref()))?
+    } else {
+        args.rx_forwards.clone()
+    };
+
+    Ok(ResolvedRadioRunArgs {
+        adapter: AdapterArgs {
+            vid: args
+                .adapter
+                .vid
+                .or_else(|| adapter.and_then(|adapter| adapter.vid)),
+            pid: args
+                .adapter
+                .pid
+                .or_else(|| adapter.and_then(|adapter| adapter.pid)),
+            bus: args
+                .adapter
+                .bus
+                .or_else(|| adapter.and_then(|adapter| adapter.bus)),
+            address: args
+                .adapter
+                .address
+                .or_else(|| adapter.and_then(|adapter| adapter.address)),
+        },
+        macos_usbhost: MacosUsbHostArgs {
+            enabled: args.macos_usbhost.enabled
+                || macos.and_then(|macos| macos.enabled).unwrap_or(false),
+            configuration_value: cli_or_config_or_default(
+                args.macos_usbhost.configuration_value,
+                default_macos.configuration_value,
+                macos.and_then(|macos| macos.configuration_value),
+            ),
+            interface_number: cli_or_config_or_default(
+                args.macos_usbhost.interface_number,
+                default_macos.interface_number,
+                macos.and_then(|macos| macos.interface_number),
+            ),
+            bulk_in_endpoint: cli_or_config_or_default(
+                args.macos_usbhost.bulk_in_endpoint,
+                default_macos.bulk_in_endpoint,
+                macos.and_then(|macos| macos.bulk_in_endpoint),
+            ),
+            bulk_out_endpoint: cli_or_config_or_default(
+                args.macos_usbhost.bulk_out_endpoint,
+                default_macos.bulk_out_endpoint,
+                macos.and_then(|macos| macos.bulk_out_endpoint),
+            ),
+            bulk_out_endpoint_count: cli_or_config_or_default(
+                args.macos_usbhost.bulk_out_endpoint_count,
+                default_macos.bulk_out_endpoint_count,
+                macos.and_then(|macos| macos.bulk_out_endpoint_count),
+            ),
+            poll_attempts: cli_or_config_or_default(
+                args.macos_usbhost.poll_attempts,
+                default_macos.poll_attempts,
+                macos.and_then(|macos| macos.poll_attempts),
+            ),
+            poll_delay_ms: cli_or_config_or_default(
+                args.macos_usbhost.poll_delay_ms,
+                default_macos.poll_delay_ms,
+                macos.and_then(|macos| macos.poll_delay_ms),
+            ),
+        },
+        tx_power: TxPowerControlArgs {
+            tx_power_index: args
+                .tx_power
+                .tx_power_index
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.index)),
+            tx_power_mode: args
+                .tx_power
+                .tx_power_mode
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.mode)),
+            tx_power_path: cli_or_config_or_default(
+                args.tx_power.tx_power_path,
+                default_tx_power.tx_power_path,
+                tx_power.and_then(|tx_power| tx_power.path),
+            ),
+            tx_power_efuse_report: args
+                .tx_power
+                .tx_power_efuse_report
+                .clone()
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.efuse_report.clone())),
+            tx_power_efuse_logical_map: args
+                .tx_power
+                .tx_power_efuse_logical_map
+                .clone()
+                .or_else(|| tx_power.and_then(|tx_power| tx_power.efuse_logical_map.clone())),
+            tx_power_safety_profile: cli_or_config_or_default(
+                args.tx_power.tx_power_safety_profile,
+                default_tx_power.tx_power_safety_profile,
+                tx_power.and_then(|tx_power| tx_power.safety_profile),
+            ),
+            tx_power_max_index: cli_or_config_or_default(
+                args.tx_power.tx_power_max_index,
+                default_tx_power.tx_power_max_index,
+                tx_power.and_then(|tx_power| tx_power.max_index),
+            ),
+        },
+        tx_calibration: TxCalibrationProfileArgs {
+            tx_calibration_profile: cli_or_config_or_default(
+                args.tx_calibration.tx_calibration_profile,
+                TxCalibrationProfileArg::CurrentDefault,
+                calibration.and_then(|calibration| calibration.profile),
+            ),
+        },
+        heartbeat_led: HeartbeatLedArgs {
+            no_heartbeat_led: args.heartbeat_led.no_heartbeat_led
+                || heartbeat
+                    .and_then(|heartbeat| heartbeat.enabled)
+                    .map(|enabled| !enabled)
+                    .unwrap_or(false),
+            heartbeat_led_half_period_ms: cli_or_config_or_default(
+                args.heartbeat_led.heartbeat_led_half_period_ms,
+                default_heartbeat.heartbeat_led_half_period_ms,
+                heartbeat.and_then(|heartbeat| heartbeat.half_period_ms),
+            ),
+        },
+        channel,
+        bandwidth,
+        firmware,
+        bind: args
+            .bind
+            .or_else(|| wfb.and_then(|wfb| wfb.bind))
+            .unwrap_or_else(radio_run_default_bind),
+        tx_binds: if args.tx_binds.is_empty() {
+            wfb.and_then(|wfb| wfb.tx_binds.clone()).unwrap_or_default()
+        } else {
+            args.tx_binds.clone()
+        },
+        duration_ms: args
+            .duration_ms
+            .or_else(|| radio.and_then(|radio| radio.duration_ms))
+            .unwrap_or(10_000),
+        rx_timeout_ms: args
+            .rx_timeout_ms
+            .or_else(|| radio.and_then(|radio| radio.rx_timeout_ms))
+            .unwrap_or(20),
+        tx_burst_limit: args
+            .tx_burst_limit
+            .or_else(|| radio.and_then(|radio| radio.tx_burst_limit))
+            .unwrap_or(8),
+        max_datagrams: args
+            .max_datagrams
+            .or_else(|| radio.and_then(|radio| radio.max_datagrams))
+            .unwrap_or(0),
+        ready_file: args
+            .ready_file
+            .clone()
+            .or_else(|| artifacts.and_then(|artifacts| artifacts.ready_file.clone())),
+        health_file: args
+            .health_file
+            .clone()
+            .or_else(|| artifacts.and_then(|artifacts| artifacts.health_file.clone())),
+        i_understand_this_transmits: args.i_understand_this_transmits
+            || authorization
+                .and_then(|authorization| authorization.transmit)
+                .unwrap_or(false),
+        i_understand_this_writes_registers: args.i_understand_this_writes_registers
+            || authorization
+                .and_then(|authorization| authorization.live_register_writes)
+                .unwrap_or(false),
+        wfb_link_id: args.wfb_link_id.or_else(|| wfb.and_then(|wfb| wfb.link_id)),
+        wfb_radio_port: args
+            .wfb_radio_port
+            .or_else(|| wfb.and_then(|wfb| wfb.radio_port)),
+        rx_aggregator: args
+            .rx_aggregator
+            .or_else(|| wfb.and_then(|wfb| wfb.rx_aggregator)),
+        rx_forwards,
+        rx_wlan_idx: args
+            .rx_wlan_idx
+            .or_else(|| wfb.and_then(|wfb| wfb.rx_wlan_idx))
+            .unwrap_or(0),
+        rx_mcs_index: args
+            .rx_mcs_index
+            .or_else(|| wfb.and_then(|wfb| wfb.rx_mcs_index))
+            .unwrap_or(0),
+    })
+}
+
+#[cfg(test)]
 fn radio_run_runtime_config(
     args: &RadioRunArgs,
+) -> std::result::Result<ProductionRuntimeFlowConfig, RuntimeRadioError> {
+    let resolved = radio_run_resolved_args(args)?;
+    radio_run_runtime_config_from_resolved(&resolved)
+}
+
+fn radio_run_runtime_config_from_resolved(
+    args: &ResolvedRadioRunArgs,
 ) -> std::result::Result<ProductionRuntimeFlowConfig, RuntimeRadioError> {
     let channel = Channel::from_number(args.channel).map_err(|error| {
         RuntimeRadioError::new(
@@ -23690,7 +24001,7 @@ fn radio_run_runtime_config(
 }
 
 fn radio_run_bridge_args(
-    args: &RadioRunArgs,
+    args: &ResolvedRadioRunArgs,
     loop_plan: &ProductionRuntimeWfbLoopPlan,
 ) -> BridgeRunArgs {
     BridgeRunArgs {
@@ -23796,7 +24107,7 @@ fn radio_run_tx_power_input(
 }
 
 fn radio_run_execution_inputs(
-    args: &RadioRunArgs,
+    args: &ResolvedRadioRunArgs,
     channel: Channel,
     init_args: &BridgeTxBenchArgs,
 ) -> std::result::Result<
@@ -24254,10 +24565,11 @@ fn radio_run_failure_report(
     channel: Option<Channel>,
     error: RuntimeRadioError,
 ) -> ProductionRuntimeFlowReport {
-    let runtime_profile =
-        RuntimeTxCalibrationProfile::from(args.tx_calibration.tx_calibration_profile);
+    let bandwidth = args.bandwidth.unwrap_or(Bandwidth::Mhz20);
+    let calibration_profile = args.tx_calibration.tx_calibration_profile;
+    let runtime_profile = RuntimeTxCalibrationProfile::from(calibration_profile);
     let captured_tail_applied = channel
-        .map(|channel| should_apply_captured_tx_bringup_tail(channel, args.bandwidth))
+        .map(|channel| should_apply_captured_tx_bringup_tail(channel, bandwidth))
         .unwrap_or(false);
     ProductionRuntimeFlowReport {
         schema_version: 1,
@@ -24266,8 +24578,8 @@ fn radio_run_failure_report(
         adapter: None,
         endpoints: None,
         channel,
-        bandwidth: args.bandwidth,
-        duration_ms: args.duration_ms,
+        bandwidth,
+        duration_ms: args.duration_ms.unwrap_or(10_000),
         ready_file: args.ready_file.clone(),
         stop_reason: "not_started",
         bulk_in_endpoint: None,
@@ -24289,7 +24601,11 @@ fn radio_run_failure_report(
 }
 
 fn radio_run_report(args: RadioRunArgs) -> ProductionRuntimeFlowReport {
-    let config = match radio_run_runtime_config(&args) {
+    let resolved = match radio_run_resolved_args(&args) {
+        Ok(resolved) => resolved,
+        Err(error) => return radio_run_failure_report(&args, None, error),
+    };
+    let config = match radio_run_runtime_config_from_resolved(&resolved) {
         Ok(config) => config,
         Err(error) => return radio_run_failure_report(&args, None, error),
     };
@@ -24298,9 +24614,9 @@ fn radio_run_report(args: RadioRunArgs) -> ProductionRuntimeFlowReport {
         Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
     };
     let channel = config.channel;
-    let bridge_args = radio_run_bridge_args(&args, &validation.wfb_loop);
+    let bridge_args = radio_run_bridge_args(&resolved, &validation.wfb_loop);
     let init_args = bridge_tx_listen_init_bridge_args(&bridge_args.tx);
-    let (inputs, init_assets) = match radio_run_execution_inputs(&args, channel, &init_args) {
+    let (inputs, init_assets) = match radio_run_execution_inputs(&resolved, channel, &init_args) {
         Ok(inputs) => inputs,
         Err(error) => return ProductionRuntimeFlowReport::not_started(&config, error),
     };
@@ -41581,8 +41897,8 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
 
         match cli.command {
             Command::RadioRun(args) => {
-                assert_eq!(args.channel, 36);
-                assert_eq!(args.duration_ms, 1);
+                assert_eq!(args.channel, Some(36));
+                assert_eq!(args.duration_ms, Some(1));
                 assert_eq!(
                     args.ready_file.as_deref(),
                     Some(Path::new("/tmp/radio-run-ready.json"))
@@ -41591,7 +41907,10 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                     args.health_file.as_deref(),
                     Some(Path::new("/tmp/radio-run-health.json"))
                 );
-                assert_eq!(args.firmware, PathBuf::from("/tmp/rtl8812a_fw.bin"));
+                assert_eq!(
+                    args.firmware.as_deref(),
+                    Some(Path::new("/tmp/rtl8812a_fw.bin"))
+                );
                 assert!(args.i_understand_this_transmits);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -41600,13 +41919,8 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
 
     #[test]
     fn radio_run_config_file_deserializes_service_settings() {
-        let path = std::env::temp_dir().join(format!(
-            "wfb-radio-run-config-{}-{}.toml",
-            std::process::id(),
-            started_at_unix_ms()
-        ));
-        fs::write(
-            &path,
+        let path = write_radio_run_config(
+            "service-settings",
             r#"
 [adapter]
 vid = 3034
@@ -41654,8 +41968,7 @@ live_register_writes = false
 ready_file = "/tmp/radio-ready.json"
 health_file = "/tmp/radio-health.json"
 "#,
-        )
-        .expect("write config");
+        );
 
         let config = load_radio_run_config_file(&path).expect("load config");
         let _ = fs::remove_file(path);
@@ -41704,15 +42017,210 @@ health_file = "/tmp/radio-health.json"
         );
     }
 
-    #[test]
-    fn radio_run_config_file_rejects_diagnostic_only_fields() {
+    fn write_radio_run_config(name: &str, contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "wfb-radio-run-bad-config-{}-{}.toml",
+            "wfb-radio-run-{name}-{}-{}.toml",
             std::process::id(),
             started_at_unix_ms()
         ));
-        fs::write(
-            &path,
+        fs::write(&path, contents).expect("write radio-run config");
+        path
+    }
+
+    #[test]
+    fn radio_run_config_only_maps_to_runtime_owned_config() {
+        let path = write_radio_run_config(
+            "config-only",
+            r#"
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/config-fw.bin"
+duration_ms = 2500
+rx_timeout_ms = 15
+tx_burst_limit = 3
+max_datagrams = 4
+
+[wfb]
+bind = "127.0.0.1:5610"
+tx_binds = ["127.0.0.1:5611"]
+link_id = 1
+radio_port = 35
+rx_aggregator = "127.0.0.1:5801"
+rx_wlan_idx = 2
+rx_mcs_index = 1
+
+[authorization]
+transmit = true
+
+[artifacts]
+ready_file = "/tmp/config-ready.json"
+health_file = "/tmp/config-health.json"
+"#,
+        );
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--config",
+            path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse config-only radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let config = radio_run_runtime_config(&args).expect("runtime config");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(config.channel.number, 36);
+        assert_eq!(config.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(
+            config.firmware.as_deref(),
+            Some(Path::new("/tmp/config-fw.bin"))
+        );
+        assert_eq!(config.bind_addr, "127.0.0.1:5610".parse().unwrap());
+        assert_eq!(
+            config.tx_binds,
+            vec!["127.0.0.1:5611".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(config.duration_ms, 2500);
+        assert_eq!(config.rx_timeout_ms, 15);
+        assert_eq!(config.tx_burst_limit, 3);
+        assert_eq!(config.max_datagrams, 4);
+        assert_eq!(config.rx_wlan_idx, 2);
+        assert_eq!(config.rx_mcs_index, 1);
+        assert_eq!(
+            config.ready_file.as_deref(),
+            Some(Path::new("/tmp/config-ready.json"))
+        );
+        assert_eq!(
+            config.health_file.as_deref(),
+            Some(Path::new("/tmp/config-health.json"))
+        );
+        assert!(config.tx_authorized);
+        config.validate().expect("valid config-only runtime config");
+    }
+
+    #[test]
+    fn radio_run_cli_flags_override_config_file_values() {
+        let path = write_radio_run_config(
+            "cli-overrides",
+            r#"
+[radio]
+channel = 149
+bandwidth_mhz = 40
+firmware = "/tmp/config-fw.bin"
+duration_ms = 5000
+rx_timeout_ms = 40
+tx_burst_limit = 8
+max_datagrams = 0
+
+[wfb]
+bind = "127.0.0.1:5610"
+tx_binds = ["127.0.0.1:5611"]
+
+[authorization]
+transmit = false
+
+[artifacts]
+ready_file = "/tmp/config-ready.json"
+health_file = "/tmp/config-health.json"
+"#,
+        );
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--config",
+            path.to_string_lossy().as_ref(),
+            "--channel",
+            "36",
+            "--bandwidth",
+            "20",
+            "--duration-ms",
+            "25",
+            "--rx-timeout-ms",
+            "10",
+            "--tx-burst-limit",
+            "4",
+            "--max-datagrams",
+            "2",
+            "--tx-bind",
+            "127.0.0.1:5701",
+            "--firmware",
+            "/tmp/cli-fw.bin",
+            "--ready-file",
+            "/tmp/cli-ready.json",
+            "--health-file",
+            "/tmp/cli-health.json",
+            "--i-understand-this-transmits",
+        ])
+        .expect("parse override radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let config = radio_run_runtime_config(&args).expect("runtime config");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(config.channel.number, 36);
+        assert_eq!(config.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(
+            config.firmware.as_deref(),
+            Some(Path::new("/tmp/cli-fw.bin"))
+        );
+        assert_eq!(config.duration_ms, 25);
+        assert_eq!(config.rx_timeout_ms, 10);
+        assert_eq!(config.tx_burst_limit, 4);
+        assert_eq!(config.max_datagrams, 2);
+        assert_eq!(
+            config.tx_binds,
+            vec!["127.0.0.1:5701".parse::<SocketAddr>().unwrap()]
+        );
+        assert_eq!(
+            config.ready_file.as_deref(),
+            Some(Path::new("/tmp/cli-ready.json"))
+        );
+        assert_eq!(
+            config.health_file.as_deref(),
+            Some(Path::new("/tmp/cli-health.json"))
+        );
+        assert!(config.tx_authorized);
+    }
+
+    #[test]
+    fn radio_run_config_file_reports_missing_required_settings() {
+        let path = write_radio_run_config(
+            "missing-required",
+            r#"
+[radio]
+channel = 36
+
+[authorization]
+transmit = true
+"#,
+        );
+        let cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--config",
+            path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse missing-required radio-run");
+        let Command::RadioRun(args) = cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let error = radio_run_runtime_config(&args).expect_err("missing firmware");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(error.code, "radio_run_config_missing_required");
+        assert!(error.message.contains("radio.firmware"));
+    }
+
+    #[test]
+    fn radio_run_config_file_rejects_diagnostic_only_fields() {
+        let path = write_radio_run_config(
+            "bad-config",
             r#"
 [radio]
 channel = 36
@@ -41721,8 +42229,7 @@ firmware = "/tmp/rtl8812aefw.bin"
 [diagnostic]
 pre_tx_write32 = ["0x0522=0x00000000"]
 "#,
-        )
-        .expect("write config");
+        );
 
         let error = load_radio_run_config_file(&path).expect_err("unknown field rejected");
         let _ = fs::remove_file(path);
@@ -41821,9 +42328,10 @@ pre_tx_write32 = ["0x0522=0x00000000"]
         let Command::RadioRun(args) = cli.command else {
             panic!("expected radio-run");
         };
+        let resolved = radio_run_resolved_args(&args).expect("resolved radio-run args");
         let config = radio_run_runtime_config(&args).expect("runtime config");
         let validation = config.validate().expect("runtime validation");
-        let bridge = radio_run_bridge_args(&args, &validation.wfb_loop);
+        let bridge = radio_run_bridge_args(&resolved, &validation.wfb_loop);
 
         assert_eq!(
             bridge.tx.tx_power.tx_power_mode,
