@@ -594,6 +594,13 @@ in both repeats, but failed both sustained gates at
 one repeat logged 94 M2L decrypt failures and the other logged 128 L2M decrypt
 failures.
 
+EFUSE-derived TX power also remains receiver-gated. The same 1000-payload A/B
+with `TX_POWER_MODE=efuse-derived` failed one of two repeats at
+`/tmp/wfb-radio-profile-matrix-remote-efuse-m2l5-l2m3-1000-repeat2-20260504-231630`:
+one repeat logged 117 L2M decrypt failures and the other passed. Keep
+`TX_POWER_MODE=current-default` with `TX_CALIBRATION_PROFILE=current-default` as
+the short-range smoke default.
+
 `scripts/run-radio-run-duplex-smoke.sh` defaults to
 `SOURCE_WARMUP_PAYLOADS=100`; set it lower only when deliberately testing
 first-acquisition behavior. These short-range results do not overturn the
