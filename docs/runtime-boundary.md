@@ -275,6 +275,11 @@ Hardware smoke after adding those fields passed at
 reported `need_more_data=0` and frame counts `85/2/1/0`; TX-positive submitted
 `64/64`, reported zero TX failures/drops, `need_more_data=0`, and frame counts
 `93/12/4/0`.
+`scripts/run-production-radio-smoke.sh` now gates those fields so future
+production-smoke runs fail if RX outcome telemetry disappears. The gated smoke
+passed at `/tmp/wfb-prod-radio-smoke-rx-telemetry-gated-20260505-012624` with
+RX-only `rx_types=79/16/6/0` and TX-positive `rx_types=128/3/4/0`, both with
+`rx_need_more=0`.
 
 After archiving the runtime cutover specs on May 4, 2026,
 `scripts/run-production-radio-smoke.sh --mode both` was run on the hardware Mac

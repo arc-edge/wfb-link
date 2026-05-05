@@ -256,16 +256,55 @@ datagrams = int(tx.get("datagrams_received", 0))
 submitted = int(tx.get("submitted_frames", 0))
 failed = int(tx.get("failed_submissions", 0))
 dropped = int(tx.get("dropped_datagrams", 0))
+parsed_frames = int(rx.get("parsed_frames", 0))
+rx_outcome_fields = [
+    "need_more_data",
+    "management_frames",
+    "control_frames",
+    "data_frames",
+    "extension_frames",
+]
+missing_rx_outcome_fields = [field for field in rx_outcome_fields if field not in rx]
+rx_outcome_counts = {}
+for field in rx_outcome_fields:
+    if field in rx:
+        try:
+            rx_outcome_counts[field] = int(rx[field])
+        except (TypeError, ValueError):
+            print(f"rx.{field} is not an integer: {rx[field]!r}", file=sys.stderr)
+            sys.exit(4)
+frame_type_total = sum(
+    rx_outcome_counts.get(field, 0)
+    for field in ("management_frames", "control_frames", "data_frames", "extension_frames")
+)
 
 print(
     f"{mode}: result={result} stop={report.get('stop_reason')} "
     f"tx_datagrams={datagrams} submitted={submitted} failed={failed} dropped={dropped} "
-    f"rx_buffers={rx.get('buffers_read', 0)} rx_frames={rx.get('parsed_frames', 0)}"
+    f"rx_buffers={rx.get('buffers_read', 0)} rx_frames={parsed_frames} "
+    f"rx_need_more={rx_outcome_counts.get('need_more_data', 'missing')} "
+    f"rx_types={rx_outcome_counts.get('management_frames', 'missing')}/"
+    f"{rx_outcome_counts.get('control_frames', 'missing')}/"
+    f"{rx_outcome_counts.get('data_frames', 'missing')}/"
+    f"{rx_outcome_counts.get('extension_frames', 'missing')}"
 )
 
 if result != "pass":
     print(json.dumps(report.get("error"), indent=2), file=sys.stderr)
     sys.exit(2)
+if missing_rx_outcome_fields:
+    print(
+        "production RX outcome telemetry is missing field(s): "
+        + ", ".join(f"rx.{field}" for field in missing_rx_outcome_fields),
+        file=sys.stderr,
+    )
+    sys.exit(4)
+if parsed_frames > 0 and frame_type_total == 0:
+    print(
+        f"production RX frame type counters are all zero despite parsed_frames={parsed_frames}",
+        file=sys.stderr,
+    )
+    sys.exit(4)
 if expect_tx:
     if datagrams < expected or submitted < expected or failed != 0 or dropped != 0:
         print(
