@@ -38,5 +38,5 @@
 - [x] 5.2 `cargo fmt` clean.
 - [x] 5.3 `cargo build -p wfb-radio-runtime -p wfb-radio-diag` clean.
 - [x] 5.4 `cargo test -p wfb-radio-runtime -p wfb-radio-diag` passes including the new tests.
-- [ ] 5.5 Operator verification on the hardware Mac: run `radio-run --macos-usbhost --channel 36 --bandwidth 20 ... --duration-ms 5000 --i-understand-this-writes-registers` and visually confirm the AWUS036ACH enclosure LED blinks at the configured cadence; `heartbeat_led.toggles_succeeded` ≥ 8 at 500 ms half-period over 5 s.
-  - Counter-backed hardware run completed at `/tmp/wfb-radio-run-led-heartbeat-20260505-125727.json`: `heartbeat_led.toggles_succeeded=10`, `toggles_failed=0`. Physical visual confirmation remains operator-pending.
+- [x] 5.5 Operator verification on the hardware Mac: run `radio-run --macos-usbhost --channel 36 --bandwidth 20 ... --duration-ms 5000 --i-understand-this-writes-registers` and visually confirm the AWUS036ACH enclosure LED blinks at the configured cadence; `heartbeat_led.toggles_succeeded` ≥ 8 at 500 ms half-period over 5 s.
+  - Counter-backed hardware run completed at `/tmp/wfb-radio-run-led-heartbeat-20260505-125727.json`: `heartbeat_led.toggles_succeeded=10`, `toggles_failed=0`. Operator visually confirmed the enclosure LED blinked.

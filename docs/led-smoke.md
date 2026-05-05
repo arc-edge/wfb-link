@@ -68,3 +68,4 @@ register from the production bridge loop and reports top-level counters in
 `/tmp/wfb-radio-run-led-heartbeat-20260505-125727.json` completed
 `radio-run --macos-usbhost` for 5 s with `heartbeat_led.enabled=true`,
 `half_period_ms=500`, `toggles_succeeded=10`, and `toggles_failed=0`.
+The operator visually confirmed the enclosure LED blinked during this run.
