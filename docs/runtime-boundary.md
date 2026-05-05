@@ -300,3 +300,12 @@ channel 36 / 20 MHz was verified. The production report now includes
 `tx_power_control` evidence for the runtime-owned EFUSE plan: 22 TXAGC writes,
 programmed paths A/B, selected path `both`, and the `linux_ch36_ht20` safety
 profile.
+
+After moving final `radio-run` production report assembly into
+`wfb-radio-runtime`, `scripts/run-production-radio-smoke.sh --mode both` passed
+on the hardware Mac deploy checkout at
+`/tmp/wfb-prod-radio-smoke-report-cutover-20260505-012051`. The RX-only run
+completed with `result=pass`, `stop_reason=duration_elapsed`, 68 RX
+buffers/frames, and zero TX datagrams. The TX-positive run completed with
+`result=pass`, submitted `64/64` synthetic WFB distributor datagrams, and
+reported zero TX failures or drops.
