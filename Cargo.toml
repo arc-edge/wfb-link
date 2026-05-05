@@ -30,3 +30,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wfb-bridge = { path = "crates/wfb-bridge" }
 wfb-radio-runtime = { path = "crates/wfb-radio-runtime" }
+wfb-radio-service = { path = "crates/wfb-radio-service" }

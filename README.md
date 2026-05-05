@@ -68,7 +68,8 @@ The bridge replaces Linux `PF_PACKET`/`pcap` radio I/O. It does not attempt to c
 
 Initial implementation has started. The current code can:
 
-- Build a Rust workspace with `radio-core`, `wfb-bridge`, and `wfb-radio-diag`.
+- Build a Rust workspace with `radio-core`, `wfb-bridge`, `wfb-radio-diag`, and
+  the standalone production `wfb-radio-service` binary.
 - Use `wfb-radio-runtime` for live USB session ownership, endpoint selection, TX submission, raw packet replay, RX packet reads, and shared runtime counters across bridge and standalone RX/TX commands.
 - Discover supported RTL8812AU-class USB adapters by VID/PID.
 - Walk USB descriptors and endpoint layouts.
@@ -116,6 +117,9 @@ Initial implementation has started. The current code can:
 - Build structured RF-quality envelopes with `rf-quality-report`, including macOS bridge artifacts, EFUSE context, Linux baseline parameters, parameter mismatches, recovery/loss/throughput summaries, receiver artifact paths, and receiver SNR confidence.
 - List verification stages with `wfb-radio-diag stages`.
 - Emit JSON diagnostics for current commands, including live `init`, `efuse-dump`, `rx-scan`, `tx-once`, `tx-repeat`, `bridge-tx-once`, `bridge-tx-listen`, and `bridge-run` reports; `tx-once --dry-run` also builds descriptor-prefixed bytes without touching USB.
+- Run the reviewed production WFB flow through `wfb-radio-service`, a smaller
+  config-first service binary that calls the runtime-owned production flow
+  directly and excludes diagnostic-only command surfaces.
 
 The simplest diagnostic entry point is still:
 
@@ -205,7 +209,24 @@ cargo run -p wfb-radio-diag -- --json trace-compare --expected fixtures/traces/i
 
 `bridge-run` is the first full bridge loop. It owns one retained radio session, runs Linux-order init once, preserves station/MSR state for TX, opens RX filter maps, drains UDP TX input with socket receiver thread(s), interleaves queued TX with bulk-IN RX reads, and forwards matching WFB RX frames to aggregator sockets. It supports multiple TX UDP inputs with repeated `--tx-bind` and multiple RX forwarding targets with repeated `--rx-forward`; `--tx-burst-limit` defaults to 8 so multi-port WFB traffic is paced between bulk-IN reads instead of dumping a large burst into the radio. The default run is bounded for diagnostics, while `--duration-ms 0` removes the time bound and `--max-datagrams 0` removes the TX datagram cap for longer bridge runs; `--ready-file` writes a JSON marker after init/calibration/monitor setup and immediately before RX/TX loops, so external traffic generators can avoid racing radio bring-up. SIGINT/SIGTERM exits through the normal report path with `stop_reason="signal"`, verified at `/tmp/wfb-agent-bridge-run-signal2.json`. The startup-burst regression is fixed: `/tmp/wfb-agent-bridgerun-drain2.json` drained and submitted 90/90 distributor datagrams sent during radio init, and Linux `wfb_rx` recovered 30/30 `DRAIN2` payloads. The first bidirectional macOS 26 run forwarded 44 Linux-to-Mac WFB frames to a Mac UDP aggregator while injecting 121/121 Mac-to-Linux distributor datagrams; Linux `wfb_rx` recovered 80/80 `MAC2LIN` payloads. A later four-stream video/telemetry-shaped run forwarded Linux-to-Mac WFB ports 0 and 1 to separate Mac aggregator sockets while injecting Mac-to-Linux ports 2 and 4 from separate TX bind sockets; Linux `wfb_rx` recovered 120/120 `M2LVID` markers and 79/80 `M2LTEL` markers, and the Mac forwarded 120 port-0 frames plus 69 port-1 frames. The RX forwarding path also works with a real stock WFB-ng network aggregator: Linux RF TX -> Mac bridge RX -> UDP `wrxfwd_t` to Linux `wfb_rx -a` recovered 120/120 decoded `L2MRXAG` payloads. Reports/captures: `/tmp/wfb-agent-bridge-run-duplex3.json`, `/tmp/wfb-agent-bridge-run-multibridge3.json`, `/tmp/wfb-agent-bridge-run-rxagg1.json`, `/tmp/wfb-agent-bridge-run-signal2.json`, `/tmp/wfb-agent-bridgerun-drain2.json`, `/tmp/wfb-agent-bridge-run-multibridge3-agg.json`, `/tmp/mac-bridgerun-duplex3-rf.pcap`, `/tmp/mac-multibridge3-rf.pcap`, `/tmp/mac-multibridge3-rx-lo.pcap`, `/tmp/mac-rxagg1-agg-lo.pcap`.
 
-`runtime-flow` is the production-shaped wrapper around the retained full bridge path. It reports adapter identity, endpoints, init readiness, calibration class/evidence source, runtime-owned RX/TX flow telemetry, RX metadata coverage counters for PHY status/RSSI/SNR/noise, USB counters, stop reason, and last error without exposing the full diagnostic bridge report shape. It accepts the bridge runtime controls needed for normal RX/TX, including `--ready-file` for external orchestration, but rejects diagnostic-only register pokes and TX-status probes before USB open; the remaining migration step is a smaller production binary/API that no longer reuses diagnostic CLI structs.
+`runtime-flow` is the production-shaped wrapper around the retained full bridge path. It reports adapter identity, endpoints, init readiness, calibration class/evidence source, runtime-owned RX/TX flow telemetry, RX metadata coverage counters for PHY status/RSSI/SNR/noise, USB counters, stop reason, and last error without exposing the full diagnostic bridge report shape. It accepts the bridge runtime controls needed for normal RX/TX, including `--ready-file` for external orchestration, but rejects diagnostic-only register pokes and TX-status probes before USB open.
+
+`wfb-radio-service` is the production command surface. It starts from a reviewed
+TOML config, applies bounded CLI overrides, writes the runtime ready marker and
+service health artifact, and runs `wfb-radio-runtime::run_production_runtime_flow`
+directly. Diagnostic-only register experiments, TX-status probes, PCAP/JSONL
+capture, trace replay, and generic bring-up commands are absent from this
+binary. The compatibility command `wfb-radio-diag radio-run` remains available
+during migration and uses the same production config/report semantics.
+
+```sh
+cargo run -p wfb-radio-service -- \
+  --config configs/radio-run-robust-short-range.toml \
+  --report /tmp/wfb-radio-service.json \
+  --ready-file /tmp/wfb-radio-service-ready.json \
+  --health-file /tmp/wfb-radio-service-health.json \
+  --i-understand-this-transmits
+```
 
 `reg-smoke` is live but read-only: it claims the adapter, reads a small set of RTL8812AU registers through vendor control requests, reports the values, and then releases the interface. It does not issue control writes, bulk transfers, RF changes, or TX operations.
 

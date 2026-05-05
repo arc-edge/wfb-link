@@ -74,9 +74,9 @@ use wfb_radio_runtime::{
 };
 
 mod radio_run_support;
-use radio_run_support::{
-    load_radio_run_config_file, radio_run_resolved_args, ResolvedRadioRunArgs,
-};
+#[cfg(test)]
+use radio_run_support::load_radio_run_config_file;
+use radio_run_support::{radio_run_resolved_args, ResolvedRadioRunArgs};
 
 #[derive(Debug, Parser)]
 #[command(name = "wfb-radio-diag")]
@@ -41711,6 +41711,41 @@ health_file = "/tmp/config-health.json"
         config
             .validate()
             .expect("valid checked-in robust short-range config");
+    }
+
+    #[test]
+    fn service_checked_in_config_matches_radio_run_compatibility_config() {
+        use clap::Parser as _;
+        use wfb_radio_service::{
+            resolve_service_run, service_runtime_config_from_resolved, ServiceCli,
+        };
+
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/radio-run-robust-short-range.toml");
+        let diag_cli = Cli::try_parse_from([
+            "wfb-radio-diag",
+            "radio-run",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in config radio-run");
+        let service_cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in config service");
+        let Command::RadioRun(diag_args) = diag_cli.command else {
+            panic!("expected radio-run");
+        };
+
+        let diag_config = radio_run_runtime_config(&diag_args).expect("diagnostic runtime config");
+        let service_resolved = resolve_service_run(&service_cli).expect("service resolved config");
+        let service_config = service_runtime_config_from_resolved(&service_resolved)
+            .expect("service runtime config");
+
+        assert_eq!(service_config, diag_config);
     }
 
     #[test]

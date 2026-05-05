@@ -20,6 +20,7 @@ Common configuration:
   MAC_LAN_IP=10.42.0.162     # remote Mac LAN IP visible to Linux peer
   PROFILE_SET=short          # short, range, or minimal
   ENABLE_M2L=1 ENABLE_L2M=1
+  RADIO_COMMAND=service       # service or diagnostic
   REPEATS=1
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100 SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
@@ -141,6 +142,7 @@ RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-60000}
 RADIO_READY_WAIT_SECONDS=${RADIO_READY_WAIT_SECONDS:-90}
 RX_TIMEOUT_MS=${RX_TIMEOUT_MS:-20}
 TX_BURST_LIMIT=${TX_BURST_LIMIT:-4}
+RADIO_COMMAND=${RADIO_COMMAND:-service}
 MATRIX_SUSTAINED_PAYLOADS=${MATRIX_SUSTAINED_PAYLOADS:-200}
 PROFILE_SET=${PROFILE_SET:-short}
 PROFILE_FILE=${PROFILE_FILE:-}
@@ -174,6 +176,11 @@ fi
 if (( REPEATS < 1 )); then
   die "REPEATS must be >= 1"
 fi
+case "$RADIO_COMMAND" in
+  service|diagnostic) ;;
+  diag) RADIO_COMMAND=diagnostic ;;
+  *) die "invalid RADIO_COMMAND=$RADIO_COMMAND (expected service or diagnostic)" ;;
+esac
 
 mkdir -p "$MATRIX_OUT_DIR/runs"
 MATRIX_OUT_DIR=$(cd "$MATRIX_OUT_DIR" && pwd)
@@ -281,7 +288,7 @@ keys = [
     "session_acquire_timeout_seconds", "session_acquire_poll_seconds",
     "payload_len", "m2l_min_unique",
     "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
-    "radio_run_duration_ms", "decrypt_failure_gate",
+    "radio_run_duration_ms", "radio_command", "decrypt_failure_gate",
 ]
 data = {key: os.environ.get(key.upper(), os.environ.get(key)) for key in keys}
 for key in [
@@ -351,7 +358,7 @@ run_one_profile() {
   export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
   export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
-  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS DECRYPT_FAILURE_GATE
+  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
   log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs} interval=${payload_interval_sec}s"
@@ -397,6 +404,7 @@ run_one_profile() {
       COUNTER_SECONDS="$COUNTER_SECONDS" \
       PEER_WAIT_SECONDS="$PEER_WAIT_SECONDS" \
       RADIO_RUN_DURATION_MS="$RADIO_RUN_DURATION_MS" \
+      RADIO_COMMAND="$RADIO_COMMAND" \
       RADIO_READY_WAIT_SECONDS="$RADIO_READY_WAIT_SECONDS" \
       RX_TIMEOUT_MS="$RX_TIMEOUT_MS" \
       TX_BURST_LIMIT="$TX_BURST_LIMIT" \
@@ -422,7 +430,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -475,6 +483,7 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "repeat_index": meta.get("repeat_index"),
         "exit_status": status.get("exit_status"),
         "smoke_result": summary.get("smoke_result", "missing"),
+        "radio_command": summary.get("radio_command") or meta.get("radio_command"),
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
         "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
         "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
@@ -637,9 +646,10 @@ for item in profiles:
 lines.extend(["", "## Runs", ""])
 for run in runs:
     lines.append(
-        "- `{profile}` r{repeat}: result `{result}`, M2L `{m2l}/{expected}`, L2M `{l2m}/{expected}`, decrypt `{decrypt}`, dir `{dir}`".format(
+        "- `{profile}` r{repeat}: command `{command}`, result `{result}`, M2L `{m2l}/{expected}`, L2M `{l2m}/{expected}`, decrypt `{decrypt}`, dir `{dir}`".format(
             profile=run["profile"],
             repeat=run.get("repeat_index"),
+            command=run.get("radio_command"),
             result=run["smoke_result"],
             m2l=run["m2l_unique"],
             l2m=run["l2m_unique"],

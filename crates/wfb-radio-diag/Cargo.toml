@@ -17,3 +17,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 wfb-bridge.workspace = true
 wfb-radio-runtime.workspace = true
+
+[dev-dependencies]
+wfb-radio-service.workspace = true

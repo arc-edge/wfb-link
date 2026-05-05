@@ -67,21 +67,28 @@
 
 ## Production Command
 
-`wfb-radio-diag radio-run` is the first production cutover entry point. It
-accepts the operational full-flow settings only: adapter selection, channel,
-bandwidth, firmware path, TX UDP bind addresses, optional WFB RX forwarding,
-runtime bounds, TX-power mode/source, calibration profile, macOS USBHost
-backend settings, and the explicit TX/register-write acknowledgements.
+`wfb-radio-service` is the standalone production entry point. It is
+config-first (`--config`), accepts bounded operator overrides for adapter
+selection, channel, bandwidth, firmware path, TX UDP bind addresses, optional
+WFB RX forwarding, runtime bounds, calibration profile, macOS USBHost backend
+settings, ready/health/report artifact paths, and the explicit live TX/register
+write acknowledgements.
 
-`radio-run` always maps into `wfb-radio-runtime::ProductionRuntimeFlowConfig`
-and validates that config before USB open. The command does not expose
-diagnostic register pokes, TX status probes, TXDMA-clear experiments, PCAP, or
-raw frame JSONL capture. Those remain available through diagnostic commands.
+The service always maps into
+`wfb-radio-runtime::ProductionRuntimeFlowConfig`, validates that config before
+USB open, and executes `wfb-radio-runtime::run_production_runtime_flow`
+directly. Its emitted JSON is `ProductionRuntimeFlowReport` from
+`wfb-radio-runtime`.
 
-During this cutover slice, `radio-run` still executes by adapting the validated
-runtime-owned config into the existing hardware-proven `runtime-flow`/bridge
-loop. Its emitted JSON is `ProductionRuntimeFlowReport` from
-`wfb-radio-runtime`, not the diagnostic `RuntimeFlowReport`.
+`wfb-radio-diag radio-run` remains as the diagnostic compatibility command
+during migration. It uses the same shared production config semantics and
+report schema, but it lives inside the diagnostic binary so operators should not
+treat it as the long-term service surface.
+
+The production service command does not expose diagnostic register pokes, TX
+status probes, TXDMA-clear experiments, PCAP, raw frame JSONL capture, trace
+replay, or other bring-up-only command surfaces. Those remain available through
+diagnostic commands.
 
 The active cutover has moved production WFB loop planning, TX ingress socket
 threads, bridge-loop scheduling, queued TX datagram handling, parsed RX packet
@@ -91,28 +98,31 @@ mutation still live in the diagnostic adapter while the boundary shifts.
 Production ready-marker file writing now uses a runtime-owned marker type and
 writer; diagnostic commands only populate command-specific field values.
 
-`radio-run` JSON now carries the runtime RX forwarding snapshots at
+The production JSON now carries the runtime RX forwarding snapshots at
 `rx.rx_forwards[]` in addition to the aggregate `rx.forwarded_payloads`. The
 aggregate is derived from the canonical forward list, not the legacy
 `wfb_forward` primary alias, so production summaries no longer double-count the
 first RX forwarding target.
 
-RF-quality automation can now opt into `MAC_RADIO_COMMAND=radio-run` so the
-receiver-backed close-range harness can exercise the production command path.
-Bridge mode remains the default until the production command has matching
-receiver-backed calibration evidence.
+Smoke automation records which command surface it exercised. Use
+`RADIO_COMMAND=service` for production gates and `RADIO_COMMAND=diagnostic` for
+the `wfb-radio-diag radio-run` compatibility path. The close-range RF-quality
+harness can also use `MAC_RADIO_COMMAND=radio-service` when the standalone
+service should be tested instead of the diagnostic adapter.
 
 ## Still Diagnostic-Owned
 
-- Full RTL8812AU init orchestration, table loading, and diagnostic phase reporting.
+- Diagnostic phase-report formatting and legacy bring-up command surfaces for
+  RTL8812AU init. The production service owns its runtime init execution path;
+  diagnostic commands still keep richer per-step reports for bench work.
 - TX calibration CLI authorization, the read-only IQK probe marker, diagnostic
   evidence formatting, and RF-quality automation while parity is still being
   hardened. Targeted parity, LCK execution, runtime IQK execution, and TX-power
   register execution now live behind runtime-owned APIs.
 - PCAP/JSONL output, diagnostic report mutation, TX status probes, and
   RF-quality automation.
-- CLI parsing and human-facing diagnostic reports, except for the thin
-  production `radio-run` command adapter.
+- CLI parsing and human-facing diagnostic reports, except for the shared
+  production config support reused by the compatibility `radio-run` adapter.
 - Legacy standalone smoke commands that still claim `ClaimedUsbDevice` directly while their report shapes remain diagnostic-only.
 
 ## Migration Order
@@ -130,11 +140,10 @@ receiver-backed calibration evidence.
    behind one calibration profile API. The next calibration extraction target
    is production init/profile plumbing that can call those runtime APIs without
    diagnostic command ownership.
-4. Move remaining bridge-loop production command execution harness code out of
-   `wfb-radio-diag`. Final `radio-run` production report assembly now happens
-   in `wfb-radio-runtime` through a report-neutral execution struct; the
-   diagnostic crate still adapts the legacy runtime-flow harness into that
-   runtime-owned shape.
+4. Keep `wfb-radio-service` as the production executable and leave
+   `wfb-radio-diag radio-run` as a compatibility adapter until deployment
+   scripts, launchd/systemd units, and operator docs no longer need the
+   diagnostic binary.
 5. Continue moving production telemetry types for calibration state, USB
    transfer counters, queue state, and WFB flow counters into
    `wfb-radio-runtime`; RX/TX flow counters, adapter-side RSSI/SNR/noise frame
@@ -342,3 +351,20 @@ passed again at `/tmp/wfb-prod-radio-smoke-local-ready-runtime-20260505-095955`.
 Both ready files were emitted by the runtime writer with `source=bridge-run` and
 `ready_at_unix_ms`; RX-only passed with 33 parsed frames, and TX-positive
 submitted `64/64` with zero failed submissions or drops.
+
+After adding the standalone `wfb-radio-service` binary, the production smoke
+runner gained `RADIO_COMMAND=service|diagnostic` selection and records the
+selected command in `summary.json`. A local service smoke passed at
+`/tmp/wfb-prod-radio-smoke-20260505-163429`, proving the service binary can
+start from `configs/radio-run-robust-short-range.toml`, emit ready/health/report
+artifacts, and run the runtime-owned production flow without diagnostic-only
+command surfaces.
+
+The receiver-backed service gate passed on May 5, 2026 at
+`/tmp/wfb-radio-run-duplex-20260505-165234`. It selected
+`radio_command=service`, used channel 36 / HT20 and the current-default captured
+calibration profile, submitted `495/495` TX frames with zero failed submissions
+or drops, forwarded `452` Linux-to-Mac WFB payloads through the runtime RX
+handler, recovered `40/40` measured payloads in both directions, logged zero
+post-session decrypt failures, and exited with service health `exited_pass` /
+`monitor`.

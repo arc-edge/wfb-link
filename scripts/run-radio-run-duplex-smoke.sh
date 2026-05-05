@@ -33,6 +33,7 @@ Configuration is via environment variables. Common overrides:
   REQUIRE_CALIBRATION_SUCCESS=auto
   AUTO_EFUSE_DUMP=1
   M2L_INGRESS_MODE=ssh-udp-relay
+  RADIO_COMMAND=service       # service or diagnostic
   RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
   OUT_DIR=/tmp/wfb-radio-run-duplex-smoke
 EOF
@@ -121,7 +122,14 @@ TX_POWER_MODE=${TX_POWER_MODE:-current-default}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
+RADIO_COMMAND=${RADIO_COMMAND:-service}
 export RADIO_RUN_CONFIG
+case "$RADIO_COMMAND" in
+  service|diagnostic) ;;
+  diag) RADIO_COMMAND=diagnostic ;;
+  *) die "invalid RADIO_COMMAND=$RADIO_COMMAND (expected service or diagnostic)" ;;
+esac
+export RADIO_COMMAND
 
 RADIO_BIND_PORT=${RADIO_BIND_PORT:-5611}
 M2L_INGRESS_MODE=${M2L_INGRESS_MODE:-ssh-udp-relay}
@@ -360,7 +368,7 @@ REMOTE_PREP
 }
 
 start_radio() {
-  log "starting local radio-run production loop"
+  log "starting local radio-run production loop via $RADIO_COMMAND command"
   local tx_power_args=()
   local write_auth_arg=()
   if [[ "$TX_POWER_MODE" != "current-default" ]]; then
@@ -378,27 +386,56 @@ start_radio() {
       ;;
   esac
 
-  cargo run -p wfb-radio-diag -- --json \
-    --report "$OUT_DIR/radio-run.json" \
-    radio-run \
-    --config "$RADIO_RUN_CONFIG" \
-    --firmware "$FIRMWARE" \
-    --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
-    --bind "$RADIO_BIND" \
-    --ready-file "$OUT_DIR/radio-ready.json" \
-    --health-file "$OUT_DIR/radio-health.json" \
-    --duration-ms "$RADIO_RUN_DURATION_MS" \
-    --rx-timeout-ms "$RX_TIMEOUT_MS" \
-    --tx-burst-limit "$TX_BURST_LIMIT" \
-    --max-datagrams 0 \
-    ${tx_power_args[@]+"${tx_power_args[@]}"} \
-    --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-    ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
-    --wfb-link-id "$LINK_ID" \
-    --wfb-radio-port "$L2M_RADIO_PORT" \
-    --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
-    --i-understand-this-transmits \
-    > "$OUT_DIR/radio-run.log" 2>&1 &
+  case "$RADIO_COMMAND" in
+    service)
+      if [[ "$TX_POWER_MODE" != "current-default" ]]; then
+        die "RADIO_COMMAND=service does not support TX_POWER_MODE=$TX_POWER_MODE yet; use RADIO_COMMAND=diagnostic for tx-power experiments"
+      fi
+      cargo run -p wfb-radio-service -- \
+        --json \
+        --report "$OUT_DIR/radio-run.json" \
+        --config "$RADIO_RUN_CONFIG" \
+        --firmware "$FIRMWARE" \
+        --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
+        --bind "$RADIO_BIND" \
+        --ready-file "$OUT_DIR/radio-ready.json" \
+        --health-file "$OUT_DIR/radio-health.json" \
+        --duration-ms "$RADIO_RUN_DURATION_MS" \
+        --rx-timeout-ms "$RX_TIMEOUT_MS" \
+        --tx-burst-limit "$TX_BURST_LIMIT" \
+        --max-datagrams 0 \
+        --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+        ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
+        --wfb-link-id "$LINK_ID" \
+        --wfb-radio-port "$L2M_RADIO_PORT" \
+        --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
+        --i-understand-this-transmits \
+        > "$OUT_DIR/radio-run.log" 2>&1 &
+      ;;
+    diagnostic)
+      cargo run -p wfb-radio-diag -- --json \
+        --report "$OUT_DIR/radio-run.json" \
+        radio-run \
+        --config "$RADIO_RUN_CONFIG" \
+        --firmware "$FIRMWARE" \
+        --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
+        --bind "$RADIO_BIND" \
+        --ready-file "$OUT_DIR/radio-ready.json" \
+        --health-file "$OUT_DIR/radio-health.json" \
+        --duration-ms "$RADIO_RUN_DURATION_MS" \
+        --rx-timeout-ms "$RX_TIMEOUT_MS" \
+        --tx-burst-limit "$TX_BURST_LIMIT" \
+        --max-datagrams 0 \
+        ${tx_power_args[@]+"${tx_power_args[@]}"} \
+        --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+        ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
+        --wfb-link-id "$LINK_ID" \
+        --wfb-radio-port "$L2M_RADIO_PORT" \
+        --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
+        --i-understand-this-transmits \
+        > "$OUT_DIR/radio-run.log" 2>&1 &
+      ;;
+  esac
   RADIO_PID=$!
 }
 
@@ -462,6 +499,7 @@ summary = {
         "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
     },
     "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
+    "radio_command": os.environ.get("RADIO_COMMAND"),
     "radio_result": report.get("result"),
     "service_health": health,
     "stop_reason": report.get("stop_reason"),
@@ -1033,6 +1071,7 @@ summary = {
         "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
     },
     "radio_result": report.get("result"),
+    "radio_command": os.environ.get("RADIO_COMMAND"),
     "service_health": health,
     "stop_reason": report.get("stop_reason"),
     "tx": tx,

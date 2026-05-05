@@ -22,10 +22,10 @@ use radio_core::{
     build_tx_packet, frame_type, list_usb_devices, parse_rx_packet,
     rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
     submit_tx_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
-    FirmwareImage, FrameType, InterfaceInfo, ParsedRxPacket, RealtekTablePlan,
-    Rtl8812auRegisterAccess, Rtl8812auRegisterError, Rtl8812auTxSubmitError, RxFrame,
-    RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints,
-    UsbError,
+    FirmwareImage, FrameType, InterfaceInfo, ParsedRxPacket, RealtekTableActionKind,
+    RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
+    Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
+    UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 use wfb_bridge::{
@@ -2183,17 +2183,3372 @@ pub fn run_production_runtime_flow(
         return ProductionRuntimeFlowReport::not_started(&config, error);
     }
 
-    production_runtime_report_with_health(
-        &config,
-        ProductionRuntimeFlowReport::not_started(
-            &config,
-            RuntimeRadioError::new(
-                "production_runtime_flow_not_implemented",
-                "production runtime flow execution has not moved from the diagnostic adapter yet",
+    let mut session = match RuntimeRadioSession::open(config.usb.to_runtime_open_config()) {
+        Ok(session) => session,
+        Err(error) => {
+            return production_runtime_report_with_health(
+                &config,
+                ProductionRuntimeFlowReport::not_started(
+                    &config,
+                    RuntimeRadioError::new(error.code, error.message),
+                ),
+                ProductionRuntimeServiceLifecycle::ExitedFail,
+            )
+        }
+    };
+    let init_inputs = inputs
+        .rtl8812au_init
+        .clone()
+        .expect("validated production runtime inputs include init assets");
+    let mut init_state =
+        Rtl8812auProductionInitState::new(init_inputs, config.channel, config.bandwidth);
+
+    run_production_runtime_flow_with_session(config, inputs, &mut session, |session, phase| {
+        run_rtl8812au_production_init_phase(session, phase, &mut init_state)
+    })
+}
+
+struct Rtl8812auProductionInitState {
+    inputs: ProductionRuntimeRtl8812auInitInputs,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    firmware_payload_offset: usize,
+    firmware_signature: Option<u16>,
+    firmware_payload_bytes: Vec<u8>,
+    llt_entries_written: u64,
+    queue_layout: Option<ProductionQueueLayout>,
+    phy_writes_applied: usize,
+    agc_writes_applied: usize,
+    radioa_writes_applied: usize,
+    radiob_writes_applied: usize,
+    table_delays_applied: usize,
+}
+
+impl Rtl8812auProductionInitState {
+    fn new(
+        inputs: ProductionRuntimeRtl8812auInitInputs,
+        channel: Channel,
+        bandwidth: Bandwidth,
+    ) -> Self {
+        let (firmware_payload_offset, firmware_signature, firmware_payload_bytes) = {
+            let payload = inputs.firmware_image.realtek_download_payload();
+            (payload.offset, payload.signature, payload.bytes.to_vec())
+        };
+        Self {
+            inputs,
+            channel,
+            bandwidth,
+            firmware_payload_offset,
+            firmware_signature,
+            firmware_payload_bytes,
+            llt_entries_written: 0,
+            queue_layout: None,
+            phy_writes_applied: 0,
+            agc_writes_applied: 0,
+            radioa_writes_applied: 0,
+            radiob_writes_applied: 0,
+            table_delays_applied: 0,
+        }
+    }
+}
+
+fn run_rtl8812au_production_init_phase<T>(
+    session: &mut RuntimeRadioSession<T>,
+    phase: Rtl8812auInitPhase,
+    state: &mut Rtl8812auProductionInitState,
+) -> Result<RuntimeSameSessionInitPhaseSummary, RuntimeSameSessionInitPhaseFailure>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers =
+        Rtl8812auRegisterAccess::new(&session.transport).with_timeout(state.inputs.init_timeout);
+    let before = session.counters;
+
+    let result = match phase {
+        Rtl8812auInitPhase::PowerOn => production_power_on_sequence(
+            &registers,
+            &mut session.counters,
+            state.inputs.init_timeout,
+        )
+        .map(|writes| (format!("completed {writes} power-on/RF-reset writes"), Some(writes))),
+        Rtl8812auInitPhase::Firmware => production_firmware_sequence(
+            &registers,
+            &mut session.counters,
+            &state.firmware_payload_bytes,
+            state.inputs.init_timeout,
+        )
+        .map(|stats| {
+            (
+                format!(
+                    "downloaded {} payload bytes from offset {} signature {} in {} control writes; checksum ready after {} polls, firmware ready after {} polls",
+                    stats.bytes_written,
+                    state.firmware_payload_offset,
+                    state
+                        .firmware_signature
+                        .map(|value| format_register_value(value, 4))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    stats.control_writes,
+                    stats.checksum_poll_attempts,
+                    stats.ready_poll_attempts
+                ),
+                Some(usize::try_from(stats.control_writes).unwrap_or(usize::MAX)),
+            )
+        }),
+        Rtl8812auInitPhase::Llt => production_llt_sequence(
+            &registers,
+            &mut session.counters,
+            state.inputs.init_timeout,
+        )
+        .map(|entries| {
+            state.llt_entries_written = entries;
+            (
+                format!("wrote {entries} LLT entries"),
+                Some(usize::try_from(entries).unwrap_or(usize::MAX)),
+            )
+        }),
+        Rtl8812auInitPhase::MacTable => {
+            production_apply_mac_table_plan(&registers, &mut session.counters, &state.inputs.mac_plan)
+                .map(|writes| {
+                    (
+                        format!("applied {writes} generated MAC register writes"),
+                        Some(writes),
+                    )
+                })
+        }
+        Rtl8812auInitPhase::QueueDma => {
+            match production_queue_layout_from_endpoints(&session.endpoints) {
+                Ok(layout) => {
+                    state.queue_layout = Some(layout);
+                    production_queue_dma_sequence(&registers, &mut session.counters, layout).map(
+                        |writes| {
+                            (
+                                format!(
+                                    "programmed queue/DMA layout for {} bulk OUT endpoints (HPQ={}, LPQ={}, NPQ={}, PUBQ={})",
+                                    layout.bulk_out_endpoint_count,
+                                    layout.hpq,
+                                    layout.lpq,
+                                    layout.npq,
+                                    layout.pubq
+                                ),
+                                Some(writes),
+                            )
+                        },
+                    )
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Rtl8812auInitPhase::Mac => {
+            production_mac_sequence(&registers, &mut session.counters).map(|writes| {
+                (
+                    format!("completed {writes} MAC/WMAC setup writes"),
+                    Some(writes),
+                )
+            })
+        }
+        Rtl8812auInitPhase::MacAddr => {
+            production_program_efuse_macid(&registers, &mut session.counters).map(|detail| (detail, None))
+        }
+        Rtl8812auInitPhase::Bb => {
+            production_bb_sequence(&registers, &mut session.counters, state).map(|writes| {
+                (
+                    format!(
+                        "applied {} PHY writes, {} AGC writes, and {} delays",
+                        state.phy_writes_applied, state.agc_writes_applied, state.table_delays_applied
+                    ),
+                    Some(writes),
+                )
+            })
+        }
+        Rtl8812auInitPhase::Rf => {
+            production_rf_sequence(&registers, &mut session.counters, state).map(|writes| {
+                (
+                    format!(
+                        "applied {} radioA writes, {} radioB writes",
+                        state.radioa_writes_applied, state.radiob_writes_applied
+                    ),
+                    Some(writes),
+                )
+            })
+        }
+        Rtl8812auInitPhase::Channel => production_channel_sequence(
+            &registers,
+            &mut session.counters,
+            state.channel,
+            state.bandwidth,
+            state.inputs.rfe_type,
+            &state.inputs.radioa_plan,
+            &state.inputs.radiob_plan,
+        )
+        .map(|writes| {
+            (
+                format!(
+                    "programmed channel {} ({} MHz, {} MHz bandwidth, RFE type {}) in {writes} writes",
+                    state.channel.number,
+                    state.channel.frequency_mhz,
+                    state.bandwidth.mhz(),
+                    format_register_value(state.inputs.rfe_type, 2)
+                ),
+                Some(writes),
+            )
+        }),
+        Rtl8812auInitPhase::TxSchedulerTail => {
+            run_rtl8812au_tx_scheduler_tail(&registers, &mut session.counters).map(|execution| {
+                (
+                    format!(
+                        "applied {} late Linux USB TX scheduler writes",
+                        execution.register_writes
+                    ),
+                    Some(execution.register_writes),
+                )
+            })
+        }
+        Rtl8812auInitPhase::RfCalibrationBeforeChannel
+        | Rtl8812auInitPhase::RfCalibrationAfterChannel
+        | Rtl8812auInitPhase::RfCalibrationBeforeTx => Ok((
+            "skipped diagnostic-only RF calibration probe in direct production runtime path"
+                .to_string(),
+            Some(0),
+        )),
+    };
+
+    match result {
+        Ok((detail, Some(writes))) => {
+            Ok(RuntimeSameSessionInitPhaseSummary::completed_with_writes(
+                phase,
+                detail,
+                writes,
+                before,
+                session.counters,
+            ))
+        }
+        Ok((detail, None)) => Ok(RuntimeSameSessionInitPhaseSummary::completed(
+            phase,
+            detail,
+            before,
+            session.counters,
+        )),
+        Err(error) => Err(RuntimeSameSessionInitPhaseFailure::new(
+            RuntimeSameSessionInitPhaseSummary::blocked(
+                phase,
+                error.message.clone(),
+                before,
+                session.counters,
             ),
+            error,
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProductionFirmwareStats {
+    bytes_written: u64,
+    control_writes: u64,
+    checksum_poll_attempts: u32,
+    ready_poll_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProductionQueueLayout {
+    bulk_out_endpoint_count: usize,
+    hpq: u8,
+    lpq: u8,
+    npq: u8,
+    pubq: u8,
+    rqpn_npq: u8,
+    rqpn: u32,
+    queue_map: u16,
+}
+
+fn production_readback_error(
+    register_name: &'static str,
+    mask: impl Into<u64>,
+    expected: impl Into<u64>,
+    actual: impl Into<u64>,
+    digits: usize,
+) -> RuntimeRadioError {
+    RuntimeRadioError::new(
+        "register_readback_mismatch",
+        format!(
+            "{register_name} expected mask {} to equal {}, got {}",
+            format_register_value(mask, digits),
+            format_register_value(expected, digits),
+            format_register_value(actual, digits)
         ),
-        ProductionRuntimeServiceLifecycle::ExitedFail,
     )
+}
+
+fn production_rmw8<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u8,
+    value: u8,
+    verify_readback: bool,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = read8_with_counter(registers, counters, address, register_name, phase)?;
+    let written = (before & !mask) | (value & mask);
+    write8_with_counter(registers, counters, address, written, register_name, phase)?;
+    if verify_readback {
+        let after = read8_with_counter(registers, counters, address, register_name, phase)?;
+        let expected = value & mask;
+        if (after & mask) != expected {
+            return Err(production_readback_error(
+                register_name,
+                mask,
+                expected,
+                after & mask,
+                2,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn production_rmw8_preserve<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    preserve_mask: u8,
+    value_mask: u8,
+    value: u8,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = read8_with_counter(registers, counters, address, register_name, phase)?;
+    let written = (before & preserve_mask) | (value & value_mask);
+    write8_with_counter(registers, counters, address, written, register_name, phase)?;
+    let after = read8_with_counter(registers, counters, address, register_name, phase)?;
+    let expected = value & value_mask;
+    if (after & value_mask) != expected {
+        return Err(production_readback_error(
+            register_name,
+            value_mask,
+            expected,
+            after & value_mask,
+            2,
+        ));
+    }
+    Ok(())
+}
+
+fn production_rmw16_preserve<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    preserve_mask: u16,
+    value_mask: u16,
+    value: u16,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = read16_with_counter(registers, counters, address, register_name, phase)?;
+    let written = (before & preserve_mask) | (value & value_mask);
+    write16_with_counter(registers, counters, address, written, register_name, phase)?;
+    let after = read16_with_counter(registers, counters, address, register_name, phase)?;
+    let expected = value & value_mask;
+    if (after & value_mask) != expected {
+        return Err(production_readback_error(
+            register_name,
+            value_mask,
+            expected,
+            after & value_mask,
+            4,
+        ));
+    }
+    Ok(())
+}
+
+fn production_rmw32_preserve<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    preserve_mask: u32,
+    value_mask: u32,
+    value: u32,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = read32_with_counter(registers, counters, address, register_name, phase)?;
+    let written = (before & preserve_mask) | (value & value_mask);
+    write32_with_counter(registers, counters, address, written, register_name, phase)?;
+    let after = read32_with_counter(registers, counters, address, register_name, phase)?;
+    let expected = value & value_mask;
+    if (after & value_mask) != expected {
+        return Err(production_readback_error(
+            register_name,
+            value_mask,
+            expected,
+            after & value_mask,
+            8,
+        ));
+    }
+    Ok(())
+}
+
+fn production_write8_verify<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    value: u8,
+    verify_mask: u8,
+    verify_value: u8,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write8_with_counter(registers, counters, address, value, register_name, phase)?;
+    if verify_mask != 0 {
+        let after = read8_with_counter(registers, counters, address, register_name, phase)?;
+        if (after & verify_mask) != (verify_value & verify_mask) {
+            return Err(production_readback_error(
+                register_name,
+                verify_mask,
+                verify_value & verify_mask,
+                after & verify_mask,
+                2,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn production_write16_verify<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    value: u16,
+    verify_mask: u16,
+    verify_value: u16,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write16_with_counter(registers, counters, address, value, register_name, phase)?;
+    if verify_mask != 0 {
+        let after = read16_with_counter(registers, counters, address, register_name, phase)?;
+        if (after & verify_mask) != (verify_value & verify_mask) {
+            return Err(production_readback_error(
+                register_name,
+                verify_mask,
+                verify_value & verify_mask,
+                after & verify_mask,
+                4,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn production_write32_verify<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    value: u32,
+    verify_mask: u32,
+    verify_value: u32,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    write32_with_counter(registers, counters, address, value, register_name, phase)?;
+    if verify_mask != 0 {
+        let after = read32_with_counter(registers, counters, address, register_name, phase)?;
+        if (after & verify_mask) != (verify_value & verify_mask) {
+            return Err(production_readback_error(
+                register_name,
+                verify_mask,
+                verify_value & verify_mask,
+                after & verify_mask,
+                8,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn production_poll8<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u8,
+    expected: u8,
+    attempts: u32,
+    delay: Duration,
+) -> Result<u32, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut last = 0u8;
+    for attempt in 1..=attempts {
+        last = read8_with_counter(registers, counters, address, register_name, "poll8")?;
+        if (last & mask) == (expected & mask) {
+            return Ok(attempt);
+        }
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+    }
+    Err(RuntimeRadioError::new(
+        "register_poll_timeout",
+        format!(
+            "{register_name} expected mask {} to equal {}, last value {} after {attempts} attempts",
+            format_register_value(mask, 2),
+            format_register_value(expected & mask, 2),
+            format_register_value(last, 2)
+        ),
+    ))
+}
+
+fn production_poll32_min<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    mask: u32,
+    expected: u32,
+    min_attempts: u32,
+    timeout: Duration,
+    delay: Duration,
+) -> Result<(u32, u32), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let started = std::time::Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        attempts = attempts.saturating_add(1);
+        let value = read32_with_counter(registers, counters, address, register_name, "poll32")?;
+        if (value & mask) == (expected & mask) {
+            return Ok((attempts, value));
+        }
+        if started.elapsed() >= timeout && attempts >= min_attempts {
+            return Err(RuntimeRadioError::new(
+                "register_poll_timeout",
+                format!(
+                    "{register_name} expected mask {} to equal {}, last value {} after {attempts} attempts",
+                    format_register_value(mask, 8),
+                    format_register_value(expected & mask, 8),
+                    format_register_value(value, 8)
+                ),
+            ));
+        }
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+    }
+}
+
+fn production_power_on_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    _timeout: Duration,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before = counters.usb_control_writes;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_APS_FSMCO + 1",
+        REG_APS_FSMCO_PLUS_1,
+        BIT2,
+        0,
+        true,
+        "power-on",
+    )?;
+    production_poll8(
+        registers,
+        counters,
+        "REG_APS_FSMCO + 2",
+        REG_APS_FSMCO_PLUS_2,
+        BIT1,
+        BIT1,
+        200,
+        Duration::from_micros(10),
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_APS_FSMCO + 1",
+        REG_APS_FSMCO_PLUS_1,
+        BIT3,
+        0,
+        true,
+        "power-on",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_APS_FSMCO + 1",
+        REG_APS_FSMCO_PLUS_1,
+        BIT0,
+        BIT0,
+        false,
+        "power-on",
+    )?;
+    production_poll8(
+        registers,
+        counters,
+        "REG_APS_FSMCO + 1",
+        REG_APS_FSMCO_PLUS_1,
+        BIT0,
+        0,
+        200,
+        Duration::from_micros(10),
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_AFE_XTAL_CTRL",
+        REG_AFE_XTAL_CTRL,
+        BIT1,
+        0,
+        true,
+        "power-on",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_AFE_PLL_CTRL",
+        REG_AFE_PLL_CTRL,
+        BIT3,
+        0,
+        true,
+        "power-on",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_CR",
+        REG_CR,
+        0,
+        u16::MAX,
+        0,
+        "power-on",
+    )?;
+    let cr = read16_with_counter(registers, counters, REG_CR, "REG_CR", "power-on")?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_CR",
+        REG_CR,
+        cr | CR_ENABLE_BITS,
+        CR_ENABLE_BITS,
+        CR_ENABLE_BITS,
+        "power-on",
+    )?;
+    for (register_name, address, value) in [
+        ("REG_RF_CTRL", REG_RF_CTRL, 0x05),
+        ("REG_RF_CTRL", REG_RF_CTRL, 0x07),
+        ("REG_RF_B_CTRL_8812", REG_RF_B_CTRL_8812, 0x05),
+        ("REG_RF_B_CTRL_8812", REG_RF_B_CTRL_8812, 0x07),
+    ] {
+        write8_with_counter(
+            registers,
+            counters,
+            address,
+            value,
+            register_name,
+            "power-on",
+        )?;
+    }
+    Ok(usize::try_from(counters.usb_control_writes.saturating_sub(before)).unwrap_or(usize::MAX))
+}
+
+fn production_firmware_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    firmware_payload: &[u8],
+    _timeout: Duration,
+) -> Result<ProductionFirmwareStats, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_writes = counters.usb_control_writes;
+    let mut bytes_written = 0u64;
+
+    production_firmware_preflight_reset_loaded_code(registers, counters)?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_MCUFWDL",
+        REG_MCUFWDL,
+        MCUFWDL_EN,
+        MCUFWDL_EN,
+        true,
+        "firmware-download-enable",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_MCUFWDL + 2",
+        REG_MCUFWDL_PLUS_2,
+        BIT3,
+        0,
+        true,
+        "firmware-download-enable",
+    )?;
+
+    let mut checksum_poll_attempts = 0;
+    let mut download_result = Err(RuntimeRadioError::new(
+        "firmware_download_not_started",
+        "firmware download loop did not run",
+    ));
+    for attempt in 1..=3 {
+        production_rmw8(
+            registers,
+            counters,
+            "REG_MCUFWDL",
+            REG_MCUFWDL,
+            FWDL_CHKSUM_RPT_U8,
+            FWDL_CHKSUM_RPT_U8,
+            false,
+            "firmware-download",
+        )?;
+        bytes_written = bytes_written.saturating_add(production_write_firmware_image(
+            registers,
+            counters,
+            firmware_payload,
+            attempt,
+        )?);
+        match production_poll32_min(
+            registers,
+            counters,
+            "REG_MCUFWDL",
+            REG_MCUFWDL,
+            FWDL_CHKSUM_RPT_U32,
+            FWDL_CHKSUM_RPT_U32,
+            5,
+            Duration::from_millis(50),
+            Duration::from_micros(1000),
+        ) {
+            Ok((attempts, _value)) => {
+                checksum_poll_attempts = attempts;
+                download_result = Ok(());
+                break;
+            }
+            Err(error) => {
+                download_result = Err(error);
+            }
+        }
+    }
+
+    let disable_result = production_rmw8(
+        registers,
+        counters,
+        "REG_MCUFWDL",
+        REG_MCUFWDL,
+        MCUFWDL_EN,
+        0,
+        true,
+        "firmware-download-disable",
+    );
+    download_result?;
+    disable_result?;
+
+    let before = read32_with_counter(
+        registers,
+        counters,
+        REG_MCUFWDL,
+        "REG_MCUFWDL",
+        "firmware-ready",
+    )?;
+    let written = (before | MCUFWDL_RDY) & !WINTINI_RDY;
+    production_write32_verify(
+        registers,
+        counters,
+        "REG_MCUFWDL",
+        REG_MCUFWDL,
+        written,
+        0,
+        0,
+        "firmware-ready",
+    )?;
+    production_firmware_8051_reset_8812(registers, counters)?;
+    let (ready_poll_attempts, _value) = production_poll32_min(
+        registers,
+        counters,
+        "REG_MCUFWDL",
+        REG_MCUFWDL,
+        WINTINI_RDY,
+        WINTINI_RDY,
+        10,
+        Duration::from_millis(200),
+        Duration::from_micros(1000),
+    )?;
+
+    Ok(ProductionFirmwareStats {
+        bytes_written,
+        control_writes: counters.usb_control_writes.saturating_sub(before_writes),
+        checksum_poll_attempts,
+        ready_poll_attempts,
+    })
+}
+
+fn production_firmware_preflight_reset_loaded_code<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let value = read8_with_counter(
+        registers,
+        counters,
+        REG_MCUFWDL,
+        "REG_MCUFWDL",
+        "firmware-preflight",
+    )?;
+    if value & RAM_DL_SEL == 0 {
+        return Ok(());
+    }
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_MCUFWDL",
+        REG_MCUFWDL,
+        0,
+        RAM_DL_SEL,
+        0,
+        "firmware-preflight",
+    )?;
+    production_firmware_8051_reset_8812(registers, counters)
+}
+
+fn production_write_firmware_image<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    firmware_payload: &[u8],
+    _attempt: u32,
+) -> Result<u64, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut bytes_written = 0u64;
+    for (page, chunk) in firmware_payload.chunks(MAX_DLFW_PAGE_SIZE).enumerate() {
+        production_rmw8(
+            registers,
+            counters,
+            "REG_MCUFWDL + 2",
+            REG_MCUFWDL_PLUS_2,
+            0x07,
+            (page as u8) & 0x07,
+            true,
+            "firmware-download",
+        )?;
+        bytes_written = bytes_written.saturating_add(production_write_firmware_page(
+            registers, counters, page, chunk,
+        )?);
+    }
+    Ok(bytes_written)
+}
+
+fn production_write_firmware_page<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    _page: usize,
+    bytes: &[u8],
+) -> Result<u64, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut bytes_written = 0u64;
+    let full_block_len = bytes.len() / MAX_REG_BLOCK_SIZE * MAX_REG_BLOCK_SIZE;
+    for (index, block) in bytes[..full_block_len]
+        .chunks(MAX_REG_BLOCK_SIZE)
+        .enumerate()
+    {
+        let page_offset = index * MAX_REG_BLOCK_SIZE;
+        production_firmware_write_data(registers, counters, page_offset, block)?;
+        bytes_written = bytes_written.saturating_add(block.len() as u64);
+    }
+
+    let remainder = &bytes[full_block_len..];
+    let remainder_block_len =
+        remainder.len() / FIRMWARE_REMAINDER_BLOCK_SIZE * FIRMWARE_REMAINDER_BLOCK_SIZE;
+    for (index, block) in remainder[..remainder_block_len]
+        .chunks(FIRMWARE_REMAINDER_BLOCK_SIZE)
+        .enumerate()
+    {
+        let page_offset = full_block_len + index * FIRMWARE_REMAINDER_BLOCK_SIZE;
+        production_firmware_write_data(registers, counters, page_offset, block)?;
+        bytes_written = bytes_written.saturating_add(block.len() as u64);
+    }
+    for (index, byte) in remainder[remainder_block_len..].iter().enumerate() {
+        let page_offset = full_block_len + remainder_block_len + index;
+        production_firmware_write_data(
+            registers,
+            counters,
+            page_offset,
+            std::slice::from_ref(byte),
+        )?;
+        bytes_written = bytes_written.saturating_add(1);
+    }
+    Ok(bytes_written)
+}
+
+fn production_firmware_write_data<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    page_offset: usize,
+    data: &[u8],
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let address = production_firmware_page_address(page_offset)?;
+    if data.len() == 1 {
+        write8_with_counter(
+            registers,
+            counters,
+            address,
+            data[0],
+            "FW_START_ADDRESS + page_offset",
+            "firmware-download",
+        )
+    } else {
+        registers.write_block(address, data).map_err(|error| {
+            RuntimeRadioError::new(
+                "firmware_write_failed",
+                format!(
+                    "firmware write offset={page_offset} len={} addr={} failed: {error}",
+                    data.len(),
+                    format_register_address(address)
+                ),
+            )
+        })?;
+        counters.usb_control_writes = counters.usb_control_writes.saturating_add(1);
+        Ok(())
+    }
+}
+
+fn production_firmware_page_address(page_offset: usize) -> Result<u16, RuntimeRadioError> {
+    let offset = u16::try_from(page_offset).map_err(|_| {
+        RuntimeRadioError::new(
+            "firmware_offset_too_large",
+            format!("firmware page offset {page_offset} does not fit in a register address"),
+        )
+    })?;
+    FW_START_ADDRESS.checked_add(offset).ok_or_else(|| {
+        RuntimeRadioError::new(
+            "firmware_address_overflow",
+            format!(
+                "firmware address overflow: start={} offset={page_offset}",
+                format_register_address(FW_START_ADDRESS)
+            ),
+        )
+    })
+}
+
+fn production_firmware_8051_reset_8812<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_rmw8(
+        registers,
+        counters,
+        "REG_RSV_CTRL",
+        REG_RSV_CTRL,
+        BIT1,
+        0,
+        true,
+        "firmware-8051-reset",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_RSV_CTRL + 1",
+        REG_RSV_CTRL + 1,
+        BIT3,
+        0,
+        true,
+        "firmware-8051-reset",
+    )?;
+    let sys_func = read8_with_counter(
+        registers,
+        counters,
+        REG_SYS_FUNC_EN_PLUS_1,
+        "REG_SYS_FUNC_EN + 1",
+        "firmware-8051-reset",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_SYS_FUNC_EN + 1",
+        REG_SYS_FUNC_EN_PLUS_1,
+        sys_func & !BIT2,
+        BIT2,
+        0,
+        "firmware-8051-reset",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_RSV_CTRL",
+        REG_RSV_CTRL,
+        BIT1,
+        0,
+        true,
+        "firmware-8051-reset",
+    )?;
+    production_rmw8(
+        registers,
+        counters,
+        "REG_RSV_CTRL + 1",
+        REG_RSV_CTRL + 1,
+        BIT3,
+        BIT3,
+        true,
+        "firmware-8051-reset",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_SYS_FUNC_EN + 1",
+        REG_SYS_FUNC_EN_PLUS_1,
+        sys_func | BIT2,
+        BIT2,
+        BIT2,
+        "firmware-8051-reset",
+    )
+}
+
+fn production_llt_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    _timeout: Duration,
+) -> Result<u64, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_cr(registers, counters, "LLT programming")?;
+    let mut entries = 0u64;
+    for address in 0..(TX_PAGE_BOUNDARY_8812 - 1) {
+        production_llt_write(registers, counters, address, address + 1)?;
+        entries = entries.saturating_add(1);
+    }
+    production_llt_write(registers, counters, TX_PAGE_BOUNDARY_8812 - 1, 0xff)?;
+    entries = entries.saturating_add(1);
+    for address in TX_PAGE_BOUNDARY_8812..LAST_ENTRY_OF_TX_PKT_BUFFER_8812 {
+        production_llt_write(registers, counters, address, address + 1)?;
+        entries = entries.saturating_add(1);
+    }
+    production_llt_write(
+        registers,
+        counters,
+        LAST_ENTRY_OF_TX_PKT_BUFFER_8812,
+        TX_PAGE_BOUNDARY_8812,
+    )?;
+    entries = entries.saturating_add(1);
+    Ok(entries)
+}
+
+fn production_llt_write<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    llt_address: u8,
+    llt_data: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let written = encode_llt_write(llt_address, llt_data);
+    write32_with_counter(
+        registers,
+        counters,
+        REG_LLT_INIT,
+        written,
+        "REG_LLT_INIT",
+        "llt",
+    )?;
+    let mut last = 0u32;
+    for _attempt in 1..=25 {
+        last = read32_with_counter(registers, counters, REG_LLT_INIT, "REG_LLT_INIT", "llt")?;
+        if llt_op_value(last) == LLT_NO_ACTIVE {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_micros(10));
+    }
+    Err(RuntimeRadioError::new(
+        "llt_poll_timeout",
+        format!(
+            "LLT write addr=0x{llt_address:02x} data=0x{llt_data:02x} did not become idle, last {}",
+            format_register_value(last, 8)
+        ),
+    ))
+}
+
+fn encode_llt_write(address: u8, data: u8) -> u32 {
+    (u32::from(address) << 8) | u32::from(data) | (LLT_WRITE_ACCESS << LLT_OP_SHIFT)
+}
+
+fn llt_op_value(value: u32) -> u32 {
+    (value >> LLT_OP_SHIFT) & LLT_OP_MASK
+}
+
+fn production_apply_mac_table_plan<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    plan: &RealtekTablePlan,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    if plan.kind != RealtekTableKind::Mac {
+        return Err(RuntimeRadioError::new(
+            "invalid_mac_table_kind",
+            format!("{} has non-MAC table kind {:?}", plan.array_name, plan.kind),
+        ));
+    }
+    let mut writes = 0usize;
+    for action in &plan.actions {
+        match action.kind {
+            RealtekTableActionKind::Delay => {
+                if let Some(delay_us) = action.delay_us {
+                    if delay_us > 0 {
+                        thread::sleep(Duration::from_micros(delay_us));
+                    }
+                }
+            }
+            RealtekTableActionKind::Write => {
+                let address = u16::try_from(action.address).map_err(|_| {
+                    RuntimeRadioError::new(
+                        "mac_table_address_out_of_range",
+                        format!(
+                            "{} pair {} address {} does not fit a USB register address",
+                            plan.array_name, action.pair_index, action.address_hex
+                        ),
+                    )
+                })?;
+                let data = action.data.ok_or_else(|| {
+                    RuntimeRadioError::new(
+                        "mac_table_write_missing_data",
+                        format!(
+                            "{} pair {} is a write action with no data",
+                            plan.array_name, action.pair_index
+                        ),
+                    )
+                })?;
+                let value = u8::try_from(data).map_err(|_| {
+                    RuntimeRadioError::new(
+                        "mac_table_write_data_out_of_range",
+                        format!(
+                            "{} pair {} data {} does not fit an 8-bit MAC table write",
+                            plan.array_name,
+                            action.pair_index,
+                            action.data_hex.as_deref().unwrap_or("<missing>")
+                        ),
+                    )
+                })?;
+                write8_with_counter(
+                    registers,
+                    counters,
+                    address,
+                    value,
+                    "array_mp_8812a_mac_reg",
+                    "mac-table",
+                )?;
+                writes += 1;
+            }
+        }
+    }
+    Ok(writes)
+}
+
+fn production_queue_layout_from_endpoints(
+    endpoints: &UsbEndpoints,
+) -> Result<ProductionQueueLayout, RuntimeRadioError> {
+    production_queue_layout_from_bulk_out_endpoint_count(endpoints.bulk_out_all.len())
+}
+
+fn production_queue_layout_from_bulk_out_endpoint_count(
+    bulk_out_endpoint_count: usize,
+) -> Result<ProductionQueueLayout, RuntimeRadioError> {
+    let (use_hpq, use_lpq, use_npq) = match bulk_out_endpoint_count {
+        2 => (true, false, true),
+        3 | 4 => (true, true, true),
+        other => {
+            return Err(RuntimeRadioError::new(
+                "unsupported_bulk_out_endpoint_count",
+                format!("queue/DMA setup supports 2, 3, or 4 bulk OUT endpoints, found {other}"),
+            ))
+        }
+    };
+    let hpq = if use_hpq { NORMAL_PAGE_NUM_HPQ_8812 } else { 0 };
+    let lpq = if use_lpq { NORMAL_PAGE_NUM_LPQ_8812 } else { 0 };
+    let npq = if use_npq { NORMAL_PAGE_NUM_NPQ_8812 } else { 0 };
+    let pubq = TX_TOTAL_PAGE_NUMBER_8812
+        .checked_sub(hpq)
+        .and_then(|value| value.checked_sub(lpq))
+        .and_then(|value| value.checked_sub(npq))
+        .ok_or_else(|| {
+            RuntimeRadioError::new(
+                "invalid_queue_page_layout",
+                "queue reserved-page layout underflowed public queue pages",
+            )
+        })?;
+    let rqpn_npq = npq;
+    let rqpn = u32::from(hpq) | (u32::from(lpq) << 8) | (u32::from(pubq) << 16) | LD_RQPN;
+    let queue_map = production_queue_map_for_endpoint_count(bulk_out_endpoint_count);
+    Ok(ProductionQueueLayout {
+        bulk_out_endpoint_count,
+        hpq,
+        lpq,
+        npq,
+        pubq,
+        rqpn_npq,
+        rqpn,
+        queue_map,
+    })
+}
+
+fn production_queue_map_for_endpoint_count(bulk_out_endpoint_count: usize) -> u16 {
+    match bulk_out_endpoint_count {
+        2 => production_queue_map(
+            QUEUE_NORMAL,
+            QUEUE_NORMAL,
+            QUEUE_HIGH,
+            QUEUE_HIGH,
+            QUEUE_HIGH,
+            QUEUE_HIGH,
+        ),
+        3 => production_queue_map(
+            QUEUE_LOW,
+            QUEUE_LOW,
+            QUEUE_NORMAL,
+            QUEUE_HIGH,
+            QUEUE_HIGH,
+            QUEUE_HIGH,
+        ),
+        4 => production_queue_map(
+            QUEUE_LOW,
+            QUEUE_LOW,
+            QUEUE_NORMAL,
+            QUEUE_NORMAL,
+            QUEUE_EXTRA,
+            QUEUE_HIGH,
+        ),
+        _ => 0,
+    }
+}
+
+fn production_queue_map(beq: u16, bkq: u16, viq: u16, voq: u16, mgq: u16, hiq: u16) -> u16 {
+    ((hiq & 0x3) << 14)
+        | ((mgq & 0x3) << 12)
+        | ((bkq & 0x3) << 10)
+        | ((beq & 0x3) << 8)
+        | ((viq & 0x3) << 6)
+        | ((voq & 0x3) << 4)
+}
+
+fn production_queue_dma_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    layout: ProductionQueueLayout,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_cr(registers, counters, "queue/DMA programming")?;
+    let before_writes = counters.usb_control_writes;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RQPN_NPQ",
+        REG_RQPN_NPQ,
+        layout.rqpn_npq,
+        u8::MAX,
+        layout.rqpn_npq,
+        "queue-dma",
+    )?;
+    production_write32_verify(
+        registers,
+        counters,
+        "REG_RQPN",
+        REG_RQPN,
+        layout.rqpn,
+        RQPN_PAGE_MASK,
+        layout.rqpn,
+        "queue-dma",
+    )?;
+    for (register_name, address) in [
+        ("REG_BCNQ_BDNY", REG_BCNQ_BDNY),
+        ("REG_MGQ_BDNY", REG_MGQ_BDNY),
+        ("REG_WMAC_LBK_BF_HD", REG_WMAC_LBK_BF_HD),
+        ("REG_TRXFF_BNDY", REG_TRXFF_BNDY),
+        ("REG_TDECTRL + 1", REG_TDECTRL + 1),
+    ] {
+        production_write8_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            TX_PAGE_BOUNDARY_8812,
+            u8::MAX,
+            TX_PAGE_BOUNDARY_8812,
+            "queue-dma",
+        )?;
+    }
+    production_rmw16_preserve(
+        registers,
+        counters,
+        "REG_TRXDMA_CTRL",
+        REG_TRXDMA_CTRL,
+        0x0007,
+        TXDMA_QUEUE_MAP_MASK,
+        layout.queue_map,
+        "queue-dma",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_TRXFF_BNDY + 2",
+        REG_TRXFF_BNDY + 2,
+        RX_DMA_BOUNDARY_8812,
+        u16::MAX,
+        RX_DMA_BOUNDARY_8812,
+        "queue-dma",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_PBP",
+        REG_PBP,
+        PSTX_PBP_512,
+        u8::MAX,
+        PSTX_PBP_512,
+        "queue-dma",
+    )?;
+    Ok(
+        usize::try_from(counters.usb_control_writes.saturating_sub(before_writes))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn production_preflight_cr<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    label: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let cr = read16_with_counter(registers, counters, REG_CR, "REG_CR", "preflight")?;
+    if (cr & CR_ENABLE_BITS) != CR_ENABLE_BITS {
+        return Err(RuntimeRadioError::new(
+            "mac_not_powered_on",
+            format!(
+                "REG_CR expected block-enable mask {} to be set before {label}, got {}",
+                format_register_value(CR_ENABLE_BITS, 4),
+                format_register_value(cr, 4)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn production_preflight_firmware<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    label: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_cr(registers, counters, label)?;
+    let mcu = read8_with_counter(registers, counters, REG_MCUFWDL, "REG_MCUFWDL", "preflight")?;
+    let firmware_ready_mask = RAM_DL_SEL | BIT6 | BIT1;
+    if (mcu & firmware_ready_mask) != firmware_ready_mask {
+        return Err(RuntimeRadioError::new(
+            "firmware_not_ready",
+            format!(
+                "REG_MCUFWDL expected firmware-ready mask {} before {label}, got {}",
+                format_register_value(firmware_ready_mask, 2),
+                format_register_value(mcu, 2)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn production_mac_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_firmware(registers, counters, "MAC programming")?;
+    let before_writes = counters.usb_control_writes;
+
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RX_DRVINFO_SZ",
+        REG_RX_DRVINFO_SZ,
+        DRVINFO_SZ,
+        u8::MAX,
+        DRVINFO_SZ,
+        "mac",
+    )?;
+    production_rmw32_preserve(
+        registers,
+        counters,
+        "REG_CR",
+        REG_CR,
+        !MASK_NETTYPE,
+        MASK_NETTYPE,
+        NETTYPE_LINK_AP,
+        "mac",
+    )?;
+    production_write32_verify(
+        registers,
+        counters,
+        "REG_RCR",
+        REG_RCR,
+        MAC_RECEIVE_CONFIG,
+        u32::MAX,
+        MAC_RECEIVE_CONFIG,
+        "mac",
+    )?;
+    for (register_name, address) in [("REG_MAR", REG_MAR), ("REG_MAR + 4", REG_MAR + 4)] {
+        production_write32_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            "mac",
+        )?;
+    }
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_RXFLTMAP1",
+        REG_RXFLTMAP1,
+        1 << 10,
+        u16::MAX,
+        1 << 10,
+        "mac",
+    )?;
+    production_rmw32_preserve(
+        registers,
+        counters,
+        "REG_RRSR",
+        REG_RRSR,
+        !RATE_BITMAP_ALL,
+        RATE_BITMAP_ALL,
+        RATE_RRSR_CCK_ONLY_1M,
+        "mac",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_SPEC_SIFS",
+        REG_SPEC_SIFS,
+        0x1010,
+        u16::MAX,
+        0x1010,
+        "mac",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_RETRY_LIMIT",
+        REG_RETRY_LIMIT,
+        RETRY_LIMIT_STA,
+        u16::MAX,
+        RETRY_LIMIT_STA,
+        "mac",
+    )?;
+    for (register_name, address) in [
+        ("REG_SPEC_SIFS", REG_SPEC_SIFS),
+        ("REG_MAC_SPEC_SIFS", REG_MAC_SPEC_SIFS),
+        ("REG_SIFS_CTX", REG_SIFS_CTX),
+        ("REG_SIFS_TRX", REG_SIFS_TRX),
+    ] {
+        production_write16_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            0x100a,
+            u16::MAX,
+            0x100a,
+            "mac",
+        )?;
+    }
+    for (register_name, address, value) in [
+        ("REG_EDCA_BE_PARAM", REG_EDCA_BE_PARAM, 0x005e_a42b),
+        ("REG_EDCA_BK_PARAM", REG_EDCA_BK_PARAM, 0x0000_a44f),
+        ("REG_EDCA_VI_PARAM", REG_EDCA_VI_PARAM, 0x005e_a324),
+        ("REG_EDCA_VO_PARAM", REG_EDCA_VO_PARAM, 0x002f_a226),
+    ] {
+        production_write32_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            value,
+            u32::MAX,
+            value,
+            "mac",
+        )?;
+    }
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_TXPAUSE",
+        REG_TXPAUSE,
+        0,
+        u8::MAX,
+        0,
+        "mac",
+    )?;
+    for (register_name, address) in [
+        ("REG_USTIME_TSF", REG_USTIME_TSF),
+        ("REG_USTIME_EDCA", REG_USTIME_EDCA),
+    ] {
+        production_write8_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            0x50,
+            u8::MAX,
+            0x50,
+            "mac",
+        )?;
+    }
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_FWHW_TXQ_CTRL",
+        REG_FWHW_TXQ_CTRL,
+        !EN_AMPDU_RTY_NEW,
+        EN_AMPDU_RTY_NEW,
+        EN_AMPDU_RTY_NEW,
+        "mac",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_ACKTO",
+        REG_ACKTO,
+        0x80,
+        u8::MAX,
+        0x80,
+        "mac",
+    )?;
+    production_beacon_parameters_sequence(registers, counters)?;
+    production_usb_burst_packet_sequence(registers, counters)?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_HWSEQ_CTRL",
+        REG_HWSEQ_CTRL,
+        0xff,
+        u8::MAX,
+        0xff,
+        "mac",
+    )?;
+    production_write32_verify(
+        registers,
+        counters,
+        "REG_BAR_MODE_CTRL",
+        REG_BAR_MODE_CTRL,
+        BAR_MODE_CTRL_VALUE,
+        BAR_MODE_CTRL_READBACK_MASK,
+        BAR_MODE_CTRL_VALUE,
+        "mac",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_CR",
+        REG_CR,
+        !MAC_TX_RX_ENABLE_MASK,
+        MAC_TX_RX_ENABLE_MASK,
+        MAC_TX_RX_ENABLE_MASK,
+        "mac",
+    )?;
+
+    Ok(
+        usize::try_from(counters.usb_control_writes.saturating_sub(before_writes))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn production_beacon_parameters_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let bcn_ctrl = u16::from(DIS_TSF_UDT) | (u16::from(DIS_TSF_UDT) << 8);
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_BCN_CTRL",
+        REG_BCN_CTRL,
+        bcn_ctrl,
+        u16::MAX,
+        bcn_ctrl,
+        "beacon-parameters",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_TBTT_PROHIBIT",
+        REG_TBTT_PROHIBIT,
+        TBTT_PROHIBIT_SETUP_TIME,
+        u8::MAX,
+        TBTT_PROHIBIT_SETUP_TIME,
+        "beacon-parameters",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_TBTT_PROHIBIT + 1",
+        REG_TBTT_PROHIBIT + 1,
+        (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN & 0x00ff) as u8,
+        u8::MAX,
+        (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN & 0x00ff) as u8,
+        "beacon-parameters",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_TBTT_PROHIBIT + 2",
+        REG_TBTT_PROHIBIT + 2,
+        0xf0,
+        0x0f,
+        (TBTT_PROHIBIT_HOLD_TIME_STOP_BCN >> 8) as u8,
+        "beacon-parameters",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_DRVERLYINT",
+        REG_DRVERLYINT,
+        DRIVER_EARLY_INT_TIME_8812,
+        u8::MAX,
+        DRIVER_EARLY_INT_TIME_8812,
+        "beacon-parameters",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_BCNDMATIM",
+        REG_BCNDMATIM,
+        BCN_DMA_ATIME_INT_TIME_8812,
+        u8::MAX,
+        BCN_DMA_ATIME_INT_TIME_8812,
+        "beacon-parameters",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_BCNTCFG",
+        REG_BCNTCFG,
+        0x4413,
+        u16::MAX,
+        0x4413,
+        "beacon-parameters",
+    )
+}
+
+fn production_usb_burst_packet_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_write8_verify(
+        registers,
+        counters,
+        "0xf050",
+        0xf050,
+        0x01,
+        0,
+        0,
+        "usb-burst",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_RXDMA_STATUS",
+        REG_RXDMA_STATUS,
+        0x7400,
+        0,
+        0,
+        "usb-burst",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RXDMA_STATUS + 1",
+        REG_RXDMA_STATUS + 1,
+        0xf5,
+        0,
+        0,
+        "usb-burst",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_AMPDU_MAX_TIME_8812",
+        REG_AMPDU_MAX_TIME_8812,
+        0x70,
+        u8::MAX,
+        0x70,
+        "usb-burst",
+    )?;
+    production_write32_verify(
+        registers,
+        counters,
+        "REG_AMPDU_MAX_LENGTH_8812",
+        REG_AMPDU_MAX_LENGTH_8812,
+        u32::MAX,
+        u32::MAX,
+        u32::MAX,
+        "usb-burst",
+    )?;
+
+    let speed_value =
+        read8_with_counter(registers, counters, 0x00ff, "USB speed probe", "usb-burst")?;
+    let rxdma_pro = read8_with_counter(
+        registers,
+        counters,
+        REG_RXDMA_PRO_8812,
+        "REG_RXDMA_PRO_8812",
+        "usb-burst",
+    )?;
+    let rxdma_pro_value = if speed_value & BIT7 != 0 {
+        let phy_speed =
+            read8_with_counter(registers, counters, 0xfe17, "USB PHY speed", "usb-burst")?;
+        if ((phy_speed >> 4) & 0x03) == 0 {
+            (rxdma_pro | BIT4 | BIT3 | BIT2 | BIT1) & !BIT5
+        } else {
+            (rxdma_pro | BIT5 | BIT3 | BIT2 | BIT1) & !BIT4
+        }
+    } else {
+        (rxdma_pro | BIT3 | BIT2 | BIT1) & !(BIT5 | BIT4)
+    };
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RXDMA_PRO_8812",
+        REG_RXDMA_PRO_8812,
+        rxdma_pro_value,
+        u8::MAX,
+        rxdma_pro_value,
+        "usb-burst",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_TDECTRL",
+        REG_TDECTRL,
+        0x10,
+        u8::MAX,
+        0x10,
+        "usb-burst",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_HT_SINGLE_AMPDU_8812",
+        REG_HT_SINGLE_AMPDU_8812,
+        !BIT7,
+        BIT7,
+        BIT7,
+        "usb-burst",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RX_PKT_LIMIT",
+        REG_RX_PKT_LIMIT,
+        0x18,
+        u8::MAX,
+        0x18,
+        "usb-burst",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_PIFS",
+        REG_PIFS,
+        0,
+        u8::MAX,
+        0,
+        "usb-burst",
+    )?;
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_MAX_AGGR_NUM",
+        REG_MAX_AGGR_NUM,
+        0x1f1f,
+        u16::MAX,
+        0x1f1f,
+        "usb-burst",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_FWHW_TXQ_CTRL",
+        REG_FWHW_TXQ_CTRL,
+        !EN_AMPDU_RTY_NEW,
+        EN_AMPDU_RTY_NEW,
+        0,
+        "usb-burst",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_RSV_CTRL",
+        REG_RSV_CTRL,
+        !(BIT5 | BIT6),
+        BIT5 | BIT6,
+        BIT5 | BIT6,
+        "usb-burst",
+    )?;
+
+    for (register_name, address, low, high) in [
+        ("REG_ARFR0_8812", REG_ARFR0_8812, 0x0000_0010, 0xffff_f000),
+        ("REG_ARFR1_8812", REG_ARFR1_8812, 0x0000_0010, 0x003f_f000),
+        ("REG_ARFR2_8812", REG_ARFR2_8812, 0x0000_0015, 0x003f_f000),
+        ("REG_ARFR3_8812", REG_ARFR3_8812, 0x0000_0015, 0xffcf_f000),
+    ] {
+        production_write32_verify(
+            registers,
+            counters,
+            register_name,
+            address,
+            low,
+            u32::MAX,
+            low,
+            "arfr-table",
+        )?;
+        production_write32_verify(
+            registers,
+            counters,
+            register_name,
+            address + 4,
+            high,
+            u32::MAX,
+            high,
+            "arfr-table",
+        )?;
+    }
+    Ok(())
+}
+
+fn production_program_efuse_macid<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<String, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    match read_rtl8812au_efuse_mac_address(registers, counters)? {
+        Some(mac) => {
+            let report = program_rtl8812au_local_mac(registers, mac, counters)?;
+            Ok(format!(
+                "programmed REG_MACID from EFUSE MAC {} (was {})",
+                format_mac_address(report.written),
+                format_mac_address(report.before)
+            ))
+        }
+        None => Ok(
+            "EFUSE did not contain a programmed MAC address; REG_MACID left unchanged".to_string(),
+        ),
+    }
+}
+
+fn format_mac_address(mac: [u8; 6]) -> String {
+    mac.iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn production_bb_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    state: &mut Rtl8812auProductionInitState,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_firmware(registers, counters, "BB programming")?;
+    let before_writes = counters.usb_control_writes;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_SYS_FUNC_EN",
+        REG_SYS_FUNC_EN,
+        !FEN_USBA,
+        FEN_USBA,
+        FEN_USBA,
+        "bb",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_SYS_FUNC_EN",
+        REG_SYS_FUNC_EN,
+        !(FEN_USBA | FEN_BB_GLB_RSTN | FEN_BBRSTB),
+        FEN_USBA | FEN_BB_GLB_RSTN | FEN_BBRSTB,
+        FEN_USBA | FEN_BB_GLB_RSTN | FEN_BBRSTB,
+        "bb",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RF_CTRL",
+        REG_RF_CTRL,
+        0x07,
+        u8::MAX,
+        0x07,
+        "bb",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_RF_B_CTRL_8812",
+        REG_RF_B_CTRL_8812,
+        0x07,
+        u8::MAX,
+        0x07,
+        "bb",
+    )?;
+
+    let (phy_writes, phy_delays) =
+        production_run_bb_table_plan(registers, counters, &state.inputs.phy_plan)?;
+    let (agc_writes, agc_delays) =
+        production_run_bb_table_plan(registers, counters, &state.inputs.agc_plan)?;
+    state.phy_writes_applied = phy_writes;
+    state.agc_writes_applied = agc_writes;
+    state.table_delays_applied = state
+        .table_delays_applied
+        .saturating_add(phy_delays)
+        .saturating_add(agc_delays);
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "REG_MAC_PHY_CTRL",
+        REG_MAC_PHY_CTRL,
+        RTL8812_CRYSTAL_CAP_MASK,
+        0x20u32 | (0x20u32 << 6),
+        "bb-crystal-cap",
+    )?;
+    Ok(
+        usize::try_from(counters.usb_control_writes.saturating_sub(before_writes))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn production_run_bb_table_plan<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    plan: &RealtekTablePlan,
+) -> Result<(usize, usize), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut writes = 0usize;
+    let mut delays = 0usize;
+    for action in &plan.actions {
+        match action.kind {
+            RealtekTableActionKind::Delay => {
+                let delay_us = action.delay_us.unwrap_or_default();
+                if delay_us > 0 {
+                    thread::sleep(Duration::from_micros(delay_us));
+                }
+                delays += 1;
+            }
+            RealtekTableActionKind::Write => {
+                let address = u16::try_from(action.address).map_err(|_| {
+                    RuntimeRadioError::new(
+                        "bb_table_address_out_of_range",
+                        format!(
+                            "{} pair {} address {} does not fit a USB register address",
+                            plan.array_name, action.pair_index, action.address_hex
+                        ),
+                    )
+                })?;
+                let bitmask = action.bitmask.unwrap_or(u32::MAX);
+                let data = action.data.ok_or_else(|| {
+                    RuntimeRadioError::new(
+                        "bb_table_write_missing_data",
+                        format!(
+                            "{} pair {} is a write action with no data",
+                            plan.array_name, action.pair_index
+                        ),
+                    )
+                })?;
+                bb_set_bb_reg(
+                    registers,
+                    counters,
+                    address,
+                    bitmask,
+                    data,
+                    "realtek-bb-table",
+                )
+                .map_err(|error| {
+                    RuntimeRadioError::new(
+                        "bb_table_write_failed",
+                        format!(
+                            "{} pair {} write addr={} data={} failed: {}",
+                            plan.array_name,
+                            action.pair_index,
+                            action.address_hex,
+                            action.data_hex.as_deref().unwrap_or("<missing>"),
+                            error.message
+                        ),
+                    )
+                })?;
+                writes += 1;
+                thread::sleep(Duration::from_micros(1));
+            }
+        }
+    }
+    Ok((writes, delays))
+}
+
+fn production_bb_masked_write32<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    register_name: &'static str,
+    address: u16,
+    bitmask: u32,
+    data: u32,
+    phase: &'static str,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    bb_set_bb_reg(registers, counters, address, bitmask, data, register_name)?;
+    if bitmask != 0 {
+        let after = read32_with_counter(registers, counters, address, register_name, phase)?;
+        let expected = (data << bitmask.trailing_zeros()) & bitmask;
+        if (after & bitmask) != expected {
+            return Err(production_readback_error(
+                register_name,
+                bitmask,
+                expected,
+                after & bitmask,
+                8,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn production_rf_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    state: &mut Rtl8812auProductionInitState,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_rf_preflight(registers, counters)?;
+    let before_writes = counters.usb_control_writes;
+    let (radioa_writes, radioa_delays) =
+        production_run_rf_table_plan(registers, counters, &state.inputs.radioa_plan)?;
+    let (radiob_writes, radiob_delays) =
+        production_run_rf_table_plan(registers, counters, &state.inputs.radiob_plan)?;
+    state.radioa_writes_applied = radioa_writes;
+    state.radiob_writes_applied = radiob_writes;
+    state.table_delays_applied = state
+        .table_delays_applied
+        .saturating_add(radioa_delays)
+        .saturating_add(radiob_delays);
+    Ok(
+        usize::try_from(counters.usb_control_writes.saturating_sub(before_writes))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn production_rf_preflight<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_preflight_firmware(registers, counters, "RF programming")?;
+    let sys = read8_with_counter(
+        registers,
+        counters,
+        REG_SYS_FUNC_EN,
+        "REG_SYS_FUNC_EN",
+        "rf-preflight",
+    )?;
+    let expected = FEN_USBA | FEN_BB_GLB_RSTN | FEN_BBRSTB;
+    if (sys & expected) != expected {
+        return Err(RuntimeRadioError::new(
+            "bb_not_ready",
+            format!(
+                "REG_SYS_FUNC_EN expected BB-ready mask {} before RF programming, got {}",
+                format_register_value(expected, 2),
+                format_register_value(sys, 2)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn production_run_rf_table_plan<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    plan: &RealtekTablePlan,
+) -> Result<(usize, usize), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let path = match plan.kind {
+        RealtekTableKind::RfRadioA => Rtl8812auRfPath::A,
+        RealtekTableKind::RfRadioB => Rtl8812auRfPath::B,
+        other => {
+            return Err(RuntimeRadioError::new(
+                "invalid_rf_table_kind",
+                format!("{} has non-RF table kind {other:?}", plan.array_name),
+            ))
+        }
+    };
+    let mut writes = 0usize;
+    let mut delays = 0usize;
+    for action in &plan.actions {
+        match action.kind {
+            RealtekTableActionKind::Delay => {
+                let delay_us = action.delay_us.unwrap_or_default();
+                if delay_us > 0 {
+                    thread::sleep(Duration::from_micros(delay_us));
+                }
+                delays += 1;
+            }
+            RealtekTableActionKind::Write => {
+                let data = action.data.ok_or_else(|| {
+                    RuntimeRadioError::new(
+                        "rf_table_write_missing_data",
+                        format!(
+                            "{} pair {} is a write action with no data",
+                            plan.array_name, action.pair_index
+                        ),
+                    )
+                })?;
+                rf_serial_write_single_path(registers, path, action.address, data, counters)
+                    .map_err(|error| {
+                        RuntimeRadioError::new(
+                            "rf_table_write_failed",
+                            format!(
+                                "{} pair {} RF addr={} data={} failed: {}",
+                                plan.array_name,
+                                action.pair_index,
+                                action.address_hex,
+                                action.data_hex.as_deref().unwrap_or("<missing>"),
+                                error.message
+                            ),
+                        )
+                    })?;
+                writes += 1;
+                thread::sleep(Duration::from_micros(1));
+            }
+        }
+    }
+    Ok((writes, delays))
+}
+
+fn production_channel_sequence<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    rfe_type: u8,
+    radioa_plan: &RealtekTablePlan,
+    radiob_plan: &RealtekTablePlan,
+) -> Result<usize, RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let before_writes = counters.usb_control_writes;
+    let programming_channel_number = production_channel_programming_number(channel, bandwidth)?;
+    let data_sc = production_data_secondary_channel_setting(channel, bandwidth)?;
+    production_rf_preflight(registers, counters)?;
+    let mut rf_path_a = production_last_rf_register_data(radioa_plan, RF_CHNLBW_JAGUAR)?;
+    let mut rf_path_b = production_last_rf_register_data(radiob_plan, RF_CHNLBW_JAGUAR)?;
+
+    production_switch_wireless_band_8812(registers, counters, channel.band, rfe_type)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rOFDMCCKEN_Jaguar",
+        REG_OFDMCCKEN_JAGUAR,
+        0x3000_0000,
+        0x03,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rFc_area_Jaguar",
+        REG_FC_AREA_JAGUAR,
+        0x1ffe_0000,
+        production_fc_area_data(programming_channel_number),
+        "channel",
+    )?;
+
+    rf_path_a = apply_rf_mask(
+        rf_path_a,
+        RF_CHNLBW_MOD_AG_MASK,
+        production_rf_mod_ag_data(programming_channel_number),
+    );
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_CHNLBW_JAGUAR,
+        rf_path_a,
+        counters,
+    )?;
+    production_fix_spur_8812a(registers, counters, programming_channel_number, bandwidth)?;
+    rf_path_a = apply_rf_mask(
+        rf_path_a,
+        RF_CHNLBW_CHANNEL_MASK,
+        u32::from(programming_channel_number),
+    );
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_CHNLBW_JAGUAR,
+        rf_path_a,
+        counters,
+    )?;
+
+    rf_path_b = apply_rf_mask(
+        rf_path_b,
+        RF_CHNLBW_MOD_AG_MASK,
+        production_rf_mod_ag_data(programming_channel_number),
+    );
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::B,
+        RF_CHNLBW_JAGUAR,
+        rf_path_b,
+        counters,
+    )?;
+    production_fix_spur_8812a(registers, counters, programming_channel_number, bandwidth)?;
+    rf_path_b = apply_rf_mask(
+        rf_path_b,
+        RF_CHNLBW_CHANNEL_MASK,
+        u32::from(programming_channel_number),
+    );
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::B,
+        RF_CHNLBW_JAGUAR,
+        rf_path_b,
+        counters,
+    )?;
+
+    let wmac_bandwidth_bits = match bandwidth {
+        Bandwidth::Mhz20 => 0x0000,
+        Bandwidth::Mhz40 => 0x0080,
+        Bandwidth::Mhz80 => 0x0100,
+    };
+    production_rmw16_preserve(
+        registers,
+        counters,
+        "REG_WMAC_TRXPTCL_CTL",
+        REG_WMAC_TRXPTCL_CTL,
+        0xfe7f,
+        0x0180,
+        wmac_bandwidth_bits,
+        "bandwidth",
+    )?;
+    production_write8_verify(
+        registers,
+        counters,
+        "REG_DATA_SC_8812",
+        REG_DATA_SC_8812,
+        data_sc,
+        u8::MAX,
+        data_sc,
+        "bandwidth",
+    )?;
+    let bw_indication = read8_with_counter(
+        registers,
+        counters,
+        REG_BW_INDICATION_JAGUAR + 3,
+        "rBWIndication_Jaguar + 3",
+        "bandwidth",
+    )?;
+    let rf_mode_data = match bandwidth {
+        Bandwidth::Mhz20 => 0x0030_0200,
+        Bandwidth::Mhz40 => 0x0030_0201,
+        Bandwidth::Mhz80 => 0x0030_0202,
+    };
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rRFMOD_Jaguar",
+        REG_RF_MOD_JAGUAR,
+        0x0030_03c3,
+        rf_mode_data,
+        "bandwidth",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rADC_Buf_Clk_Jaguar",
+        REG_ADC_BUF_CLK_JAGUAR,
+        1 << 30,
+        if bandwidth == Bandwidth::Mhz80 { 1 } else { 0 },
+        "bandwidth",
+    )?;
+    if matches!(bandwidth, Bandwidth::Mhz40 | Bandwidth::Mhz80) {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            "rRFMOD_Jaguar",
+            REG_RF_MOD_JAGUAR,
+            0x0000_003c,
+            u32::from(data_sc),
+            "bandwidth",
+        )?;
+        production_bb_masked_write32(
+            registers,
+            counters,
+            "rCCAonSec_Jaguar",
+            REG_CCA_ON_SEC_JAGUAR,
+            0xf000_0000,
+            u32::from(data_sc),
+            "bandwidth",
+        )?;
+    }
+
+    let l1_peak = match bandwidth {
+        Bandwidth::Mhz20 => 7,
+        Bandwidth::Mhz40 if (bw_indication & BIT2) != 0 => 6,
+        Bandwidth::Mhz40 => 7,
+        Bandwidth::Mhz80 if (bw_indication & BIT2) != 0 => 5,
+        Bandwidth::Mhz80 => 6,
+    };
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rL1PeakTH_Jaguar",
+        REG_L1_PEAK_TH_JAGUAR,
+        0x03c0_0000,
+        l1_peak,
+        "bandwidth",
+    )?;
+    if bandwidth == Bandwidth::Mhz40 {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            "rCCK_System_Jaguar",
+            REG_CCK_SYSTEM_JAGUAR,
+            0x10,
+            if data_sc == VHT_DATA_SC_20_UPPER_OF_80MHZ {
+                1
+            } else {
+                0
+            },
+            "bandwidth",
+        )?;
+    }
+    production_fix_spur_8812a(registers, counters, programming_channel_number, bandwidth)?;
+
+    let rf_bandwidth_bits = match bandwidth {
+        Bandwidth::Mhz20 => 3,
+        Bandwidth::Mhz40 => 1,
+        Bandwidth::Mhz80 => 0,
+    };
+    rf_path_a = apply_rf_mask(rf_path_a, RF_CHNLBW_BW_MASK, rf_bandwidth_bits);
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::A,
+        RF_CHNLBW_JAGUAR,
+        rf_path_a,
+        counters,
+    )?;
+    rf_path_b = apply_rf_mask(rf_path_b, RF_CHNLBW_BW_MASK, rf_bandwidth_bits);
+    rf_serial_write_single_path(
+        registers,
+        Rtl8812auRfPath::B,
+        RF_CHNLBW_JAGUAR,
+        rf_path_b,
+        counters,
+    )?;
+
+    if production_should_apply_captured_tx_bringup_tail(channel, bandwidth) {
+        production_apply_captured_tx_bringup_tail(registers, counters, bandwidth)?;
+    }
+
+    Ok(
+        usize::try_from(counters.usb_control_writes.saturating_sub(before_writes))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn production_data_secondary_channel_setting(
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> Result<u8, RuntimeRadioError> {
+    match bandwidth {
+        Bandwidth::Mhz20 => Ok(0),
+        Bandwidth::Mhz40 => match channel.band {
+            Band::Ghz5 if channel.number % 8 == 4 => Ok(VHT_DATA_SC_20_LOWER_OF_80MHZ),
+            Band::Ghz5 if channel.number % 8 == 0 => Ok(VHT_DATA_SC_20_UPPER_OF_80MHZ),
+            Band::Ghz5 => Err(RuntimeRadioError::new(
+                "channel_bandwidth_not_supported",
+                format!(
+                    "channel {} is not aligned to a 5 GHz 40 MHz channel pair",
+                    channel.number
+                ),
+            )),
+            Band::Ghz2 if (1..=7).contains(&channel.number) => Ok(VHT_DATA_SC_20_LOWER_OF_80MHZ),
+            Band::Ghz2 if (8..=13).contains(&channel.number) => Ok(VHT_DATA_SC_20_UPPER_OF_80MHZ),
+            Band::Ghz2 => Err(RuntimeRadioError::new(
+                "channel_bandwidth_not_supported",
+                format!(
+                    "channel {} is not supported for 2.4 GHz 40 MHz operation",
+                    channel.number
+                ),
+            )),
+        },
+        Bandwidth::Mhz80 => {
+            let (_center, position) = production_eighty_mhz_center_and_position(channel.number)?;
+            let (sc40, sc20) = match position {
+                0 => (
+                    VHT_DATA_SC_40_LOWER_OF_80MHZ,
+                    VHT_DATA_SC_20_LOWEST_OF_80MHZ,
+                ),
+                1 => (VHT_DATA_SC_40_LOWER_OF_80MHZ, VHT_DATA_SC_20_LOWER_OF_80MHZ),
+                2 => (VHT_DATA_SC_40_UPPER_OF_80MHZ, VHT_DATA_SC_20_UPPER_OF_80MHZ),
+                3 => (
+                    VHT_DATA_SC_40_UPPER_OF_80MHZ,
+                    VHT_DATA_SC_20_UPPERST_OF_80MHZ,
+                ),
+                _ => unreachable!("80 MHz position is constrained to four primary channels"),
+            };
+            Ok((sc40 << 4) | sc20)
+        }
+    }
+}
+
+fn production_channel_programming_number(
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> Result<u8, RuntimeRadioError> {
+    match bandwidth {
+        Bandwidth::Mhz20 => Ok(channel.number),
+        Bandwidth::Mhz40 => production_forty_mhz_center_channel(channel),
+        Bandwidth::Mhz80 => {
+            production_eighty_mhz_center_and_position(channel.number).map(|(center, _)| center)
+        }
+    }
+}
+
+fn production_forty_mhz_center_channel(channel: Channel) -> Result<u8, RuntimeRadioError> {
+    let data_sc = production_data_secondary_channel_setting(channel, Bandwidth::Mhz40)?;
+    match data_sc {
+        VHT_DATA_SC_20_LOWER_OF_80MHZ => Ok(channel.number + 2),
+        VHT_DATA_SC_20_UPPER_OF_80MHZ => Ok(channel.number - 2),
+        _ => Err(RuntimeRadioError::new(
+            "channel_bandwidth_not_supported",
+            format!(
+                "channel {} did not map to a 40 MHz primary side",
+                channel.number
+            ),
+        )),
+    }
+}
+
+fn production_eighty_mhz_center_and_position(
+    primary_channel: u8,
+) -> Result<(u8, u8), RuntimeRadioError> {
+    match primary_channel {
+        36 => Ok((42, 0)),
+        40 => Ok((42, 1)),
+        44 => Ok((42, 2)),
+        48 => Ok((42, 3)),
+        52 => Ok((58, 0)),
+        56 => Ok((58, 1)),
+        60 => Ok((58, 2)),
+        64 => Ok((58, 3)),
+        100 => Ok((106, 0)),
+        104 => Ok((106, 1)),
+        108 => Ok((106, 2)),
+        112 => Ok((106, 3)),
+        116 => Ok((122, 0)),
+        120 => Ok((122, 1)),
+        124 => Ok((122, 2)),
+        128 => Ok((122, 3)),
+        132 => Ok((138, 0)),
+        136 => Ok((138, 1)),
+        140 => Ok((138, 2)),
+        144 => Ok((138, 3)),
+        149 => Ok((155, 0)),
+        153 => Ok((155, 1)),
+        157 => Ok((155, 2)),
+        161 => Ok((155, 3)),
+        _ => Err(RuntimeRadioError::new(
+            "channel_bandwidth_not_supported",
+            format!("channel {primary_channel} is not aligned to a supported 5 GHz 80 MHz group"),
+        )),
+    }
+}
+
+fn production_switch_wireless_band_8812<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    target_band: Band,
+    rfe_type: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let cck_check = read8_with_counter(
+        registers,
+        counters,
+        REG_CCK_CHECK_8812,
+        "REG_CCK_CHECK_8812",
+        "band-switch",
+    )?;
+    let current_band = if cck_check & BIT7 != 0 {
+        Band::Ghz5
+    } else {
+        Band::Ghz2
+    };
+    if current_band == target_band {
+        return production_set_rfe_reg_8812(registers, counters, target_band, rfe_type);
+    }
+    match target_band {
+        Band::Ghz2 => production_switch_to_2g_band(registers, counters, rfe_type),
+        Band::Ghz5 => production_switch_to_5g_band(registers, counters, rfe_type),
+    }
+}
+
+fn production_switch_to_2g_band<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    rfe_type: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rOFDMCCKEN_Jaguar",
+        REG_OFDMCCKEN_JAGUAR,
+        0x3000_0000,
+        0x03,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rBWIndication_Jaguar",
+        REG_BW_INDICATION_JAGUAR,
+        0x0000_0003,
+        0x01,
+        "band-switch",
+    )?;
+    production_set_pwed_thresholds(registers, counters, 0x17)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rAGC_table_Jaguar",
+        REG_AGC_TABLE_JAGUAR,
+        0x0000_0003,
+        0x00,
+        "band-switch",
+    )?;
+    production_set_rfe_reg_8812(registers, counters, Band::Ghz2, rfe_type)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rTxPath_Jaguar",
+        REG_TX_PATH_JAGUAR,
+        0x0000_00f0,
+        0x01,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rCCK_RX_Jaguar",
+        REG_CCK_RX_JAGUAR,
+        0x0f00_0000,
+        0x01,
+        "band-switch",
+    )?;
+    production_set_basic_rate(registers, counters, BASIC_RATE_2G)?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_CCK_CHECK_8812",
+        REG_CCK_CHECK_8812,
+        !BIT7,
+        BIT7,
+        0,
+        "band-switch",
+    )?;
+    production_set_bb_swing_default(registers, counters)
+}
+
+fn production_switch_to_5g_band<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    rfe_type: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_CCK_CHECK_8812",
+        REG_CCK_CHECK_8812,
+        !BIT7,
+        BIT7,
+        BIT7,
+        "band-switch",
+    )?;
+    production_poll_tx_packet_empty(registers, counters)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rOFDMCCKEN_Jaguar",
+        REG_OFDMCCKEN_JAGUAR,
+        0x3000_0000,
+        0x03,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rBWIndication_Jaguar",
+        REG_BW_INDICATION_JAGUAR,
+        0x0000_0003,
+        0x02,
+        "band-switch",
+    )?;
+    production_set_pwed_thresholds(registers, counters, 0x15)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rAGC_table_Jaguar",
+        REG_AGC_TABLE_JAGUAR,
+        0x0000_0003,
+        0x01,
+        "band-switch",
+    )?;
+    production_set_rfe_reg_8812(registers, counters, Band::Ghz5, rfe_type)?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rTxPath_Jaguar",
+        REG_TX_PATH_JAGUAR,
+        0x0000_00f0,
+        0x00,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rCCK_RX_Jaguar",
+        REG_CCK_RX_JAGUAR,
+        0x0f00_0000,
+        0x0f,
+        "band-switch",
+    )?;
+    production_set_basic_rate(registers, counters, BASIC_RATE_5G)?;
+    production_set_bb_swing_default(registers, counters)
+}
+
+fn production_set_pwed_thresholds<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    pd_th_20m: u32,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rPwed_TH_Jaguar",
+        REG_PWED_TH_JAGUAR,
+        0x0003_e000,
+        pd_th_20m,
+        "band-switch",
+    )?;
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rPwed_TH_Jaguar",
+        REG_PWED_TH_JAGUAR,
+        0x0000_000e,
+        0x04,
+        "band-switch",
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProductionRfeRegConfig {
+    pinmux: u32,
+    inv_mask: u32,
+    inv: u32,
+    antsel: Option<u32>,
+}
+
+fn production_rfe_reg_config_8812(
+    band: Band,
+    rfe_type: u8,
+) -> Result<ProductionRfeRegConfig, RuntimeRadioError> {
+    match (band, rfe_type) {
+        (Band::Ghz2, 0 | 1 | 2) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x7777_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x000,
+            antsel: None,
+        }),
+        (Band::Ghz2, 3) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x5433_7770,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: Some(0x1),
+        }),
+        (Band::Ghz2, 4) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x7777_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x001,
+            antsel: None,
+        }),
+        (Band::Ghz2, 6) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x0777_2770,
+            inv_mask: u32::MAX,
+            inv: 0x0000_0077,
+            antsel: None,
+        }),
+        (Band::Ghz5, 0) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x7733_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: None,
+        }),
+        (Band::Ghz5, 1) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x7733_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x000,
+            antsel: None,
+        }),
+        (Band::Ghz5, 2 | 4) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x7733_7777,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: None,
+        }),
+        (Band::Ghz5, 3) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x5433_7717,
+            inv_mask: 0x3ff0_0000,
+            inv: 0x010,
+            antsel: Some(0x1),
+        }),
+        (Band::Ghz5, 6) => Ok(ProductionRfeRegConfig {
+            pinmux: 0x0773_7717,
+            inv_mask: u32::MAX,
+            inv: 0x0000_0077,
+            antsel: None,
+        }),
+        (_, 5) => Err(RuntimeRadioError::new(
+            "unsupported_rfe_type",
+            "RFE type 5 needs byte-level partial pinmux writes that are not ported yet",
+        )),
+        _ => Err(RuntimeRadioError::new(
+            "unsupported_rfe_type",
+            format!("RFE type {rfe_type} is not supported by the RTL8812A channel path"),
+        )),
+    }
+}
+
+fn production_set_rfe_reg_8812<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    band: Band,
+    rfe_type: u8,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let config = production_rfe_reg_config_8812(band, rfe_type)?;
+    for (register_name, address) in [
+        ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR),
+        ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR),
+    ] {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            register_name,
+            address,
+            u32::MAX,
+            config.pinmux,
+            "band-switch",
+        )?;
+    }
+    for (register_name, address) in [
+        ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR),
+        ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR),
+    ] {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            register_name,
+            address,
+            config.inv_mask,
+            config.inv,
+            "band-switch",
+        )?;
+    }
+    if let Some(antsel) = config.antsel {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            "r_ANTSEL_SW_Jaguar",
+            REG_ANTSEL_SW_JAGUAR,
+            0x0000_0303,
+            antsel,
+            "band-switch",
+        )?;
+    }
+    Ok(())
+}
+
+fn production_set_basic_rate<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    rate_mask: u16,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    production_write16_verify(
+        registers,
+        counters,
+        "REG_RRSR",
+        REG_RRSR,
+        rate_mask,
+        u16::MAX,
+        rate_mask,
+        "band-switch",
+    )?;
+    production_rmw8_preserve(
+        registers,
+        counters,
+        "REG_RRSR + 2",
+        REG_RRSR + 2,
+        0xf0,
+        0x0f,
+        0,
+        "band-switch",
+    )
+}
+
+fn production_set_bb_swing_default<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    for (register_name, address) in [
+        ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR),
+        ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR),
+    ] {
+        production_bb_masked_write32(
+            registers,
+            counters,
+            register_name,
+            address,
+            0xffe0_0000,
+            0x200,
+            "band-switch",
+        )?;
+    }
+    Ok(())
+}
+
+fn production_poll_tx_packet_empty<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    let mut observed = 0u16;
+    for _attempt in 0..50 {
+        observed = read16_with_counter(
+            registers,
+            counters,
+            REG_TXPKT_EMPTY,
+            "REG_TXPKT_EMPTY",
+            "band-switch",
+        )?;
+        if observed & 0x0030 == 0x0030 {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_micros(50));
+    }
+    Err(RuntimeRadioError::new(
+        "tx_packet_empty_poll_failed",
+        format!(
+            "REG_TXPKT_EMPTY did not report mask 0x0030 after 50 reads, got {}",
+            format_register_value(observed, 4)
+        ),
+    ))
+}
+
+fn production_fix_spur_8812a<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    channel_number: u8,
+    bandwidth: Bandwidth,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    if channel_number > 14 {
+        return Ok(());
+    }
+    let data = if bandwidth == Bandwidth::Mhz20 && matches!(channel_number, 13 | 14) {
+        0x03
+    } else {
+        0x02
+    };
+    production_bb_masked_write32(
+        registers,
+        counters,
+        "rRFMOD_Jaguar",
+        REG_RF_MOD_JAGUAR,
+        0x0000_0300,
+        data,
+        "spur",
+    )
+}
+
+fn production_last_rf_register_data(
+    plan: &RealtekTablePlan,
+    rf_offset: u32,
+) -> Result<u32, RuntimeRadioError> {
+    let mut data = None;
+    for action in &plan.actions {
+        if action.kind == RealtekTableActionKind::Write && action.address == rf_offset {
+            data = action.data;
+        }
+    }
+    data.ok_or_else(|| {
+        RuntimeRadioError::new(
+            "rf_channel_base_missing",
+            format!(
+                "{} did not contain a final RF register 0x{rf_offset:02x} write to use as channel base",
+                plan.array_name
+            ),
+        )
+    })
+}
+
+fn production_fc_area_data(channel: u8) -> u32 {
+    match channel {
+        36..=48 => 0x494,
+        15..=35 => 0x494,
+        50..=80 => 0x453,
+        82..=116 => 0x452,
+        118..=u8::MAX => 0x412,
+        _ => 0x96a,
+    }
+}
+
+fn production_rf_mod_ag_data(channel: u8) -> u32 {
+    match channel {
+        36..=80 => 0x101,
+        15..=35 => 0x101,
+        82..=140 => 0x301,
+        141..=u8::MAX => 0x501,
+        _ => 0x000,
+    }
+}
+
+fn production_should_apply_captured_tx_bringup_tail(
+    channel: Channel,
+    bandwidth: Bandwidth,
+) -> bool {
+    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+}
+
+type ProductionCapturedTxBringupWrite = (&'static str, u16, u32);
+
+const PRODUCTION_CAPTURED_TX_BRINGUP_TAIL_20MHZ: &[ProductionCapturedTxBringupWrite] = &[
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x2d40_0003),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x2d40_0003),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
+    ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
+    ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
+    (
+        "rB_IQK_Result_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x200,
+        0x3000_0c1c,
+    ),
+    (
+        "rA_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 4,
+        0x0000_0058,
+    ),
+    (
+        "rB_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x204,
+        0x0000_0058,
+    ),
+    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
+    (
+        "rA_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+        0x2626_2828,
+    ),
+    (
+        "rA_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+        0x2626_2626,
+    ),
+    (
+        "rA_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+        0x2626_2626,
+    ),
+    ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001e),
+    ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0010_161e),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0181_7d24),
+    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
+    (
+        "rB_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+        0x2a2a_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+        0x2828_2a2a,
+    ),
+    (
+        "rB_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+        0x2828_2828,
+    ),
+    ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001e),
+    ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0012_1820),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7d24),
+];
+
+const PRODUCTION_CAPTURED_TX_BRINGUP_TAIL_40MHZ: &[ProductionCapturedTxBringupWrite] = &[
+    ("rA_TxScale_Jaguar", REG_TX_SCALE_A_JAGUAR, 0x35e0_0003),
+    ("rB_TxScale_Jaguar", REG_TX_SCALE_B_JAGUAR, 0x35e0_0003),
+    ("rA_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_A_JAGUAR, 0x5433_7717),
+    ("rB_RFE_Pinmux_Jaguar", REG_RFE_PINMUX_B_JAGUAR, 0x5433_7717),
+    ("rA_RFE_Inv_Jaguar", REG_RFE_INV_A_JAGUAR, 0x0100_0077),
+    ("rB_RFE_Inv_Jaguar", REG_RFE_INV_B_JAGUAR, 0x0100_0077),
+    ("rA_RFE_Timing_Jaguar", REG_RFE_TIMING_A_JAGUAR, 0x0050_8242),
+    ("rB_RFE_Timing_Jaguar", REG_RFE_TIMING_B_JAGUAR, 0x0050_8242),
+    ("rA_IQK_Result_Jaguar", REG_OFDM0_XBAGCCORE1, 0x3000_0c1c),
+    (
+        "rB_IQK_Result_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x200,
+        0x3000_0c1c,
+    ),
+    (
+        "rA_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 4,
+        0x0000_0058,
+    ),
+    (
+        "rB_IQK_Shadow_Jaguar",
+        REG_OFDM0_XBAGCCORE1 + 0x204,
+        0x0000_0058,
+    ),
+    ("rA_TxAGC_CCK", REG_TX_AGC_A_CCK_JAGUAR, 0x1515_1515),
+    (
+        "rA_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_A_OFDM18_OFDM6_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_A_OFDM54_OFDM24_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_A_MCS3_MCS0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_A_MCS7_MCS4_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_A_NSS1_7_NSS1_4_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_A_NSS1_11_NSS1_8_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_A_NSS1_3_NSS1_0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR,
+        0x2727_2929,
+    ),
+    (
+        "rA_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR,
+        0x2727_2727,
+    ),
+    (
+        "rA_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR,
+        0x2727_2727,
+    ),
+    ("rA_TxPowerOffset", REG_TX_PWR_OFFSET_A_JAGUAR, 0x0000_001c),
+    ("rA_TxPowerTraining", REG_TX_PWR_TRAIN_A_JAGUAR, 0x0011_171f),
+    ("rA_TxBbCtrl", REG_TX_BB_CTRL_A_JAGUAR, 0x0423_8500),
+    ("rB_TxAGC_CCK", REG_TX_AGC_B_CCK_JAGUAR, 0x1818_1818),
+    (
+        "rB_TxAGC_OFDM18_OFDM6",
+        REG_TX_AGC_B_OFDM18_OFDM6_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_OFDM54_OFDM24",
+        REG_TX_AGC_B_OFDM54_OFDM24_JAGUAR,
+        0x2828_2828,
+    ),
+    (
+        "rB_TxAGC_MCS3_MCS0",
+        REG_TX_AGC_B_MCS3_MCS0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_MCS7_MCS4",
+        REG_TX_AGC_B_MCS7_MCS4_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS1_7_NSS1_4",
+        REG_TX_AGC_B_NSS1_7_NSS1_4_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS1_11_NSS1_8",
+        REG_TX_AGC_B_NSS1_11_NSS1_8_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS1_3_NSS1_0",
+        REG_TX_AGC_B_NSS1_3_NSS1_0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_3_NSS2_0",
+        REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR,
+        0x2b2b_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_7_NSS2_4",
+        REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR,
+        0x2929_2b2b,
+    ),
+    (
+        "rB_TxAGC_NSS2_11_NSS2_8",
+        REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR,
+        0x2929_2929,
+    ),
+    (
+        "rB_TxAGC_NSS3_3_NSS3_0",
+        REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR,
+        0x2929_2929,
+    ),
+    ("rB_TxPowerOffset", REG_TX_PWR_OFFSET_B_JAGUAR, 0x0000_001c),
+    ("rB_TxPowerTraining", REG_TX_PWR_TRAIN_B_JAGUAR, 0x0013_1921),
+    ("rB_TxBbCtrl", REG_TX_BB_CTRL_B_JAGUAR, 0x0181_7526),
+];
+
+fn production_captured_tx_bringup_tail(
+    bandwidth: Bandwidth,
+) -> Result<&'static [ProductionCapturedTxBringupWrite], RuntimeRadioError> {
+    match bandwidth {
+        Bandwidth::Mhz20 => Ok(PRODUCTION_CAPTURED_TX_BRINGUP_TAIL_20MHZ),
+        Bandwidth::Mhz40 => Ok(PRODUCTION_CAPTURED_TX_BRINGUP_TAIL_40MHZ),
+        Bandwidth::Mhz80 => Err(RuntimeRadioError::new(
+            "captured_tx_bringup_tail_unsupported",
+            "captured TX bring-up tail is only available for 20 and 40 MHz",
+        )),
+    }
+}
+
+fn production_apply_captured_tx_bringup_tail<T>(
+    registers: &Rtl8812auRegisterAccess<T>,
+    counters: &mut RuntimeRadioCounters,
+    bandwidth: Bandwidth,
+) -> Result<(), RuntimeRadioError>
+where
+    T: Rtl8812auUsbTransport,
+{
+    for (register_name, address, value) in production_captured_tx_bringup_tail(bandwidth)? {
+        production_write32_verify(
+            registers,
+            counters,
+            register_name,
+            *address,
+            *value,
+            u32::MAX,
+            *value,
+            "tx-bringup-tail",
+        )?;
+    }
+    Ok(())
 }
 
 pub fn run_production_runtime_flow_with_session<T, F>(
@@ -3544,28 +6899,96 @@ const REG_EFUSE_CTRL: u16 = 0x0030;
 const REG_EFUSE_BURN_GNT_8812: u16 = 0x00cf;
 const REG_SDIO_CTRL_8812: u16 = 0x0070;
 const REG_SYS_ISO_CTRL: u16 = 0x0000;
+const REG_APS_FSMCO_PLUS_1: u16 = 0x0005;
+const REG_APS_FSMCO_PLUS_2: u16 = 0x0006;
 const REG_SYS_FUNC_EN: u16 = 0x0002;
+const REG_SYS_FUNC_EN_PLUS_1: u16 = 0x0003;
 const REG_SYS_CLKR: u16 = 0x0008;
+const REG_RSV_CTRL: u16 = 0x001c;
+const REG_AFE_XTAL_CTRL: u16 = 0x0024;
+const REG_AFE_PLL_CTRL: u16 = 0x0028;
+const REG_RF_CTRL: u16 = 0x001f;
+const REG_RF_B_CTRL_8812: u16 = 0x0076;
+const REG_MAC_PHY_CTRL: u16 = 0x002c;
+const REG_MCUFWDL: u16 = 0x0080;
+const REG_MCUFWDL_PLUS_2: u16 = REG_MCUFWDL + 2;
 const REG_CR: u16 = 0x0100;
 const REG_MSR: u16 = REG_CR + 2;
+const REG_PBP: u16 = 0x0104;
+const REG_TRXDMA_CTRL: u16 = 0x010c;
+const REG_TRXFF_BNDY: u16 = 0x0114;
+const REG_LLT_INIT: u16 = 0x01e0;
+const REG_RQPN: u16 = 0x0200;
+const REG_TDECTRL: u16 = 0x0208;
+const REG_RQPN_NPQ: u16 = 0x0214;
+const REG_RXDMA_STATUS: u16 = 0x0288;
+const REG_RXDMA_PRO_8812: u16 = 0x0290;
 const REG_EARLY_MODE_CONTROL_8812: u16 = 0x02bc;
 const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
+const REG_HWSEQ_CTRL: u16 = 0x0423;
+const REG_BCNQ_BDNY: u16 = 0x0424;
+const REG_MGQ_BDNY: u16 = 0x0425;
+const REG_SPEC_SIFS: u16 = 0x0428;
+const REG_RETRY_LIMIT: u16 = 0x042a;
+const REG_RRSR: u16 = 0x0440;
+const REG_ARFR0_8812: u16 = 0x0444;
+const REG_ARFR1_8812: u16 = 0x044c;
+const REG_CCK_CHECK_8812: u16 = 0x0454;
+const REG_AMPDU_MAX_TIME_8812: u16 = 0x0456;
+const REG_AMPDU_MAX_LENGTH_8812: u16 = 0x0458;
+const REG_WMAC_LBK_BF_HD: u16 = 0x045d;
+const REG_TXPKT_EMPTY: u16 = 0x041a;
+const REG_DATA_SC_8812: u16 = 0x0483;
+const REG_ARFR2_8812: u16 = 0x048c;
+const REG_ARFR3_8812: u16 = 0x0494;
 const REG_QUEUE_CTRL: u16 = 0x04c6;
+const REG_HT_SINGLE_AMPDU_8812: u16 = 0x04c7;
+const REG_MAX_AGGR_NUM: u16 = 0x04ca;
+const REG_BAR_MODE_CTRL: u16 = 0x04cc;
 const REG_TX_RPT_TIME: u16 = 0x04f0;
+const REG_BCNTCFG: u16 = 0x0510;
+const REG_EDCA_VO_PARAM: u16 = 0x0500;
+const REG_EDCA_VI_PARAM: u16 = 0x0504;
+const REG_EDCA_BE_PARAM: u16 = 0x0508;
+const REG_EDCA_BK_PARAM: u16 = 0x050c;
+const REG_PIFS: u16 = 0x0512;
+const REG_SIFS_CTX: u16 = 0x0514;
+const REG_SIFS_TRX: u16 = 0x0516;
 const REG_TXPAUSE: u16 = 0x0522;
+const REG_TBTT_PROHIBIT: u16 = 0x0540;
+const REG_DRVERLYINT: u16 = 0x0558;
+const REG_BCNDMATIM: u16 = 0x0559;
+const REG_USTIME_TSF: u16 = 0x055c;
 const REG_RCR: u16 = 0x0608;
+const REG_RX_PKT_LIMIT: u16 = 0x060c;
+const REG_RX_DRVINFO_SZ: u16 = 0x060f;
 const REG_MACID: u16 = 0x0610;
+const REG_MAR: u16 = 0x0620;
+const REG_USTIME_EDCA: u16 = 0x0638;
+const REG_MAC_SPEC_SIFS: u16 = 0x063a;
+const REG_ACKTO: u16 = 0x0640;
 const REG_NAV_UPPER: u16 = 0x0652;
+const REG_WMAC_TRXPTCL_CTL: u16 = 0x0668;
+const REG_RXFLTMAP1: u16 = 0x06a2;
 const REG_RXFLTMAP2: u16 = 0x06a4;
 const REG_BCN_CTRL: u16 = 0x0550;
 const REG_AGC_TABLE_JAGUAR: u16 = 0x082c;
 const REG_OFDMCCKEN_JAGUAR: u16 = 0x0808;
+const REG_TX_PATH_JAGUAR: u16 = 0x080c;
+const REG_PWED_TH_JAGUAR: u16 = 0x0830;
+const REG_BW_INDICATION_JAGUAR: u16 = 0x0834;
 const REG_CCA_ON_SEC_JAGUAR: u16 = 0x0838;
+const REG_L1_PEAK_TH_JAGUAR: u16 = 0x0848;
+const REG_FC_AREA_JAGUAR: u16 = 0x0860;
 const REG_HSSI_READ_JAGUAR: u16 = 0x08b0;
+const REG_RF_MOD_JAGUAR: u16 = 0x08ac;
+const REG_ADC_BUF_CLK_JAGUAR: u16 = 0x08c4;
 const REG_IQK_MACBB_0X0520: u16 = 0x0520;
 const REG_IQK_MACBB_0X090C: u16 = 0x090c;
+const REG_ANTSEL_SW_JAGUAR: u16 = 0x0900;
 const REG_SINGLE_TONE_CONT_TX_JAGUAR: u16 = 0x0914;
 const REG_IQK_TRIGGER_980: u16 = 0x0980;
+const REG_CCK_SYSTEM_JAGUAR: u16 = 0x0a00;
 const REG_CCK_RX_JAGUAR: u16 = 0x0a04;
 const REG_CCK_RX_PATH_JAGUAR: u16 = 0x0a07;
 const REG_RF_PI_MODE_A_JAGUAR: u16 = 0x0c00;
@@ -3599,6 +7022,8 @@ const REG_TX_AGC_A_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0c40;
 const REG_TX_AGC_A_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0c44;
 const REG_TX_AGC_A_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0c48;
 const REG_TX_AGC_A_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0c4c;
+const REG_TX_PWR_OFFSET_A_JAGUAR: u16 = 0x0c50;
+const REG_TX_PWR_TRAIN_A_JAGUAR: u16 = 0x0c54;
 const REG_RFE_PINMUX_A_JAGUAR: u16 = 0x0cb0;
 const REG_RFE_INV_A_JAGUAR: u16 = 0x0cb4;
 const REG_RFE_TIMING_A_JAGUAR: u16 = 0x0cb8;
@@ -3635,6 +7060,8 @@ const REG_TX_AGC_B_NSS2_3_NSS2_0_JAGUAR: u16 = 0x0e40;
 const REG_TX_AGC_B_NSS2_7_NSS2_4_JAGUAR: u16 = 0x0e44;
 const REG_TX_AGC_B_NSS2_11_NSS2_8_JAGUAR: u16 = 0x0e48;
 const REG_TX_AGC_B_NSS3_3_NSS3_0_JAGUAR: u16 = 0x0e4c;
+const REG_TX_PWR_OFFSET_B_JAGUAR: u16 = 0x0e50;
+const REG_TX_PWR_TRAIN_B_JAGUAR: u16 = 0x0e54;
 const REG_IQK_AFE_B_E5C: u16 = 0x0e5c;
 const REG_IQK_AFE_B_E60: u16 = 0x0e60;
 const REG_IQK_AFE_B_E64: u16 = 0x0e64;
@@ -3680,22 +7107,94 @@ const RTL8812AU_EFUSE_MAC_OFFSET: usize = 0x0d7;
 const EFUSE_ACCESS_ON_JAGUAR: u8 = 0x69;
 const EFUSE_ACCESS_OFF_JAGUAR: u8 = 0x00;
 
+const FW_START_ADDRESS: u16 = 0x1000;
+const BIT0: u8 = 1 << 0;
+const BIT1: u8 = 1 << 1;
+const BIT2: u8 = 1 << 2;
 const BIT3: u8 = 1 << 3;
+const BIT4: u8 = 1 << 4;
+const BIT5: u8 = 1 << 5;
+const BIT6: u8 = 1 << 6;
+const BIT7: u8 = 1 << 7;
 const FEN_ELDR: u16 = 1 << 12;
 const ANA8M: u16 = 1 << 1;
 const LOADER_CLK_EN: u16 = 1 << 5;
+const FEN_BBRSTB: u8 = BIT0;
+const FEN_BB_GLB_RSTN: u8 = BIT1;
+const FEN_USBA: u8 = BIT2;
 const MSR_PORT0_NETTYPE_MASK: u8 = 0x03;
+const MAX_DLFW_PAGE_SIZE: usize = 4096;
+const MAX_REG_BLOCK_SIZE: usize = 196;
+const FIRMWARE_REMAINDER_BLOCK_SIZE: usize = 8;
+const TX_PAGE_BOUNDARY_8812: u8 = 0xf7;
+const LAST_ENTRY_OF_TX_PKT_BUFFER_8812: u8 = 0xff;
+const TX_TOTAL_PAGE_NUMBER_8812: u8 = TX_PAGE_BOUNDARY_8812 - 1;
+const RX_DMA_BOUNDARY_8812: u16 = 0x3e7f;
+const NORMAL_PAGE_NUM_HPQ_8812: u8 = 0x10;
+const NORMAL_PAGE_NUM_LPQ_8812: u8 = 0x10;
+const NORMAL_PAGE_NUM_NPQ_8812: u8 = 0x00;
+const PBP_512: u8 = 0x03;
+const PSTX_PBP_512: u8 = PBP_512 << 4;
+const QUEUE_EXTRA: u16 = 0;
+const QUEUE_LOW: u16 = 1;
+const QUEUE_NORMAL: u16 = 2;
+const QUEUE_HIGH: u16 = 3;
+const LD_RQPN: u32 = 1 << 31;
+const RQPN_PAGE_MASK: u32 = 0x00ff_ffff;
+const TXDMA_QUEUE_MAP_MASK: u16 = 0xfff8;
+const DRVINFO_SZ: u8 = 4;
+const MASK_NETTYPE: u32 = 0x0003_0000;
+const NT_LINK_AP: u32 = 0x3;
+const NETTYPE_LINK_AP: u32 = NT_LINK_AP << 16;
 const RCR_APM: u32 = 1 << 1;
 const RCR_AM: u32 = 1 << 2;
 const RCR_AB: u32 = 1 << 3;
 const RCR_AAP: u32 = 1 << 0;
 const RCR_APWRMGT: u32 = 1 << 5;
+const RCR_CBSSID_DATA: u32 = 1 << 6;
+const RCR_CBSSID_BCN: u32 = 1 << 7;
 const RCR_ADF: u32 = 1 << 11;
 const RCR_ACF: u32 = 1 << 12;
 const RCR_AMF: u32 = 1 << 13;
+const RCR_HTC_LOC_CTRL: u32 = 1 << 14;
+const RCR_FORCEACK: u32 = 1 << 26;
 const RCR_APP_PHYST_RXFF: u32 = 1 << 28;
+const RCR_APP_ICV: u32 = 1 << 29;
+const RCR_APP_MIC: u32 = 1 << 30;
 const RCR_APPFCS: u32 = 1 << 31;
+const MAC_RECEIVE_CONFIG: u32 = RCR_APM
+    | RCR_AM
+    | RCR_AB
+    | RCR_CBSSID_DATA
+    | RCR_CBSSID_BCN
+    | RCR_AMF
+    | RCR_HTC_LOC_CTRL
+    | RCR_APP_PHYST_RXFF
+    | RCR_APP_ICV
+    | RCR_APP_MIC
+    | RCR_FORCEACK;
+const RATE_BITMAP_ALL: u32 = 0x000f_ffff;
+const RATE_RRSR_CCK_ONLY_1M: u32 = 0x000f_fff1;
+const RL_VAL_STA: u16 = 0x30;
+const RETRY_LIMIT_STA: u16 = RL_VAL_STA | (RL_VAL_STA << 8);
+const BASIC_RATE_2G: u16 = 0x015f;
+const BASIC_RATE_5G: u16 = 0x0150;
+const BAR_MODE_CTRL_VALUE: u32 = 0x0201_ffff;
+const BAR_MODE_CTRL_READBACK_MASK: u32 = 0xffff_ff7f;
+const EN_AMPDU_RTY_NEW: u8 = 1 << 7;
+const DIS_TSF_UDT: u8 = BIT4;
+const TBTT_PROHIBIT_SETUP_TIME: u8 = 0x04;
+const TBTT_PROHIBIT_HOLD_TIME_STOP_BCN: u16 = 0x0064;
+const DRIVER_EARLY_INT_TIME_8812: u8 = 0x05;
+const BCN_DMA_ATIME_INT_TIME_8812: u8 = 0x02;
+const MACTXEN: u8 = 1 << 6;
+const MACRXEN: u8 = 1 << 7;
+const MAC_TX_RX_ENABLE_MASK: u8 = MACTXEN | MACRXEN;
+const RTL8812_CRYSTAL_CAP_MASK: u32 = 0x7ff8_0000;
 const RF_CHNLBW_JAGUAR: u32 = 0x18;
+const RF_CHNLBW_MOD_AG_MASK: u32 = 0x0007_0300;
+const RF_CHNLBW_BW_MASK: u32 = 0x0000_0c00;
+const RF_CHNLBW_CHANNEL_MASK: u32 = 0x0000_00ff;
 const RF_LCK_JAGUAR: u32 = 0xb4;
 const RF_IQK_LOK_READBACK_JAGUAR: u32 = 0x08;
 const RF_IQK_TX_0X30_JAGUAR: u32 = 0x30;
@@ -3706,6 +7205,24 @@ const RF_IQK_MODE_JAGUAR: u32 = 0xef;
 const RF_REGISTER_OFFSET_MASK: u32 = 0x000f_ffff;
 const RF_LCK_MODE_BIT: u32 = 1 << 14;
 const RF_CHNLBW_LCK_TRIGGER_BIT: u32 = 1 << 15;
+const VHT_DATA_SC_20_UPPER_OF_80MHZ: u8 = 1;
+const VHT_DATA_SC_20_LOWER_OF_80MHZ: u8 = 2;
+const VHT_DATA_SC_20_UPPERST_OF_80MHZ: u8 = 3;
+const VHT_DATA_SC_20_LOWEST_OF_80MHZ: u8 = 4;
+const VHT_DATA_SC_40_UPPER_OF_80MHZ: u8 = 9;
+const VHT_DATA_SC_40_LOWER_OF_80MHZ: u8 = 10;
+const LLT_NO_ACTIVE: u32 = 0x0;
+const LLT_WRITE_ACCESS: u32 = 0x1;
+const LLT_OP_SHIFT: u32 = 30;
+const LLT_OP_MASK: u32 = 0x3;
+const MCUFWDL_EN: u8 = BIT0;
+const MCUFWDL_RDY: u32 = BIT1 as u32;
+const FWDL_CHKSUM_RPT_U8: u8 = BIT2;
+const FWDL_CHKSUM_RPT_U32: u32 = BIT2 as u32;
+const WINTINI_RDY: u32 = BIT6 as u32;
+const RAM_DL_SEL: u8 = BIT7;
+const CR_ENABLE_BITS: u16 =
+    (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 9) | (1 << 10);
 const RTL8812A_IQK_PAGE_C1_SELECT_BIT: u32 = 0x8000_0000;
 const RTL8812A_IQK_MAX_ATTEMPTS: u8 = 10;
 const RTL8812A_IQK_MAX_RX_CANDIDATES: usize = 5;

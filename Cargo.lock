@@ -659,6 +659,7 @@ dependencies = [
  "tracing-subscriber",
  "wfb-bridge",
  "wfb-radio-runtime",
+ "wfb-radio-service",
 ]
 
 [[package]]

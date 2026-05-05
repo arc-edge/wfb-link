@@ -15,7 +15,7 @@ Configuration is via environment variables. Common overrides:
   HW_MAC_HOST=local          # shorthand for LOCAL_HW=1
   HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
   HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
-  MAC_RADIO_COMMAND=bridge-tx-listen
+  MAC_RADIO_COMMAND=bridge-tx-listen  # bridge-tx-listen, radio-run, or radio-service
   LINUX_HOST=drone-2f389.local
   LINUX_SSH_JUMP=rownd@rownds-macbook-pro.tail5c793f.ts.net
   LINUX_SSH_NESTED=1         # use "ssh jump ssh linux" instead of ProxyJump
@@ -174,6 +174,7 @@ BRIDGE_START_DELAY=${BRIDGE_START_DELAY:-0}
 BRIDGE_IDLE_TIMEOUT_MS=${BRIDGE_IDLE_TIMEOUT_MS:-60000}
 BRIDGE_WAIT_SECONDS=${BRIDGE_WAIT_SECONDS:-140}
 MAC_RADIO_COMMAND=${MAC_RADIO_COMMAND:-bridge-tx-listen}
+RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
 RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-$((BRIDGE_WAIT_SECONDS * 1000))}
 
 IFACE=${IFACE:-wfb0}
@@ -226,7 +227,7 @@ export LINUX_REMOTE_PATH LINUX_REQUIRE_IW LINUX_REQUIRE_PEER_ISOLATION LINUX_PEE
 export CHANNEL BANDWIDTH_MHZ FEC_K FEC_N EXPECTED_PAYLOADS SOURCE_WARMUP_PAYLOADS THEORETICAL_MAX_DATAGRAMS THEORETICAL_WARMUP_DATAGRAMS THEORETICAL_TOTAL_DATAGRAMS MAX_DATAGRAMS DATAGRAM_SHORTFALL_TOLERANCE
 export PAYLOAD_LEN PAYLOAD_MARKER PAYLOAD_INTERVAL_SEC RX_STARTUP_SECONDS TX_STARTUP_SECONDS LINK_ID WFB_CLI_LINK_ID RADIO_PORT RADIO_PORT_HEX
 export TX_RATE TX_PROFILE TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE CALIBRATION_MODE PROFILE_KIND PROFILE_NAME
-export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_READY_WAIT_SECONDS BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS
+export RELAY_BIND_IP RELAY_PORT BRIDGE_BIND_HOST BRIDGE_BIND_PORT BRIDGE_READY_WAIT_SECONDS BRIDGE_START_DELAY BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_CONFIG RADIO_RUN_DURATION_MS
 export IFACE WFB_SERVICE WFB_KEY LINUX_SOURCE_PORT LINUX_RX_PORT TCPDUMP_SECONDS RX_SECONDS TX_SECONDS COUNTER_SECONDS
 export FIRMWARE EFUSE_REPORT LINUX_BASELINE OUT_DIR SYNC_HW_REPO HW_DEPLOY HW_DEPLOY_PATH ALLOW_DEPLOY_OVER_WORKTREE
 
@@ -295,7 +296,7 @@ keys = [
     "PROFILE_NAME", "RELAY_BIND_IP", "RELAY_PORT", "BRIDGE_BIND_HOST",
     "BRIDGE_BIND_PORT", "BRIDGE_READY_WAIT_SECONDS", "BRIDGE_START_DELAY",
     "BRIDGE_IDLE_TIMEOUT_MS", "BRIDGE_WAIT_SECONDS", "MAC_RADIO_COMMAND",
-    "RADIO_RUN_DURATION_MS", "IFACE", "WFB_SERVICE", "WFB_KEY",
+    "RADIO_RUN_CONFIG", "RADIO_RUN_DURATION_MS", "IFACE", "WFB_SERVICE", "WFB_KEY",
     "LINUX_SOURCE_PORT", "LINUX_RX_PORT", "FIRMWARE", "EFUSE_REPORT",
     "LINUX_BASELINE", "SYNC_HW_REPO", "HW_DEPLOY", "HW_DEPLOY_PATH",
     "ALLOW_DEPLOY_OVER_WORKTREE",
@@ -321,7 +322,7 @@ Configuration written to:
 
 Hardware Mac:
   LOCAL_HW=$LOCAL_HW HW_DEPLOY=$HW_DEPLOY HW_DEPLOY_PATH=$HW_DEPLOY_PATH SYNC_HW_REPO=$SYNC_HW_REPO
-  MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS=$RADIO_RUN_DURATION_MS
+  MAC_RADIO_COMMAND=$MAC_RADIO_COMMAND RADIO_RUN_CONFIG=$RADIO_RUN_CONFIG RADIO_RUN_DURATION_MS=$RADIO_RUN_DURATION_MS
   TX_POWER_MODE=$TX_POWER_MODE TX_CALIBRATION_PROFILE=$TX_CALIBRATION_PROFILE CALIBRATION_MODE=$CALIBRATION_MODE
   $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'run relay/radio locally from %s\n' "$dry_bridge_path"; elif [[ "$HW_DEPLOY" == "1" ]]; then printf 'rsync local checkout to %s:%s\n' "$HW_MAC_HOST" "$HW_DEPLOY_PATH"; else printf 'no local deploy sync\n'; fi)
   $(if [[ "$LOCAL_HW" == "1" ]]; then printf 'local'; else printf 'ssh %s' "$(quote "$HW_MAC_HOST")"; fi) '<start UDP relay $RELAY_BIND_IP:$RELAY_PORT -> $BRIDGE_BIND_HOST:$BRIDGE_BIND_PORT>'
@@ -476,7 +477,7 @@ MAC_RELAY
 
 start_bridge() {
   local remote_cmd
-  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_DURATION_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
+  remote_cmd="$(env_assignments REMOTE_PREFIX HW_REPO_PATH SYNC_HW_REPO FIRMWARE CHANNEL BANDWIDTH_MHZ BRIDGE_BIND_HOST BRIDGE_BIND_PORT MAX_DATAGRAMS BRIDGE_IDLE_TIMEOUT_MS BRIDGE_WAIT_SECONDS MAC_RADIO_COMMAND RADIO_RUN_CONFIG RADIO_RUN_DURATION_MS TX_POWER_MODE EFUSE_REPORT TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE) bash -s"
   log "starting hardware-Mac $MAC_RADIO_COMMAND listener"
   hw_exec "$remote_cmd" <<'MAC_BRIDGE'
 set -euo pipefail
@@ -539,6 +540,28 @@ case "$MAC_RADIO_COMMAND" in
       --max-datagrams "$MAX_DATAGRAMS" \
       --duration-ms "$RADIO_RUN_DURATION_MS" \
       ${tx_power_args[@]+"${tx_power_args[@]}"} \
+      --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
+      --i-understand-this-transmits \
+      ${write_auth_arg:+"$write_auth_arg"} \
+      > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
+    ;;
+  radio-service)
+    if [[ "$TX_POWER_MODE" != "current-default" ]]; then
+      echo "MAC_RADIO_COMMAND=radio-service does not support TX_POWER_MODE=$TX_POWER_MODE yet; use MAC_RADIO_COMMAND=radio-run for tx-power experiments" >&2
+      exit 2
+    fi
+    nohup cargo run -p wfb-radio-service -- \
+      --json \
+      --report "${REMOTE_PREFIX}-listen.json" \
+      --config "$RADIO_RUN_CONFIG" \
+      --macos-usbhost \
+      --vid 0x0bda --pid 0x8812 \
+      --firmware "$FIRMWARE" \
+      --channel "$CHANNEL" --bandwidth "$BANDWIDTH_MHZ" \
+      --bind "${BRIDGE_BIND_HOST}:${BRIDGE_BIND_PORT}" \
+      --ready-file "${REMOTE_PREFIX}-bridge-ready.json" \
+      --max-datagrams "$MAX_DATAGRAMS" \
+      --duration-ms "$RADIO_RUN_DURATION_MS" \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
       --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
@@ -1377,6 +1400,7 @@ channel_state_path = Path(sys.argv[8])
 if channel_state_path.exists():
     channel_state = json.loads(channel_state_path.read_text())
 summary = {
+    "mac_radio_command": os.environ.get("MAC_RADIO_COMMAND"),
     "preflight": preflight,
     "counter": counter,
     "receiver_health": receiver_health,

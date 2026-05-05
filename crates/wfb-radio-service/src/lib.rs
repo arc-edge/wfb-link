@@ -2,12 +2,31 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
-use radio_core::Bandwidth;
+use radio_core::{
+    parse_realtek_u32_array, plan_realtek_table, Band, Bandwidth, Channel, DeviceSelector,
+    FirmwareImage, RealtekConditionEnv, RealtekTableKind, RealtekTablePlan,
+};
 use serde::Deserialize;
-use wfb_radio_runtime::{RuntimeRadioError, DEFAULT_HEARTBEAT_HALF_PERIOD_MS};
+use wfb_radio_runtime::{
+    run_production_runtime_flow, LedHeartbeatConfig, MacosUsbHostConfig,
+    ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRtl8812auInitInputs,
+    ProductionRuntimeRxForwardConfig, ProductionRuntimeTxPowerControlInput,
+    ProductionRuntimeUsbConfig, Rtl8812auInitOrder, RuntimeRadioError, TxCalibrationProfile,
+    DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
+};
+
+const MAC_REG_ARRAY: &str = "array_mp_8812a_mac_reg";
+const BB_PHY_ARRAY: &str = "array_mp_8812a_phy_reg";
+const BB_AGC_ARRAY: &str = "array_mp_8812a_agc_tab";
+const RF_RADIOA_ARRAY: &str = "array_mp_8812a_radioa";
+const RF_RADIOB_ARRAY: &str = "array_mp_8812a_radiob";
+const DEFAULT_RFE_TYPE: u8 = 0x03;
+const DEFAULT_INIT_TIMEOUT_MS: u64 = 500;
 
 #[derive(Debug, Parser, Clone)]
 #[command(name = "wfb-radio-service")]
@@ -288,6 +307,24 @@ pub struct ResolvedServiceRun {
     pub rx_mcs_index: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceRxForwardArg {
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
+    pub aggregator: SocketAddr,
+}
+
+impl ServiceAdapterConfig {
+    pub fn selector(&self) -> DeviceSelector {
+        DeviceSelector {
+            vid: self.vid,
+            pid: self.pid,
+            bus: self.bus,
+            address: self.address,
+        }
+    }
+}
+
 pub fn load_service_config_file(
     path: &Path,
 ) -> std::result::Result<ServiceConfigFile, RuntimeRadioError> {
@@ -459,6 +496,129 @@ pub fn resolve_service_run(
     })
 }
 
+pub fn run_service(
+    cli: &ServiceCli,
+) -> std::result::Result<ProductionRuntimeFlowReport, RuntimeRadioError> {
+    let resolved = resolve_service_run(cli)?;
+    let config = service_runtime_config_from_resolved(&resolved)?;
+    let inputs = match service_runtime_inputs_from_resolved(&resolved) {
+        Ok(inputs) => inputs,
+        Err(error) => return Ok(ProductionRuntimeFlowReport::not_started(&config, error)),
+    };
+    Ok(run_production_runtime_flow(config, inputs))
+}
+
+pub fn service_runtime_config_from_resolved(
+    resolved: &ResolvedServiceRun,
+) -> std::result::Result<ProductionRuntimeFlowConfig, RuntimeRadioError> {
+    let channel = Channel::from_number(resolved.channel).map_err(|error| {
+        RuntimeRadioError::new(
+            "invalid_channel",
+            format!("invalid production service channel: {error}"),
+        )
+    })?;
+    let usb = if resolved.macos_usbhost.enabled.unwrap_or(false) {
+        ProductionRuntimeUsbConfig::macos_usbhost(
+            resolved.adapter.selector(),
+            service_macos_usbhost_config(&resolved.macos_usbhost),
+        )
+    } else {
+        ProductionRuntimeUsbConfig::libusb(resolved.adapter.selector())
+    };
+    let rx_forwards = service_runtime_rx_forwards(resolved)?;
+
+    Ok(ProductionRuntimeFlowConfig {
+        usb,
+        channel,
+        bandwidth: resolved.bandwidth,
+        firmware: Some(resolved.firmware.clone()),
+        bind_addr: resolved.bind,
+        tx_binds: resolved.tx_binds.clone(),
+        duration_ms: resolved.duration_ms,
+        rx_timeout_ms: resolved.rx_timeout_ms,
+        tx_burst_limit: resolved.tx_burst_limit,
+        max_datagrams: resolved.max_datagrams,
+        ready_file: resolved.ready_file.clone(),
+        health_file: resolved.health_file.clone(),
+        tx_authorized: resolved.tx_authorized,
+        live_register_write_authorized: resolved.live_register_write_authorized,
+        calibration_profile: TxCalibrationProfile::from(resolved.calibration_profile),
+        captured_tail_applied: service_should_apply_captured_tx_bringup_tail(
+            channel,
+            resolved.bandwidth,
+        ),
+        primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig {
+            link_id: resolved.wfb_link_id,
+            radio_port: resolved.wfb_radio_port,
+            aggregator: resolved.rx_aggregator,
+        },
+        rx_forwards,
+        rx_wlan_idx: resolved.rx_wlan_idx,
+        rx_mcs_index: resolved.rx_mcs_index,
+    })
+}
+
+pub fn service_runtime_inputs_from_resolved(
+    resolved: &ResolvedServiceRun,
+) -> std::result::Result<ProductionRuntimeFlowExecutionInputs, RuntimeRadioError> {
+    let firmware_image = FirmwareImage::load_external(&resolved.firmware).map_err(|error| {
+        RuntimeRadioError::new(
+            "service_firmware_load_failed",
+            format!("{}: {error}", resolved.firmware.display()),
+        )
+    })?;
+    let condition_env = RealtekConditionEnv::rtl8812au_awus036ach_default();
+    let mac_plan = load_service_realtek_table_plan(
+        &rtl8812a_mac_source_default(),
+        MAC_REG_ARRAY,
+        RealtekTableKind::Mac,
+        condition_env,
+    )?;
+    let phy_plan = load_service_realtek_table_plan(
+        &rtl8812a_bb_source_default(),
+        BB_PHY_ARRAY,
+        RealtekTableKind::BbPhy,
+        condition_env,
+    )?;
+    let agc_plan = load_service_realtek_table_plan(
+        &rtl8812a_bb_source_default(),
+        BB_AGC_ARRAY,
+        RealtekTableKind::BbAgc,
+        condition_env,
+    )?;
+    let radioa_plan = load_service_realtek_table_plan(
+        &rtl8812a_rf_source_default(),
+        RF_RADIOA_ARRAY,
+        RealtekTableKind::RfRadioA,
+        condition_env,
+    )?;
+    let radiob_plan = load_service_realtek_table_plan(
+        &rtl8812a_rf_source_default(),
+        RF_RADIOB_ARRAY,
+        RealtekTableKind::RfRadioB,
+        condition_env,
+    )?;
+
+    Ok(ProductionRuntimeFlowExecutionInputs {
+        rtl8812au_init: Some(ProductionRuntimeRtl8812auInitInputs {
+            firmware_image,
+            mac_plan,
+            phy_plan,
+            agc_plan,
+            radioa_plan,
+            radiob_plan,
+            init_order: Rtl8812auInitOrder::Linux,
+            rfe_type: DEFAULT_RFE_TYPE,
+            init_timeout: Duration::from_millis(DEFAULT_INIT_TIMEOUT_MS),
+        }),
+        tx_power_control: ProductionRuntimeTxPowerControlInput::None,
+        heartbeat_led: LedHeartbeatConfig {
+            enabled: resolved.heartbeat_enabled,
+            half_period_ms: resolved.heartbeat_half_period_ms,
+        },
+    })
+}
+
 pub fn parse_bandwidth(input: &str) -> std::result::Result<Bandwidth, String> {
     let normalized = input
         .trim()
@@ -498,6 +658,130 @@ fn service_default_bind() -> SocketAddr {
     "127.0.0.1:5600"
         .parse()
         .expect("service default bind address")
+}
+
+fn service_runtime_rx_forwards(
+    resolved: &ResolvedServiceRun,
+) -> std::result::Result<Vec<ProductionRuntimeRxForwardConfig>, RuntimeRadioError> {
+    resolved
+        .rx_forwards
+        .iter()
+        .map(|forward| {
+            parse_service_rx_forward_arg(forward).map(|forward| ProductionRuntimeRxForwardConfig {
+                link_id: forward.link_id.or(resolved.wfb_link_id),
+                radio_port: forward.radio_port,
+                aggregator: Some(forward.aggregator),
+            })
+        })
+        .collect()
+}
+
+fn service_macos_usbhost_config(config: &ServiceMacosUsbHostConfig) -> MacosUsbHostConfig {
+    MacosUsbHostConfig {
+        configuration_value: config.configuration_value.unwrap_or(1),
+        interface_number: config.interface_number.unwrap_or(0),
+        bulk_in_endpoint: config.bulk_in_endpoint.unwrap_or(0x81),
+        bulk_out_endpoint: config.bulk_out_endpoint.unwrap_or(0x02),
+        bulk_out_endpoint_count: config.bulk_out_endpoint_count.unwrap_or(3),
+        poll_attempts: config.poll_attempts.unwrap_or(25),
+        poll_delay: Duration::from_millis(config.poll_delay_ms.unwrap_or(100)),
+    }
+}
+
+fn service_should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
+    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+}
+
+fn load_service_realtek_table_plan(
+    source_path: &Path,
+    array_name: &str,
+    kind: RealtekTableKind,
+    condition_env: RealtekConditionEnv,
+) -> std::result::Result<RealtekTablePlan, RuntimeRadioError> {
+    let source = fs::read_to_string(source_path).map_err(|error| {
+        RuntimeRadioError::new(
+            "service_realtek_table_source_read_failed",
+            format!("failed to read {}: {error}", source_path.display()),
+        )
+    })?;
+    let values = parse_realtek_u32_array(&source, array_name).map_err(|error| {
+        RuntimeRadioError::new("service_realtek_table_parse_failed", error.to_string())
+    })?;
+    plan_realtek_table(array_name, kind, &values, condition_env).map_err(|error| {
+        RuntimeRadioError::new("service_realtek_table_plan_failed", error.to_string())
+    })
+}
+
+fn rtl8812a_mac_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_mac.c")
+}
+
+fn rtl8812a_bb_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_bb.c")
+}
+
+fn rtl8812a_rf_source_default() -> PathBuf {
+    PathBuf::from("/tmp/wfb-ref-rtl8812au/hal/phydm/rtl8812a/halhwimg8812a_rf.c")
+}
+
+fn parse_service_rx_forward_arg(
+    input: &str,
+) -> std::result::Result<ServiceRxForwardArg, RuntimeRadioError> {
+    let (lhs, rhs) = input.split_once('=').ok_or_else(|| {
+        RuntimeRadioError::new(
+            "service_rx_forward_parse_failed",
+            "expected LINK_ID:RADIO_PORT=HOST:PORT or RADIO_PORT=HOST:PORT",
+        )
+    })?;
+    let aggregator = rhs.parse::<SocketAddr>().map_err(|error| {
+        RuntimeRadioError::new(
+            "service_rx_forward_parse_failed",
+            format!("invalid RX forward aggregator {rhs:?}: {error}"),
+        )
+    })?;
+    let parts = lhs.split(':').collect::<Vec<_>>();
+    let (link_id, radio_port) = match parts.as_slice() {
+        [radio_port] => (None, parse_service_prefixed_u8(radio_port)?),
+        [link_id, radio_port] => (
+            Some(parse_service_prefixed_u32(link_id)?),
+            parse_service_prefixed_u8(radio_port)?,
+        ),
+        _ => {
+            return Err(RuntimeRadioError::new(
+                "service_rx_forward_parse_failed",
+                "expected at most one ':' before '='",
+            ))
+        }
+    };
+    Ok(ServiceRxForwardArg {
+        link_id,
+        radio_port,
+        aggregator,
+    })
+}
+
+fn parse_service_prefixed_u32(input: &str) -> std::result::Result<u32, RuntimeRadioError> {
+    parse_prefixed_int(input)
+        .and_then(|value| u32::try_from(value).map_err(|_| format!("{input} does not fit in u32")))
+        .map_err(|error| RuntimeRadioError::new("service_rx_forward_parse_failed", error))
+}
+
+fn parse_service_prefixed_u8(input: &str) -> std::result::Result<u8, RuntimeRadioError> {
+    parse_prefixed_int(input)
+        .and_then(|value| u8::try_from(value).map_err(|_| format!("{input} does not fit in u8")))
+        .map_err(|error| RuntimeRadioError::new("service_rx_forward_parse_failed", error))
+}
+
+impl From<ServiceTxCalibrationProfile> for TxCalibrationProfile {
+    fn from(profile: ServiceTxCalibrationProfile) -> Self {
+        match profile {
+            ServiceTxCalibrationProfile::CurrentDefault => Self::CurrentDefault,
+            ServiceTxCalibrationProfile::LinuxParityCh36Ht20 => Self::LinuxParityCh36Ht20,
+            ServiceTxCalibrationProfile::Rtl8812aLck => Self::Rtl8812aLck,
+            ServiceTxCalibrationProfile::Rtl8812aIqkProbe => Self::Rtl8812aIqkProbe,
+            ServiceTxCalibrationProfile::Rtl8812aRuntimeIqk => Self::Rtl8812aRuntimeIqk,
+        }
+    }
 }
 
 fn parse_u16(input: &str) -> std::result::Result<u16, String> {

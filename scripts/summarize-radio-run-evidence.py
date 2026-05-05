@@ -330,6 +330,7 @@ def summarize_run(run_dir: Path, lateness_warn_sec: float) -> dict[str, Any]:
     return {
         "run_dir": str(run_dir),
         "profile": meta.get("profile_name") or run_dir.name,
+        "radio_command": summary.get("radio_command") or meta.get("radio_command"),
         "smoke_result": summary.get("smoke_result"),
         "radio_result": radio_result,
         "failures": summary.get("failures") or [],
@@ -402,15 +403,16 @@ def print_text(runs: list[dict[str, Any]]) -> None:
     if not runs:
         print("No run evidence found.")
         return
-    print("| Run | Result | M2L | L2M | Source | TX | Signal | Assessment |")
-    print("|---|---|---:|---:|---|---|---|---|")
+    print("| Run | Command | Result | M2L | L2M | Source | TX | Signal | Assessment |")
+    print("|---|---|---|---:|---:|---|---|---|---|")
     for run in runs:
         result = run.get("smoke_result") or run.get("radio_result") or "-"
         tx = run["tx"]
         tx_text = "submitted={submitted_frames} fail={failed_submissions} drop={dropped_datagrams}".format(**tx)
         print(
-            "| `{run}` | `{result}` | {m2l} | {l2m} | {source} | {tx} | {signal} | `{assessment}` |".format(
+            "| `{run}` | `{command}` | `{result}` | {m2l} | {l2m} | {source} | {tx} | {signal} | `{assessment}` |".format(
                 run=Path(run["run_dir"]).name,
+                command=run.get("radio_command") or "-",
                 result=result,
                 m2l=ratio_text(run["m2l"]),
                 l2m=ratio_text(run["l2m"]),

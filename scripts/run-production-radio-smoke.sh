@@ -12,6 +12,7 @@ Configuration is via environment variables:
   HW_MAC_HOST=rownd@100.104.12.123
   HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-snr-deploy
   LOCAL_HW=1              # run on this checkout instead of SSH deployment
+  RADIO_COMMAND=service    # service or diagnostic
   FIRMWARE=/tmp/rtl8812aefw.bin
   RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
   VID=0x0bda PID=0x8812 CHANNEL=36 BANDWIDTH_MHZ=20
@@ -83,6 +84,7 @@ HW_DEPLOY_PATH_WAS_SET=${HW_DEPLOY_PATH+x}
 HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-snr-deploy}
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
+RADIO_COMMAND=${RADIO_COMMAND:-service}
 VID=${VID:-0x0bda}
 PID=${PID:-0x8812}
 CHANNEL=${CHANNEL:-36}
@@ -101,6 +103,12 @@ MCS=${MCS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-256}
 PAYLOAD_MARKER=${PAYLOAD_MARKER:-PRODSMOK}
 REMOTE_OUT_DIR=${REMOTE_OUT_DIR:-/tmp/wfb-prod-radio-smoke-$RUN_ID}
+
+case "$RADIO_COMMAND" in
+  service|diagnostic) ;;
+  diag) RADIO_COMMAND=diagnostic ;;
+  *) die "invalid RADIO_COMMAND: $RADIO_COMMAND (expected service or diagnostic)" ;;
+esac
 
 LOCAL_RUN=0
 case "$HW_MAC_HOST" in
@@ -171,34 +179,59 @@ run_radio_smoke() {
   local report="$REMOTE_OUT_DIR/radio-run-$smoke_mode.json"
   local ready="$REMOTE_OUT_DIR/radio-run-$smoke_mode-ready.json"
   local health="$REMOTE_OUT_DIR/radio-run-$smoke_mode-health.json"
+  local summary="$REMOTE_OUT_DIR/radio-run-$smoke_mode-summary.json"
   local log_file="$REMOTE_OUT_DIR/radio-run-$smoke_mode.log"
   local max_datagrams=0
   local duration_ms=$DURATION_MS
 
-  rm -f "$report" "$ready" "$health" "$log_file"
+  rm -f "$report" "$ready" "$health" "$summary" "$log_file"
   if [[ "$smoke_mode" == "tx-positive" ]]; then
     max_datagrams=$TX_DATAGRAMS
     duration_ms=$((DURATION_MS < 3500 ? 3500 : DURATION_MS))
   fi
 
-  log "starting radio-run $smoke_mode report=$report"
+  log "starting $RADIO_COMMAND radio-run $smoke_mode report=$report"
   set +e
-  ./target/debug/wfb-radio-diag --json --report "$report" radio-run \
-    --config "$RADIO_RUN_CONFIG" \
-    --vid "$VID" \
-    --pid "$PID" \
-    --channel "$CHANNEL" \
-    --bandwidth "$BANDWIDTH_MHZ" \
-    --firmware "$FIRMWARE" \
-    --bind "$TX_BIND" \
-    --duration-ms "$duration_ms" \
-    --rx-timeout-ms "$RX_TIMEOUT_MS" \
-    --tx-burst-limit "$TX_BURST_LIMIT" \
-    --max-datagrams "$max_datagrams" \
-    --ready-file "$ready" \
-    --health-file "$health" \
-    --i-understand-this-transmits \
-    >"$log_file" 2>&1 &
+  case "$RADIO_COMMAND" in
+    service)
+      ./target/debug/wfb-radio-service \
+        --json \
+        --report "$report" \
+        --config "$RADIO_RUN_CONFIG" \
+        --vid "$VID" \
+        --pid "$PID" \
+        --channel "$CHANNEL" \
+        --bandwidth "$BANDWIDTH_MHZ" \
+        --firmware "$FIRMWARE" \
+        --bind "$TX_BIND" \
+        --duration-ms "$duration_ms" \
+        --rx-timeout-ms "$RX_TIMEOUT_MS" \
+        --tx-burst-limit "$TX_BURST_LIMIT" \
+        --max-datagrams "$max_datagrams" \
+        --ready-file "$ready" \
+        --health-file "$health" \
+        --i-understand-this-transmits \
+        >"$log_file" 2>&1 &
+      ;;
+    diagnostic)
+      ./target/debug/wfb-radio-diag --json --report "$report" radio-run \
+        --config "$RADIO_RUN_CONFIG" \
+        --vid "$VID" \
+        --pid "$PID" \
+        --channel "$CHANNEL" \
+        --bandwidth "$BANDWIDTH_MHZ" \
+        --firmware "$FIRMWARE" \
+        --bind "$TX_BIND" \
+        --duration-ms "$duration_ms" \
+        --rx-timeout-ms "$RX_TIMEOUT_MS" \
+        --tx-burst-limit "$TX_BURST_LIMIT" \
+        --max-datagrams "$max_datagrams" \
+        --ready-file "$ready" \
+        --health-file "$health" \
+        --i-understand-this-transmits \
+        >"$log_file" 2>&1 &
+      ;;
+  esac
   local radio_pid=$!
   set -e
 
@@ -267,7 +300,7 @@ PY
     die "radio-run failed for $smoke_mode"
   fi
 
-  SMOKE_MODE="$smoke_mode" REPORT="$report" HEALTH="$health" EXPECT_TX="$([[ "$smoke_mode" == "tx-positive" ]] && echo 1 || echo 0)" \
+  SMOKE_MODE="$smoke_mode" RADIO_COMMAND="$RADIO_COMMAND" REPORT="$report" HEALTH="$health" SUMMARY="$summary" EXPECT_TX="$([[ "$smoke_mode" == "tx-positive" ]] && echo 1 || echo 0)" \
     TX_DATAGRAMS="$TX_DATAGRAMS" python3 - <<'PY'
 import json
 import os
@@ -275,7 +308,9 @@ import sys
 
 report_path = os.environ["REPORT"]
 health_path = os.environ["HEALTH"]
+summary_path = os.environ["SUMMARY"]
 mode = os.environ["SMOKE_MODE"]
+radio_command = os.environ["RADIO_COMMAND"]
 expect_tx = os.environ["EXPECT_TX"] == "1"
 expected = int(os.environ["TX_DATAGRAMS"])
 with open(report_path, "r", encoding="utf-8") as handle:
@@ -311,9 +346,22 @@ frame_type_total = sum(
     rx_outcome_counts.get(field, 0)
     for field in ("management_frames", "control_frames", "data_frames", "extension_frames")
 )
+summary = {
+    "mode": mode,
+    "radio_command": radio_command,
+    "result": result,
+    "stop_reason": report.get("stop_reason"),
+    "health_lifecycle": health.get("lifecycle"),
+    "health_operator_action": health.get("operator_action"),
+    "tx": tx,
+    "rx": rx,
+}
+with open(summary_path, "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2, sort_keys=True)
+    handle.write("\n")
 
 print(
-    f"{mode}: result={result} stop={report.get('stop_reason')} "
+    f"{mode}: command={radio_command} result={result} stop={report.get('stop_reason')} "
     f"health={health.get('lifecycle')}/{health.get('operator_action')} "
     f"tx_datagrams={datagrams} submitted={submitted} failed={failed} dropped={dropped} "
     f"rx_buffers={rx.get('buffers_read', 0)} rx_frames={parsed_frames} "
@@ -357,8 +405,16 @@ PY
 cd "$HW_DEPLOY_PATH"
 [[ -f "$RADIO_RUN_CONFIG" ]] || die "radio-run config not found: $RADIO_RUN_CONFIG"
 mkdir -p "$REMOTE_OUT_DIR"
-log "building wfb-radio-diag"
-cargo build -p wfb-radio-diag
+case "$RADIO_COMMAND" in
+  service)
+    log "building wfb-radio-service"
+    cargo build -p wfb-radio-service
+    ;;
+  diagnostic)
+    log "building wfb-radio-diag"
+    cargo build -p wfb-radio-diag
+    ;;
+esac
 
 case "$MODE" in
   rx-only)
@@ -380,7 +436,7 @@ if (( DRY_RUN == 1 )); then
   if (( LOCAL_RUN == 1 )); then
     cat <<EOF
 local bash with:
-MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") \\
+MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") RADIO_COMMAND=$(printf '%q' "$RADIO_COMMAND") \\
 FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
 DURATION_MS=$(printf '%q' "$DURATION_MS") RX_TIMEOUT_MS=$(printf '%q' "$RX_TIMEOUT_MS") TX_BURST_LIMIT=$(printf '%q' "$TX_BURST_LIMIT") \\
 TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX_INTERVAL_SEC=$(printf '%q' "$TX_INTERVAL_SEC") READY_WAIT_SECONDS=$(printf '%q' "$READY_WAIT_SECONDS") \\
@@ -390,7 +446,7 @@ EOF
   else
     cat <<EOF
 ssh $HW_MAC_HOST with:
-MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") \\
+MODE=$(printf '%q' "$MODE") RUN_ID=$(printf '%q' "$RUN_ID") HW_DEPLOY_PATH=$(printf '%q' "$HW_DEPLOY_PATH") REMOTE_OUT_DIR=$(printf '%q' "$REMOTE_OUT_DIR") RADIO_COMMAND=$(printf '%q' "$RADIO_COMMAND") \\
 FIRMWARE=$(printf '%q' "$FIRMWARE") RADIO_RUN_CONFIG=$(printf '%q' "$RADIO_RUN_CONFIG") VID=$(printf '%q' "$VID") PID=$(printf '%q' "$PID") CHANNEL=$(printf '%q' "$CHANNEL") BANDWIDTH_MHZ=$(printf '%q' "$BANDWIDTH_MHZ") \\
 DURATION_MS=$(printf '%q' "$DURATION_MS") RX_TIMEOUT_MS=$(printf '%q' "$RX_TIMEOUT_MS") TX_BURST_LIMIT=$(printf '%q' "$TX_BURST_LIMIT") \\
 TX_DATAGRAMS=$(printf '%q' "$TX_DATAGRAMS") TX_BIND=$(printf '%q' "$TX_BIND") TX_INTERVAL_SEC=$(printf '%q' "$TX_INTERVAL_SEC") READY_WAIT_SECONDS=$(printf '%q' "$READY_WAIT_SECONDS") \\
@@ -407,6 +463,7 @@ if (( LOCAL_RUN == 1 )); then
   RUN_ID="$RUN_ID" \
   HW_DEPLOY_PATH="$HW_DEPLOY_PATH" \
   REMOTE_OUT_DIR="$REMOTE_OUT_DIR" \
+  RADIO_COMMAND="$RADIO_COMMAND" \
   FIRMWARE="$FIRMWARE" \
   RADIO_RUN_CONFIG="$RADIO_RUN_CONFIG" \
   VID="$VID" \
@@ -436,6 +493,7 @@ ssh "$HW_MAC_HOST" \
   RUN_ID="$RUN_ID" \
   HW_DEPLOY_PATH="$HW_DEPLOY_PATH" \
   REMOTE_OUT_DIR="$REMOTE_OUT_DIR" \
+  RADIO_COMMAND="$RADIO_COMMAND" \
   FIRMWARE="$FIRMWARE" \
   RADIO_RUN_CONFIG="$RADIO_RUN_CONFIG" \
   VID="$VID" \
