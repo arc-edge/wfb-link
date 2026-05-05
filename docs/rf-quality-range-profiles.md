@@ -598,6 +598,12 @@ The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
 (default `200`), the wrapped smoke passes, no decrypt failures occur, and TX
 reports no dropped datagrams or failed submissions.
 
+The duplex smoke runner sends unmeasured source-tail payloads after the marked
+payload schedule by default (`SOURCE_TAIL_PAYLOADS=auto`) so the Linux `wfb_tx`
+encoder can flush a final partial FEC block. These tail markers are excluded
+from recovered-payload accounting and recorded in `source-gate.json` and
+`source-summary.json`.
+
 Use `scripts/summarize-radio-run-evidence.py` on a single duplex smoke run or a
 profile-matrix output directory when payload counts miss strict acceptance. It
 reads the collected `summary.json`, peer counters, and source-timing evidence,

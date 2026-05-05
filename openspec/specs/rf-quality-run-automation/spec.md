@@ -47,6 +47,13 @@ The system SHALL support unmeasured source-payload warmup before marked payload 
   maximum source-send lateness, payload interval, and source phase values in
   collected source evidence
 
+#### Scenario: Tail padding flushes source encoders
+- **WHEN** an automated duplex run finishes sending measured marked payloads
+- **THEN** the command MUST support unmeasured source-tail payloads after the
+  marked schedule, MUST exclude those tail markers from recovered-payload
+  accounting, and MUST record configured and actual tail counts in source-gate
+  or source-summary evidence
+
 #### Scenario: Session acquisition settle is configured
 - **WHEN** an automated duplex run observes required WFB receiver sessions after
   warmup

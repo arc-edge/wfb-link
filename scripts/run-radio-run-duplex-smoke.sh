@@ -18,6 +18,7 @@ Configuration is via environment variables. Common overrides:
   LINK_ID=0x000001        # report/runtime value
   WFB_CLI_LINK_ID=1       # decimal value for Linux WFB-ng CLI; derived by default
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
+  SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
   SESSION_ACQUIRE_SETTLE_SECONDS=1
   M2L_SOURCE_PHASE_SEC=0 L2M_SOURCE_PHASE_SEC=0
@@ -94,6 +95,7 @@ DECRYPT_FAILURE_GATE=${DECRYPT_FAILURE_GATE:-post-session}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
 export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES DECRYPT_FAILURE_GATE REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
+SOURCE_TAIL_PAYLOADS=${SOURCE_TAIL_PAYLOADS:-auto}
 SESSION_ACQUIRE_MODE=${SESSION_ACQUIRE_MODE:-observed}
 SESSION_ACQUIRE_TIMEOUT_SECONDS=${SESSION_ACQUIRE_TIMEOUT_SECONDS:-15}
 SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
@@ -102,11 +104,13 @@ PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.003}
 M2L_SOURCE_PHASE_SEC=${M2L_SOURCE_PHASE_SEC:-0}
 L2M_SOURCE_PHASE_SEC=${L2M_SOURCE_PHASE_SEC:-0}
-export SOURCE_WARMUP_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
+export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
 L2M_WARMUP_MARKER=${L2M_WARMUP_MARKER:-L2MWARM1}
+M2L_TAIL_MARKER=${M2L_TAIL_MARKER:-M2LTAIL1}
+L2M_TAIL_MARKER=${L2M_TAIL_MARKER:-L2MTAIL1}
 
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 EFUSE_REPORT=${EFUSE_REPORT:-/tmp/wfb-remote-macos-efuse-dump.json}
@@ -400,7 +404,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 enabled() {
@@ -595,6 +599,13 @@ session_poll = float(os.environ.get("SESSION_ACQUIRE_POLL_SECONDS", "0.2"))
 session_settle = float(os.environ.get("SESSION_ACQUIRE_SETTLE_SECONDS", "1"))
 enable_m2l = enabled("ENABLE_M2L")
 enable_l2m = enabled("ENABLE_L2M")
+m2l_fec_k = int(os.environ["M2L_FEC_K"])
+l2m_fec_k = int(os.environ["L2M_FEC_K"])
+tail_config = os.environ.get("SOURCE_TAIL_PAYLOADS", "auto").strip().lower()
+if tail_config == "auto":
+    tail = max([value for enabled_flag, value in [(enable_m2l, m2l_fec_k), (enable_l2m, l2m_fec_k)] if enabled_flag] or [0])
+else:
+    tail = max(0, int(tail_config))
 source_m2l = ("127.0.0.1", int(os.environ["LINUX_M2L_SOURCE_PORT"]))
 source_l2m = ("127.0.0.1", int(os.environ["LINUX_L2M_SOURCE_PORT"]))
 sock_m2l = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -614,6 +625,12 @@ def send_warmup(seq):
         sock_m2l.sendto(payload(os.environ["M2L_WARMUP_MARKER"], seq, b"w"), source_m2l)
     if enable_l2m:
         sock_l2m.sendto(payload(os.environ["L2M_WARMUP_MARKER"], seq, b"w"), source_l2m)
+
+def send_tail(seq):
+    if enable_m2l:
+        sock_m2l.sendto(payload(os.environ["M2L_TAIL_MARKER"], seq, b"t"), source_m2l)
+    if enable_l2m:
+        sock_l2m.sendto(payload(os.environ["L2M_TAIL_MARKER"], seq, b"t"), source_l2m)
 
 def has_session(path):
     try:
@@ -665,7 +682,9 @@ measured_started_at = time.time()
     "observed_sessions": observed_sessions,
     "missing_sessions": missing_sessions,
     "configured_warmup_payloads": warmup,
+    "configured_tail_payloads": tail_config,
     "warmup_payloads": warmup_sent,
+    "tail_payloads": tail,
     "expected_payloads": expected,
     "timeout_sec": session_timeout,
     "poll_sec": session_poll,
@@ -711,10 +730,17 @@ for event in source_events:
     direction = event["direction"]
     direction_counts[direction] = direction_counts.get(direction, 0) + 1
     max_lateness[direction] = max(max_lateness.get(direction, 0.0), event["lateness_sec"])
+marked_completed_at = time.time()
+tail_started_at = marked_completed_at
+for seq in range(tail):
+    send_tail(seq)
+    time.sleep(interval)
+tail_completed_at = time.time()
 (remote_prefix / "source-summary.json").write_text(json.dumps({
     "source_started_at": source_started_at,
     "expected_payloads": expected,
     "payload_interval_sec": interval,
+    "tail_payloads": tail,
     "source_phase_sec": {
         "m2l": m2l_phase,
         "l2m": l2m_phase,
@@ -722,10 +748,12 @@ for event in source_events:
     "marked_source_events": len(source_events),
     "direction_counts": direction_counts,
     "max_lateness_sec": max_lateness,
-    "duration_sec": round(time.time() - source_started_at, 6),
+    "marked_duration_sec": round(marked_completed_at - source_started_at, 6),
+    "tail_duration_sec": round(tail_completed_at - tail_started_at, 6),
+    "duration_sec": round(tail_completed_at - source_started_at, 6),
 }, indent=2, sort_keys=True) + "\n")
 PY
-printf 'sent configured_warmup=%s marked=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$EXPECTED_PAYLOADS" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
+printf 'sent configured_warmup=%s configured_tail=%s marked=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$SOURCE_TAIL_PAYLOADS" "$EXPECTED_PAYLOADS" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
 
 for _ in $(seq 1 "$PEER_WAIT_SECONDS"); do
   [[ -f "$REMOTE_PREFIX/counter-m2l.json" && -f "$REMOTE_PREFIX/counter-l2m.json" ]] && break
