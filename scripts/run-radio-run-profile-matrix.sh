@@ -22,6 +22,7 @@ Common configuration:
   ENABLE_M2L=1 ENABLE_L2M=1
   REPEATS=1
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100
+  SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
   MATRIX_OUT_DIR=/tmp/wfb-radio-profile-matrix
 
 Set PROFILE_FILE to a pipe-delimited profile list:
@@ -129,6 +130,9 @@ EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
 ENABLE_M2L=${ENABLE_M2L:-1}
 ENABLE_L2M=${ENABLE_L2M:-1}
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
+SESSION_ACQUIRE_MODE=${SESSION_ACQUIRE_MODE:-observed}
+SESSION_ACQUIRE_TIMEOUT_SECONDS=${SESSION_ACQUIRE_TIMEOUT_SECONDS:-15}
+SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 COUNTER_SECONDS=${COUNTER_SECONDS:-55}
 PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-40}
@@ -272,7 +276,9 @@ keys = [
     "enable_m2l", "enable_l2m",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
     "l2m_mcs", "payload_interval_sec", "expected_payloads",
-    "source_warmup_payloads", "payload_len", "m2l_min_unique",
+    "source_warmup_payloads", "session_acquire_mode",
+    "session_acquire_timeout_seconds", "session_acquire_poll_seconds",
+    "payload_len", "m2l_min_unique",
     "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
     "radio_run_duration_ms", "decrypt_failure_gate",
 ]
@@ -283,11 +289,14 @@ for key in [
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
     "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
     "radio_run_duration_ms",
+    "session_acquire_timeout_seconds",
 ]:
     if data.get(key) is not None:
         data[key] = int(data[key])
 if data.get("payload_interval_sec") is not None:
     data["payload_interval_sec"] = float(data["payload_interval_sec"])
+if data.get("session_acquire_poll_seconds") is not None:
+    data["session_acquire_poll_seconds"] = float(data["session_acquire_poll_seconds"])
 Path(sys.argv[1]).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 PY
 }
@@ -340,7 +349,7 @@ run_one_profile() {
   export LOCAL_HW HW_MAC_HOST LINUX_HOST LINUX_LAN_IP MAC_LAN_IP CHANNEL BANDWIDTH_MHZ
   export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
   export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
-  export SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
+  export SOURCE_WARMUP_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
   export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
@@ -376,6 +385,9 @@ run_one_profile() {
       ENABLE_M2L="$ENABLE_M2L" \
       ENABLE_L2M="$ENABLE_L2M" \
       SOURCE_WARMUP_PAYLOADS="$SOURCE_WARMUP_PAYLOADS" \
+      SESSION_ACQUIRE_MODE="$SESSION_ACQUIRE_MODE" \
+      SESSION_ACQUIRE_TIMEOUT_SECONDS="$SESSION_ACQUIRE_TIMEOUT_SECONDS" \
+      SESSION_ACQUIRE_POLL_SECONDS="$SESSION_ACQUIRE_POLL_SECONDS" \
       PAYLOAD_LEN="$PAYLOAD_LEN" \
       PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
       M2L_MIN_UNIQUE="$M2L_MIN_UNIQUE" \
@@ -408,7 +420,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -447,6 +459,7 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
     m2l = summary.get("m2l_counter") or {}
     l2m = summary.get("l2m_counter") or {}
     dec = summary.get("peer_wfb_rx") or {}
+    source_gate = summary.get("source_gate") or {}
     directions = summary.get("directions") or {}
     rx = summary.get("rx") or {}
     signal = rx.get("signal") or {}
@@ -463,6 +476,9 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
         "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
         "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
+        "source_gate_status": source_gate.get("status"),
+        "source_gate_acquired": source_gate.get("acquired"),
+        "source_gate_missing_sessions": source_gate.get("missing_sessions") or [],
         "enable_m2l": meta.get("enable_m2l"),
         "enable_l2m": meta.get("enable_l2m"),
         "m2l_enabled": m2l_enabled,

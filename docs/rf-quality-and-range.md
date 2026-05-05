@@ -115,7 +115,11 @@ when overwriting that destination is intentional.
 The current production-smoke default uses the retained captured/default TX power
 and calibration state. EFUSE-derived TX power and runtime IQK are explicit A/B
 profiles only until they pass sustained receiver-backed regression matrices with
-zero decrypt failures.
+zero post-session decrypt failures. The duplex smoke sends unmeasured warmup
+payloads first and, by default, waits for each enabled Linux `wfb_rx` path to
+log `SESSION` before marked payload accounting starts. A timeout is recorded as
+`source_gate.status=timed_out` and fails the run as an acquisition regression
+rather than mixing session startup with steady-state payload recovery.
 
 ```sh
 cargo run -p wfb-radio-diag -- --json \

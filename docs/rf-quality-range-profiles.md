@@ -54,6 +54,11 @@ Required settings:
   outdoor evidence.
 - At least 120 source payloads for quick checks; use 2,000 source payloads for
   an accepted reference.
+- For production duplex smokes, keep `SESSION_ACQUIRE_MODE=observed` unless
+  deliberately debugging first-acquisition behavior. Marked payloads should not
+  start until each enabled WFB receiver path has logged `SESSION`; pre-session
+  decrypt failures are acquisition evidence, while post-session decrypt failures
+  still quarantine the profile.
 - Linux baseline or Linux receiver artifact paths attached to the report.
 
 Example RF-quality envelope:
@@ -613,26 +618,33 @@ decrypt failures were zero, TX drops and failed submissions were zero, M2L
 recovery was `1993/2000` and `1990/2000`, and L2M recovery was `1987/2000` and
 `1978/2000`.
 
-Runtime IQK remains receiver-gated and is not promoted for this profile. The
-same M2L `5/12` plus L2M `3/12` 1000-payload A/B with
-`TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk` completed calibration and cleanup
-in both repeats, but failed both sustained gates at
-`/tmp/wfb-radio-profile-matrix-remote-iqk-m2l5-l2m3-1000-repeat2-20260504-231004`:
-one repeat logged 94 M2L decrypt failures and the other logged 128 L2M decrypt
-failures.
+Runtime IQK and EFUSE-derived TX power remain receiver-gated, but the original
+1000-payload A/B failures are now classified as acquisition-gate regressions
+rather than proven post-session payload corruption. The older runtime-IQK run
+at `/tmp/wfb-radio-profile-matrix-remote-iqk-m2l5-l2m3-1000-repeat2-20260504-231004`
+and EFUSE run at
+`/tmp/wfb-radio-profile-matrix-remote-efuse-m2l5-l2m3-1000-repeat2-20260504-231630`
+logged decrypt failures before the receiver's first `SESSION`; post-session
+decrypt failures were zero.
 
-EFUSE-derived TX power also remains receiver-gated. The same 1000-payload A/B
-with `TX_POWER_MODE=efuse-derived` failed one of two repeats at
-`/tmp/wfb-radio-profile-matrix-remote-efuse-m2l5-l2m3-1000-repeat2-20260504-231630`:
-one repeat logged 117 L2M decrypt failures and the other passed. Keep
-`TX_POWER_MODE=current-default` with `TX_CALIBRATION_PROFILE=current-default` as
-the short-range smoke default.
+The duplex smoke now defaults to `SESSION_ACQUIRE_MODE=observed`: it sends
+unmeasured warmup traffic, keeps sending warmup probes while waiting for each
+enabled receiver to log `SESSION`, and only then starts marked payload
+accounting. A corrected one-repeat A/B at
+`/tmp/wfb-radio-calibration-active-sessiongate-duplex-20260505-003700` passed
+all three variants with zero pre-session and post-session decrypt failures:
+current-default recovered M2L `997/1000` and L2M `995/1000`, runtime IQK
+recovered M2L `997/1000` and L2M `998/1000`, and EFUSE-derived recovered M2L
+`994/1000` and L2M `989/1000`. Runtime IQK completed in sweep 2 with cleanup
+restored and 20 selected IQC fill writes applied. Treat those experimental
+profiles as `experimental-pass-needs-soak`, not production defaults, until
+repeat-count and longer-distance evidence catch up.
 
-`scripts/run-radio-run-duplex-smoke.sh` defaults to
-`SOURCE_WARMUP_PAYLOADS=100`; set it lower only when deliberately testing
-first-acquisition behavior. These short-range results do not overturn the
-earlier 100 ft result, where the older M2L `4/12` profile failed a 200-payload
-acceptance gate.
+`scripts/run-radio-run-duplex-smoke.sh` still defaults to
+`SOURCE_WARMUP_PAYLOADS=100`; set `SESSION_ACQUIRE_MODE=disabled` or reduce
+warmup only when deliberately testing first-acquisition behavior. These
+short-range results do not overturn the earlier 100 ft result, where the older
+M2L `4/12` profile failed a 200-payload acceptance gate.
 
 ## Acceptance Margins
 
