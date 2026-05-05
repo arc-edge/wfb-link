@@ -41,6 +41,12 @@ The system SHALL support unmeasured source-payload warmup before marked payload 
 - **WHEN** an automated run configures nonzero source warmup payloads
 - **THEN** the command MUST send warmup payloads before marked payloads, exclude warmup markers from recovered-payload accounting, increase the expected total WFB datagram budget by the warmup FEC estimate, and record warmup payload/datagram counts in the run evidence
 
+#### Scenario: Measured source timing evidence is recorded
+- **WHEN** an automated duplex run sends measured marked payloads
+- **THEN** the command MUST record per-direction measured source event counts,
+  maximum source-send lateness, payload interval, and source phase values in
+  collected source evidence
+
 #### Scenario: Session acquisition settle is configured
 - **WHEN** an automated duplex run observes required WFB receiver sessions after
   warmup
@@ -64,6 +70,12 @@ The system SHALL collect Mac and Linux run artifacts into a timestamped local ou
 #### Scenario: Artifacts are collected
 - **WHEN** an automated run completes
 - **THEN** the command copies the Mac bridge report and Linux receiver logs, counters, setup logs, restore logs, and captures into the local output directory when those artifacts are available
+
+#### Scenario: Per-sequence counter evidence is collected
+- **WHEN** an automated duplex smoke run counts marked payload recovery
+- **THEN** the command MUST preserve full per-sequence receive counts in peer
+  counter artifacts and MAY compact those counts out of the top-level summary
+  while retaining missing-sequence and duplicate-sequence totals there
 
 #### Scenario: Artifact collection is partial
 - **WHEN** a remote artifact cannot be copied

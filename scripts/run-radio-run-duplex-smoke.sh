@@ -448,6 +448,7 @@ import json
 import socket
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 host = sys.argv[1]
@@ -467,6 +468,7 @@ packets = 0
 bytes_total = 0
 matched = 0
 seqs = set()
+seq_counts = Counter()
 last_peer = None
 while time.time() < deadline and len(seqs) < expected:
     try:
@@ -479,7 +481,11 @@ while time.time() < deadline and len(seqs) < expected:
     idx = data.find(marker)
     if idx >= 0 and idx + len(marker) + 4 <= len(data):
         matched += 1
-        seqs.add(int.from_bytes(data[idx + len(marker):idx + len(marker) + 4], "big"))
+        seq = int.from_bytes(data[idx + len(marker):idx + len(marker) + 4], "big")
+        seqs.add(seq)
+        seq_counts[seq] += 1
+duplicate_sequences = {str(seq): count for seq, count in sorted(seq_counts.items()) if count > 1}
+sequence_counts = {str(seq): count for seq, count in sorted(seq_counts.items())}
 report = {
     "bind": f"{host}:{port}",
     "marker": marker.decode(),
@@ -489,6 +495,11 @@ report = {
     "matched_datagrams": matched,
     "unique_sequences": len(seqs),
     "missing_sequences": [i for i in range(expected) if i not in seqs],
+    "duplicate_sequence_count": len(duplicate_sequences),
+    "duplicate_sequences": duplicate_sequences,
+    "sequence_counts": sequence_counts,
+    "max_sequence_count": max(seq_counts.values(), default=0),
+    "min_seen_sequence_count": min(seq_counts.values(), default=0),
     "last_peer": last_peer,
     "duration_sec": time.time() - started,
 }
@@ -667,6 +678,7 @@ measured_started_at = time.time()
 }, indent=2, sort_keys=True) + "\n")
 source_started_at = time.time()
 schedule = []
+source_events = []
 for seq in range(expected):
     send_base = source_started_at + seq * interval
     if enable_m2l:
@@ -682,6 +694,36 @@ for send_at, direction, seq in schedule:
         sock_m2l.sendto(payload(os.environ["M2L_MARKER"], seq, b"m"), source_m2l)
     else:
         sock_l2m.sendto(payload(os.environ["L2M_MARKER"], seq, b"l"), source_l2m)
+    sent_at = time.time()
+    source_events.append({
+        "direction": direction,
+        "sequence": seq,
+        "scheduled_offset_sec": round(send_at - source_started_at, 6),
+        "sent_offset_sec": round(sent_at - source_started_at, 6),
+        "lateness_sec": round(sent_at - send_at, 6),
+    })
+(remote_prefix / "source-events.jsonl").write_text(
+    "".join(json.dumps(event, sort_keys=True) + "\n" for event in source_events)
+)
+direction_counts = {}
+max_lateness = {}
+for event in source_events:
+    direction = event["direction"]
+    direction_counts[direction] = direction_counts.get(direction, 0) + 1
+    max_lateness[direction] = max(max_lateness.get(direction, 0.0), event["lateness_sec"])
+(remote_prefix / "source-summary.json").write_text(json.dumps({
+    "source_started_at": source_started_at,
+    "expected_payloads": expected,
+    "payload_interval_sec": interval,
+    "source_phase_sec": {
+        "m2l": m2l_phase,
+        "l2m": l2m_phase,
+    },
+    "marked_source_events": len(source_events),
+    "direction_counts": direction_counts,
+    "max_lateness_sec": max_lateness,
+    "duration_sec": round(time.time() - source_started_at, 6),
+}, indent=2, sort_keys=True) + "\n")
 PY
 printf 'sent configured_warmup=%s marked=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$EXPECTED_PAYLOADS" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
 
@@ -748,10 +790,20 @@ def decrypt_stats(path):
             stats["before_session"] += 1
     return stats
 
+def compact_counter(counter):
+    if not isinstance(counter, dict):
+        return counter
+    return {
+        key: value
+        for key, value in counter.items()
+        if key not in {"sequence_counts", "duplicate_sequences"}
+    }
+
 report = load(run / "radio-run.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
 source_gate = load(run / "peer" / "source-gate.json")
+source_summary = load(run / "peer" / "source-summary.json")
 rx = report.get("rx") or {}
 tx = report.get("tx") or {}
 calibration = report.get("tx_calibration_profile") or {}
@@ -868,6 +920,7 @@ summary = {
     "max_l2m_decrypt_failures": max_l2m_decrypt_failures,
     "decrypt_failure_gate": decrypt_failure_gate,
     "source_gate": source_gate,
+    "source_summary": source_summary,
     "peer_wfb_rx": {
         "m2l_decrypt_failures": m2l_decrypt_failures,
         "m2l_decrypt_failures_total": m2l_decrypt_stats["total"],
@@ -881,8 +934,8 @@ summary = {
         "l2m_session_observed": l2m_decrypt_stats["session_observed"],
         "m2l_unknown_encapsulation": m2l_unknown_encapsulation,
     },
-    "m2l_counter": m2l,
-    "l2m_counter": l2m,
+    "m2l_counter": compact_counter(m2l),
+    "l2m_counter": compact_counter(l2m),
 }
 (run / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, indent=2, sort_keys=True))
