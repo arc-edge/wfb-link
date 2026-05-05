@@ -77,6 +77,14 @@ The system SHALL collect Mac and Linux run artifacts into a timestamped local ou
   counter artifacts and MAY compact those counts out of the top-level summary
   while retaining missing-sequence and duplicate-sequence totals there
 
+#### Scenario: Run evidence can be summarized
+- **WHEN** the operator points the evidence summarizer at one or more duplex
+  smoke run directories or a profile-matrix output directory
+- **THEN** the summarizer MUST report per-direction recovery, missing-sequence
+  clusters, source event counts, source lateness, TX failures/drops, signal
+  summary, and a source-vs-RF-vs-decrypt assessment without claiming the radio
+  device or transmitting RF
+
 #### Scenario: Artifact collection is partial
 - **WHEN** a remote artifact cannot be copied
 - **THEN** the command records the failed artifact path and continues collecting remaining artifacts

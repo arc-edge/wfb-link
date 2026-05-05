@@ -596,6 +596,13 @@ The matrix runner separates `short_smoke_pass` from `accepted`. A run is only
 (default `200`), the wrapped smoke passes, no decrypt failures occur, and TX
 reports no dropped datagrams or failed submissions.
 
+Use `scripts/summarize-radio-run-evidence.py` on a single duplex smoke run or a
+profile-matrix output directory when payload counts miss strict acceptance. It
+reads the collected `summary.json`, peer counters, and source-timing evidence,
+then prints per-direction recovery, missing-sequence clusters, source lateness,
+TX failures/drops, signal summary, and a source-vs-RF-vs-decrypt assessment
+without claiming the radio device or transmitting RF.
+
 May 5, 2026 local-Mac poor-SNR evidence adds one stricter smoke tuple for the
 current adapter placement. M2L `4/12` MCS1 plus L2M `3/12` MCS2 passed the
 200-payload gate at `/tmp/wfb-radio-run-duplex-local-m2l4-l2m3-settle-20260505-101147`
