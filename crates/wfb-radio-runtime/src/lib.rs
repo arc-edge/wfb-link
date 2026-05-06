@@ -722,6 +722,149 @@ pub struct ProductionRuntimePrimaryRxForwardConfig {
     pub aggregator: Option<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeAirtimeMode {
+    Continuous,
+    Tdd,
+}
+
+impl Default for ProductionRuntimeAirtimeMode {
+    fn default() -> Self {
+        Self::Continuous
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRuntimeTddWindow {
+    Rx,
+    Tx,
+}
+
+impl Default for ProductionRuntimeTddWindow {
+    fn default() -> Self {
+        Self::Rx
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeAirtimeSchedule {
+    pub mode: ProductionRuntimeAirtimeMode,
+    pub tdd_first_window: ProductionRuntimeTddWindow,
+    pub tdd_rx_window_ms: u64,
+    pub tdd_tx_window_ms: u64,
+    pub tdd_guard_ms: u64,
+    pub tdd_start_delay_ms: u64,
+}
+
+impl Default for ProductionRuntimeAirtimeSchedule {
+    fn default() -> Self {
+        Self {
+            mode: ProductionRuntimeAirtimeMode::Continuous,
+            tdd_first_window: ProductionRuntimeTddWindow::Rx,
+            tdd_rx_window_ms: 1_000,
+            tdd_tx_window_ms: 1_000,
+            tdd_guard_ms: 0,
+            tdd_start_delay_ms: 0,
+        }
+    }
+}
+
+impl ProductionRuntimeAirtimeSchedule {
+    pub fn continuous() -> Self {
+        Self::default()
+    }
+
+    pub fn tdd(
+        tdd_first_window: ProductionRuntimeTddWindow,
+        tdd_rx_window_ms: u64,
+        tdd_tx_window_ms: u64,
+        tdd_guard_ms: u64,
+        tdd_start_delay_ms: u64,
+    ) -> Self {
+        Self {
+            mode: ProductionRuntimeAirtimeMode::Tdd,
+            tdd_first_window,
+            tdd_rx_window_ms,
+            tdd_tx_window_ms,
+            tdd_guard_ms,
+            tdd_start_delay_ms,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), RuntimeRadioError> {
+        match self.mode {
+            ProductionRuntimeAirtimeMode::Continuous => Ok(()),
+            ProductionRuntimeAirtimeMode::Tdd => {
+                if self.tdd_rx_window_ms == 0 {
+                    return Err(RuntimeRadioError::new(
+                        "invalid_airtime_tdd_rx_window",
+                        "TDD airtime schedule requires tdd_rx_window_ms greater than zero",
+                    ));
+                }
+                if self.tdd_tx_window_ms == 0 {
+                    return Err(RuntimeRadioError::new(
+                        "invalid_airtime_tdd_tx_window",
+                        "TDD airtime schedule requires tdd_tx_window_ms greater than zero",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn tx_allowed_at_elapsed(self, elapsed: Duration) -> bool {
+        match self.mode {
+            ProductionRuntimeAirtimeMode::Continuous => true,
+            ProductionRuntimeAirtimeMode::Tdd => self.tdd_tx_allowed_at_elapsed(elapsed),
+        }
+    }
+
+    fn tdd_tx_allowed_at_elapsed(self, elapsed: Duration) -> bool {
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        if elapsed_ms < self.tdd_start_delay_ms {
+            return false;
+        }
+        let rx = self.tdd_rx_window_ms;
+        let tx = self.tdd_tx_window_ms;
+        let guard = self.tdd_guard_ms;
+        let cycle = rx
+            .saturating_add(tx)
+            .saturating_add(guard.saturating_mul(2));
+        if cycle == 0 {
+            return false;
+        }
+        let offset = elapsed_ms.saturating_sub(self.tdd_start_delay_ms) % cycle;
+        match self.tdd_first_window {
+            ProductionRuntimeTddWindow::Rx => {
+                let tx_start = rx.saturating_add(guard);
+                offset >= tx_start && offset < tx_start.saturating_add(tx)
+            }
+            ProductionRuntimeTddWindow::Tx => offset < tx,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeAirtimeReport {
+    pub schedule: ProductionRuntimeAirtimeSchedule,
+    pub tx_allowed_iterations: u64,
+    pub tx_gated_iterations: u64,
+}
+
+impl ProductionRuntimeAirtimeReport {
+    fn idle(schedule: ProductionRuntimeAirtimeSchedule) -> Self {
+        Self {
+            schedule,
+            tx_allowed_iterations: 0,
+            tx_gated_iterations: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeRxForwardPlan {
@@ -737,6 +880,7 @@ pub struct ProductionRuntimeWfbLoopConfig {
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
     pub max_datagrams: u32,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub bandwidth: Bandwidth,
     pub primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig,
     pub rx_forwards: Vec<ProductionRuntimeRxForwardConfig>,
@@ -752,6 +896,7 @@ pub struct ProductionRuntimeWfbLoopPlan {
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
     pub max_datagrams: u32,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub rx_wlan_idx: u8,
     pub rx_mcs_index: u8,
     pub bandwidth_mhz: u8,
@@ -772,6 +917,7 @@ pub fn plan_production_wfb_loop(
             "production WFB loop requires tx_burst_limit greater than zero",
         ));
     }
+    config.airtime_schedule.validate()?;
 
     let mut tx_bind_addrs = Vec::with_capacity(config.tx_binds.len() + 1);
     tx_bind_addrs.push(config.bind_addr);
@@ -838,6 +984,7 @@ pub fn plan_production_wfb_loop(
         rx_timeout_ms: config.rx_timeout_ms,
         tx_burst_limit: config.tx_burst_limit,
         max_datagrams: config.max_datagrams,
+        airtime_schedule: config.airtime_schedule,
         rx_wlan_idx: config.rx_wlan_idx,
         rx_mcs_index: config.rx_mcs_index,
         bandwidth_mhz: config.bandwidth.mhz() as u8,
@@ -1191,6 +1338,7 @@ pub struct ProductionRuntimeBridgeLoopRunConfig {
     pub rx_timeout: Duration,
     pub tx_burst_limit: u32,
     pub max_datagrams: u64,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
 }
 
 impl ProductionRuntimeBridgeLoopRunConfig {
@@ -1205,7 +1353,16 @@ impl ProductionRuntimeBridgeLoopRunConfig {
             rx_timeout: Duration::from_millis(rx_timeout_ms),
             tx_burst_limit,
             max_datagrams,
+            airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
         }
+    }
+
+    pub fn with_airtime_schedule(
+        mut self,
+        airtime_schedule: ProductionRuntimeAirtimeSchedule,
+    ) -> Self {
+        self.airtime_schedule = airtime_schedule;
+        self
     }
 }
 
@@ -1251,6 +1408,8 @@ pub struct ProductionRuntimeBridgeLoopOutcome {
     pub iterations: u64,
     pub tx_polls: u64,
     pub rx_polls: u64,
+    pub airtime_tx_allowed_iterations: u64,
+    pub airtime_tx_gated_iterations: u64,
 }
 
 /// Run the production bridge loop with a per-iteration tick hook.
@@ -1279,6 +1438,8 @@ where
     let mut iterations = 0u64;
     let mut tx_polls = 0u64;
     let mut rx_polls = 0u64;
+    let mut airtime_tx_allowed_iterations = 0u64;
+    let mut airtime_tx_gated_iterations = 0u64;
 
     loop {
         iterations = iterations.saturating_add(1);
@@ -1289,6 +1450,8 @@ where
                 iterations,
                 tx_polls,
                 rx_polls,
+                airtime_tx_allowed_iterations,
+                airtime_tx_gated_iterations,
             });
         }
         if let Some(deadline) = deadline {
@@ -1299,6 +1462,8 @@ where
                     iterations,
                     tx_polls,
                     rx_polls,
+                    airtime_tx_allowed_iterations,
+                    airtime_tx_gated_iterations,
                 });
             }
         } else if !unlimited_datagrams && tx_datagrams_processed >= config.max_datagrams {
@@ -1308,35 +1473,48 @@ where
                 iterations,
                 tx_polls,
                 rx_polls,
+                airtime_tx_allowed_iterations,
+                airtime_tx_gated_iterations,
             });
         }
 
-        on_iteration_start(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        on_iteration_start(now);
 
-        let mut tx_burst_count = 0u32;
-        while (unlimited_datagrams || tx_datagrams_processed < config.max_datagrams)
-            && tx_burst_count < config.tx_burst_limit
+        if config
+            .airtime_schedule
+            .tx_allowed_at_elapsed(now.saturating_duration_since(started))
         {
-            tx_polls = tx_polls.saturating_add(1);
-            match handle_step(ProductionRuntimeBridgeLoopStep::TryTx)? {
-                ProductionRuntimeBridgeLoopStepOutcome::TxProcessed => {
-                    tx_datagrams_processed = tx_datagrams_processed.saturating_add(1);
-                    tx_burst_count = tx_burst_count.saturating_add(1);
+            airtime_tx_allowed_iterations = airtime_tx_allowed_iterations.saturating_add(1);
+            let mut tx_burst_count = 0u32;
+            while (unlimited_datagrams || tx_datagrams_processed < config.max_datagrams)
+                && tx_burst_count < config.tx_burst_limit
+            {
+                tx_polls = tx_polls.saturating_add(1);
+                match handle_step(ProductionRuntimeBridgeLoopStep::TryTx)? {
+                    ProductionRuntimeBridgeLoopStepOutcome::TxProcessed => {
+                        tx_datagrams_processed = tx_datagrams_processed.saturating_add(1);
+                        tx_burst_count = tx_burst_count.saturating_add(1);
+                    }
+                    ProductionRuntimeBridgeLoopStepOutcome::TxEmpty
+                    | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => break,
+                    ProductionRuntimeBridgeLoopStepOutcome::Stop(stop_reason) => {
+                        return Ok(ProductionRuntimeBridgeLoopOutcome {
+                            stop_reason,
+                            tx_datagrams_processed,
+                            iterations,
+                            tx_polls,
+                            rx_polls,
+                            airtime_tx_allowed_iterations,
+                            airtime_tx_gated_iterations,
+                        });
+                    }
+                    ProductionRuntimeBridgeLoopStepOutcome::RxRead
+                    | ProductionRuntimeBridgeLoopStepOutcome::RxTimeout => break,
                 }
-                ProductionRuntimeBridgeLoopStepOutcome::TxEmpty
-                | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => break,
-                ProductionRuntimeBridgeLoopStepOutcome::Stop(stop_reason) => {
-                    return Ok(ProductionRuntimeBridgeLoopOutcome {
-                        stop_reason,
-                        tx_datagrams_processed,
-                        iterations,
-                        tx_polls,
-                        rx_polls,
-                    });
-                }
-                ProductionRuntimeBridgeLoopStepOutcome::RxRead
-                | ProductionRuntimeBridgeLoopStepOutcome::RxTimeout => break,
             }
+        } else {
+            airtime_tx_gated_iterations = airtime_tx_gated_iterations.saturating_add(1);
         }
 
         let timeout = match deadline {
@@ -1349,6 +1527,8 @@ where
                         iterations,
                         tx_polls,
                         rx_polls,
+                        airtime_tx_allowed_iterations,
+                        airtime_tx_gated_iterations,
                     });
                 }
                 config.rx_timeout.min(remaining)
@@ -1366,6 +1546,8 @@ where
                     iterations,
                     tx_polls,
                     rx_polls,
+                    airtime_tx_allowed_iterations,
+                    airtime_tx_gated_iterations,
                 });
             }
             ProductionRuntimeBridgeLoopStepOutcome::TxProcessed
@@ -1662,6 +1844,7 @@ pub struct ProductionRuntimeFlowConfig {
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
     pub max_datagrams: u32,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub ready_file: Option<PathBuf>,
     pub health_file: Option<PathBuf>,
     pub tx_authorized: bool,
@@ -1747,6 +1930,7 @@ impl ProductionRuntimeFlowConfig {
             rx_timeout_ms: self.rx_timeout_ms,
             tx_burst_limit: self.tx_burst_limit,
             max_datagrams: self.max_datagrams,
+            airtime_schedule: self.airtime_schedule,
             bandwidth: self.bandwidth,
             primary_rx_forward: self.primary_rx_forward,
             rx_forwards: self.rx_forwards.clone(),
@@ -1786,6 +1970,7 @@ pub struct ProductionRuntimeReadyMarker {
     pub rx_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_burst_limit: Option<u32>,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub init_before_tx: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub same_session_init_result: Option<String>,
@@ -1906,6 +2091,7 @@ pub struct ProductionRuntimeFlowExecutionReport {
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
     pub rx_startup_kick: Option<ProductionRuntimeRxStartupKickReport>,
     pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    pub airtime: ProductionRuntimeAirtimeReport,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
     pub rx: RuntimeFlowRxTelemetry,
@@ -1939,6 +2125,7 @@ pub struct ProductionRuntimeFlowReport {
     pub rx_startup_kick: Option<ProductionRuntimeRxStartupKickReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    pub airtime: ProductionRuntimeAirtimeReport,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
     pub rx: RuntimeFlowRxTelemetry,
@@ -1975,6 +2162,7 @@ impl ProductionRuntimeFlowReport {
             tx_calibration_profile: execution.tx_calibration_profile,
             rx_startup_kick: execution.rx_startup_kick,
             heartbeat_led: execution.heartbeat_led,
+            airtime: execution.airtime,
             receiver_backed_validation_required: execution.receiver_backed_validation_required,
             init: execution.init,
             rx: execution.rx,
@@ -2012,6 +2200,7 @@ impl ProductionRuntimeFlowReport {
             tx_calibration_profile: None,
             rx_startup_kick: None,
             heartbeat_led: None,
+            airtime: ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init: ProductionRuntimeInitTelemetry::default(),
             rx: RuntimeFlowRxTelemetry::default(),
@@ -6107,7 +6296,8 @@ where
             config.rx_timeout_ms,
             config.tx_burst_limit,
             u64::from(config.max_datagrams),
-        ),
+        )
+        .with_airtime_schedule(config.airtime_schedule),
         |now| {
             heartbeat.maybe_toggle(&&session_cell.borrow().transport, now);
         },
@@ -6238,7 +6428,7 @@ where
         .sum();
     apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
 
-    production_runtime_flow_report_from_state_with_health(
+    production_runtime_flow_report_from_state_with_airtime_and_health(
         &config,
         session,
         loop_outcome.stop_reason.as_str(),
@@ -6247,6 +6437,11 @@ where
         heartbeat_led,
         rx,
         tx,
+        ProductionRuntimeAirtimeReport {
+            schedule: config.airtime_schedule,
+            tx_allowed_iterations: loop_outcome.airtime_tx_allowed_iterations,
+            tx_gated_iterations: loop_outcome.airtime_tx_gated_iterations,
+        },
         ProductionRuntimeFlowResult::Pass,
         None,
     )
@@ -6279,6 +6474,7 @@ fn production_runtime_ready_marker(
         idle_timeout_ms: None,
         rx_timeout_ms: Some(config.rx_timeout_ms),
         tx_burst_limit: Some(config.tx_burst_limit),
+        airtime_schedule: config.airtime_schedule,
         init_before_tx: true,
         same_session_init_result: Some(
             match init.readiness {
@@ -6534,11 +6730,7 @@ fn production_runtime_flow_report_from_state_with_health<T>(
     result: ProductionRuntimeFlowResult,
     error: Option<RuntimeRadioError>,
 ) -> ProductionRuntimeFlowReport {
-    let lifecycle = match result {
-        ProductionRuntimeFlowResult::Pass => ProductionRuntimeServiceLifecycle::ExitedPass,
-        ProductionRuntimeFlowResult::Fail => ProductionRuntimeServiceLifecycle::ExitedFail,
-    };
-    let report = production_runtime_flow_report_from_state(
+    production_runtime_flow_report_from_state_with_airtime_and_health(
         config,
         session,
         stop_reason,
@@ -6547,6 +6739,39 @@ fn production_runtime_flow_report_from_state_with_health<T>(
         heartbeat_led,
         rx,
         tx,
+        ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
+        result,
+        error,
+    )
+}
+
+fn production_runtime_flow_report_from_state_with_airtime_and_health<T>(
+    config: &ProductionRuntimeFlowConfig,
+    session: &RuntimeRadioSession<T>,
+    stop_reason: &'static str,
+    init: ProductionRuntimeInitTelemetry,
+    pre_loop: ProductionRuntimePreLoopReports,
+    heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    rx: RuntimeFlowRxTelemetry,
+    tx: RuntimeFlowTxTelemetry,
+    airtime: ProductionRuntimeAirtimeReport,
+    result: ProductionRuntimeFlowResult,
+    error: Option<RuntimeRadioError>,
+) -> ProductionRuntimeFlowReport {
+    let lifecycle = match result {
+        ProductionRuntimeFlowResult::Pass => ProductionRuntimeServiceLifecycle::ExitedPass,
+        ProductionRuntimeFlowResult::Fail => ProductionRuntimeServiceLifecycle::ExitedFail,
+    };
+    let report = production_runtime_flow_report_from_state_with_airtime(
+        config,
+        session,
+        stop_reason,
+        init,
+        pre_loop,
+        heartbeat_led,
+        rx,
+        tx,
+        airtime,
         result,
         error,
     );
@@ -6562,6 +6787,34 @@ fn production_runtime_flow_report_from_state<T>(
     heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
     rx: RuntimeFlowRxTelemetry,
     tx: RuntimeFlowTxTelemetry,
+    result: ProductionRuntimeFlowResult,
+    error: Option<RuntimeRadioError>,
+) -> ProductionRuntimeFlowReport {
+    production_runtime_flow_report_from_state_with_airtime(
+        config,
+        session,
+        stop_reason,
+        init,
+        pre_loop,
+        heartbeat_led,
+        rx,
+        tx,
+        ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
+        result,
+        error,
+    )
+}
+
+fn production_runtime_flow_report_from_state_with_airtime<T>(
+    config: &ProductionRuntimeFlowConfig,
+    session: &RuntimeRadioSession<T>,
+    stop_reason: &'static str,
+    init: ProductionRuntimeInitTelemetry,
+    pre_loop: ProductionRuntimePreLoopReports,
+    heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
+    rx: RuntimeFlowRxTelemetry,
+    tx: RuntimeFlowTxTelemetry,
+    airtime: ProductionRuntimeAirtimeReport,
     result: ProductionRuntimeFlowResult,
     error: Option<RuntimeRadioError>,
 ) -> ProductionRuntimeFlowReport {
@@ -6587,6 +6840,7 @@ fn production_runtime_flow_report_from_state<T>(
             tx_calibration_profile: pre_loop.tx_calibration_profile,
             rx_startup_kick: pre_loop.rx_startup_kick,
             heartbeat_led,
+            airtime,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init,
             rx,
@@ -12541,7 +12795,8 @@ mod tests {
         production_rx_forward_snapshots, run_production_bridge_loop, run_production_runtime_flow,
         run_production_runtime_flow_with_session, runtime_unix_ms,
         spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
-        write_production_runtime_service_health, MacosUsbHostConfig,
+        write_production_runtime_service_health, MacosUsbHostConfig, ProductionRuntimeAirtimeMode,
+        ProductionRuntimeAirtimeReport, ProductionRuntimeAirtimeSchedule,
         ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
         ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
         ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
@@ -12554,10 +12809,10 @@ mod tests {
         ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
         ProductionRuntimeRxForwardSnapshot, ProductionRuntimeServiceHealth,
         ProductionRuntimeServiceLifecycle, ProductionRuntimeServiceOperatorAction,
-        ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig, Rtl8812auInitOrder,
-        Rtl8812auInitPhase, Rtl8812auTxPowerControlMode, RuntimeFlowRxTelemetry,
-        RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError, RuntimeRadioSession,
-        RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
+        ProductionRuntimeTddWindow, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
+        Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auTxPowerControlMode,
+        RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError,
+        RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
         RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
         RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
         RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
@@ -14046,6 +14301,7 @@ mod tests {
             rx_timeout_ms: 20,
             tx_burst_limit: 8,
             max_datagrams: 0,
+            airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             ready_file: Some(PathBuf::from("/tmp/radio-run-ready.json")),
             health_file: None,
             tx_authorized: true,
@@ -14169,6 +14425,7 @@ mod tests {
             idle_timeout_ms: None,
             rx_timeout_ms: Some(20),
             tx_burst_limit: Some(8),
+            airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             init_before_tx: true,
             same_session_init_result: Some("pass".to_string()),
             monitor_opmode_applied: Some(true),
@@ -14446,6 +14703,7 @@ mod tests {
                 tx_calibration_profile: None,
                 rx_startup_kick: None,
                 heartbeat_led: None,
+                airtime: ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
                 receiver_backed_validation_required: false,
                 init: ProductionRuntimeInitTelemetry {
                     readiness: ProductionRuntimeInitReadiness::Ready,
@@ -14513,6 +14771,7 @@ mod tests {
                 tx_calibration_profile: None,
                 rx_startup_kick: None,
                 heartbeat_led: None,
+                airtime: ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
                 receiver_backed_validation_required: false,
                 init: ProductionRuntimeInitTelemetry {
                     readiness: ProductionRuntimeInitReadiness::Ready,
@@ -15408,6 +15667,61 @@ mod tests {
     }
 
     #[test]
+    fn production_airtime_schedule_tdd_gates_tx_windows() {
+        let schedule =
+            ProductionRuntimeAirtimeSchedule::tdd(ProductionRuntimeTddWindow::Rx, 100, 50, 10, 20);
+
+        assert_eq!(schedule.mode, ProductionRuntimeAirtimeMode::Tdd);
+        assert!(!schedule.tx_allowed_at_elapsed(Duration::from_millis(0)));
+        assert!(!schedule.tx_allowed_at_elapsed(Duration::from_millis(119)));
+        assert!(schedule.tx_allowed_at_elapsed(Duration::from_millis(130)));
+        assert!(schedule.tx_allowed_at_elapsed(Duration::from_millis(179)));
+        assert!(!schedule.tx_allowed_at_elapsed(Duration::from_millis(180)));
+        assert!(!schedule.tx_allowed_at_elapsed(Duration::from_millis(189)));
+        assert!(!schedule.tx_allowed_at_elapsed(Duration::from_millis(190)));
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_gates_tx_until_tdd_tx_window() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(6, 1, 4, 0)
+            .with_airtime_schedule(ProductionRuntimeAirtimeSchedule::tdd(
+                ProductionRuntimeTddWindow::Rx,
+                100,
+                100,
+                0,
+                0,
+            ));
+        let mut saw_tx = false;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            |_| {},
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        saw_tx = true;
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { .. } => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::DurationElapsed
+        );
+        assert!(!saw_tx);
+        assert_eq!(outcome.tx_polls, 0);
+        assert_eq!(outcome.airtime_tx_allowed_iterations, 0);
+        assert!(outcome.airtime_tx_gated_iterations > 0);
+    }
+
+    #[test]
     fn production_bridge_loop_executor_fires_iteration_tick_per_outer_iteration() {
         let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(0, 1, 4, 2);
         let mut tx_remaining = 2u64;
@@ -15483,6 +15797,7 @@ mod tests {
                     toggles_succeeded: 4,
                     toggles_failed: 0,
                 }),
+                airtime: ProductionRuntimeAirtimeReport::idle(config.airtime_schedule),
                 receiver_backed_validation_required: false,
                 init: Default::default(),
                 rx: RuntimeFlowRxTelemetry::default(),

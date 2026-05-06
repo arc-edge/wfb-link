@@ -61,6 +61,12 @@ fn print_service_report_human(report: &wfb_radio_runtime::ProductionRuntimeFlowR
         report.tx.failed_submissions,
         report.tx.dropped_datagrams
     );
+    println!(
+        "Airtime: mode={:?} tx_allowed_iterations={} tx_gated_iterations={}",
+        report.airtime.schedule.mode,
+        report.airtime.tx_allowed_iterations,
+        report.airtime.tx_gated_iterations
+    );
     if let Some(error) = &report.error {
         println!("Error: {}: {}", error.code, error.message);
     }

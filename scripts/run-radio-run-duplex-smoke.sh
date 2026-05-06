@@ -23,6 +23,9 @@ Configuration is via environment variables. Common overrides:
   SESSION_ACQUIRE_SETTLE_SECONDS=1
   DUPLEX_TRAFFIC_MODE=simultaneous   # simultaneous, phased, or tdd
   TDD_FIRST_DIRECTION=l2m TDD_GUARD_SEC=2.0
+  AIRTIME_MODE=continuous            # continuous or tdd runtime TX gating
+  AIRTIME_TDD_FIRST_WINDOW=rx AIRTIME_TDD_RX_WINDOW_MS=7000
+  AIRTIME_TDD_TX_WINDOW_MS=20000 AIRTIME_TDD_GUARD_MS=500
   M2L_SOURCE_PHASE_SEC=0 L2M_SOURCE_PHASE_SEC=0
   ENABLE_M2L=1 ENABLE_L2M=1
   M2L_FEC_K=3 M2L_FEC_N=12 L2M_FEC_K=3 L2M_FEC_N=12
@@ -120,9 +123,23 @@ case "$TDD_FIRST_DIRECTION" in
   *) die "invalid TDD_FIRST_DIRECTION=$TDD_FIRST_DIRECTION (expected m2l or l2m)" ;;
 esac
 TDD_GUARD_SEC=${TDD_GUARD_SEC:-2.0}
+AIRTIME_MODE=${AIRTIME_MODE:-continuous}
+case "$AIRTIME_MODE" in
+  continuous|tdd) ;;
+  *) die "invalid AIRTIME_MODE=$AIRTIME_MODE (expected continuous or tdd)" ;;
+esac
+AIRTIME_TDD_FIRST_WINDOW=${AIRTIME_TDD_FIRST_WINDOW:-rx}
+case "$AIRTIME_TDD_FIRST_WINDOW" in
+  rx|tx) ;;
+  *) die "invalid AIRTIME_TDD_FIRST_WINDOW=$AIRTIME_TDD_FIRST_WINDOW (expected rx or tx)" ;;
+esac
+AIRTIME_TDD_RX_WINDOW_MS=${AIRTIME_TDD_RX_WINDOW_MS:-1000}
+AIRTIME_TDD_TX_WINDOW_MS=${AIRTIME_TDD_TX_WINDOW_MS:-1000}
+AIRTIME_TDD_GUARD_MS=${AIRTIME_TDD_GUARD_MS:-0}
+AIRTIME_TDD_START_DELAY_MS=${AIRTIME_TDD_START_DELAY_MS:-0}
 M2L_SOURCE_PHASE_SEC=${M2L_SOURCE_PHASE_SEC:-0}
 L2M_SOURCE_PHASE_SEC=${L2M_SOURCE_PHASE_SEC:-0}
-export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
+export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
@@ -406,6 +423,7 @@ REMOTE_PREP
 start_radio() {
   log "starting local radio-run production loop via $RADIO_COMMAND command"
   local tx_power_args=()
+  local airtime_args=()
   local write_auth_arg=()
   if [[ "$TX_POWER_MODE" != "current-default" ]]; then
     tx_power_args+=(--tx-power-mode "$TX_POWER_MODE")
@@ -421,6 +439,19 @@ start_radio() {
       write_auth_arg+=(--i-understand-this-writes-registers)
       ;;
   esac
+  if [[ "$AIRTIME_MODE" != "continuous" ]]; then
+    if [[ "$RADIO_COMMAND" != "service" ]]; then
+      die "runtime airtime gating requires RADIO_COMMAND=service"
+    fi
+    airtime_args+=(
+      --airtime-mode "$AIRTIME_MODE"
+      --airtime-tdd-first-window "$AIRTIME_TDD_FIRST_WINDOW"
+      --airtime-tdd-rx-window-ms "$AIRTIME_TDD_RX_WINDOW_MS"
+      --airtime-tdd-tx-window-ms "$AIRTIME_TDD_TX_WINDOW_MS"
+      --airtime-tdd-guard-ms "$AIRTIME_TDD_GUARD_MS"
+      --airtime-tdd-start-delay-ms "$AIRTIME_TDD_START_DELAY_MS"
+    )
+  fi
 
   case "$RADIO_COMMAND" in
     service)
@@ -437,6 +468,7 @@ start_radio() {
         --rx-timeout-ms "$RX_TIMEOUT_MS" \
         --tx-burst-limit "$TX_BURST_LIMIT" \
         --max-datagrams 0 \
+        ${airtime_args[@]+"${airtime_args[@]}"} \
         ${tx_power_args[@]+"${tx_power_args[@]}"} \
         --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
         ${write_auth_arg[@]+"${write_auth_arg[@]}"} \
@@ -1221,6 +1253,13 @@ summary = {
         "traffic_mode": os.environ.get("DUPLEX_TRAFFIC_MODE"),
         "tdd_first_direction": os.environ.get("TDD_FIRST_DIRECTION"),
         "tdd_guard_sec": float(os.environ.get("TDD_GUARD_SEC", 0)),
+        "airtime_mode": os.environ.get("AIRTIME_MODE"),
+        "airtime_tdd_first_window": os.environ.get("AIRTIME_TDD_FIRST_WINDOW"),
+        "airtime_tdd_rx_window_ms": int(os.environ.get("AIRTIME_TDD_RX_WINDOW_MS", 0)),
+        "airtime_tdd_tx_window_ms": int(os.environ.get("AIRTIME_TDD_TX_WINDOW_MS", 0)),
+        "airtime_tdd_guard_ms": int(os.environ.get("AIRTIME_TDD_GUARD_MS", 0)),
+        "airtime_tdd_start_delay_ms": int(os.environ.get("AIRTIME_TDD_START_DELAY_MS", 0)),
+        "runtime_airtime": report.get("airtime"),
         "radio_run_config": os.environ.get("RADIO_RUN_CONFIG"),
         "m2l_ingress_mode": os.environ.get("M2L_INGRESS_MODE"),
         "m2l_distributor_host": os.environ.get("M2L_DISTRIBUTOR_HOST"),

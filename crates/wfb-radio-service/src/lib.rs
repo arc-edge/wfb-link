@@ -13,9 +13,10 @@ use radio_core::{
 use serde::Deserialize;
 use wfb_radio_runtime::{
     plan_rtl8812au_efuse_tx_power, run_production_runtime_flow, LedHeartbeatConfig,
-    MacosUsbHostConfig, ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
-    ProductionRuntimeFlowReport, ProductionRuntimePrimaryRxForwardConfig,
-    ProductionRuntimeRtl8812auInitInputs, ProductionRuntimeRxForwardConfig,
+    MacosUsbHostConfig, ProductionRuntimeAirtimeMode, ProductionRuntimeAirtimeSchedule,
+    ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRtl8812auInitInputs,
+    ProductionRuntimeRxForwardConfig, ProductionRuntimeTddWindow,
     ProductionRuntimeTxPowerControlInput, ProductionRuntimeUsbConfig, Rtl8812auInitOrder,
     Rtl8812auRfPath, Rtl8812auTxPowerEfuseSourceReport, Rtl8812auTxPowerSafetyProfile,
     RuntimeRadioError, TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
@@ -130,6 +131,30 @@ pub struct ServiceCli {
     #[arg(long)]
     pub max_datagrams: Option<u32>,
 
+    /// Runtime airtime scheduler mode for TX/RX coexistence.
+    #[arg(long, value_enum)]
+    pub airtime_mode: Option<ServiceAirtimeMode>,
+
+    /// First window in the runtime TDD airtime cycle.
+    #[arg(long, value_enum)]
+    pub airtime_tdd_first_window: Option<ServiceTddWindow>,
+
+    /// Runtime TDD receive-only window length in milliseconds.
+    #[arg(long)]
+    pub airtime_tdd_rx_window_ms: Option<u64>,
+
+    /// Runtime TDD transmit-allowed window length in milliseconds.
+    #[arg(long)]
+    pub airtime_tdd_tx_window_ms: Option<u64>,
+
+    /// Runtime TDD guard interval in milliseconds before each direction switch.
+    #[arg(long)]
+    pub airtime_tdd_guard_ms: Option<u64>,
+
+    /// Runtime TDD initial TX-disabled delay in milliseconds after the loop starts.
+    #[arg(long)]
+    pub airtime_tdd_start_delay_ms: Option<u64>,
+
     /// Write this JSON marker after init/calibration and immediately before runtime loops.
     #[arg(long, value_name = "PATH")]
     pub ready_file: Option<PathBuf>,
@@ -217,6 +242,7 @@ pub struct ServiceConfigFile {
     pub adapter: Option<ServiceAdapterConfig>,
     pub macos_usbhost: Option<ServiceMacosUsbHostConfig>,
     pub radio: Option<ServiceRadioConfig>,
+    pub airtime: Option<ServiceAirtimeConfig>,
     pub wfb: Option<ServiceWfbConfig>,
     pub tx_power: Option<ServiceTxPowerConfig>,
     pub calibration: Option<ServiceCalibrationConfig>,
@@ -257,6 +283,17 @@ pub struct ServiceRadioConfig {
     pub rx_timeout_ms: Option<u64>,
     pub tx_burst_limit: Option<u32>,
     pub max_datagrams: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceAirtimeConfig {
+    pub mode: Option<ServiceAirtimeMode>,
+    pub tdd_first_window: Option<ServiceTddWindow>,
+    pub tdd_rx_window_ms: Option<u64>,
+    pub tdd_tx_window_ms: Option<u64>,
+    pub tdd_guard_ms: Option<u64>,
+    pub tdd_start_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -343,6 +380,20 @@ pub enum ServiceTxCalibrationProfile {
     Rtl8812aRuntimeIqk,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAirtimeMode {
+    Continuous,
+    Tdd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTddWindow {
+    Rx,
+    Tx,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedServiceRun {
     pub report: Option<PathBuf>,
@@ -357,6 +408,7 @@ pub struct ResolvedServiceRun {
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
     pub max_datagrams: u32,
+    pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub ready_file: Option<PathBuf>,
     pub health_file: Option<PathBuf>,
     pub tx_authorized: bool,
@@ -426,6 +478,7 @@ pub fn resolve_service_run(
     let adapter = file.adapter.as_ref();
     let macos = file.macos_usbhost.as_ref();
     let radio = file.radio.as_ref();
+    let airtime = file.airtime.as_ref();
     let wfb = file.wfb.as_ref();
     let tx_power = file.tx_power.as_ref();
     let calibration = file.calibration.as_ref();
@@ -526,6 +579,7 @@ pub fn resolve_service_run(
             .max_datagrams
             .or_else(|| radio.and_then(|radio| radio.max_datagrams))
             .unwrap_or(0),
+        airtime_schedule: service_airtime_schedule_from_inputs(cli, airtime)?,
         ready_file: cli
             .ready_file
             .clone()
@@ -644,6 +698,7 @@ pub fn service_runtime_config_from_resolved(
         rx_timeout_ms: resolved.rx_timeout_ms,
         tx_burst_limit: resolved.tx_burst_limit,
         max_datagrams: resolved.max_datagrams,
+        airtime_schedule: resolved.airtime_schedule,
         ready_file: resolved.ready_file.clone(),
         health_file: resolved.health_file.clone(),
         tx_authorized: resolved.tx_authorized,
@@ -797,6 +852,42 @@ fn service_macos_usbhost_config(config: &ServiceMacosUsbHostConfig) -> MacosUsbH
         poll_attempts: config.poll_attempts.unwrap_or(25),
         poll_delay: Duration::from_millis(config.poll_delay_ms.unwrap_or(100)),
     }
+}
+
+fn service_airtime_schedule_from_inputs(
+    cli: &ServiceCli,
+    airtime: Option<&ServiceAirtimeConfig>,
+) -> std::result::Result<ProductionRuntimeAirtimeSchedule, RuntimeRadioError> {
+    let mode = cli
+        .airtime_mode
+        .or_else(|| airtime.and_then(|airtime| airtime.mode))
+        .unwrap_or(ServiceAirtimeMode::Continuous);
+    let schedule = ProductionRuntimeAirtimeSchedule {
+        mode: ProductionRuntimeAirtimeMode::from(mode),
+        tdd_first_window: ProductionRuntimeTddWindow::from(
+            cli.airtime_tdd_first_window
+                .or_else(|| airtime.and_then(|airtime| airtime.tdd_first_window))
+                .unwrap_or(ServiceTddWindow::Rx),
+        ),
+        tdd_rx_window_ms: cli
+            .airtime_tdd_rx_window_ms
+            .or_else(|| airtime.and_then(|airtime| airtime.tdd_rx_window_ms))
+            .unwrap_or(1_000),
+        tdd_tx_window_ms: cli
+            .airtime_tdd_tx_window_ms
+            .or_else(|| airtime.and_then(|airtime| airtime.tdd_tx_window_ms))
+            .unwrap_or(1_000),
+        tdd_guard_ms: cli
+            .airtime_tdd_guard_ms
+            .or_else(|| airtime.and_then(|airtime| airtime.tdd_guard_ms))
+            .unwrap_or(0),
+        tdd_start_delay_ms: cli
+            .airtime_tdd_start_delay_ms
+            .or_else(|| airtime.and_then(|airtime| airtime.tdd_start_delay_ms))
+            .unwrap_or(0),
+    };
+    schedule.validate()?;
+    Ok(schedule)
 }
 
 fn service_should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
@@ -1102,6 +1193,24 @@ impl From<ServiceTxCalibrationProfile> for TxCalibrationProfile {
     }
 }
 
+impl From<ServiceAirtimeMode> for ProductionRuntimeAirtimeMode {
+    fn from(mode: ServiceAirtimeMode) -> Self {
+        match mode {
+            ServiceAirtimeMode::Continuous => Self::Continuous,
+            ServiceAirtimeMode::Tdd => Self::Tdd,
+        }
+    }
+}
+
+impl From<ServiceTddWindow> for ProductionRuntimeTddWindow {
+    fn from(window: ServiceTddWindow) -> Self {
+        match window {
+            ServiceTddWindow::Rx => Self::Rx,
+            ServiceTddWindow::Tx => Self::Tx,
+        }
+    }
+}
+
 impl From<ServiceTxPowerPath> for Rtl8812auRfPath {
     fn from(path: ServiceTxPowerPath) -> Self {
         match path {
@@ -1202,6 +1311,14 @@ rx_timeout_ms = 15
 tx_burst_limit = 3
 max_datagrams = 4
 
+[airtime]
+mode = "tdd"
+tdd_first_window = "rx"
+tdd_rx_window_ms = 7000
+tdd_tx_window_ms = 20000
+tdd_guard_ms = 500
+tdd_start_delay_ms = 250
+
 [wfb]
 bind = "127.0.0.1:5610"
 tx_binds = ["127.0.0.1:5611"]
@@ -1248,6 +1365,18 @@ health_file = "/tmp/config-health.json"
         assert_eq!(resolved.rx_timeout_ms, 15);
         assert_eq!(resolved.tx_burst_limit, 3);
         assert_eq!(resolved.max_datagrams, 4);
+        assert_eq!(
+            resolved.airtime_schedule.mode,
+            ProductionRuntimeAirtimeMode::Tdd
+        );
+        assert_eq!(
+            resolved.airtime_schedule.tdd_first_window,
+            ProductionRuntimeTddWindow::Rx
+        );
+        assert_eq!(resolved.airtime_schedule.tdd_rx_window_ms, 7000);
+        assert_eq!(resolved.airtime_schedule.tdd_tx_window_ms, 20000);
+        assert_eq!(resolved.airtime_schedule.tdd_guard_ms, 500);
+        assert_eq!(resolved.airtime_schedule.tdd_start_delay_ms, 250);
         assert_eq!(resolved.rx_wlan_idx, 2);
         assert_eq!(resolved.rx_mcs_index, 1);
         assert!(resolved.tx_authorized);
@@ -1286,6 +1415,11 @@ rx_timeout_ms = 40
 tx_burst_limit = 8
 max_datagrams = 0
 
+[airtime]
+mode = "continuous"
+tdd_rx_window_ms = 1000
+tdd_tx_window_ms = 1000
+
 [wfb]
 bind = "127.0.0.1:5610"
 tx_binds = ["127.0.0.1:5611"]
@@ -1320,6 +1454,18 @@ profile = "current_default"
             "4",
             "--max-datagrams",
             "2",
+            "--airtime-mode",
+            "tdd",
+            "--airtime-tdd-first-window",
+            "tx",
+            "--airtime-tdd-rx-window-ms",
+            "6000",
+            "--airtime-tdd-tx-window-ms",
+            "9000",
+            "--airtime-tdd-guard-ms",
+            "300",
+            "--airtime-tdd-start-delay-ms",
+            "50",
             "--tx-bind",
             "127.0.0.1:5701",
             "--firmware",
@@ -1354,6 +1500,18 @@ profile = "current_default"
         assert_eq!(resolved.rx_timeout_ms, 10);
         assert_eq!(resolved.tx_burst_limit, 4);
         assert_eq!(resolved.max_datagrams, 2);
+        assert_eq!(
+            resolved.airtime_schedule.mode,
+            ProductionRuntimeAirtimeMode::Tdd
+        );
+        assert_eq!(
+            resolved.airtime_schedule.tdd_first_window,
+            ProductionRuntimeTddWindow::Tx
+        );
+        assert_eq!(resolved.airtime_schedule.tdd_rx_window_ms, 6000);
+        assert_eq!(resolved.airtime_schedule.tdd_tx_window_ms, 9000);
+        assert_eq!(resolved.airtime_schedule.tdd_guard_ms, 300);
+        assert_eq!(resolved.airtime_schedule.tdd_start_delay_ms, 50);
         assert_eq!(resolved.tx_binds.len(), 1);
         assert_eq!(
             resolved.ready_file.as_deref(),
