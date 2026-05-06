@@ -24,6 +24,7 @@ Common configuration:
   REPEATS=1
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100 SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
+  DUPLEX_TRAFFIC_MODE=simultaneous TDD_FIRST_DIRECTION=l2m TDD_GUARD_SEC=2.0
   MATRIX_OUT_DIR=/tmp/wfb-radio-profile-matrix
 
 Set PROFILE_FILE to a pipe-delimited profile list:
@@ -115,8 +116,8 @@ if [[ "$LOCAL_HW" == "1" ]]; then
   LINUX_LAN_IP=${LINUX_LAN_IP:-192.168.122.77}
   MAC_LAN_IP=${MAC_LAN_IP:-192.168.122.84}
 else
-  LINUX_LAN_IP=${LINUX_LAN_IP:-10.42.0.1}
-  MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
+  LINUX_LAN_IP=${LINUX_LAN_IP:-auto}
+  MAC_LAN_IP=${MAC_LAN_IP:-auto}
 fi
 
 CHANNEL=${CHANNEL:-36}
@@ -136,6 +137,9 @@ SESSION_ACQUIRE_MODE=${SESSION_ACQUIRE_MODE:-observed}
 SESSION_ACQUIRE_TIMEOUT_SECONDS=${SESSION_ACQUIRE_TIMEOUT_SECONDS:-15}
 SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
+DUPLEX_TRAFFIC_MODE=${DUPLEX_TRAFFIC_MODE:-simultaneous}
+TDD_FIRST_DIRECTION=${TDD_FIRST_DIRECTION:-l2m}
+TDD_GUARD_SEC=${TDD_GUARD_SEC:-2.0}
 COUNTER_SECONDS=${COUNTER_SECONDS:-55}
 PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-40}
 RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-60000}
@@ -262,6 +266,43 @@ sync_realtek_ref() {
     "$REALTEK_REF_LOCAL_PATH/" "$HW_MAC_HOST:$REALTEK_REF_REMOTE_PATH/"
 }
 
+resolve_remote_lan_pair() {
+  if [[ "$LOCAL_HW" == "1" || "$MAC_LAN_IP" != "auto" ]]; then
+    return
+  fi
+  (( DRY_RUN == 0 )) || return
+  log "resolving remote Mac/Linux LAN pair through $HW_MAC_HOST"
+  local pair
+  if ! pair=$(ssh "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" \
+    "LINUX_HOST=$(quote "$LINUX_HOST") LINUX_REMOTE_PATH=$(quote "$LINUX_REMOTE_PATH") bash -s" <<'REMOTE_RESOLVE'
+set -euo pipefail
+export PATH="$LINUX_REMOTE_PATH:$PATH"
+linux_ips=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$LINUX_HOST" 'hostname -I' 2>/dev/null || true)
+for linux_ip in $linux_ips; do
+  if [[ -z "$linux_ip" || "$linux_ip" == 127.* || "$linux_ip" == 169.254.* || "$linux_ip" == 172.17.* || "$linux_ip" == 10.5.* || "$linux_ip" == fd* || "$linux_ip" == *:* ]]; then
+    continue
+  fi
+  iface=$(route -n get "$linux_ip" 2>/dev/null | awk '/interface:/{print $2; exit}')
+  [[ -n "$iface" ]] || continue
+  mac_ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
+  [[ -n "$mac_ip" ]] || continue
+  linux_src=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$LINUX_HOST" \
+    "ip -4 route get '$mac_ip' 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p' | head -n 1" 2>/dev/null || true)
+  if [[ "$linux_src" == "$linux_ip" ]]; then
+    printf '%s %s\n' "$mac_ip" "$linux_ip"
+    exit 0
+  fi
+done
+exit 42
+REMOTE_RESOLVE
+  ); then
+    die "could not resolve reciprocal LAN pair from $HW_MAC_HOST to $LINUX_HOST"
+  fi
+  MAC_LAN_IP=${pair%% *}
+  LINUX_LAN_IP=${pair##* }
+  log "resolved MAC_LAN_IP=$MAC_LAN_IP LINUX_LAN_IP=$LINUX_LAN_IP"
+}
+
 ceil_percent() {
   local total=$1
   local pct=$2
@@ -284,6 +325,7 @@ keys = [
     "enable_m2l", "enable_l2m",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
     "l2m_mcs", "payload_interval_sec", "expected_payloads",
+    "duplex_traffic_mode", "tdd_first_direction", "tdd_guard_sec",
     "source_warmup_payloads", "source_tail_payloads", "session_acquire_mode",
     "session_acquire_timeout_seconds", "session_acquire_poll_seconds",
     "payload_len", "m2l_min_unique",
@@ -303,6 +345,8 @@ for key in [
         data[key] = int(data[key])
 if data.get("payload_interval_sec") is not None:
     data["payload_interval_sec"] = float(data["payload_interval_sec"])
+if data.get("tdd_guard_sec") is not None:
+    data["tdd_guard_sec"] = float(data["tdd_guard_sec"])
 if data.get("session_acquire_poll_seconds") is not None:
     data["session_acquire_poll_seconds"] = float(data["session_acquire_poll_seconds"])
 Path(sys.argv[1]).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
@@ -358,6 +402,7 @@ run_one_profile() {
   export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
   export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
+  export DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC
   export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
@@ -398,6 +443,9 @@ run_one_profile() {
       SESSION_ACQUIRE_TIMEOUT_SECONDS="$SESSION_ACQUIRE_TIMEOUT_SECONDS" \
       SESSION_ACQUIRE_POLL_SECONDS="$SESSION_ACQUIRE_POLL_SECONDS" \
       PAYLOAD_LEN="$PAYLOAD_LEN" \
+      DUPLEX_TRAFFIC_MODE="$DUPLEX_TRAFFIC_MODE" \
+      TDD_FIRST_DIRECTION="$TDD_FIRST_DIRECTION" \
+      TDD_GUARD_SEC="$TDD_GUARD_SEC" \
       PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
       M2L_MIN_UNIQUE="$M2L_MIN_UNIQUE" \
       L2M_MIN_UNIQUE="$L2M_MIN_UNIQUE" \
@@ -430,7 +478,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -519,6 +567,9 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
             "m2l_mcs": meta.get("m2l_mcs"),
             "l2m_mcs": meta.get("l2m_mcs"),
             "payload_interval_sec": meta.get("payload_interval_sec"),
+            "traffic_mode": meta.get("duplex_traffic_mode"),
+            "tdd_first_direction": meta.get("tdd_first_direction"),
+            "tdd_guard_sec": meta.get("tdd_guard_sec"),
         },
         "signal": signal,
     }
@@ -682,6 +733,7 @@ if (( DRY_RUN == 1 )); then
   log "dry run; matrix artifacts will be skeletal under $MATRIX_OUT_DIR"
 else
   deploy_remote_repo
+  resolve_remote_lan_pair
 fi
 
 profile_count=0

@@ -21,6 +21,8 @@ Configuration is via environment variables. Common overrides:
   SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
   SESSION_ACQUIRE_SETTLE_SECONDS=1
+  DUPLEX_TRAFFIC_MODE=simultaneous   # simultaneous, phased, or tdd
+  TDD_FIRST_DIRECTION=l2m TDD_GUARD_SEC=2.0
   M2L_SOURCE_PHASE_SEC=0 L2M_SOURCE_PHASE_SEC=0
   ENABLE_M2L=1 ENABLE_L2M=1
   M2L_FEC_K=3 M2L_FEC_N=12 L2M_FEC_K=3 L2M_FEC_N=12
@@ -107,9 +109,20 @@ SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
 SESSION_ACQUIRE_SETTLE_SECONDS=${SESSION_ACQUIRE_SETTLE_SECONDS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.020}
+DUPLEX_TRAFFIC_MODE=${DUPLEX_TRAFFIC_MODE:-simultaneous}
+case "$DUPLEX_TRAFFIC_MODE" in
+  simultaneous|phased|tdd) ;;
+  *) die "invalid DUPLEX_TRAFFIC_MODE=$DUPLEX_TRAFFIC_MODE (expected simultaneous, phased, or tdd)" ;;
+esac
+TDD_FIRST_DIRECTION=${TDD_FIRST_DIRECTION:-l2m}
+case "$TDD_FIRST_DIRECTION" in
+  m2l|l2m) ;;
+  *) die "invalid TDD_FIRST_DIRECTION=$TDD_FIRST_DIRECTION (expected m2l or l2m)" ;;
+esac
+TDD_GUARD_SEC=${TDD_GUARD_SEC:-2.0}
 M2L_SOURCE_PHASE_SEC=${M2L_SOURCE_PHASE_SEC:-0}
 L2M_SOURCE_PHASE_SEC=${L2M_SOURCE_PHASE_SEC:-0}
-export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
+export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
@@ -430,6 +443,7 @@ start_radio() {
         --wfb-link-id "$LINK_ID" \
         --wfb-radio-port "$L2M_RADIO_PORT" \
         --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
+        --rx-mcs-index "$L2M_MCS" \
         --i-understand-this-transmits \
         > "$OUT_DIR/radio-run.log" 2>&1 &
       ;;
@@ -453,6 +467,7 @@ start_radio() {
         --wfb-link-id "$LINK_ID" \
         --wfb-radio-port "$L2M_RADIO_PORT" \
         --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
+        --rx-mcs-index "$L2M_MCS" \
         --i-understand-this-transmits \
         > "$OUT_DIR/radio-run.log" 2>&1 &
       ;;
@@ -576,7 +591,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' M2L_DISTRIBUTOR_HOST='$M2L_DISTRIBUTOR_HOST' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' WFB_RX_RCV_BUF_BYTES='$WFB_RX_RCV_BUF_BYTES' WFB_RX_SND_BUF_BYTES='$WFB_RX_SND_BUF_BYTES' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' M2L_DISTRIBUTOR_HOST='$M2L_DISTRIBUTOR_HOST' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' DUPLEX_TRAFFIC_MODE='$DUPLEX_TRAFFIC_MODE' TDD_FIRST_DIRECTION='$TDD_FIRST_DIRECTION' TDD_GUARD_SEC='$TDD_GUARD_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' WFB_RX_RCV_BUF_BYTES='$WFB_RX_RCV_BUF_BYTES' WFB_RX_SND_BUF_BYTES='$WFB_RX_SND_BUF_BYTES' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 enabled() {
@@ -765,6 +780,9 @@ payload_len = int(os.environ["PAYLOAD_LEN"])
 warmup = int(os.environ["SOURCE_WARMUP_PAYLOADS"])
 expected = int(os.environ["EXPECTED_PAYLOADS"])
 interval = float(os.environ["PAYLOAD_INTERVAL_SEC"])
+traffic_mode = os.environ.get("DUPLEX_TRAFFIC_MODE", "simultaneous")
+tdd_first_direction = os.environ.get("TDD_FIRST_DIRECTION", "l2m")
+tdd_guard = max(0.0, float(os.environ.get("TDD_GUARD_SEC", "2.0")))
 m2l_phase = max(0.0, float(os.environ.get("M2L_SOURCE_PHASE_SEC", "0")))
 l2m_phase = max(0.0, float(os.environ.get("L2M_SOURCE_PHASE_SEC", "0")))
 session_mode = os.environ.get("SESSION_ACQUIRE_MODE", "observed")
@@ -864,6 +882,9 @@ measured_started_at = time.time()
     "poll_sec": session_poll,
     "settle_sec": session_settle if not timed_out and not missing_sessions else 0,
     "delay_after_warmup_sec": measured_started_at - warmup_completed_at,
+    "traffic_mode": traffic_mode,
+    "tdd_first_direction": tdd_first_direction,
+    "tdd_guard_sec": tdd_guard,
     "source_phase_sec": {
         "m2l": m2l_phase,
         "l2m": l2m_phase,
@@ -872,12 +893,28 @@ measured_started_at = time.time()
 source_started_at = time.time()
 schedule = []
 source_events = []
-for seq in range(expected):
-    send_base = source_started_at + seq * interval
-    if enable_m2l:
-        schedule.append((send_base + m2l_phase, "m2l", seq))
-    if enable_l2m:
-        schedule.append((send_base + l2m_phase, "l2m", seq))
+if traffic_mode == "tdd":
+    enabled_order = []
+    if tdd_first_direction == "m2l":
+        preferred = ["m2l", "l2m"]
+    else:
+        preferred = ["l2m", "m2l"]
+    for direction in preferred:
+        if direction == "m2l" and enable_m2l:
+            enabled_order.append(direction)
+        if direction == "l2m" and enable_l2m:
+            enabled_order.append(direction)
+    for block_index, direction in enumerate(enabled_order):
+        block_start = source_started_at + block_index * (expected * interval + tdd_guard)
+        for seq in range(expected):
+            schedule.append((block_start + seq * interval, direction, seq))
+else:
+    for seq in range(expected):
+        send_base = source_started_at + seq * interval
+        if enable_m2l:
+            schedule.append((send_base + m2l_phase, "m2l", seq))
+        if enable_l2m:
+            schedule.append((send_base + l2m_phase, "l2m", seq))
 schedule.sort()
 for send_at, direction, seq in schedule:
     delay = send_at - time.time()
@@ -915,6 +952,9 @@ tail_completed_at = time.time()
     "expected_payloads": expected,
     "payload_interval_sec": interval,
     "tail_payloads": tail,
+    "traffic_mode": traffic_mode,
+    "tdd_first_direction": tdd_first_direction,
+    "tdd_guard_sec": tdd_guard,
     "source_phase_sec": {
         "m2l": m2l_phase,
         "l2m": l2m_phase,
@@ -1178,6 +1218,9 @@ summary = {
         "payload_interval_sec": float(os.environ.get("PAYLOAD_INTERVAL_SEC", 0)),
         "payload_len": int(os.environ.get("PAYLOAD_LEN", 0)),
         "expected_payloads": expected_payloads,
+        "traffic_mode": os.environ.get("DUPLEX_TRAFFIC_MODE"),
+        "tdd_first_direction": os.environ.get("TDD_FIRST_DIRECTION"),
+        "tdd_guard_sec": float(os.environ.get("TDD_GUARD_SEC", 0)),
         "radio_run_config": os.environ.get("RADIO_RUN_CONFIG"),
         "m2l_ingress_mode": os.environ.get("M2L_INGRESS_MODE"),
         "m2l_distributor_host": os.environ.get("M2L_DISTRIBUTOR_HOST"),
