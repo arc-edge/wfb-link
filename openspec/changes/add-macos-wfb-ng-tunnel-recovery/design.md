@@ -18,15 +18,26 @@ This avoids a premature Rust port of the WFB-NG session crypto and FEC codec.
 
 ## Direction Defaults
 
-Stock WFB-NG GS tunnel defaults are:
+Arc GS tunnel defaults are:
 
-- RX from drone: radio port `0x20`
-- TX to drone: radio port `0xa0`
+- link ID: `0x000000`
+- RX from drone: radio port `3`
+- TX to drone: radio port `4`
+- FEC: `k=2,n=4`
 - GS IP: `10.5.0.1/24`
 - Drone IP: `10.5.0.2/24`
 
-The recovery runner exposes these as environment overrides because this bench
-has also used custom ports during RF smoke tests.
+The recovery runner exposes these as environment overrides because stock WFB-NG
+uses `0x20`/`0xa0`, while production RF smoke tests have also used custom
+ports and link IDs.
+
+## Recovery Observability
+
+The production RX report records WFB-prefixed 802.11 channel IDs observed on
+air, grouped by source/destination raw channel ID. This is intentionally before
+decrypt/FEC, so a recovery run can tell the difference between "only ambient
+Wi-Fi was present" and "the drone is transmitting WFB on an unexpected
+link/port tuple."
 
 ## Key Requirement
 

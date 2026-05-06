@@ -4,7 +4,7 @@ The system SHALL provide a production-oriented WFB runtime entry point that
 opens, initializes, receives, and transmits through runtime-owned types rather
 than diagnostic bridge argument or report types. The production runtime MAY be
 composed with external WFB-NG UDP codec processes for operator recovery flows
-that need stock WFB-NG encryption/FEC compatibility.
+that need WFB-NG encryption/FEC compatibility.
 
 #### Scenario: Production command starts full flow
 - **WHEN** an operator starts the production runtime command with adapter,
@@ -27,3 +27,9 @@ that need stock WFB-NG encryption/FEC compatibility.
 - **THEN** the runner starts the production radio service plus WFB-NG
   distributor/aggregator codec processes and a macOS `utun` bridge using the
   configured GS tunnel ports and tunnel IPs
+
+#### Scenario: Recovery reports observed WFB channel IDs
+- **WHEN** the production runtime receives 802.11 frames during a recovery run
+- **THEN** the RX telemetry reports any WFB-prefixed source/destination channel
+  IDs it observed, including raw IDs, decoded link IDs, decoded radio ports,
+  and counts

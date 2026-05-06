@@ -13,7 +13,10 @@ a GS-side tunnel shim and WFB-NG UDP codec wiring before operators can try
 - Add a macOS build wrapper for WFB-NG `wfb_tx` and `wfb_rx` in UDP
   distributor/aggregator mode.
 - Add a recovery orchestrator that starts `wfb-radio-service`, WFB-NG codec
-  processes, and the `utun` bridge with stock GS tunnel defaults.
+  processes, and the `utun` bridge with Arc GS tunnel defaults.
+- Add production RX observations for WFB-prefixed channel IDs so recovery runs
+  can distinguish ambient Wi-Fi from real WFB frames on unexpected link/port
+  tuples.
 - Document the required WFB-NG keypair and default tunnel ports/IPs.
 
 ## Capabilities
@@ -32,5 +35,5 @@ None.
 - Affected scripts: new macOS tunnel bridge, WFB-NG codec build wrapper, and
   recovery runner.
 - Affected docs: WFB-NG tunnel recovery instructions.
-- Runtime/service code remains unchanged; this is orchestration around the
-  existing production service boundary.
+- Runtime telemetry gains WFB channel-ID observations; the rest is
+  orchestration around the existing production service boundary.

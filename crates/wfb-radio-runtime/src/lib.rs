@@ -54,6 +54,13 @@ pub use tx_power::{
 
 pub const PRODUCTION_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 pub const PRODUCTION_TX_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
+const WFB_OBSERVED_HEADER_LEN: usize = 24;
+const WFB_OBSERVED_MAC_PREFIX: [u8; 2] = [0x57, 0x42];
+const WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET: usize = 10;
+const WFB_OBSERVED_SRC_CHANNEL_ID_OFFSET: usize = 12;
+const WFB_OBSERVED_DST_MAC_PREFIX_OFFSET: usize = 16;
+const WFB_OBSERVED_DST_CHANNEL_ID_OFFSET: usize = 18;
+const WFB_MAX_CHANNEL_OBSERVATIONS: usize = 32;
 
 pub enum RuntimeUsbTransport {
     Libusb(Box<ClaimedUsbDevice>),
@@ -508,6 +515,100 @@ pub struct RuntimeFlowRxTelemetry {
     pub control_frames: u64,
     pub data_frames: u64,
     pub extension_frames: u64,
+    pub wfb_channel_observations: Vec<RuntimeWfbChannelObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeWfbChannelObservation {
+    pub source_channel_id: u32,
+    pub source_channel_id_hex: String,
+    pub source_link_id: u32,
+    pub source_radio_port: u8,
+    pub destination_channel_id: u32,
+    pub destination_channel_id_hex: String,
+    pub destination_link_id: u32,
+    pub destination_radio_port: u8,
+    pub count: u64,
+}
+
+fn format_wfb_observed_channel_id(raw: u32) -> String {
+    format!("0x{raw:08x}")
+}
+
+fn split_wfb_observed_channel_id(raw: u32) -> (u32, u8) {
+    (raw >> 8, (raw & 0xff) as u8)
+}
+
+fn observe_runtime_wfb_channel_id(
+    observations: &mut Vec<RuntimeWfbChannelObservation>,
+    frame: &[u8],
+) {
+    if frame.len() < WFB_OBSERVED_HEADER_LEN {
+        return;
+    }
+    if frame[WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET..WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET + 2]
+        != WFB_OBSERVED_MAC_PREFIX
+        || frame[WFB_OBSERVED_DST_MAC_PREFIX_OFFSET..WFB_OBSERVED_DST_MAC_PREFIX_OFFSET + 2]
+            != WFB_OBSERVED_MAC_PREFIX
+    {
+        return;
+    }
+
+    let source_channel_id = u32::from_be_bytes(
+        frame[WFB_OBSERVED_SRC_CHANNEL_ID_OFFSET..WFB_OBSERVED_SRC_CHANNEL_ID_OFFSET + 4]
+            .try_into()
+            .expect("slice length checked by frame length"),
+    );
+    let destination_channel_id = u32::from_be_bytes(
+        frame[WFB_OBSERVED_DST_CHANNEL_ID_OFFSET..WFB_OBSERVED_DST_CHANNEL_ID_OFFSET + 4]
+            .try_into()
+            .expect("slice length checked by frame length"),
+    );
+
+    if let Some(existing) = observations.iter_mut().find(|observation| {
+        observation.source_channel_id == source_channel_id
+            && observation.destination_channel_id == destination_channel_id
+    }) {
+        existing.count = existing.count.saturating_add(1);
+        return;
+    }
+    if observations.len() >= WFB_MAX_CHANNEL_OBSERVATIONS {
+        return;
+    }
+
+    let (source_link_id, source_radio_port) = split_wfb_observed_channel_id(source_channel_id);
+    let (destination_link_id, destination_radio_port) =
+        split_wfb_observed_channel_id(destination_channel_id);
+    observations.push(RuntimeWfbChannelObservation {
+        source_channel_id,
+        source_channel_id_hex: format_wfb_observed_channel_id(source_channel_id),
+        source_link_id,
+        source_radio_port,
+        destination_channel_id,
+        destination_channel_id_hex: format_wfb_observed_channel_id(destination_channel_id),
+        destination_link_id,
+        destination_radio_port,
+        count: 1,
+    });
+}
+
+fn merge_runtime_wfb_channel_observations(
+    target: &mut Vec<RuntimeWfbChannelObservation>,
+    source: Vec<RuntimeWfbChannelObservation>,
+) {
+    for observation in source {
+        if let Some(existing) = target.iter_mut().find(|existing| {
+            existing.source_channel_id == observation.source_channel_id
+                && existing.destination_channel_id == observation.destination_channel_id
+        }) {
+            existing.count = existing.count.saturating_add(observation.count);
+            continue;
+        }
+        if target.len() < WFB_MAX_CHANNEL_OBSERVATIONS {
+            target.push(observation);
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -753,7 +854,7 @@ pub struct ProductionRuntimeRxForwardSnapshot {
     pub counters: RxCounters,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeRxPacketTelemetry {
     pub parsed_frames: u64,
@@ -768,6 +869,7 @@ pub struct ProductionRuntimeRxPacketTelemetry {
     pub control_frames: u64,
     pub data_frames: u64,
     pub extension_frames: u64,
+    pub wfb_channel_observations: Vec<RuntimeWfbChannelObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -829,6 +931,10 @@ pub fn process_production_rx_packet_outcomes(
                 telemetry.parsed_frames = telemetry.parsed_frames.saturating_add(1);
                 count_production_rx_metadata(&mut telemetry, frame);
                 count_production_rx_frame_type(&mut telemetry, &frame.data);
+                observe_runtime_wfb_channel_id(
+                    &mut telemetry.wfb_channel_observations,
+                    &frame.data,
+                );
                 process_production_wfb_rx_forwards(rx_forwards, frame)?;
             }
             RxParseOutcome::Drop => {
@@ -6276,6 +6382,10 @@ fn apply_production_runtime_rx_packet_telemetry(
     rx.extension_frames = rx
         .extension_frames
         .saturating_add(telemetry.extension_frames);
+    merge_runtime_wfb_channel_observations(
+        &mut rx.wfb_channel_observations,
+        telemetry.wfb_channel_observations,
+    );
 }
 
 fn apply_production_runtime_tx_telemetry(
@@ -13813,6 +13923,7 @@ mod tests {
             control_frames: 3,
             data_frames: 4,
             extension_frames: 5,
+            wfb_channel_observations: Vec::new(),
         };
         let tx = RuntimeFlowTxTelemetry {
             datagrams_received: 5,
@@ -14806,6 +14917,28 @@ mod tests {
         assert_eq!(outcome.telemetry.dropped_packets, 1);
         assert_eq!(outcome.telemetry.need_more_data, 1);
         assert!(outcome.rx_forwards.is_empty());
+    }
+
+    #[test]
+    fn production_rx_handler_observes_wfb_channel_ids() {
+        let channel_id = WfbChannelId::new(0x000102, 0x03).expect("channel ID");
+        let packets = vec![ParsedRxPacket {
+            consumed: 64,
+            outcome: RxParseOutcome::Frame,
+            frame: Some(runtime_wfb_frame(channel_id)),
+        }];
+        let mut forwards = Vec::new();
+
+        let outcome =
+            process_production_rx_packet_outcomes(&packets, &mut forwards).expect("rx outcomes");
+
+        let observations = outcome.telemetry.wfb_channel_observations;
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].source_channel_id_hex, "0x00010203");
+        assert_eq!(observations[0].source_link_id, 0x000102);
+        assert_eq!(observations[0].source_radio_port, 0x03);
+        assert_eq!(observations[0].destination_channel_id_hex, "0x00010203");
+        assert_eq!(observations[0].count, 1);
     }
 
     #[test]

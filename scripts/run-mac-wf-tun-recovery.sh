@@ -14,17 +14,17 @@ TUN_SCRIPT=${TUN_SCRIPT:-$REPO_ROOT/scripts/wfb-mac-wf-tun.py}
 PYTHON=${PYTHON:-python3}
 
 WFB_KEY=${WFB_KEY:-}
-LINK_ID=${LINK_ID:-0x000001}
+LINK_ID=${LINK_ID:-0x000000}
 WFB_CLI_LINK_ID=${WFB_CLI_LINK_ID:-$(printf '%d' "$((LINK_ID))")}
 CHANNEL=${CHANNEL:-36}
 BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
 MCS=${MCS:-1}
-FEC_K=${FEC_K:-1}
-FEC_N=${FEC_N:-2}
+FEC_K=${FEC_K:-2}
+FEC_N=${FEC_N:-4}
 
-# WFB-NG stock GS tunnel direction: RX 0x20 from drone, TX 0xa0 to drone.
-TUN_RX_RADIO_PORT=${TUN_RX_RADIO_PORT:-0x20}
-TUN_TX_RADIO_PORT=${TUN_TX_RADIO_PORT:-0xa0}
+# Arc tunnel direction: RX stream 3 from drone, TX stream 4 to drone.
+TUN_RX_RADIO_PORT=${TUN_RX_RADIO_PORT:-3}
+TUN_TX_RADIO_PORT=${TUN_TX_RADIO_PORT:-4}
 TUN_RX_RADIO_PORT_DEC=$(printf '%d' "$((TUN_RX_RADIO_PORT))")
 TUN_TX_RADIO_PORT_DEC=$(printf '%d' "$((TUN_TX_RADIO_PORT))")
 

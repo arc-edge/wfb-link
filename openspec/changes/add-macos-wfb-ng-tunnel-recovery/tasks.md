@@ -22,9 +22,11 @@
 
 - [x] 3.1 Add a recovery runner that starts `wfb-radio-service`,
       WFB-NG `wfb_rx`, WFB-NG `wfb_tx`, and the macOS tunnel shim.
-- [x] 3.2 Use stock GS tunnel defaults: RX `0x20`, TX `0xa0`, GS
-      `10.5.0.1`, drone `10.5.0.2`.
+- [x] 3.2 Use Arc GS tunnel defaults: link ID `0x000000`, RX stream `3`, TX
+      stream `4`, FEC `2/4`, GS `10.5.0.1`, drone `10.5.0.2`.
 - [x] 3.3 Fail fast when the required WFB-NG keypair is missing.
+- [x] 3.4 Record observed WFB channel IDs in production RX telemetry for
+      tunnel recovery diagnostics.
 
 ## 4. Verification
 
@@ -33,5 +35,7 @@
       Homebrew libsodium dependency.
 - [x] 4.3 Hardware Mac tunnel helper self-test passes.
 - [x] 4.4 Hardware Mac production service crate builds.
-- [ ] 4.5 End-to-end tunnel SSH over RF succeeds after a matching WFB-NG
-      keypair is placed on the Mac.
+- [x] 4.5 Paired-key active RF probes submit frames cleanly on the hardware Mac
+      and report zero WFB-prefixed drone responses across the tested Arc tuples.
+- [ ] 4.6 End-to-end tunnel SSH over RF succeeds after the drone-side
+      `wfb-link`/`wfb_tun` stack is confirmed running and keyed.

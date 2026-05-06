@@ -1,7 +1,7 @@
 # WFB-NG Tunnel Recovery on macOS
 
-This recovery path wires the native macOS RTL8812AU radio service into stock
-WFB-NG tunnel semantics:
+This recovery path wires the native macOS RTL8812AU radio service into the Arc
+WFB-NG tunnel profile:
 
 ```text
 macOS utun
@@ -11,13 +11,16 @@ macOS utun
   <-> AWUS036ACH USB radio
 ```
 
-The stock WFB-NG GS tunnel ports are:
+The Arc GS tunnel defaults are:
 
-- RX from drone: `0x20`
-- TX to drone: `0xa0`
+- link ID: `0x000000` (the drone-side `wfb-link` currently omits `wfb-ng -i`)
+- RX from drone: stream/radio port `3`
+- TX to drone: stream/radio port `4`
+- FEC: `k=2,n=4`
 
-The drone profile is the inverse. The default tunnel IPs are `10.5.0.1/24`
-for GS and `10.5.0.2/24` for drone.
+The drone profile is the inverse. The default tunnel IPs are `10.5.0.1/24` for
+GS and `10.5.0.2/24` for drone. Stock WFB-NG tunnel ports (`0x20` / `0xa0`) can
+still be supplied as overrides when testing against an unmodified WFB-NG peer.
 
 ## Build the local WFB-NG codec binaries
 
@@ -59,12 +62,19 @@ ssh pi@10.5.0.2
 Useful overrides:
 
 ```bash
-LINK_ID=0x000001
-TUN_RX_RADIO_PORT=0x20
-TUN_TX_RADIO_PORT=0xa0
+LINK_ID=0x000000
+TUN_RX_RADIO_PORT=3
+TUN_TX_RADIO_PORT=4
 LOCAL_IP=10.5.0.1
 PEER_IP=10.5.0.2
 MCS=1
-FEC_K=1
-FEC_N=2
+FEC_K=2
+FEC_N=4
+```
+
+For stock WFB-NG GS tunnel semantics, override:
+
+```bash
+LINK_ID=0x000001 TUN_RX_RADIO_PORT=0x20 TUN_TX_RADIO_PORT=0xa0 FEC_K=1 FEC_N=2 \
+scripts/run-mac-wf-tun-recovery.sh
 ```
