@@ -162,7 +162,10 @@ RADIO_READY_WAIT_SECONDS=${RADIO_READY_WAIT_SECONDS:-90}
 RX_TIMEOUT_MS=${RX_TIMEOUT_MS:-20}
 TX_BURST_LIMIT=${TX_BURST_LIMIT:-4}
 COUNTER_SECONDS=${COUNTER_SECONDS:-50}
-PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-35}
+PEER_WAIT_SECONDS=${PEER_WAIT_SECONDS:-$((COUNTER_SECONDS + 5))}
+if (( PEER_WAIT_SECONDS < COUNTER_SECONDS + 5 )); then
+  PEER_WAIT_SECONDS=$((COUNTER_SECONDS + 5))
+fi
 
 case "${1:-}" in
   -h|--help)
@@ -362,6 +365,8 @@ sudo -n iw dev "$IFACE" info > "$REMOTE_PREFIX/channel-state-before.txt" 2>&1 ||
 ip -d link show "$IFACE" > "$REMOTE_PREFIX/link-state-before.txt" 2>&1 || true
 sudo -n timeout 3 tcpdump -i "$IFACE" -L > "$REMOTE_PREFIX/pcap-linktypes-before.txt" 2>&1 || true
 grep -q "type monitor" "$REMOTE_PREFIX/channel-state-before.txt"
+grep -q "channel ${CHANNEL} " "$REMOTE_PREFIX/channel-state-before.txt"
+grep -q "width: 20 MHz" "$REMOTE_PREFIX/channel-state-before.txt"
 grep -q "link/ieee802.11/radiotap" "$REMOTE_PREFIX/link-state-before.txt"
 grep -q "IEEE802_11_RADIO" "$REMOTE_PREFIX/pcap-linktypes-before.txt"
 REMOTE_PREP
@@ -667,6 +672,8 @@ sudo -n iw dev "$IFACE" info > "$REMOTE_PREFIX/channel-state-traffic.txt" 2>&1 |
 ip -d link show "$IFACE" > "$REMOTE_PREFIX/link-state-traffic.txt" 2>&1 || true
 sudo -n timeout 3 tcpdump -i "$IFACE" -L > "$REMOTE_PREFIX/pcap-linktypes-traffic.txt" 2>&1 || true
 grep -q "type monitor" "$REMOTE_PREFIX/channel-state-traffic.txt"
+grep -q "channel ${CHANNEL} " "$REMOTE_PREFIX/channel-state-traffic.txt"
+grep -q "width: 20 MHz" "$REMOTE_PREFIX/channel-state-traffic.txt"
 grep -q "link/ieee802.11/radiotap" "$REMOTE_PREFIX/link-state-traffic.txt"
 grep -q "IEEE802_11_RADIO" "$REMOTE_PREFIX/pcap-linktypes-traffic.txt"
 
@@ -976,12 +983,59 @@ def compact_counter(counter):
         if key not in {"sequence_counts", "duplicate_sequences"}
     }
 
+def parse_iw_channel_state(path):
+    try:
+        text = path.read_text(errors="replace")
+    except Exception as exc:
+        return {"error": str(exc), "path": str(path)}
+    state = {
+        "path": str(path),
+        "type": None,
+        "channel": None,
+        "frequency_mhz": None,
+        "width_mhz": None,
+        "txpower_dbm": None,
+        "raw": text,
+    }
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("type "):
+            state["type"] = stripped.split(None, 1)[1]
+        elif stripped.startswith("channel "):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                try:
+                    state["channel"] = int(parts[1])
+                except ValueError:
+                    pass
+            if "(" in stripped and "MHz" in stripped:
+                try:
+                    state["frequency_mhz"] = int(stripped.split("(", 1)[1].split("MHz", 1)[0].strip())
+                except ValueError:
+                    pass
+            if "width:" in stripped and "MHz" in stripped.rsplit("width:", 1)[1]:
+                try:
+                    state["width_mhz"] = int(stripped.rsplit("width:", 1)[1].split("MHz", 1)[0].strip())
+                except ValueError:
+                    pass
+        elif stripped.startswith("txpower "):
+            try:
+                state["txpower_dbm"] = float(stripped.split()[1])
+            except (IndexError, ValueError):
+                pass
+    return state
+
 report = load(run / "radio-run.json")
 health = load(run / "radio-health.json")
 m2l = load(run / "peer" / "counter-m2l.json")
 l2m = load(run / "peer" / "counter-l2m.json")
 source_gate = load(run / "peer" / "source-gate.json")
 source_summary = load(run / "peer" / "source-summary.json")
+peer_channel_state = {
+    "before": parse_iw_channel_state(run / "peer" / "channel-state-before.txt"),
+    "traffic": parse_iw_channel_state(run / "peer" / "channel-state-traffic.txt"),
+    "after": parse_iw_channel_state(run / "peer" / "channel-state-after.txt"),
+}
 rx = report.get("rx") or {}
 tx = report.get("tx") or {}
 calibration = report.get("tx_calibration_profile") or {}
@@ -1032,6 +1086,15 @@ if health.get("result") != "pass":
     failures.append(f"health_result={health.get('result')}")
 if health.get("operator_action") != "monitor":
     failures.append(f"health_operator_action={health.get('operator_action')}")
+traffic_channel = peer_channel_state["traffic"].get("channel")
+traffic_width_mhz = peer_channel_state["traffic"].get("width_mhz")
+traffic_type = peer_channel_state["traffic"].get("type")
+if traffic_type != "monitor":
+    failures.append(f"peer_wfb0_type={traffic_type}")
+if traffic_channel != int(os.environ["CHANNEL"]):
+    failures.append(f"peer_wfb0_channel={traffic_channel}!={os.environ['CHANNEL']}")
+if traffic_width_mhz != 20:
+    failures.append(f"peer_wfb0_width_mhz={traffic_width_mhz}!=20")
 if (tx.get("failed_submissions") or 0) != 0:
     failures.append(f"tx_failed_submissions={tx.get('failed_submissions')}")
 if (tx.get("dropped_datagrams") or 0) != 0:
@@ -1071,6 +1134,7 @@ summary = {
         "linux_lan_ip_requested": os.environ.get("LINUX_LAN_IP_REQUESTED"),
         "mac_lan_ip": os.environ.get("MAC_LAN_IP"),
     },
+    "peer_channel_state": peer_channel_state,
     "radio_result": report.get("result"),
     "radio_command": os.environ.get("RADIO_COMMAND"),
     "tx_power_mode": os.environ.get("TX_POWER_MODE"),

@@ -5417,7 +5417,7 @@ fn production_should_apply_captured_tx_bringup_tail(
     channel: Channel,
     bandwidth: Bandwidth,
 ) -> bool {
-    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+    channel.number == 36 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
 }
 
 type ProductionCapturedTxBringupWrite = (&'static str, u16, u32);

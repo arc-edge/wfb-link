@@ -7,8 +7,8 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use radio_core::{
-    parse_realtek_u32_array, plan_realtek_table, Band, Bandwidth, Channel, DeviceSelector,
-    FirmwareImage, RealtekConditionEnv, RealtekTableKind, RealtekTablePlan,
+    parse_realtek_u32_array, plan_realtek_table, Bandwidth, Channel, DeviceSelector, FirmwareImage,
+    RealtekConditionEnv, RealtekTableKind, RealtekTablePlan,
 };
 use serde::Deserialize;
 use wfb_radio_runtime::{
@@ -800,7 +800,7 @@ fn service_macos_usbhost_config(config: &ServiceMacosUsbHostConfig) -> MacosUsbH
 }
 
 fn service_should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
-    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+    channel.number == 36 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
 }
 
 fn service_runtime_tx_power_input(

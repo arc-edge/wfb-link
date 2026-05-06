@@ -14092,7 +14092,7 @@ where
 }
 
 fn should_apply_captured_tx_bringup_tail(channel: Channel, bandwidth: Bandwidth) -> bool {
-    channel.band == Band::Ghz5 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
+    channel.number == 36 && matches!(bandwidth, Bandwidth::Mhz20 | Bandwidth::Mhz40)
 }
 
 type CapturedTxBringupWrite = (&'static str, u16, u32);
@@ -24312,6 +24312,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             control_frames: bridge.rx.control_frames,
             data_frames: bridge.rx.data_frames,
             extension_frames: bridge.rx.extension_frames,
+            wfb_channel_observations: Vec::new(),
         },
         tx: RuntimeFlowTxTelemetry {
             datagrams_received: bridge.datagrams_received,
@@ -41104,8 +41105,9 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
     }
 
     #[test]
-    fn captured_tx_bringup_tail_covers_5ghz_twenty_and_forty_mhz() {
+    fn captured_tx_bringup_tail_is_limited_to_validated_channel_36() {
         let channel_36 = Channel::from_number(36).expect("channel 36");
+        let channel_149 = Channel::from_number(149).expect("channel 149");
         let channel_6 = Channel::from_number(6).expect("channel 6");
 
         assert!(should_apply_captured_tx_bringup_tail(
@@ -41119,6 +41121,10 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
         assert!(!should_apply_captured_tx_bringup_tail(
             channel_36,
             Bandwidth::Mhz80
+        ));
+        assert!(!should_apply_captured_tx_bringup_tail(
+            channel_149,
+            Bandwidth::Mhz20
         ));
         assert!(!should_apply_captured_tx_bringup_tail(
             channel_6,
