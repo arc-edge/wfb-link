@@ -782,6 +782,7 @@ pub fn service_runtime_inputs_from_resolved(
             enabled: resolved.heartbeat_enabled,
             half_period_ms: resolved.heartbeat_half_period_ms,
         },
+        process_signal_stop: true,
     })
 }
 

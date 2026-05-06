@@ -1894,6 +1894,7 @@ pub struct ProductionRuntimeFlowExecutionInputs {
     pub rtl8812au_init: Option<ProductionRuntimeRtl8812auInitInputs>,
     pub tx_power_control: ProductionRuntimeTxPowerControlInput,
     pub heartbeat_led: LedHeartbeatConfig,
+    pub process_signal_stop: bool,
 }
 
 impl ProductionRuntimeFlowExecutionInputs {
@@ -1908,6 +1909,34 @@ impl ProductionRuntimeFlowExecutionInputs {
             RuntimeRadioError::new("invalid_heartbeat_led_config", error.to_string())
         })
     }
+}
+
+static PRODUCTION_RUNTIME_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn production_runtime_signal_handler(_signal: libc::c_int) {
+    PRODUCTION_RUNTIME_STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_production_runtime_signal_handlers() -> io::Result<()> {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = production_runtime_signal_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = 0;
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_production_runtime_signal_handlers() -> io::Result<()> {
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2492,6 +2521,22 @@ pub fn run_production_runtime_flow(
             ProductionRuntimeFlowReport::not_started(&config, error),
             ProductionRuntimeServiceLifecycle::ExitedFail,
         );
+    }
+    if inputs.process_signal_stop {
+        PRODUCTION_RUNTIME_STOP_REQUESTED.store(false, Ordering::SeqCst);
+        if let Err(error) = install_production_runtime_signal_handlers() {
+            return production_runtime_report_with_health(
+                &config,
+                ProductionRuntimeFlowReport::not_started(
+                    &config,
+                    RuntimeRadioError::new(
+                        "runtime_signal_handler_failed",
+                        format!("failed to install runtime SIGINT/SIGTERM handler: {error}"),
+                    ),
+                ),
+                ProductionRuntimeServiceLifecycle::ExitedFail,
+            );
+        }
     }
     if let Err(error) = write_production_runtime_service_health(
         config.health_file.as_deref(),
@@ -6301,7 +6346,7 @@ where
         |now| {
             heartbeat.maybe_toggle(&&session_cell.borrow().transport, now);
         },
-        || false,
+        || inputs.process_signal_stop && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst),
         |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, RuntimeRadioError> {
             match step {
                 ProductionRuntimeBridgeLoopStep::TryTx => match tx_receiver.receiver.try_recv() {
@@ -6381,6 +6426,14 @@ where
                     Err(error) if error.timeout => {
                         rx.read_timeouts = rx.read_timeouts.saturating_add(1);
                         Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                    Err(_error)
+                        if inputs.process_signal_stop
+                            && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst) =>
+                    {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
+                            ProductionRuntimeBridgeLoopStopReason::Signal,
+                        ))
                     }
                     Err(error) => Err(error),
                 },

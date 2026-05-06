@@ -16,11 +16,17 @@ PYTHON=${PYTHON:-python3}
 WFB_KEY=${WFB_KEY:-}
 LINK_ID=${LINK_ID:-0x000000}
 WFB_CLI_LINK_ID=${WFB_CLI_LINK_ID:-$(printf '%d' "$((LINK_ID))")}
-CHANNEL=${CHANNEL:-36}
+CHANNEL=${CHANNEL:-161}
 BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
 MCS=${MCS:-1}
 FEC_K=${FEC_K:-2}
 FEC_N=${FEC_N:-4}
+AIRTIME_MODE=${AIRTIME_MODE:-tdd}
+AIRTIME_TDD_FIRST_WINDOW=${AIRTIME_TDD_FIRST_WINDOW:-rx}
+AIRTIME_TDD_RX_WINDOW_MS=${AIRTIME_TDD_RX_WINDOW_MS:-7000}
+AIRTIME_TDD_TX_WINDOW_MS=${AIRTIME_TDD_TX_WINDOW_MS:-20000}
+AIRTIME_TDD_GUARD_MS=${AIRTIME_TDD_GUARD_MS:-500}
+AIRTIME_TDD_START_DELAY_MS=${AIRTIME_TDD_START_DELAY_MS:-0}
 
 # Arc tunnel direction: RX stream 3 from drone, TX stream 4 to drone.
 TUN_RX_RADIO_PORT=${TUN_RX_RADIO_PORT:-3}
@@ -37,8 +43,13 @@ TUN_RX_PORT=${TUN_RX_PORT:-56021}
 LOCAL_IP=${LOCAL_IP:-10.5.0.1}
 PEER_IP=${PEER_IP:-10.5.0.2}
 PREFIX_LEN=${PREFIX_LEN:-24}
+TUN_MTU=${TUN_MTU:-1400}
+RADIO_MTU=${RADIO_MTU:-1445}
+TUN_AGG_TIMEOUT_MS=${TUN_AGG_TIMEOUT_MS:-5}
 RADIO_READY_WAIT_SECONDS=${RADIO_READY_WAIT_SECONDS:-90}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+TUN_SETTLE_SECONDS=${TUN_SETTLE_SECONDS:-3}
+TUN_PROBE_COMMAND=${TUN_PROBE_COMMAND:-}
 
 mkdir -p "$OUT_DIR"
 
@@ -82,6 +93,12 @@ service_cmd=(
   --bandwidth "$BANDWIDTH_MHZ"
   --duration-ms 0
   --max-datagrams 0
+  --airtime-mode "$AIRTIME_MODE"
+  --airtime-tdd-first-window "$AIRTIME_TDD_FIRST_WINDOW"
+  --airtime-tdd-rx-window-ms "$AIRTIME_TDD_RX_WINDOW_MS"
+  --airtime-tdd-tx-window-ms "$AIRTIME_TDD_TX_WINDOW_MS"
+  --airtime-tdd-guard-ms "$AIRTIME_TDD_GUARD_MS"
+  --airtime-tdd-start-delay-ms "$AIRTIME_TDD_START_DELAY_MS"
   --wfb-link-id "$LINK_ID"
   --wfb-radio-port "$TUN_RX_RADIO_PORT_DEC"
   --rx-aggregator "127.0.0.1:$AGG_PORT"
@@ -143,10 +160,24 @@ pids+=("$!")
 
 echo "Starting macOS utun bridge. It needs sudo because macOS gates utun creation/configuration." >&2
 echo "Try SSH after it starts: ssh pi@$PEER_IP" >&2
-sudo -n "$PYTHON" "$TUN_SCRIPT" \
+tun_cmd=(
+  sudo -n "$PYTHON" "$TUN_SCRIPT"
   --local-ip "$LOCAL_IP" \
   --peer-ip "$PEER_IP" \
   --prefix-len "$PREFIX_LEN" \
+  --tun-mtu "$TUN_MTU" \
+  --radio-mtu "$RADIO_MTU" \
+  --agg-timeout-ms "$TUN_AGG_TIMEOUT_MS" \
   --tx-peer "127.0.0.1:$TUN_TX_PORT" \
-  --rx-bind "127.0.0.1:$TUN_RX_PORT" \
-  2>"$OUT_DIR/wf-tun.log"
+  --rx-bind "127.0.0.1:$TUN_RX_PORT"
+)
+if [[ -n "$TUN_PROBE_COMMAND" ]]; then
+  "${tun_cmd[@]}" 2>"$OUT_DIR/wf-tun.log" &
+  pids+=("$!")
+  sleep "$TUN_SETTLE_SECONDS"
+  echo "Running tunnel probe: $TUN_PROBE_COMMAND" >&2
+  bash -lc "$TUN_PROBE_COMMAND" >"$OUT_DIR/tun-probe.log" 2>&1
+  echo "Tunnel probe passed; artifacts: $OUT_DIR" >&2
+else
+  "${tun_cmd[@]}" 2>"$OUT_DIR/wf-tun.log"
+fi

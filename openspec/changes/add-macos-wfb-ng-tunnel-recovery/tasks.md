@@ -37,5 +37,5 @@
 - [x] 4.4 Hardware Mac production service crate builds.
 - [x] 4.5 Paired-key active RF probes submit frames cleanly on the hardware Mac
       and report zero WFB-prefixed drone responses across the tested Arc tuples.
-- [ ] 4.6 End-to-end tunnel SSH over RF succeeds after the drone-side
+- [x] 4.6 End-to-end tunnel SSH over RF succeeds after the drone-side
       `wfb-link`/`wfb_tun` stack is confirmed running and keyed.
