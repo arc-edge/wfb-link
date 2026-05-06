@@ -24,8 +24,8 @@ use radio_core::{
     submit_tx_frame, Band, Bandwidth, Channel, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
     FirmwareImage, FrameType, InterfaceInfo, ParsedRxPacket, RealtekTableActionKind,
     RealtekTableKind, RealtekTablePlan, Rtl8812auRegisterAccess, Rtl8812auRegisterError,
-    Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxSubmitCounters, UsbBulkTransfer,
-    UsbDeviceInfo, UsbEndpoints, UsbError,
+    Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
+    UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
 };
 use serde::Serialize;
 use wfb_bridge::{
@@ -61,6 +61,14 @@ const WFB_OBSERVED_SRC_CHANNEL_ID_OFFSET: usize = 12;
 const WFB_OBSERVED_DST_MAC_PREFIX_OFFSET: usize = 16;
 const WFB_OBSERVED_DST_CHANNEL_ID_OFFSET: usize = 18;
 const WFB_MAX_CHANNEL_OBSERVATIONS: usize = 32;
+const PRODUCTION_RX_STARTUP_KICK_FRAME: [u8; 24] = [
+    0x48, 0x00, // data null, no flags
+    0x00, 0x00, // duration
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // addr1: broadcast
+    0x02, 0x00, 0x5e, 0x00, 0x00, 0x01, // addr2: local non-WFB source
+    0x02, 0x00, 0x5e, 0x00, 0x00, 0x01, // addr3: local non-WFB BSSID
+    0x00, 0x00, // seq control
+];
 
 pub enum RuntimeUsbTransport {
     Libusb(Box<ClaimedUsbDevice>),
@@ -1724,6 +1732,7 @@ struct ProductionRuntimePreLoopReports {
     monitor_opmode_applied: bool,
     tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    rx_startup_kick: Option<ProductionRuntimeRxStartupKickReport>,
 }
 
 impl ProductionRuntimeFlowConfig {
@@ -1784,6 +1793,7 @@ pub struct ProductionRuntimeReadyMarker {
     pub monitor_opmode_applied: Option<bool>,
     pub tx_power_control_applied: bool,
     pub tx_calibration_profile_applied: bool,
+    pub rx_startup_kick_applied: bool,
 }
 
 pub fn write_production_runtime_ready_marker(
@@ -1867,6 +1877,18 @@ pub struct ProductionRuntimeHeartbeatLedReport {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeRxStartupKickReport {
+    pub semantics: &'static str,
+    pub frame_len: usize,
+    pub tx_options: TxOptions,
+    pub attempted: u64,
+    pub submitted: u64,
+    pub failed: u64,
+    pub bytes_written: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeFlowExecutionReport {
     pub selector: DeviceSelector,
     pub adapter: Option<UsbDeviceInfo>,
@@ -1882,6 +1904,7 @@ pub struct ProductionRuntimeFlowExecutionReport {
     pub calibration_class: TxCalibrationClass,
     pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    pub rx_startup_kick: Option<ProductionRuntimeRxStartupKickReport>,
     pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
     pub receiver_backed_validation_required: bool,
     pub init: ProductionRuntimeInitTelemetry,
@@ -1912,6 +1935,8 @@ pub struct ProductionRuntimeFlowReport {
     pub calibration_evidence_source: RuntimeTxCalibrationEvidenceSource,
     pub tx_power_control: Option<Rtl8812auTxPowerControlReport>,
     pub tx_calibration_profile: Option<Rtl8812auTxCalibrationProfileReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx_startup_kick: Option<ProductionRuntimeRxStartupKickReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
     pub receiver_backed_validation_required: bool,
@@ -1948,6 +1973,7 @@ impl ProductionRuntimeFlowReport {
                 .evidence_source(config.captured_tail_applied),
             tx_power_control: execution.tx_power_control,
             tx_calibration_profile: execution.tx_calibration_profile,
+            rx_startup_kick: execution.rx_startup_kick,
             heartbeat_led: execution.heartbeat_led,
             receiver_backed_validation_required: execution.receiver_backed_validation_required,
             init: execution.init,
@@ -1984,6 +2010,7 @@ impl ProductionRuntimeFlowReport {
             calibration_evidence_source,
             tx_power_control: None,
             tx_calibration_profile: None,
+            rx_startup_kick: None,
             heartbeat_led: None,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init: ProductionRuntimeInitTelemetry::default(),
@@ -5929,6 +5956,27 @@ where
             }
         }
     }
+    if !validation.wfb_loop.rx_forwards.is_empty() {
+        match apply_production_runtime_rx_startup_kick(session, &config) {
+            Ok(report) => {
+                pre_loop.rx_startup_kick = Some(report);
+            }
+            Err(error) => {
+                return production_runtime_flow_report_from_state_with_health(
+                    &config,
+                    session,
+                    "not_started",
+                    init_telemetry,
+                    pre_loop,
+                    None,
+                    RuntimeFlowRxTelemetry::default(),
+                    RuntimeFlowTxTelemetry::default(),
+                    ProductionRuntimeFlowResult::Fail,
+                    Some(error),
+                )
+            }
+        }
+    }
 
     if let Err(error) = write_production_runtime_ready_marker(
         config.ready_file.as_deref(),
@@ -5939,6 +5987,7 @@ where
             pre_loop.monitor_opmode_applied,
             pre_loop.tx_power_control.is_some(),
             pre_loop.tx_calibration_profile.is_some(),
+            pre_loop.rx_startup_kick.is_some(),
         ),
     ) {
         return production_runtime_flow_report_from_state_with_health(
@@ -6210,6 +6259,7 @@ fn production_runtime_ready_marker(
     monitor_opmode_applied: bool,
     tx_power_control_applied: bool,
     tx_calibration_profile_applied: bool,
+    rx_startup_kick_applied: bool,
 ) -> ProductionRuntimeReadyMarker {
     ProductionRuntimeReadyMarker {
         source: "bridge-run".to_string(),
@@ -6240,6 +6290,7 @@ fn production_runtime_ready_marker(
         monitor_opmode_applied: Some(monitor_opmode_applied),
         tx_power_control_applied,
         tx_calibration_profile_applied,
+        rx_startup_kick_applied,
     }
 }
 
@@ -6252,6 +6303,41 @@ where
 {
     let registers = Rtl8812auRegisterAccess::new(transport);
     run_rtl8812au_monitor_opmode(&registers, counters).map(|_| ())
+}
+
+fn apply_production_runtime_rx_startup_kick<T>(
+    session: &mut RuntimeRadioSession<T>,
+    config: &ProductionRuntimeFlowConfig,
+) -> Result<ProductionRuntimeRxStartupKickReport, RuntimeRadioError>
+where
+    T: UsbBulkTransfer,
+{
+    let tx_options = TxOptions {
+        rate: TxRate::Ofdm6m,
+        bandwidth: Bandwidth::Mhz20,
+        channel_bandwidth: Some(config.bandwidth),
+        queue: TxQueue::Mgnt,
+        retries: 0,
+        no_retry: true,
+        rate_fallback_limit: 0,
+        ..TxOptions::default()
+    };
+    let mut counters = TxSubmitCounters::default();
+    session.submit_80211_frame(
+        &PRODUCTION_RX_STARTUP_KICK_FRAME,
+        config.channel,
+        tx_options,
+        &mut counters,
+    )?;
+    Ok(ProductionRuntimeRxStartupKickReport {
+        semantics: "one-shot non-WFB null-data TX submitted after init and before ready marker to wake RTL8812AU RX DMA on macOS; required for RX-only production runs observed on high-band channels",
+        frame_len: PRODUCTION_RX_STARTUP_KICK_FRAME.len(),
+        tx_options,
+        attempted: counters.attempted,
+        submitted: counters.submitted,
+        failed: counters.failed,
+        bytes_written: counters.bytes_written,
+    })
 }
 
 fn apply_production_runtime_tx_power_control<T>(
@@ -6499,6 +6585,7 @@ fn production_runtime_flow_report_from_state<T>(
             calibration_class,
             tx_power_control: pre_loop.tx_power_control,
             tx_calibration_profile: pre_loop.tx_calibration_profile,
+            rx_startup_kick: pre_loop.rx_startup_kick,
             heartbeat_led,
             receiver_backed_validation_required: !config.calibration_profile.is_default(),
             init,
@@ -14087,6 +14174,7 @@ mod tests {
             monitor_opmode_applied: Some(true),
             tx_power_control_applied: false,
             tx_calibration_profile_applied: true,
+            rx_startup_kick_applied: true,
         };
 
         write_production_runtime_ready_marker(Some(path.as_path()), marker)
@@ -14104,6 +14192,7 @@ mod tests {
         assert_eq!(value["tx_burst_limit"], 8);
         assert_eq!(value["same_session_init_result"], "pass");
         assert_eq!(value["tx_calibration_profile_applied"], true);
+        assert_eq!(value["rx_startup_kick_applied"], true);
     }
 
     #[test]
@@ -14355,6 +14444,7 @@ mod tests {
                     .before_tx_class(config.captured_tail_applied),
                 tx_power_control: None,
                 tx_calibration_profile: None,
+                rx_startup_kick: None,
                 heartbeat_led: None,
                 receiver_backed_validation_required: false,
                 init: ProductionRuntimeInitTelemetry {
@@ -14421,6 +14511,7 @@ mod tests {
                     .before_tx_class(config.captured_tail_applied),
                 tx_power_control: None,
                 tx_calibration_profile: None,
+                rx_startup_kick: None,
                 heartbeat_led: None,
                 receiver_backed_validation_required: false,
                 init: ProductionRuntimeInitTelemetry {
@@ -15384,6 +15475,7 @@ mod tests {
                     .before_tx_class(config.captured_tail_applied),
                 tx_power_control: None,
                 tx_calibration_profile: None,
+                rx_startup_kick: None,
                 heartbeat_led: Some(ProductionRuntimeHeartbeatLedReport {
                     enabled: true,
                     half_period_ms: DEFAULT_HEARTBEAT_HALF_PERIOD_MS,
@@ -15548,6 +15640,41 @@ mod tests {
         assert_eq!(session.counters.usb_bulk_out_writes, 1);
         assert_eq!(session.counters.tx_frames, 1);
         assert_eq!(session.counters.dropped_frames, 0);
+    }
+
+    #[test]
+    fn production_rx_startup_kick_submits_non_wfb_null_frame() {
+        let config = production_runtime_flow_config();
+        let endpoints =
+            macos_usbhost_endpoints(&MacosUsbHostConfig::default()).expect("default endpoints");
+        let adapter = macos_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        let mut session = RuntimeRadioSession::new(
+            MockTransport::default(),
+            adapter,
+            endpoints,
+            RuntimeRadioCounters::default(),
+        );
+
+        let report = super::apply_production_runtime_rx_startup_kick(&mut session, &config)
+            .expect("rx startup kick");
+
+        assert_eq!(
+            report.frame_len,
+            super::PRODUCTION_RX_STARTUP_KICK_FRAME.len()
+        );
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.submitted, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.tx_options.queue, TxQueue::Mgnt);
+        assert_eq!(session.transport.bulk_writes.len(), 1);
+        let packet = &session.transport.bulk_writes[0].1;
+        assert_eq!(packet[super::TX_DESC_SIZE], 0x48);
+        assert_ne!(
+            &packet[super::TX_DESC_SIZE + 10..super::TX_DESC_SIZE + 12],
+            b"WB"
+        );
+        assert_eq!(session.counters.usb_bulk_out_writes, 1);
+        assert_eq!(session.counters.tx_frames, 1);
     }
 
     #[test]

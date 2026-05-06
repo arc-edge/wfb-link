@@ -23384,6 +23384,7 @@ fn bridge_tx_listen_write_ready_file(
             monitor_opmode_applied: None,
             tx_power_control_applied: report.tx_power_control.is_some(),
             tx_calibration_profile_applied: report.tx_calibration_profile.is_some(),
+            rx_startup_kick_applied: false,
         },
     )
     .map_err(runtime_radio_error)
@@ -24167,6 +24168,7 @@ fn radio_run_failure_report(
         calibration_evidence_source: runtime_profile.evidence_source(captured_tail_applied),
         tx_power_control: None,
         tx_calibration_profile: None,
+        rx_startup_kick: None,
         heartbeat_led: None,
         receiver_backed_validation_required: !runtime_profile.is_default(),
         init: ProductionRuntimeInitTelemetry::default(),
@@ -25351,6 +25353,7 @@ fn bridge_run_write_ready_file(
             monitor_opmode_applied: Some(report.monitor_opmode.is_some()),
             tx_power_control_applied: report.tx_power_control.is_some(),
             tx_calibration_profile_applied: report.tx_calibration_profile.is_some(),
+            rx_startup_kick_applied: false,
         },
     )
     .map_err(runtime_radio_error)
