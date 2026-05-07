@@ -62,7 +62,7 @@ if [[ -n "$SSH_KEY" ]]; then
 fi
 if [[ "$TUN_USE_SUDO" == "1" || "$TUN_USE_SUDO" == "true" || "$TUN_USE_SUDO" == "yes" || "$TUN_USE_SUDO" == "on" ]]; then
   command -v sudo >/dev/null 2>&1 || die "sudo is required when TUN_USE_SUDO=$TUN_USE_SUDO"
-  sudo -n true >/dev/null 2>&1 || die "passwordless sudo is required for wfb-tun-macos; set TUN_USE_SUDO=0 only on hosts allowed to open utun without sudo"
+  sudo -n "$TUN_BIN" --help >/dev/null 2>&1 || die "passwordless sudo is required for $TUN_BIN; set TUN_USE_SUDO=0 only on hosts allowed to open utun without sudo"
 fi
 
 mkdir -p "$OUT_DIR"
@@ -88,7 +88,7 @@ PROBE_SCRIPT="$OUT_DIR/ssh-download-probe.sh"
   printf ' %q %q | wc -c)\n' \
     "$SSH_USER@$PEER_IP" \
     "dd if=/dev/zero bs=$SSH_DD_BLOCK_SIZE count=$SSH_DD_COUNT 2>/dev/null"
-  printf 'echo "$bytes"\n'
+  printf 'echo "$bytes" >&2\n'
   printf 'test "$bytes" -ge %q\n' "$SSH_DD_MIN_BYTES"
 } >"$PROBE_SCRIPT"
 chmod +x "$PROBE_SCRIPT"
