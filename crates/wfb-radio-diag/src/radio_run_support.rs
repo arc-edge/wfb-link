@@ -64,6 +64,7 @@ pub(crate) struct RadioRunRadioConfig {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) rx_timeout_ms: Option<u64>,
     pub(crate) tx_burst_limit: Option<u32>,
+    pub(crate) tx_min_interval_us: Option<u64>,
     pub(crate) max_datagrams: Option<u32>,
 }
 
@@ -140,6 +141,7 @@ pub(crate) struct ResolvedRadioRunArgs {
     pub(crate) duration_ms: u64,
     pub(crate) rx_timeout_ms: u64,
     pub(crate) tx_burst_limit: u32,
+    pub(crate) tx_min_interval_us: u64,
     pub(crate) max_datagrams: u32,
     pub(crate) ready_file: Option<PathBuf>,
     pub(crate) health_file: Option<PathBuf>,
@@ -347,6 +349,10 @@ pub(crate) fn radio_run_resolved_args(
             .tx_burst_limit
             .or_else(|| radio.and_then(|radio| radio.tx_burst_limit))
             .unwrap_or(8),
+        tx_min_interval_us: args
+            .tx_min_interval_us
+            .or_else(|| radio.and_then(|radio| radio.tx_min_interval_us))
+            .unwrap_or(0),
         max_datagrams: args
             .max_datagrams
             .or_else(|| radio.and_then(|radio| radio.max_datagrams))

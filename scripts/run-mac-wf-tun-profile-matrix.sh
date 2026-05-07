@@ -116,6 +116,7 @@ MCS=${MCS:-1}
 FEC_K=${FEC_K:-2}
 FEC_N=${FEC_N:-4}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-0}
 DATA_LOAD_MODE=${DATA_LOAD_MODE:-none}
 DATA_LOAD_EXPECTED_PAYLOADS=${DATA_LOAD_EXPECTED_PAYLOADS:-100}
 DATA_LOAD_MIN_M2L_UNIQUE=${DATA_LOAD_MIN_M2L_UNIQUE:-$DATA_LOAD_EXPECTED_PAYLOADS}
@@ -276,8 +277,8 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
 
     log "profile=$name repeat=$repeat probe=$probe_kind rx=${rx_ms}ms tx=${tx_ms}ms guard=${guard_ms}ms"
     if (( DRY_RUN == 1 )); then
-      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q DATA_LOAD_MODE=%q DATA_LOAD_PRE_PROBE_SECONDS=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
-        "$run_dir" "$WFB_KEY" "$PEER_IP" "$DATA_LOAD_MODE" "$DATA_LOAD_PRE_PROBE_SECONDS" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
+      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q DATA_LOAD_MODE=%q DATA_LOAD_PRE_PROBE_SECONDS=%q TX_MIN_INTERVAL_US=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
+        "$run_dir" "$WFB_KEY" "$PEER_IP" "$DATA_LOAD_MODE" "$DATA_LOAD_PRE_PROBE_SECONDS" "$TX_MIN_INTERVAL_US" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
       status=0
     else
       if OUT_DIR="$run_dir" \
@@ -290,6 +291,7 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
         FEC_K="$FEC_K" \
         FEC_N="$FEC_N" \
         TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
+        TX_MIN_INTERVAL_US="$TX_MIN_INTERVAL_US" \
         DATA_LOAD_MODE="$DATA_LOAD_MODE" \
         DATA_LOAD_EXPECTED_PAYLOADS="$DATA_LOAD_EXPECTED_PAYLOADS" \
         DATA_LOAD_MIN_M2L_UNIQUE="$DATA_LOAD_MIN_M2L_UNIQUE" \
@@ -501,6 +503,7 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
         "radio_result": radio.get("result") if isinstance(radio, dict) else None,
         "data_load_result": data_load.get("result") if isinstance(data_load, dict) else None,
         "data_load_mode": data_load.get("mode") if isinstance(data_load, dict) else None,
+        "tx_min_interval_us": (summary.get("settings") or {}).get("tx_min_interval_us") if isinstance(summary, dict) else None,
         "data_load_m2l_unique": ((data_load.get("m2l") or {}).get("counter") or {}).get("unique_sequences") if isinstance(data_load, dict) else None,
         "data_load_l2m_unique": ((data_load.get("l2m") or {}).get("counter") or {}).get("unique_sequences") if isinstance(data_load, dict) else None,
         "probe_metrics": probe_metrics,

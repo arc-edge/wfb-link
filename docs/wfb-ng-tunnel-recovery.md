@@ -70,6 +70,7 @@ PEER_IP=10.5.0.2
 MCS=1
 FEC_K=2
 FEC_N=4
+TX_MIN_INTERVAL_US=400  # optional TX pacing for loaded bidirectional runs
 ```
 
 For stock WFB-NG GS tunnel semantics, override:
@@ -90,9 +91,25 @@ DATA_LOAD_MIN_M2L_UNIQUE=95 DATA_LOAD_MIN_L2M_UNIQUE=95 \
 DATA_LOAD_INTERVAL_SEC=0.040 scripts/run-mac-wf-tun-profile-matrix.sh
 ```
 
-The current accepted short-range loaded gate is a 95/100 side-stream minimum
-with 40 ms marked payloads. Exact 100/100 side delivery during a 256 KiB SSH
-download is not accepted yet: May 6 telemetry showed every Mac TX ingress
-datagram was processed and submitted with zero pending queue depth, while the
-Linux peer still missed several Mac-to-Linux side payloads. That makes the
-remaining issue peer airtime/contention rather than Mac UDP ingress loss.
+`TX_MIN_INTERVAL_US` applies optional microsecond pacing between Mac TX
+datagram submissions. It is intended for loaded bidirectional profiles where a
+Linux peer is transmitting at the same time and has no shared airtime scheduler
+with the Mac.
+
+The current accepted short-range loaded gate uses `TX_MIN_INTERVAL_US=400` with
+40 ms marked side payloads, 100 expected each direction, and an exact 100/100
+side-stream minimum during a 256 KiB SSH download. On May 6, 2026,
+`/tmp/wfb-mac-wf-tun-txpace400us-final-20260506-231922` accepted 3/3 loaded
+SSH-download repeats: 262,144 bytes in `8.274 s`, `9.039 s`, and `7.255 s`,
+with side streams `100/100` Mac-to-Linux and `100/100` Linux-to-Mac. Radio TX
+telemetry reported zero submission failures and zero ingress queue-send
+failures; one repeat exited with 17 pending TX ingress datagrams because the
+runner stops immediately after the probe completes.
+
+Earlier no-pacing and burst-only telemetry showed every Mac TX ingress datagram
+being processed and submitted while the Linux peer still missed side payloads,
+so the failure was downstream airtime/contention rather than Mac UDP ingress
+loss. Sub-millisecond pacing narrowed the useful local range: `250 us` and
+`350 us` were still lossy, `400 us` passed the repeat gate, and `450 us` or
+higher periodically protected side traffic but pushed the SSH download beyond
+the 10 s gate.

@@ -889,6 +889,7 @@ pub struct ProductionRuntimeWfbLoopConfig {
     pub tx_binds: Vec<SocketAddr>,
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
+    pub tx_min_interval_us: u64,
     pub max_datagrams: u32,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub bandwidth: Bandwidth,
@@ -905,6 +906,7 @@ pub struct ProductionRuntimeWfbLoopPlan {
     pub rx_forwards: Vec<ProductionRuntimeRxForwardPlan>,
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
+    pub tx_min_interval_us: u64,
     pub max_datagrams: u32,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub rx_wlan_idx: u8,
@@ -993,6 +995,7 @@ pub fn plan_production_wfb_loop(
         rx_forwards,
         rx_timeout_ms: config.rx_timeout_ms,
         tx_burst_limit: config.tx_burst_limit,
+        tx_min_interval_us: config.tx_min_interval_us,
         max_datagrams: config.max_datagrams,
         airtime_schedule: config.airtime_schedule,
         rx_wlan_idx: config.rx_wlan_idx,
@@ -1387,6 +1390,7 @@ pub struct ProductionRuntimeBridgeLoopRunConfig {
     pub duration: Option<Duration>,
     pub rx_timeout: Duration,
     pub tx_burst_limit: u32,
+    pub tx_min_interval: Duration,
     pub max_datagrams: u64,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
 }
@@ -1402,9 +1406,15 @@ impl ProductionRuntimeBridgeLoopRunConfig {
             duration: (duration_ms != 0).then(|| Duration::from_millis(duration_ms)),
             rx_timeout: Duration::from_millis(rx_timeout_ms),
             tx_burst_limit,
+            tx_min_interval: Duration::ZERO,
             max_datagrams,
             airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
         }
+    }
+
+    pub fn with_tx_min_interval(mut self, tx_min_interval_us: u64) -> Self {
+        self.tx_min_interval = Duration::from_micros(tx_min_interval_us);
+        self
     }
 
     pub fn with_airtime_schedule(
@@ -1490,6 +1500,7 @@ where
     let mut rx_polls = 0u64;
     let mut airtime_tx_allowed_iterations = 0u64;
     let mut airtime_tx_gated_iterations = 0u64;
+    let mut last_tx_processed_at: Option<std::time::Instant> = None;
 
     loop {
         iterations = iterations.saturating_add(1);
@@ -1540,11 +1551,18 @@ where
             while (unlimited_datagrams || tx_datagrams_processed < config.max_datagrams)
                 && tx_burst_count < config.tx_burst_limit
             {
+                if let Some(last_tx_processed_at) = last_tx_processed_at {
+                    let elapsed_since_tx = now.saturating_duration_since(last_tx_processed_at);
+                    if elapsed_since_tx < config.tx_min_interval {
+                        break;
+                    }
+                }
                 tx_polls = tx_polls.saturating_add(1);
                 match handle_step(ProductionRuntimeBridgeLoopStep::TryTx)? {
                     ProductionRuntimeBridgeLoopStepOutcome::TxProcessed => {
                         tx_datagrams_processed = tx_datagrams_processed.saturating_add(1);
                         tx_burst_count = tx_burst_count.saturating_add(1);
+                        last_tx_processed_at = Some(std::time::Instant::now());
                     }
                     ProductionRuntimeBridgeLoopStepOutcome::TxEmpty
                     | ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected => break,
@@ -1896,6 +1914,7 @@ pub struct ProductionRuntimeFlowConfig {
     pub duration_ms: u64,
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
+    pub tx_min_interval_us: u64,
     pub max_datagrams: u32,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub ready_file: Option<PathBuf>,
@@ -2011,6 +2030,7 @@ impl ProductionRuntimeFlowConfig {
             tx_binds: self.tx_binds.clone(),
             rx_timeout_ms: self.rx_timeout_ms,
             tx_burst_limit: self.tx_burst_limit,
+            tx_min_interval_us: self.tx_min_interval_us,
             max_datagrams: self.max_datagrams,
             airtime_schedule: self.airtime_schedule,
             bandwidth: self.bandwidth,
@@ -2052,6 +2072,8 @@ pub struct ProductionRuntimeReadyMarker {
     pub rx_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_burst_limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_min_interval_us: Option<u64>,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub init_before_tx: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6395,6 +6417,7 @@ where
             config.tx_burst_limit,
             u64::from(config.max_datagrams),
         )
+        .with_tx_min_interval(config.tx_min_interval_us)
         .with_airtime_schedule(config.airtime_schedule),
         |now| {
             heartbeat.maybe_toggle(&&session_cell.borrow().transport, now);
@@ -6590,6 +6613,7 @@ fn production_runtime_ready_marker(
         idle_timeout_ms: None,
         rx_timeout_ms: Some(config.rx_timeout_ms),
         tx_burst_limit: Some(config.tx_burst_limit),
+        tx_min_interval_us: (config.tx_min_interval_us != 0).then_some(config.tx_min_interval_us),
         airtime_schedule: config.airtime_schedule,
         init_before_tx: true,
         same_session_init_result: Some(
@@ -14444,6 +14468,7 @@ mod tests {
             duration_ms: 10_000,
             rx_timeout_ms: 20,
             tx_burst_limit: 8,
+            tx_min_interval_us: 0,
             max_datagrams: 0,
             airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             ready_file: Some(PathBuf::from("/tmp/radio-run-ready.json")),
@@ -14569,6 +14594,7 @@ mod tests {
             idle_timeout_ms: None,
             rx_timeout_ms: Some(20),
             tx_burst_limit: Some(8),
+            tx_min_interval_us: Some(2_000),
             airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             init_before_tx: true,
             same_session_init_result: Some("pass".to_string()),
@@ -14591,6 +14617,7 @@ mod tests {
         assert_eq!(value["channel"], 36);
         assert_eq!(value["bandwidth_mhz"], 20);
         assert_eq!(value["tx_burst_limit"], 8);
+        assert_eq!(value["tx_min_interval_us"], 2_000);
         assert_eq!(value["same_session_init_result"], "pass");
         assert_eq!(value["tx_calibration_profile_applied"], true);
         assert_eq!(value["rx_startup_kick_applied"], true);
@@ -15735,6 +15762,44 @@ mod tests {
         assert_eq!(max_burst_seen, 2);
         assert!(rx_polls >= 1);
         assert!(outcome.rx_polls >= 1);
+    }
+
+    #[test]
+    fn production_bridge_loop_executor_honors_tx_min_interval() {
+        let config = ProductionRuntimeBridgeLoopRunConfig::from_bounds(20, 1, 8, 2)
+            .with_tx_min_interval(50_000);
+        let mut tx_available = 2u64;
+        let mut rx_polls = 0u64;
+
+        let outcome = run_production_bridge_loop(
+            config,
+            |_| {},
+            || false,
+            |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, std::convert::Infallible> {
+                match step {
+                    ProductionRuntimeBridgeLoopStep::TryTx if tx_available > 0 => {
+                        tx_available -= 1;
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
+                    }
+                    ProductionRuntimeBridgeLoopStep::TryTx => {
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::TxEmpty)
+                    }
+                    ProductionRuntimeBridgeLoopStep::ReadRx { .. } => {
+                        rx_polls = rx_polls.saturating_add(1);
+                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                    }
+                }
+            },
+        )
+        .expect("loop outcome");
+
+        assert_eq!(
+            outcome.stop_reason,
+            ProductionRuntimeBridgeLoopStopReason::DurationElapsed
+        );
+        assert_eq!(outcome.tx_datagrams_processed, 1);
+        assert_eq!(tx_available, 1);
+        assert!(rx_polls > 0);
     }
 
     #[test]

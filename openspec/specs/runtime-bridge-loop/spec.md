@@ -17,8 +17,8 @@ depending on diagnostic command argument structs.
 
 #### Scenario: Valid loop plan is built
 - **WHEN** a production runtime flow supplies a TX bind address, additional TX
-  bind addresses, RX timeout, TX burst limit, max datagrams, and WFB forwarding
-  targets
+  bind addresses, RX timeout, TX burst limit, optional TX minimum interval,
+  max datagrams, and WFB forwarding targets
 - **THEN** the runtime library returns a loop plan containing ordered TX bind
   addresses, validated RX forwarding configs, WFB metadata, and runtime bounds
 
@@ -37,6 +37,12 @@ depending on diagnostic command argument structs.
 - **THEN** the runtime library controls signal stop checks, duration stop
   checks, max-datagram stop checks, TX burst draining, and RX timeout
   calculation
+
+#### Scenario: Runtime executor paces TX submissions
+- **WHEN** the production bridge loop is configured with a nonzero TX minimum
+  interval
+- **THEN** the runtime library waits at least that interval between processed
+  TX datagrams while continuing to poll RX according to the configured cadence
 
 #### Scenario: Runtime handler processes queued TX
 - **WHEN** the runtime executor asks for TX work and a queued datagram is

@@ -127,6 +127,10 @@ pub struct ServiceCli {
     #[arg(long)]
     pub tx_burst_limit: Option<u32>,
 
+    /// Minimum interval between submitted TX datagrams in microseconds; 0 disables pacing.
+    #[arg(long)]
+    pub tx_min_interval_us: Option<u64>,
+
     /// Maximum datagrams to receive before exiting; 0 is unlimited.
     #[arg(long)]
     pub max_datagrams: Option<u32>,
@@ -282,6 +286,7 @@ pub struct ServiceRadioConfig {
     pub duration_ms: Option<u64>,
     pub rx_timeout_ms: Option<u64>,
     pub tx_burst_limit: Option<u32>,
+    pub tx_min_interval_us: Option<u64>,
     pub max_datagrams: Option<u32>,
 }
 
@@ -407,6 +412,7 @@ pub struct ResolvedServiceRun {
     pub duration_ms: u64,
     pub rx_timeout_ms: u64,
     pub tx_burst_limit: u32,
+    pub tx_min_interval_us: u64,
     pub max_datagrams: u32,
     pub airtime_schedule: ProductionRuntimeAirtimeSchedule,
     pub ready_file: Option<PathBuf>,
@@ -575,6 +581,10 @@ pub fn resolve_service_run(
             .tx_burst_limit
             .or_else(|| radio.and_then(|radio| radio.tx_burst_limit))
             .unwrap_or(8),
+        tx_min_interval_us: cli
+            .tx_min_interval_us
+            .or_else(|| radio.and_then(|radio| radio.tx_min_interval_us))
+            .unwrap_or(0),
         max_datagrams: cli
             .max_datagrams
             .or_else(|| radio.and_then(|radio| radio.max_datagrams))
@@ -697,6 +707,7 @@ pub fn service_runtime_config_from_resolved(
         duration_ms: resolved.duration_ms,
         rx_timeout_ms: resolved.rx_timeout_ms,
         tx_burst_limit: resolved.tx_burst_limit,
+        tx_min_interval_us: resolved.tx_min_interval_us,
         max_datagrams: resolved.max_datagrams,
         airtime_schedule: resolved.airtime_schedule,
         ready_file: resolved.ready_file.clone(),
@@ -1310,6 +1321,7 @@ firmware = "/tmp/config-fw.bin"
 duration_ms = 2500
 rx_timeout_ms = 15
 tx_burst_limit = 3
+tx_min_interval_us = 750
 max_datagrams = 4
 
 [airtime]
@@ -1365,6 +1377,7 @@ health_file = "/tmp/config-health.json"
         assert_eq!(resolved.duration_ms, 2500);
         assert_eq!(resolved.rx_timeout_ms, 15);
         assert_eq!(resolved.tx_burst_limit, 3);
+        assert_eq!(resolved.tx_min_interval_us, 750);
         assert_eq!(resolved.max_datagrams, 4);
         assert_eq!(
             resolved.airtime_schedule.mode,
@@ -1414,6 +1427,7 @@ firmware = "/tmp/config-fw.bin"
 duration_ms = 5000
 rx_timeout_ms = 40
 tx_burst_limit = 8
+tx_min_interval_us = 900
 max_datagrams = 0
 
 [airtime]
@@ -1453,6 +1467,8 @@ profile = "current_default"
             "10",
             "--tx-burst-limit",
             "4",
+            "--tx-min-interval-us",
+            "400",
             "--max-datagrams",
             "2",
             "--airtime-mode",
@@ -1500,6 +1516,7 @@ profile = "current_default"
         assert_eq!(resolved.duration_ms, 25);
         assert_eq!(resolved.rx_timeout_ms, 10);
         assert_eq!(resolved.tx_burst_limit, 4);
+        assert_eq!(resolved.tx_min_interval_us, 400);
         assert_eq!(resolved.max_datagrams, 2);
         assert_eq!(
             resolved.airtime_schedule.mode,

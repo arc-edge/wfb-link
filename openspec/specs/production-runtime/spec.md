@@ -18,6 +18,12 @@ than diagnostic bridge argument or report types.
   configuration and runs the full RX/TX flow without exposing diagnostic-only
   register experiment flags
 
+#### Scenario: Production command accepts TX pacing
+- **WHEN** an operator starts the production runtime command with a nonzero
+  `--tx-min-interval-us`
+- **THEN** the command passes that microsecond TX pacing interval into the
+  runtime-owned bridge loop and records it in readiness/configuration outputs
+
 #### Scenario: Production report is runtime-owned
 - **WHEN** the production runtime command exits
 - **THEN** it emits a runtime-owned report containing adapter identity,
@@ -156,4 +162,3 @@ complete.
 - **THEN** it can continue to parse the same report fields and gate on peer
   recovery, decrypt failures, TX failures/drops, RX forwarding snapshots,
   source timing, and signal summaries without command-specific changes
-

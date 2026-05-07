@@ -30,6 +30,7 @@ AIRTIME_TDD_RX_WINDOW_MS=${AIRTIME_TDD_RX_WINDOW_MS:-7000}
 AIRTIME_TDD_TX_WINDOW_MS=${AIRTIME_TDD_TX_WINDOW_MS:-20000}
 AIRTIME_TDD_GUARD_MS=${AIRTIME_TDD_GUARD_MS:-500}
 AIRTIME_TDD_START_DELAY_MS=${AIRTIME_TDD_START_DELAY_MS:-0}
+TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-0}
 
 # Arc tunnel direction: RX stream 3 from drone, TX stream 4 to drone.
 TUN_RX_RADIO_PORT=${TUN_RX_RADIO_PORT:-3}
@@ -117,6 +118,7 @@ write_recovery_summary() {
   AIRTIME_TDD_TX_WINDOW_MS="$AIRTIME_TDD_TX_WINDOW_MS" \
   AIRTIME_TDD_GUARD_MS="$AIRTIME_TDD_GUARD_MS" \
   AIRTIME_TDD_START_DELAY_MS="$AIRTIME_TDD_START_DELAY_MS" \
+  TX_MIN_INTERVAL_US="$TX_MIN_INTERVAL_US" \
   LOCAL_IP="$LOCAL_IP" \
   PEER_IP="$PEER_IP" \
   TUN_MTU="$TUN_MTU" \
@@ -181,6 +183,7 @@ summary = {
         "airtime_tdd_tx_window_ms": getenv_int("AIRTIME_TDD_TX_WINDOW_MS"),
         "airtime_tdd_guard_ms": getenv_int("AIRTIME_TDD_GUARD_MS"),
         "airtime_tdd_start_delay_ms": getenv_int("AIRTIME_TDD_START_DELAY_MS"),
+        "tx_min_interval_us": getenv_int("TX_MIN_INTERVAL_US"),
         "local_ip": os.environ["LOCAL_IP"],
         "peer_ip": os.environ["PEER_IP"],
         "tun_mtu": getenv_int("TUN_MTU"),
@@ -290,6 +293,7 @@ service_cmd=(
   --airtime-tdd-tx-window-ms "$AIRTIME_TDD_TX_WINDOW_MS"
   --airtime-tdd-guard-ms "$AIRTIME_TDD_GUARD_MS"
   --airtime-tdd-start-delay-ms "$AIRTIME_TDD_START_DELAY_MS"
+  --tx-min-interval-us "$TX_MIN_INTERVAL_US"
   --wfb-link-id "$LINK_ID"
   --wfb-radio-port "$TUN_RX_RADIO_PORT_DEC"
   --rx-aggregator "127.0.0.1:$AGG_PORT"

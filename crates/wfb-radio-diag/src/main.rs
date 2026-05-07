@@ -1625,6 +1625,10 @@ struct BridgeRunArgs {
     #[arg(long, default_value_t = 8)]
     tx_burst_limit: u32,
 
+    /// Minimum interval between submitted TX datagrams in microseconds; 0 disables pacing.
+    #[arg(long, default_value_t = 0)]
+    tx_min_interval_us: u64,
+
     /// WFB link ID to match and optionally forward during RX.
     #[arg(long, value_parser = parse_u32)]
     wfb_link_id: Option<u32>,
@@ -1698,6 +1702,10 @@ struct RadioRunArgs {
     /// Maximum TX datagrams to drain before returning to one bulk-IN RX read.
     #[arg(long)]
     tx_burst_limit: Option<u32>,
+
+    /// Minimum interval between submitted TX datagrams in microseconds; 0 disables pacing.
+    #[arg(long)]
+    tx_min_interval_us: Option<u64>,
 
     /// Maximum datagrams to receive before exiting; 0 is unlimited.
     #[arg(long)]
@@ -3639,6 +3647,7 @@ struct BridgeRunReport {
     duration_ms: u64,
     rx_timeout_ms: u64,
     tx_burst_limit: u32,
+    tx_min_interval_us: u64,
     max_datagrams: u32,
     datagrams_received: u64,
     stop_reason: &'static str,
@@ -23376,6 +23385,7 @@ fn bridge_tx_listen_write_ready_file(
             idle_timeout_ms: Some(args.idle_timeout_ms),
             rx_timeout_ms: None,
             tx_burst_limit: None,
+            tx_min_interval_us: None,
             airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             init_before_tx: args.init_before_tx,
             same_session_init_result: report
@@ -23560,6 +23570,7 @@ fn radio_run_runtime_config_from_resolved(
         duration_ms: args.duration_ms,
         rx_timeout_ms: args.rx_timeout_ms,
         tx_burst_limit: args.tx_burst_limit,
+        tx_min_interval_us: args.tx_min_interval_us,
         airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
         max_datagrams: args.max_datagrams,
         ready_file: args.ready_file.clone(),
@@ -23631,6 +23642,7 @@ fn radio_run_bridge_args(
         duration_ms: args.duration_ms,
         rx_timeout_ms: loop_plan.rx_timeout_ms,
         tx_burst_limit: loop_plan.tx_burst_limit,
+        tx_min_interval_us: loop_plan.tx_min_interval_us,
         wfb_link_id: args.wfb_link_id,
         wfb_radio_port: args.wfb_radio_port,
         rx_aggregator: args.rx_aggregator,
@@ -24939,7 +24951,8 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
                 args.rx_timeout_ms,
                 args.tx_burst_limit,
                 u64::from(args.tx.max_datagrams),
-            ),
+            )
+            .with_tx_min_interval(args.tx_min_interval_us),
             |now| {
                 // Tick the LED heartbeat once per outer iteration. No-op
                 // until the configured half-period elapses; failures are
@@ -25304,6 +25317,7 @@ fn bridge_run_base_report(
         duration_ms: args.duration_ms,
         rx_timeout_ms: args.rx_timeout_ms,
         tx_burst_limit: args.tx_burst_limit,
+        tx_min_interval_us: args.tx_min_interval_us,
         max_datagrams: args.tx.max_datagrams,
         datagrams_received: 0,
         stop_reason: "not_started",
@@ -25358,6 +25372,7 @@ fn bridge_run_write_ready_file(
             idle_timeout_ms: None,
             rx_timeout_ms: Some(args.rx_timeout_ms),
             tx_burst_limit: Some(args.tx_burst_limit),
+            tx_min_interval_us: (args.tx_min_interval_us != 0).then_some(args.tx_min_interval_us),
             airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
             init_before_tx: args.tx.init_before_tx,
             same_session_init_result: report
@@ -37294,6 +37309,7 @@ mod tests {
             duration_ms: 10,
             rx_timeout_ms: 1,
             tx_burst_limit: 8,
+            tx_min_interval_us: 0,
             wfb_link_id: None,
             wfb_radio_port: None,
             rx_aggregator: None,
@@ -41640,6 +41656,7 @@ firmware = "/tmp/config-fw.bin"
 duration_ms = 2500
 rx_timeout_ms = 15
 tx_burst_limit = 3
+tx_min_interval_us = 750
 max_datagrams = 4
 
 [wfb]
@@ -41687,6 +41704,7 @@ health_file = "/tmp/config-health.json"
         assert_eq!(config.duration_ms, 2500);
         assert_eq!(config.rx_timeout_ms, 15);
         assert_eq!(config.tx_burst_limit, 3);
+        assert_eq!(config.tx_min_interval_us, 750);
         assert_eq!(config.max_datagrams, 4);
         assert_eq!(config.rx_wlan_idx, 2);
         assert_eq!(config.rx_mcs_index, 1);
@@ -41783,6 +41801,7 @@ firmware = "/tmp/config-fw.bin"
 duration_ms = 5000
 rx_timeout_ms = 40
 tx_burst_limit = 8
+tx_min_interval_us = 900
 max_datagrams = 0
 
 [wfb]
@@ -41812,6 +41831,8 @@ health_file = "/tmp/config-health.json"
             "10",
             "--tx-burst-limit",
             "4",
+            "--tx-min-interval-us",
+            "400",
             "--max-datagrams",
             "2",
             "--tx-bind",
@@ -41841,6 +41862,7 @@ health_file = "/tmp/config-health.json"
         assert_eq!(config.duration_ms, 25);
         assert_eq!(config.rx_timeout_ms, 10);
         assert_eq!(config.tx_burst_limit, 4);
+        assert_eq!(config.tx_min_interval_us, 400);
         assert_eq!(config.max_datagrams, 2);
         assert_eq!(
             config.tx_binds,

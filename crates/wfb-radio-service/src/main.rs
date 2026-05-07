@@ -55,11 +55,12 @@ fn print_service_report_human(report: &wfb_radio_runtime::ProductionRuntimeFlowR
         report.rx.buffers_read, report.rx.parsed_frames, report.rx.forwarded_payloads
     );
     println!(
-        "TX: datagrams={} submitted={} failed={} dropped={}",
+        "TX: datagrams={} submitted={} failed={} dropped={} ingress_pending={}",
         report.tx.datagrams_received,
         report.tx.submitted_frames,
         report.tx.failed_submissions,
-        report.tx.dropped_datagrams
+        report.tx.dropped_datagrams,
+        report.tx.ingress_pending_datagrams
     );
     println!(
         "Airtime: mode={:?} tx_allowed_iterations={} tx_gated_iterations={}",
