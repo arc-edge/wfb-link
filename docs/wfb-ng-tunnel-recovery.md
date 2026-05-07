@@ -70,7 +70,7 @@ PEER_IP=10.5.0.2
 MCS=1
 FEC_K=2
 FEC_N=4
-TX_MIN_INTERVAL_US=400  # optional TX pacing for loaded bidirectional runs
+TX_MIN_INTERVAL_US=500  # optional TX pacing for loaded bidirectional runs
 ```
 
 For stock WFB-NG GS tunnel semantics, override:
@@ -98,14 +98,14 @@ PROFILE_SET=loaded REPEATS=3 scripts/run-mac-wf-tun-profile-matrix.sh
 ```
 
 When `PROFILE_SET=loaded` is used without a custom `PROFILE_FILE`, the matrix
-defaults to the accepted short-range profile: `TX_MIN_INTERVAL_US=400`,
+defaults to the accepted short-range profile: `TX_MIN_INTERVAL_US=500`,
 `DATA_LOAD_MODE=duplex`, 100 expected side payloads per direction, 40 ms side
 payload spacing, and a 1 s/1 s/100 ms TDD SSH-download probe. The matrix
 summary includes TX ingress/processed/submitted/pending counts and gates TX
 submission failures, TX ingress queue-send failures, and excessive pending TX
 backlog.
 
-The first named-profile hardware run passed at
+The first named-profile hardware run used `400 us` pacing and passed at
 `/tmp/wfb-mac-wf-tun-loaded-profile-20260507-002904`: 262,144 SSH-download
 bytes in `8.640 s`, side streams `100/100` in both directions, TX ingress
 `476`, TX processed/submitted `471`, pending TX ingress `5`, and zero TX
@@ -116,20 +116,21 @@ datagram submissions. It is intended for loaded bidirectional profiles where a
 Linux peer is transmitting at the same time and has no shared airtime scheduler
 with the Mac.
 
-The current accepted short-range loaded gate uses `TX_MIN_INTERVAL_US=400` with
+The current accepted short-range loaded gate uses `TX_MIN_INTERVAL_US=500` with
 40 ms marked side payloads, 100 expected each direction, and an exact 100/100
-side-stream minimum during a 256 KiB SSH download. On May 6, 2026,
-`/tmp/wfb-mac-wf-tun-txpace400us-final-20260506-231922` accepted 3/3 loaded
-SSH-download repeats: 262,144 bytes in `8.274 s`, `9.039 s`, and `7.255 s`,
-with side streams `100/100` Mac-to-Linux and `100/100` Linux-to-Mac. Radio TX
-telemetry reported zero submission failures and zero ingress queue-send
-failures; one repeat exited with 17 pending TX ingress datagrams because the
-runner stops immediately after the probe completes.
+side-stream minimum during a 256 KiB SSH download. On May 7, 2026,
+`/tmp/wfb-mac-wf-tun-loaded-profile-link-500us-20260507-010322` accepted the
+loaded gate after two `400 us` repeats recovered only 90/100 and 88/100
+Mac-to-Linux side payloads. The accepted run moved 262,144 bytes in `7.997 s`,
+recovered side streams `100/100` in both directions, reported zero tunnel
+drops/corrupt/truncated messages, zero radio TX failures, zero ingress
+queue-send failures, and one pending TX ingress datagram.
 
 Earlier no-pacing and burst-only telemetry showed every Mac TX ingress datagram
 being processed and submitted while the Linux peer still missed side payloads,
 so the failure was downstream airtime/contention rather than Mac UDP ingress
 loss. Sub-millisecond pacing narrowed the useful local range: `250 us` and
-`350 us` were still lossy, `400 us` passed the repeat gate, and `450 us` or
-higher periodically protected side traffic but pushed the SSH download beyond
-the 10 s gate.
+`350 us` were still lossy, `400 us` passed an earlier repeat gate but later
+regressed under the loaded side gate, and `500 us` is the current short-range
+default that preserves side traffic while staying under the 10 s SSH-download
+gate in the latest validation.

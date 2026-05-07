@@ -128,7 +128,7 @@ Responsibilities:
 
 - Build/resolve `ProductionRuntimeFlowConfig`.
 - Start the runtime without process signal handlers in embedded mode.
-- Apply production defaults such as `TX_MIN_INTERVAL_US=400` for loaded tunnel
+- Apply production defaults such as `TX_MIN_INTERVAL_US=500` for loaded tunnel
   profiles when selected.
 - Optionally supervise `wfb_tx`, `wfb_rx`, and `wf_tun` helpers.
 - Report runtime health, radio telemetry, TX ingress metrics, RX signal

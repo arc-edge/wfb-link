@@ -19,12 +19,16 @@
       ready, prints endpoints/health, requests stop, and prints the report.
 - [x] 3.2 Add unit tests for endpoint shape, embedded no-signal behavior, and
       cooperative stop/report behavior.
-- [ ] 3.3 Run the hardware `PROFILE_SET=loaded` gate after embedding changes.
+- [x] 3.3 Run the hardware `PROFILE_SET=loaded` gate after embedding changes.
       Attempted on 2026-05-07 after deploying the rebuilt
-      `wfb-radio-service` to the remote macOS host. Radio/runtime and tunnel
-      probes passed, but the strict duplex side-load gate rejected the run due
-      to Mac-to-Linux side-stream recovery below 100/100:
+      `wfb-radio-service` to the remote macOS host. Two `400 us` runs had
+      radio/runtime and tunnel probes pass, but the strict duplex side-load
+      gate rejected them due to Mac-to-Linux side-stream recovery below 100/100:
       `/tmp/wfb-mac-wf-tun-loaded-profile-link-20260507-010003` recovered
       90/100 M2L, and
       `/tmp/wfb-mac-wf-tun-loaded-profile-link-rerun-20260507-010104`
-      recovered 88/100 M2L.
+      recovered 88/100 M2L. The accepted loaded gate is
+      `/tmp/wfb-mac-wf-tun-loaded-profile-link-500us-20260507-010322` with
+      `TX_MIN_INTERVAL_US=500`: 262,144 bytes in 7.997s, side streams 100/100
+      in both directions, zero tunnel drops/corrupt/truncated messages, zero
+      TX failures, and one pending ingress datagram.
