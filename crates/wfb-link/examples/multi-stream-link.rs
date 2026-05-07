@@ -1,9 +1,6 @@
 use std::{error::Error, thread, time::Duration};
 
-use wfb_link::{
-    LinkBackend, LinkConfig, LinkEndpointsBuilder, MacosUserspaceRadioBackend,
-    MacosUserspaceRadioConfig, PayloadKind, StreamCriticality,
-};
+use wfb_link::{LinkBackend, LinkConfig, MacosUserspaceRadioBackend, MacosUserspaceRadioConfig};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let config_path = std::env::args_os()
@@ -11,31 +8,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("usage: multi-stream-link <wfb-radio-service.toml>")?;
     let wait_ready_timeout = env_duration_s("WFB_LINK_READY_TIMEOUT_S", 90);
 
-    let mut radio = MacosUserspaceRadioConfig::from_service_config_path(config_path)?;
-    radio.endpoints = LinkEndpointsBuilder::new()
-        .rx_stream_with_criticality(
-            "s0",
-            0,
-            "127.0.0.1:5800",
-            PayloadKind::RawApplicationDatagram,
-            StreamCriticality::Required,
-        )
-        .rx_stream_with_criticality(
-            "s1",
-            1,
-            "127.0.0.1:5801",
-            PayloadKind::RawApplicationDatagram,
-            StreamCriticality::BestEffort,
-        )
-        .tx_stream_with_criticality(
-            "s2",
-            2,
-            "127.0.0.1:5802",
-            PayloadKind::RawApplicationDatagram,
-            StreamCriticality::Required,
-        )
-        .with_tunnel("10.5.0.1", "10.5.0.2")
-        .build()?;
+    let radio = MacosUserspaceRadioConfig::from_service_config_path(config_path)?;
+    if radio.endpoints.streams.is_empty() {
+        return Err("config did not resolve any named link streams".into());
+    }
 
     let mut backend = MacosUserspaceRadioBackend::default();
     let handle = backend.start(LinkConfig::macos_userspace_radio(radio))?;

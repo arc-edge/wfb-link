@@ -1,0 +1,88 @@
+# Example multi-stream macOS radio profile for products that own WFB-NG
+# distributor datagrams or supervise their own WFB-NG helper processes.
+#
+# This is not a raw-application datagram profile. `MacosUserspaceRadioBackend`
+# consumes WFB distributor datagrams on TX sockets and emits WFB aggregator
+# datagrams on RX sockets. Use `MacosWfbTunnelBackend` for the managed IP tunnel
+# path, or add a product/helper layer that converts raw application UDP to WFB
+# distributor datagrams before using this profile.
+
+[adapter]
+vid = 3034
+pid = 34834
+
+[macos_usbhost]
+enabled = true
+configuration_value = 1
+interface_number = 0
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+bulk_out_endpoint_count = 3
+poll_attempts = 25
+poll_delay_ms = 100
+
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/rtl8812aefw.bin"
+duration_ms = 0
+rx_timeout_ms = 20
+tx_burst_limit = 4
+tx_min_interval_us = 700
+max_datagrams = 0
+
+[airtime]
+mode = "tdd"
+tdd_first_window = "rx"
+tdd_rx_window_ms = 2200
+tdd_tx_window_ms = 3600
+tdd_guard_ms = 200
+tdd_start_delay_ms = 0
+
+[wfb]
+link_id = 1
+rx_wlan_idx = 0
+rx_mcs_index = 2
+
+[[streams]]
+name = "downlink-primary"
+direction = "rx"
+radio_port = 4
+local_udp = "127.0.0.1:5804"
+payload_kind = "wfb_distributor_datagram"
+criticality = "required"
+
+[[streams]]
+name = "downlink-aux"
+direction = "rx"
+radio_port = 5
+local_udp = "127.0.0.1:5805"
+payload_kind = "wfb_distributor_datagram"
+criticality = "best_effort"
+
+[[streams]]
+name = "uplink-control"
+direction = "tx"
+radio_port = 6
+local_udp = "0.0.0.0:5606"
+payload_kind = "wfb_distributor_datagram"
+criticality = "required"
+
+[tunnel]
+local_ip = "10.5.0.1"
+peer_ip = "10.5.0.2"
+
+[calibration]
+profile = "current_default"
+
+[heartbeat]
+enabled = true
+half_period_ms = 500
+
+[authorization]
+transmit = true
+live_register_writes = false
+
+[artifacts]
+ready_file = "/tmp/wfb-radio-run-multi-stream-ready.json"
+health_file = "/tmp/wfb-radio-run-multi-stream-health.json"

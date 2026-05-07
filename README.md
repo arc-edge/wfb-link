@@ -85,6 +85,17 @@ That example demonstrates the lifecycle API: start, wait-ready, print health,
 request stop, and print the final report. It is not a full application data
 plane by itself.
 
+Run the multi-stream distributor example:
+
+```sh
+cargo run -p wfb-link --example multi-stream-link -- \
+  configs/radio-run-multi-stream-example.toml
+```
+
+That profile exposes named WFB distributor/aggregator datagram streams. It is
+for products that already own WFB-NG datagrams or supervise helper processes;
+raw application UDP streams need a codec/helper layer above the radio backend.
+
 Run the product-facing radio API smoke on a prepared Mac with an attached
 AWUS036ACH:
 
@@ -156,7 +167,8 @@ uses the accepted TDD timing profile.
 
 ## Product Integration
 
-For a Rust product binary, depend on `wfb-link` and construct a backend:
+For a Rust product binary, depend on `wfb-link` and construct a backend. The
+short version for a managed macOS tunnel is:
 
 ```rust
 use std::time::Duration;
@@ -186,6 +198,10 @@ On Linux, the intended backend is native WFB-NG over `wfb0` monitor mode with
 the aircrack/rtl88xxau driver. Do not port the macOS USB bridge to Linux just
 to share implementation; share the `wfb-link` lifecycle and endpoint contract.
 
+For the full integration contract, backend selection rules, payload-kind
+semantics, and health/report shape, read
+[Product integration](docs/product-integration.md).
+
 ## Current Limitations
 
 - Hardware scope is RTL8812AU/AWUS036ACH class adapters.
@@ -211,6 +227,8 @@ to share implementation; share the `wfb-link` lifecycle and endpoint contract.
 ## Documentation
 
 - [Cross-platform link interface](docs/cross-platform-link-interface.md)
+- [Product integration](docs/product-integration.md)
+- [Service config reference](docs/service-config-reference.md)
 - [Runtime boundary](docs/runtime-boundary.md)
 - [Tunnel recovery and loaded profile](docs/wfb-ng-tunnel-recovery.md)
 - [RF quality and range work](docs/rf-quality-and-range.md)

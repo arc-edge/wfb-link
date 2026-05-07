@@ -71,6 +71,11 @@ when the caller owns WFB-NG codec/session work. Distributor datagram endpoints
 may leave `stream` unset because one local UDP ingress can carry multiple WFB
 streams.
 
+Do not treat endpoint metadata as a runtime rewrite mechanism. Runtime sockets
+come from `MacosUserspaceRadioConfig` / `wfb-radio-service` resolution. If a
+product needs named streams, put them in `[[streams]]` or build the complete
+runtime config and endpoint model together.
+
 ## macOS Backend
 
 The macOS backend uses this repository's native radio runtime:
@@ -178,6 +183,10 @@ runtime bind set and reported as degraded instead of failing the whole link.
 Required bind failures still abort. RX forward sockets are runtime-owned
 ephemeral sockets today, so RX best-effort currently acts as health metadata;
 there is no operator-specified RX bind to skip.
+
+See [Product integration](product-integration.md) for backend selection and
+[Service config reference](service-config-reference.md) for field-level TOML
+rules.
 
 Example:
 

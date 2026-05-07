@@ -2013,6 +2013,37 @@ profile = "does_not_exist"
     }
 
     #[test]
+    fn service_checked_in_multistream_config_is_valid() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/radio-run-multi-stream-example.toml");
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in multi-stream config");
+
+        let resolved = resolve_service_run(&cli).expect("resolve checked-in config");
+        let config = service_runtime_config_from_resolved(&resolved)
+            .expect("runtime config from checked-in config");
+
+        assert_eq!(resolved.streams.len(), 3);
+        assert_eq!(resolved.bind, "0.0.0.0:5606".parse().unwrap());
+        assert_eq!(resolved.wfb_link_id, Some(1));
+        assert_eq!(resolved.wfb_radio_port, Some(4));
+        assert_eq!(
+            resolved.rx_aggregator,
+            Some("127.0.0.1:5804".parse().unwrap())
+        );
+        assert_eq!(resolved.rx_forwards, vec!["1:5=127.0.0.1:5805"]);
+        assert!(resolved.tunnel.is_some());
+        config
+            .validate()
+            .expect("valid checked-in multi-stream config");
+    }
+
+    #[test]
     fn service_config_rejects_diagnostic_only_fields() {
         let path = write_config(
             "bad",
