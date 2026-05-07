@@ -45,6 +45,7 @@ pub struct LinkStreamEndpoint {
     pub direction: LinkDirection,
     pub local_udp: SocketAddr,
     pub payload_kind: PayloadKind,
+    pub criticality: StreamCriticality,
     pub stream: Option<WfbStreamId>,
 }
 
@@ -56,6 +57,11 @@ pub struct WfbStreamId {
 pub enum PayloadKind {
     RawApplicationDatagram,
     WfbDistributorDatagram,
+}
+
+pub enum StreamCriticality {
+    Required,
+    BestEffort,
 }
 ```
 
@@ -127,6 +133,51 @@ let endpoints = LinkEndpointsBuilder::new()
 The builder validates duplicate stream names, duplicate local UDP sockets, and
 duplicate `(direction, radio_port)` pairs, returning typed
 `LinkBuilderError` variants so callers can surface clean operator errors.
+
+The service TOML can express the same shape directly. Existing `[wfb]`
+single-stream and tunnel-oriented profiles still work; `[[streams]]` becomes
+the higher-level form when present and CLI overrides still win.
+
+```toml
+[[streams]]
+name = "s0"
+direction = "rx"
+radio_port = 0
+local_udp = "127.0.0.1:5800"
+payload_kind = "raw_application_datagram"
+criticality = "required"
+
+[[streams]]
+name = "s1"
+direction = "rx"
+radio_port = 1
+local_udp = "127.0.0.1:5801"
+criticality = "best_effort"
+
+[[streams]]
+name = "s2"
+direction = "tx"
+radio_port = 2
+local_udp = "127.0.0.1:5802"
+payload_kind = "raw_application_datagram"
+
+[tunnel]
+local_ip = "10.5.0.1"
+peer_ip = "10.5.0.2"
+```
+
+`LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
+entries expose submitted frames, failed submissions, dropped datagrams, and
+last successful submit time when the runtime owns the TX bind. RX entries
+expose forwarded frames/bytes and the last RX-forward time. `degraded_streams`
+lists best-effort streams that were skipped or degraded during startup.
+
+For the current macOS userspace radio backend, `BestEffort` is implemented for
+TX UDP bind preflight: an unavailable best-effort TX socket is removed from the
+runtime bind set and reported as degraded instead of failing the whole link.
+Required bind failures still abort. RX forward sockets are runtime-owned
+ephemeral sockets today, so RX best-effort currently acts as health metadata;
+there is no operator-specified RX bind to skip.
 
 Example:
 

@@ -8,7 +8,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -28,7 +28,8 @@ use wfb_radio_runtime::{
 };
 use wfb_radio_service::{
     resolve_service_run, service_runtime_config_from_resolved,
-    service_runtime_inputs_from_resolved, ServiceCli,
+    service_runtime_inputs_from_resolved, ResolvedServiceRun, ResolvedServiceStream, ServiceCli,
+    ServiceStreamCriticality, ServiceStreamDirection, ServiceStreamPayloadKind,
 };
 
 static NEXT_ARTIFACT_ID: AtomicU64 = AtomicU64::new(0);
@@ -39,6 +40,8 @@ pub type Result<T> = std::result::Result<T, LinkError>;
 pub enum LinkError {
     #[error("{code}: {message}")]
     Runtime { code: &'static str, message: String },
+    #[error("invalid link endpoints: {0}")]
+    InvalidEndpoints(#[from] LinkBuilderError),
     #[error("unsupported backend config: {0}")]
     UnsupportedBackend(&'static str),
     #[error("backend exited before ready")]
@@ -138,7 +141,11 @@ impl MacosUserspaceRadioConfig {
         let runtime_config = service_runtime_config_from_resolved(&resolved)?;
         let execution_inputs =
             service_runtime_inputs_from_resolved(&resolved, runtime_config.channel)?;
-        Ok(Self::from_runtime_parts(runtime_config, execution_inputs))
+        let mut config = Self::from_runtime_parts(runtime_config, execution_inputs);
+        if resolved.tunnel.is_some() || !resolved.streams.is_empty() {
+            config.endpoints = link_endpoints_from_service_resolved(&resolved)?;
+        }
+        Ok(config)
     }
 
     pub fn from_runtime_parts(
@@ -207,6 +214,7 @@ impl MacosWfbTunnelConfig {
         radio: MacosUserspaceRadioConfig,
         wfb_key: impl Into<PathBuf>,
     ) -> Self {
+        let service_tunnel = radio.endpoints.tunnel.clone();
         let tunnel_rx_aggregator = radio
             .runtime_config
             .primary_rx_forward
@@ -238,8 +246,14 @@ impl MacosWfbTunnelConfig {
             tunnel_tx_radio_bind,
             tunnel_tx_udp: "127.0.0.1:56020".parse().expect("default tunnel tx UDP"),
             tunnel_rx_udp: "127.0.0.1:56021".parse().expect("default tunnel rx UDP"),
-            local_ip: "10.5.0.1".parse().expect("default local tunnel IP"),
-            peer_ip: "10.5.0.2".parse().expect("default peer tunnel IP"),
+            local_ip: service_tunnel
+                .as_ref()
+                .map(|tunnel| tunnel.local_ip)
+                .unwrap_or_else(|| "10.5.0.1".parse().expect("default local tunnel IP")),
+            peer_ip: service_tunnel
+                .as_ref()
+                .map(|tunnel| tunnel.peer_ip)
+                .unwrap_or_else(|| "10.5.0.2".parse().expect("default peer tunnel IP")),
             prefix_len: 24,
             tun_mtu: 1400,
             radio_mtu: 1445,
@@ -324,6 +338,7 @@ impl MacosWfbTunnelConfig {
             direction: LinkDirection::Tx,
             local_udp: self.tunnel_tx_udp,
             payload_kind: PayloadKind::RawApplicationDatagram,
+            criticality: StreamCriticality::Required,
             stream: Some(WfbStreamId {
                 link_id: Some(self.link_id),
                 radio_port: self.tunnel_tx_radio_port,
@@ -334,6 +349,7 @@ impl MacosWfbTunnelConfig {
             direction: LinkDirection::Rx,
             local_udp: self.tunnel_rx_udp,
             payload_kind: PayloadKind::RawApplicationDatagram,
+            criticality: StreamCriticality::Required,
             stream: Some(WfbStreamId {
                 link_id: Some(self.link_id),
                 radio_port: self.tunnel_rx_radio_port,
@@ -425,6 +441,42 @@ impl LinkEndpointsBuilder {
         self.stream(name, LinkDirection::Tx, radio_port, local_udp, payload_kind)
     }
 
+    pub fn rx_stream_with_criticality(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+        criticality: StreamCriticality,
+    ) -> Self {
+        self.stream_with_criticality(
+            name,
+            LinkDirection::Rx,
+            radio_port,
+            local_udp,
+            payload_kind,
+            criticality,
+        )
+    }
+
+    pub fn tx_stream_with_criticality(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+        criticality: StreamCriticality,
+    ) -> Self {
+        self.stream_with_criticality(
+            name,
+            LinkDirection::Tx,
+            radio_port,
+            local_udp,
+            payload_kind,
+            criticality,
+        )
+    }
+
     pub fn with_tunnel(self, local_ip: impl ToString, peer_ip: impl ToString) -> Self {
         Self {
             tunnel: Some(LinkTunnelEndpointDraft {
@@ -460,6 +512,7 @@ impl LinkEndpointsBuilder {
                 direction: draft.direction,
                 local_udp,
                 payload_kind: draft.payload_kind,
+                criticality: draft.criticality,
                 stream: Some(WfbStreamId {
                     link_id: None,
                     radio_port: draft.radio_port,
@@ -480,12 +533,33 @@ impl LinkEndpointsBuilder {
         local_udp: impl ToString,
         payload_kind: PayloadKind,
     ) -> Self {
+        self = self.stream_with_criticality(
+            name,
+            direction,
+            radio_port,
+            local_udp,
+            payload_kind,
+            StreamCriticality::Required,
+        );
+        self
+    }
+
+    fn stream_with_criticality(
+        mut self,
+        name: impl Into<String>,
+        direction: LinkDirection,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+        criticality: StreamCriticality,
+    ) -> Self {
         self.streams.push(LinkStreamEndpointDraft {
             name: name.into(),
             direction,
             radio_port,
             local_udp: local_udp.to_string(),
             payload_kind,
+            criticality,
         });
         self
     }
@@ -498,6 +572,7 @@ struct LinkStreamEndpointDraft {
     radio_port: u8,
     local_udp: String,
     payload_kind: PayloadKind,
+    criticality: StreamCriticality,
 }
 
 #[derive(Debug, Clone)]
@@ -570,8 +645,16 @@ pub struct LinkStreamEndpoint {
     pub direction: LinkDirection,
     pub local_udp: SocketAddr,
     pub payload_kind: PayloadKind,
+    pub criticality: StreamCriticality,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<WfbStreamId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCriticality {
+    Required,
+    BestEffort,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -620,6 +703,8 @@ pub struct LinkHealth {
     pub endpoints: LinkEndpoints,
     pub tx: LinkTxHealth,
     pub rx: LinkRxHealth,
+    pub streams: Vec<LinkStreamHealth>,
+    pub degraded_streams: Vec<String>,
     pub backend: Value,
 }
 
@@ -658,11 +743,55 @@ pub struct LinkRxHealth {
     pub noise_average_dbm: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LinkStreamHealth {
+    pub name: String,
+    pub direction: LinkDirection,
+    pub local_udp: SocketAddr,
+    pub payload_kind: PayloadKind,
+    pub criticality: StreamCriticality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<WfbStreamId>,
+    pub degraded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degradation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx: Option<LinkStreamTxHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<LinkStreamRxHealth>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LinkStreamTxHealth {
+    pub submitted_frames: u64,
+    pub failed_submissions: u64,
+    pub dropped_datagrams: u64,
+    pub last_submit_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LinkStreamRxHealth {
+    pub forwarded_frames: u64,
+    pub forwarded_bytes: u64,
+    pub last_rx_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkStreamDegradation {
+    name: String,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct LinkReport {
     pub lifecycle: LinkLifecycle,
     pub endpoints: LinkEndpoints,
+    pub streams: Vec<LinkStreamHealth>,
+    pub degraded_streams: Vec<String>,
     pub backend: LinkBackendReport,
 }
 
@@ -729,6 +858,8 @@ impl MacosUserspaceRadioHandle {
             endpoints,
             ready_poll_interval,
         } = config;
+        let startup_degraded_streams =
+            apply_best_effort_tx_bind_preflight(&mut runtime_config, &endpoints);
 
         let ready_file = runtime_config
             .ready_file
@@ -750,6 +881,7 @@ impl MacosUserspaceRadioHandle {
 
         Ok(Self {
             endpoints,
+            startup_degraded_streams,
             stop_requested,
             join_handle,
             ready_file,
@@ -759,9 +891,59 @@ impl MacosUserspaceRadioHandle {
     }
 }
 
+fn apply_best_effort_tx_bind_preflight(
+    runtime_config: &mut ProductionRuntimeFlowConfig,
+    endpoints: &LinkEndpoints,
+) -> Vec<LinkStreamDegradation> {
+    let mut degraded = Vec::new();
+    for stream in endpoints.streams.iter().filter(|stream| {
+        stream.direction == LinkDirection::Tx && stream.criticality == StreamCriticality::BestEffort
+    }) {
+        if !runtime_tx_bind_addrs(runtime_config).contains(&stream.local_udp) {
+            continue;
+        }
+        match UdpSocket::bind(stream.local_udp) {
+            Ok(socket) => drop(socket),
+            Err(error) => {
+                remove_runtime_tx_bind(runtime_config, stream.local_udp);
+                degraded.push(LinkStreamDegradation {
+                    name: stream.name.clone(),
+                    reason: format!(
+                        "best-effort TX bind {} unavailable: {error}",
+                        stream.local_udp
+                    ),
+                });
+            }
+        }
+    }
+    degraded
+}
+
+fn runtime_tx_bind_addrs(config: &ProductionRuntimeFlowConfig) -> Vec<SocketAddr> {
+    std::iter::once(config.bind_addr)
+        .chain(config.tx_binds.iter().copied())
+        .collect()
+}
+
+fn remove_runtime_tx_bind(config: &mut ProductionRuntimeFlowConfig, local_udp: SocketAddr) {
+    if config.bind_addr == local_udp {
+        if let Some(promoted) = config.tx_binds.first().copied() {
+            config.bind_addr = promoted;
+            config.tx_binds.remove(0);
+        } else {
+            config.bind_addr = "127.0.0.1:0"
+                .parse()
+                .expect("fallback loopback wildcard bind");
+        }
+    } else {
+        config.tx_binds.retain(|bind| *bind != local_udp);
+    }
+}
+
 #[derive(Debug)]
 pub struct MacosUserspaceRadioHandle {
     endpoints: LinkEndpoints,
+    startup_degraded_streams: Vec<LinkStreamDegradation>,
     stop_requested: Arc<AtomicBool>,
     join_handle: JoinHandle<ProductionRuntimeFlowReport>,
     ready_file: PathBuf,
@@ -816,6 +998,12 @@ impl LinkHandle for MacosUserspaceRadioHandle {
     fn health(&self) -> Result<LinkHealth> {
         if self.health_file.exists() {
             let health = read_json_file(&self.health_file)?;
+            let streams = link_stream_health_from_backend_json(
+                &self.endpoints,
+                &health,
+                &self.startup_degraded_streams,
+            );
+            let degraded_streams = degraded_stream_names(&streams);
             return Ok(LinkHealth {
                 lifecycle: link_lifecycle_from_health_json(&health),
                 ready: matches!(
@@ -825,22 +1013,38 @@ impl LinkHandle for MacosUserspaceRadioHandle {
                 endpoints: self.endpoints.clone(),
                 tx: link_tx_health_from_json(health.get("tx")),
                 rx: link_rx_health_from_json(health.get("rx")),
+                streams,
+                degraded_streams,
                 backend: health,
             });
         }
 
         if self.ready_file.exists() {
             let ready = read_json_file(&self.ready_file)?;
+            let streams = link_stream_health_from_backend_json(
+                &self.endpoints,
+                &ready,
+                &self.startup_degraded_streams,
+            );
+            let degraded_streams = degraded_stream_names(&streams);
             return Ok(LinkHealth {
                 lifecycle: LinkLifecycle::Ready,
                 ready: true,
                 endpoints: self.endpoints.clone(),
                 tx: LinkTxHealth::default(),
                 rx: LinkRxHealth::default(),
+                streams,
+                degraded_streams,
                 backend: ready,
             });
         }
 
+        let streams = link_stream_health_from_backend_json(
+            &self.endpoints,
+            &Value::Null,
+            &self.startup_degraded_streams,
+        );
+        let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkHealth {
             lifecycle: if self.join_handle.is_finished() {
                 LinkLifecycle::Failed
@@ -851,6 +1055,8 @@ impl LinkHandle for MacosUserspaceRadioHandle {
             endpoints: self.endpoints.clone(),
             tx: LinkTxHealth::default(),
             rx: LinkRxHealth::default(),
+            streams,
+            degraded_streams,
             backend: Value::Null,
         })
     }
@@ -863,6 +1069,7 @@ impl LinkHandle for MacosUserspaceRadioHandle {
     fn join(self: Box<Self>) -> Result<LinkReport> {
         let MacosUserspaceRadioHandle {
             endpoints,
+            startup_degraded_streams,
             join_handle,
             ..
         } = *self;
@@ -871,9 +1078,18 @@ impl LinkHandle for MacosUserspaceRadioHandle {
             ProductionRuntimeFlowResult::Pass => LinkLifecycle::Stopped,
             ProductionRuntimeFlowResult::Fail => LinkLifecycle::Failed,
         };
+        let backend_json = serde_json::to_value(&report).unwrap_or(Value::Null);
+        let streams = link_stream_health_from_backend_json(
+            &endpoints,
+            &backend_json,
+            &startup_degraded_streams,
+        );
+        let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkReport {
             lifecycle,
             endpoints,
+            streams,
+            degraded_streams,
             backend: LinkBackendReport::MacosUserspaceRadio(report),
         })
     }
@@ -1024,12 +1240,17 @@ impl LinkHandle for MacosWfbTunnelHandle {
         } else {
             radio_health.lifecycle
         };
+        let streams =
+            link_stream_health_from_backend_json(&self.endpoints, &radio_health.backend, &[]);
+        let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkHealth {
             lifecycle,
             ready: radio_health.ready && !child_failed,
             endpoints: self.endpoints.clone(),
             tx: radio_health.tx,
             rx: radio_health.rx,
+            streams,
+            degraded_streams,
             backend: serde_json::json!({
                 "kind": "macos_wfb_tunnel",
                 "radio": radio_health.backend,
@@ -1081,9 +1302,14 @@ impl LinkHandle for MacosWfbTunnelHandle {
         } else {
             LinkLifecycle::Failed
         };
+        let backend_json = serde_json::to_value(&radio).unwrap_or(Value::Null);
+        let streams = link_stream_health_from_backend_json(&endpoints, &backend_json, &[]);
+        let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkReport {
             lifecycle,
             endpoints,
+            streams,
+            degraded_streams,
             backend: LinkBackendReport::MacosWfbTunnel(MacosWfbTunnelReport {
                 radio,
                 tunnel_summary,
@@ -1105,6 +1331,7 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
             direction: LinkDirection::Tx,
             local_udp,
             payload_kind: PayloadKind::WfbDistributorDatagram,
+            criticality: StreamCriticality::Required,
             stream: None,
         });
     }
@@ -1118,6 +1345,7 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
             direction: LinkDirection::Rx,
             local_udp,
             payload_kind: PayloadKind::WfbDistributorDatagram,
+            criticality: StreamCriticality::Required,
             stream: Some(WfbStreamId {
                 link_id: config.primary_rx_forward.link_id,
                 radio_port,
@@ -1134,6 +1362,7 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
             direction: LinkDirection::Rx,
             local_udp,
             payload_kind: PayloadKind::WfbDistributorDatagram,
+            criticality: StreamCriticality::Required,
             stream: Some(WfbStreamId {
                 link_id: forward.link_id,
                 radio_port: forward.radio_port,
@@ -1144,6 +1373,93 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
     LinkEndpoints {
         streams,
         tunnel: None,
+    }
+}
+
+fn link_endpoints_from_service_resolved(
+    resolved: &ResolvedServiceRun,
+) -> std::result::Result<LinkEndpoints, LinkBuilderError> {
+    let streams = resolved
+        .streams
+        .iter()
+        .map(link_stream_endpoint_from_service_stream)
+        .collect();
+    let tunnel = resolved.tunnel.as_ref().map(|tunnel| LinkTunnelEndpoint {
+        local_ip: tunnel.local_ip,
+        peer_ip: tunnel.peer_ip,
+        interface_name: tunnel.interface_name.clone(),
+    });
+    let endpoints = LinkEndpoints { streams, tunnel };
+    validate_link_endpoints(&endpoints)?;
+    Ok(endpoints)
+}
+
+fn link_stream_endpoint_from_service_stream(stream: &ResolvedServiceStream) -> LinkStreamEndpoint {
+    LinkStreamEndpoint {
+        name: stream.name.clone(),
+        direction: LinkDirection::from(stream.direction),
+        local_udp: stream.local_udp,
+        payload_kind: PayloadKind::from(stream.payload_kind),
+        criticality: StreamCriticality::from(stream.criticality),
+        stream: Some(WfbStreamId {
+            link_id: stream.link_id,
+            radio_port: stream.radio_port,
+        }),
+    }
+}
+
+fn validate_link_endpoints(endpoints: &LinkEndpoints) -> std::result::Result<(), LinkBuilderError> {
+    let mut names = HashSet::new();
+    let mut sockets = HashSet::new();
+    let mut stream_ports = HashSet::new();
+
+    for stream in &endpoints.streams {
+        if !names.insert(stream.name.clone()) {
+            return Err(LinkBuilderError::DuplicateStreamName {
+                name: stream.name.clone(),
+            });
+        }
+        if !sockets.insert(stream.local_udp) {
+            return Err(LinkBuilderError::DuplicateLocalUdp {
+                local_udp: stream.local_udp,
+            });
+        }
+        if let Some(wfb_stream) = stream.stream {
+            if !stream_ports.insert((stream.direction, wfb_stream.radio_port)) {
+                return Err(LinkBuilderError::DuplicateDirectionRadioPort {
+                    direction: stream.direction,
+                    radio_port: wfb_stream.radio_port,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+impl From<ServiceStreamDirection> for LinkDirection {
+    fn from(direction: ServiceStreamDirection) -> Self {
+        match direction {
+            ServiceStreamDirection::Tx => Self::Tx,
+            ServiceStreamDirection::Rx => Self::Rx,
+        }
+    }
+}
+
+impl From<ServiceStreamPayloadKind> for PayloadKind {
+    fn from(payload_kind: ServiceStreamPayloadKind) -> Self {
+        match payload_kind {
+            ServiceStreamPayloadKind::RawApplicationDatagram => Self::RawApplicationDatagram,
+            ServiceStreamPayloadKind::WfbDistributorDatagram => Self::WfbDistributorDatagram,
+        }
+    }
+}
+
+impl From<ServiceStreamCriticality> for StreamCriticality {
+    fn from(criticality: ServiceStreamCriticality) -> Self {
+        match criticality {
+            ServiceStreamCriticality::Required => Self::Required,
+            ServiceStreamCriticality::BestEffort => Self::BestEffort,
+        }
     }
 }
 
@@ -1432,6 +1748,190 @@ fn link_rx_health_from_json(rx: Option<&Value>) -> LinkRxHealth {
     }
 }
 
+fn link_stream_health_from_backend_json(
+    endpoints: &LinkEndpoints,
+    backend: &Value,
+    startup_degraded_streams: &[LinkStreamDegradation],
+) -> Vec<LinkStreamHealth> {
+    let tx_stream_count = endpoints
+        .streams
+        .iter()
+        .filter(|stream| stream.direction == LinkDirection::Tx)
+        .count();
+    endpoints
+        .streams
+        .iter()
+        .map(|stream| {
+            let startup_degradation = startup_degraded_streams
+                .iter()
+                .find(|degradation| degradation.name == stream.name);
+            let degradation_reason =
+                startup_degradation.map(|degradation| degradation.reason.clone());
+            let degraded = degradation_reason.is_some();
+            LinkStreamHealth {
+                name: stream.name.clone(),
+                direction: stream.direction,
+                local_udp: stream.local_udp,
+                payload_kind: stream.payload_kind,
+                criticality: stream.criticality,
+                stream: stream.stream,
+                degraded,
+                degradation_reason,
+                tx: (stream.direction == LinkDirection::Tx).then(|| {
+                    link_stream_tx_health_from_json(backend.get("tx"), stream, tx_stream_count)
+                }),
+                rx: (stream.direction == LinkDirection::Rx)
+                    .then(|| link_stream_rx_health_from_json(backend.get("rx"), stream)),
+            }
+        })
+        .collect()
+}
+
+fn degraded_stream_names(streams: &[LinkStreamHealth]) -> Vec<String> {
+    streams
+        .iter()
+        .filter(|stream| stream.degraded)
+        .map(|stream| stream.name.clone())
+        .collect()
+}
+
+fn link_stream_tx_health_from_json(
+    tx: Option<&Value>,
+    stream: &LinkStreamEndpoint,
+    tx_stream_count: usize,
+) -> LinkStreamTxHealth {
+    let Some(tx) = tx else {
+        return LinkStreamTxHealth::default();
+    };
+    if let Some(bind) = tx
+        .get("tx_binds")
+        .and_then(Value::as_array)
+        .and_then(|binds| {
+            binds.iter().find(|bind| {
+                bind.get("bind_addr")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<SocketAddr>().ok())
+                    == Some(stream.local_udp)
+            })
+        })
+    {
+        return LinkStreamTxHealth {
+            submitted_frames: json_u64(bind, "submitted_frames"),
+            failed_submissions: json_u64(bind, "failed_submissions"),
+            dropped_datagrams: json_u64(bind, "dropped_datagrams"),
+            last_submit_unix_ms: bind.get("last_submit_unix_ms").and_then(Value::as_u64),
+        };
+    }
+
+    let submitted_frames = stream
+        .stream
+        .map(|wfb_stream| {
+            link_wfb_observation_count(tx.get("wfb_channel_observations"), wfb_stream)
+        })
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| {
+            if tx_stream_count <= 1 {
+                json_u64(tx, "submitted_frames")
+            } else {
+                0
+            }
+        });
+    LinkStreamTxHealth {
+        submitted_frames,
+        failed_submissions: if tx_stream_count <= 1 {
+            json_u64(tx, "failed_submissions")
+        } else {
+            0
+        },
+        dropped_datagrams: if tx_stream_count <= 1 {
+            json_u64(tx, "dropped_datagrams")
+        } else {
+            0
+        },
+        last_submit_unix_ms: tx.get("last_submit_unix_ms").and_then(Value::as_u64),
+    }
+}
+
+fn link_stream_rx_health_from_json(
+    rx: Option<&Value>,
+    stream: &LinkStreamEndpoint,
+) -> LinkStreamRxHealth {
+    let Some(rx) = rx else {
+        return LinkStreamRxHealth::default();
+    };
+    let Some(wfb_stream) = stream.stream else {
+        return LinkStreamRxHealth::default();
+    };
+    let Some(forward) = rx
+        .get("rx_forwards")
+        .and_then(Value::as_array)
+        .and_then(|forwards| {
+            forwards.iter().find(|forward| {
+                let channel_id = forward
+                    .get("config")
+                    .and_then(|config| config.get("channel_id"));
+                let link_id_matches = match wfb_stream.link_id {
+                    Some(link_id) => {
+                        channel_id
+                            .and_then(|channel_id| channel_id.get("link_id"))
+                            .and_then(Value::as_u64)
+                            == Some(u64::from(link_id))
+                    }
+                    None => true,
+                };
+                link_id_matches
+                    && channel_id
+                        .and_then(|channel_id| channel_id.get("radio_port"))
+                        .and_then(Value::as_u64)
+                        == Some(u64::from(wfb_stream.radio_port))
+            })
+        })
+    else {
+        return LinkStreamRxHealth::default();
+    };
+    LinkStreamRxHealth {
+        forwarded_frames: forward
+            .get("counters")
+            .map(|counters| json_u64(counters, "forwarded"))
+            .unwrap_or(0),
+        forwarded_bytes: json_u64(forward, "forwarded_bytes"),
+        last_rx_unix_ms: forward.get("last_rx_unix_ms").and_then(Value::as_u64),
+    }
+}
+
+fn link_wfb_observation_count(observations: Option<&Value>, stream: WfbStreamId) -> u64 {
+    observations
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|observation| wfb_observation_matches_stream(observation, stream))
+        .map(|observation| json_u64(observation, "count"))
+        .sum()
+}
+
+fn wfb_observation_matches_stream(observation: &Value, stream: WfbStreamId) -> bool {
+    let source_matches = wfb_observation_side_matches_stream(observation, "source", stream);
+    let destination_matches =
+        wfb_observation_side_matches_stream(observation, "destination", stream);
+    source_matches || destination_matches
+}
+
+fn wfb_observation_side_matches_stream(
+    observation: &Value,
+    side: &str,
+    stream: WfbStreamId,
+) -> bool {
+    let radio_key = format!("{side}_radio_port");
+    if observation.get(&radio_key).and_then(Value::as_u64) != Some(u64::from(stream.radio_port)) {
+        return false;
+    }
+    let Some(link_id) = stream.link_id else {
+        return true;
+    };
+    let link_key = format!("{side}_link_id");
+    observation.get(&link_key).and_then(Value::as_u64) == Some(u64::from(link_id))
+}
+
 fn rx_signal_average(rx: &Value, metric: &str) -> Option<i64> {
     rx.get("signal")?.get(metric)?.get("average")?.as_i64()
 }
@@ -1534,6 +2034,10 @@ mod tests {
             PayloadKind::RawApplicationDatagram
         );
         assert_eq!(
+            endpoints.streams[0].criticality,
+            StreamCriticality::Required
+        );
+        assert_eq!(
             endpoints.streams[0].stream,
             Some(WfbStreamId {
                 link_id: None,
@@ -1548,6 +2052,113 @@ mod tests {
         let tunnel = endpoints.tunnel.expect("tunnel");
         assert_eq!(tunnel.local_ip, "10.5.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(tunnel.peer_ip, "10.5.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn endpoint_builder_accepts_best_effort_streams() {
+        let endpoints = LinkEndpointsBuilder::new()
+            .tx_stream_with_criticality(
+                "opportunistic",
+                7,
+                "127.0.0.1:5807",
+                PayloadKind::RawApplicationDatagram,
+                StreamCriticality::BestEffort,
+            )
+            .build()
+            .expect("endpoints");
+
+        assert_eq!(
+            endpoints.streams[0].criticality,
+            StreamCriticality::BestEffort
+        );
+    }
+
+    #[test]
+    fn stream_health_maps_runtime_counters_by_named_endpoint() {
+        let endpoints = LinkEndpoints {
+            tunnel: None,
+            streams: vec![
+                LinkStreamEndpoint {
+                    name: "control-up".to_string(),
+                    direction: LinkDirection::Tx,
+                    local_udp: "127.0.0.1:5606".parse().unwrap(),
+                    payload_kind: PayloadKind::WfbDistributorDatagram,
+                    criticality: StreamCriticality::Required,
+                    stream: Some(WfbStreamId {
+                        link_id: Some(1),
+                        radio_port: 6,
+                    }),
+                },
+                LinkStreamEndpoint {
+                    name: "video-down".to_string(),
+                    direction: LinkDirection::Rx,
+                    local_udp: "127.0.0.1:5804".parse().unwrap(),
+                    payload_kind: PayloadKind::RawApplicationDatagram,
+                    criticality: StreamCriticality::BestEffort,
+                    stream: Some(WfbStreamId {
+                        link_id: Some(1),
+                        radio_port: 4,
+                    }),
+                },
+            ],
+        };
+        let backend = serde_json::json!({
+            "tx": {
+                "tx_binds": [{
+                    "report_index": 0,
+                    "bind_addr": "127.0.0.1:5606",
+                    "datagrams_received": 3,
+                    "submitted_frames": 2,
+                    "failed_submissions": 1,
+                    "dropped_datagrams": 1,
+                    "last_submit_unix_ms": 1234
+                }]
+            },
+            "rx": {
+                "rx_forwards": [{
+                    "config": {
+                        "channel_id": {
+                            "link_id": 1,
+                            "radio_port": 4
+                        }
+                    },
+                    "forwarded_bytes": 4096,
+                    "last_rx_unix_ms": 5678,
+                    "counters": {
+                        "forwarded": 8
+                    }
+                }]
+            }
+        });
+
+        let streams = link_stream_health_from_backend_json(
+            &endpoints,
+            &backend,
+            &[LinkStreamDegradation {
+                name: "video-down".to_string(),
+                reason: "optional aggregator unavailable".to_string(),
+            }],
+        );
+
+        assert_eq!(
+            streams[0].tx,
+            Some(LinkStreamTxHealth {
+                submitted_frames: 2,
+                failed_submissions: 1,
+                dropped_datagrams: 1,
+                last_submit_unix_ms: Some(1234),
+            })
+        );
+        assert_eq!(
+            streams[1].rx,
+            Some(LinkStreamRxHealth {
+                forwarded_frames: 8,
+                forwarded_bytes: 4096,
+                last_rx_unix_ms: Some(5678),
+            })
+        );
+        assert!(streams[1].degraded);
+        assert_eq!(degraded_stream_names(&streams), vec!["video-down"]);
     }
 
     #[test]
@@ -1688,6 +2299,7 @@ mod tests {
         });
         let handle = MacosUserspaceRadioHandle {
             endpoints: endpoints.clone(),
+            startup_degraded_streams: Vec::new(),
             stop_requested: Arc::clone(&stop_requested),
             join_handle,
             ready_file: unique_runtime_artifact_path("test-ready"),

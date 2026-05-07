@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -248,6 +248,8 @@ pub struct ServiceConfigFile {
     pub radio: Option<ServiceRadioConfig>,
     pub airtime: Option<ServiceAirtimeConfig>,
     pub wfb: Option<ServiceWfbConfig>,
+    pub streams: Option<Vec<ServiceStreamConfig>>,
+    pub tunnel: Option<ServiceTunnelConfig>,
     pub tx_power: Option<ServiceTxPowerConfig>,
     pub calibration: Option<ServiceCalibrationConfig>,
     pub heartbeat: Option<ServiceHeartbeatConfig>,
@@ -312,6 +314,47 @@ pub struct ServiceWfbConfig {
     pub rx_forwards: Option<Vec<String>>,
     pub rx_wlan_idx: Option<u8>,
     pub rx_mcs_index: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceStreamConfig {
+    pub name: String,
+    pub direction: ServiceStreamDirection,
+    pub radio_port: u8,
+    pub local_udp: SocketAddr,
+    pub link_id: Option<u32>,
+    pub payload_kind: Option<ServiceStreamPayloadKind>,
+    pub criticality: Option<ServiceStreamCriticality>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceTunnelConfig {
+    pub local_ip: IpAddr,
+    pub peer_ip: IpAddr,
+    pub interface_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStreamDirection {
+    Tx,
+    Rx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStreamPayloadKind {
+    RawApplicationDatagram,
+    WfbDistributorDatagram,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStreamCriticality {
+    Required,
+    BestEffort,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -429,6 +472,8 @@ pub struct ResolvedServiceRun {
     pub rx_forwards: Vec<String>,
     pub rx_wlan_idx: u8,
     pub rx_mcs_index: u8,
+    pub streams: Vec<ResolvedServiceStream>,
+    pub tunnel: Option<ResolvedServiceTunnel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,6 +485,24 @@ pub struct ResolvedServiceTxPowerControl {
     pub efuse_logical_map: Option<PathBuf>,
     pub safety_profile: ServiceTxPowerSafetyProfile,
     pub max_index: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedServiceStream {
+    pub name: String,
+    pub direction: ServiceStreamDirection,
+    pub radio_port: u8,
+    pub local_udp: SocketAddr,
+    pub link_id: Option<u32>,
+    pub payload_kind: ServiceStreamPayloadKind,
+    pub criticality: ServiceStreamCriticality,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedServiceTunnel {
+    pub local_ip: IpAddr,
+    pub peer_ip: IpAddr,
+    pub interface_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,6 +607,8 @@ pub fn resolve_service_run(
     let radio = file.radio.as_ref();
     let airtime = file.airtime.as_ref();
     let wfb = file.wfb.as_ref();
+    let streams = service_resolved_streams(file.streams.as_deref(), wfb)?;
+    let tunnel = file.tunnel.as_ref().map(service_resolved_tunnel);
     let tx_power = file.tx_power.as_ref();
     let calibration = file.calibration.as_ref();
     let heartbeat = file.heartbeat.as_ref();
@@ -565,11 +630,22 @@ pub fn resolve_service_run(
         .clone()
         .or_else(|| radio.and_then(|radio| radio.firmware.clone()))
         .ok_or_else(|| service_missing_required("radio.firmware"))?;
-    let rx_forwards = if cli.rx_forwards.is_empty() {
-        wfb.and_then(|wfb| wfb.rx_forwards.clone())
+    let stream_tx_bind_addrs = service_stream_tx_bind_addrs(&streams);
+    let stream_rx_inputs = service_stream_rx_inputs(&streams, wfb.and_then(|wfb| wfb.link_id));
+    let cli_rx_overrides = cli.wfb_link_id.is_some()
+        || cli.wfb_radio_port.is_some()
+        || cli.rx_aggregator.is_some()
+        || !cli.rx_forwards.is_empty();
+    let rx_forwards = if cli_rx_overrides {
+        cli.rx_forwards.clone()
+    } else if stream_rx_inputs.is_some() {
+        stream_rx_inputs
+            .as_ref()
+            .map(|inputs| inputs.rx_forwards.clone())
             .unwrap_or_default()
     } else {
-        cli.rx_forwards.clone()
+        wfb.and_then(|wfb| wfb.rx_forwards.clone())
+            .unwrap_or_default()
     };
 
     Ok(ResolvedServiceRun {
@@ -618,14 +694,22 @@ pub fn resolve_service_run(
         channel,
         bandwidth,
         firmware,
-        bind: cli
-            .bind
-            .or_else(|| wfb.and_then(|wfb| wfb.bind))
-            .unwrap_or_else(service_default_bind),
-        tx_binds: if cli.tx_binds.is_empty() {
-            wfb.and_then(|wfb| wfb.tx_binds.clone()).unwrap_or_default()
+        bind: if cli.bind.is_some() || !cli.tx_binds.is_empty() {
+            cli.bind
+                .or_else(|| wfb.and_then(|wfb| wfb.bind))
+                .unwrap_or_else(service_default_bind)
+        } else if let Some((first, _rest)) = stream_tx_bind_addrs.split_first() {
+            *first
         } else {
+            wfb.and_then(|wfb| wfb.bind)
+                .unwrap_or_else(service_default_bind)
+        },
+        tx_binds: if !cli.tx_binds.is_empty() {
             cli.tx_binds.clone()
+        } else if cli.bind.is_none() && !stream_tx_bind_addrs.is_empty() {
+            stream_tx_bind_addrs.iter().copied().skip(1).collect()
+        } else {
+            wfb.and_then(|wfb| wfb.tx_binds.clone()).unwrap_or_default()
         },
         duration_ms: cli
             .duration_ms
@@ -705,13 +789,29 @@ pub fn resolve_service_run(
             .heartbeat_led_half_period_ms
             .or_else(|| heartbeat.and_then(|heartbeat| heartbeat.half_period_ms))
             .unwrap_or(DEFAULT_HEARTBEAT_HALF_PERIOD_MS),
-        wfb_link_id: cli.wfb_link_id.or_else(|| wfb.and_then(|wfb| wfb.link_id)),
-        wfb_radio_port: cli
-            .wfb_radio_port
-            .or_else(|| wfb.and_then(|wfb| wfb.radio_port)),
-        rx_aggregator: cli
-            .rx_aggregator
-            .or_else(|| wfb.and_then(|wfb| wfb.rx_aggregator)),
+        wfb_link_id: if cli_rx_overrides {
+            cli.wfb_link_id.or_else(|| wfb.and_then(|wfb| wfb.link_id))
+        } else if let Some(inputs) = stream_rx_inputs.as_ref() {
+            inputs.link_id
+        } else {
+            wfb.and_then(|wfb| wfb.link_id)
+        },
+        wfb_radio_port: if cli_rx_overrides {
+            cli.wfb_radio_port
+                .or_else(|| wfb.and_then(|wfb| wfb.radio_port))
+        } else if let Some(inputs) = stream_rx_inputs.as_ref() {
+            Some(inputs.radio_port)
+        } else {
+            wfb.and_then(|wfb| wfb.radio_port)
+        },
+        rx_aggregator: if cli_rx_overrides {
+            cli.rx_aggregator
+                .or_else(|| wfb.and_then(|wfb| wfb.rx_aggregator))
+        } else if let Some(inputs) = stream_rx_inputs.as_ref() {
+            Some(inputs.aggregator)
+        } else {
+            wfb.and_then(|wfb| wfb.rx_aggregator)
+        },
         rx_forwards,
         rx_wlan_idx: cli
             .rx_wlan_idx
@@ -721,6 +821,8 @@ pub fn resolve_service_run(
             .rx_mcs_index
             .or_else(|| wfb.and_then(|wfb| wfb.rx_mcs_index))
             .unwrap_or(0),
+        streams,
+        tunnel,
     })
 }
 
@@ -895,6 +997,92 @@ fn service_default_bind() -> SocketAddr {
     "127.0.0.1:5600"
         .parse()
         .expect("service default bind address")
+}
+
+#[derive(Debug, Clone)]
+struct ServiceStreamRxInputs {
+    link_id: Option<u32>,
+    radio_port: u8,
+    aggregator: SocketAddr,
+    rx_forwards: Vec<String>,
+}
+
+fn service_resolved_streams(
+    streams: Option<&[ServiceStreamConfig]>,
+    wfb: Option<&ServiceWfbConfig>,
+) -> std::result::Result<Vec<ResolvedServiceStream>, RuntimeRadioError> {
+    let default_link_id = wfb.and_then(|wfb| wfb.link_id);
+    streams
+        .unwrap_or_default()
+        .iter()
+        .map(|stream| {
+            if stream.name.trim().is_empty() {
+                return Err(RuntimeRadioError::new(
+                    "service_stream_invalid_name",
+                    "stream name cannot be empty",
+                ));
+            }
+            Ok(ResolvedServiceStream {
+                name: stream.name.clone(),
+                direction: stream.direction,
+                radio_port: stream.radio_port,
+                local_udp: stream.local_udp,
+                link_id: stream.link_id.or(default_link_id),
+                payload_kind: stream
+                    .payload_kind
+                    .unwrap_or(ServiceStreamPayloadKind::RawApplicationDatagram),
+                criticality: stream
+                    .criticality
+                    .unwrap_or(ServiceStreamCriticality::Required),
+            })
+        })
+        .collect()
+}
+
+fn service_resolved_tunnel(tunnel: &ServiceTunnelConfig) -> ResolvedServiceTunnel {
+    ResolvedServiceTunnel {
+        local_ip: tunnel.local_ip,
+        peer_ip: tunnel.peer_ip,
+        interface_name: tunnel.interface_name.clone(),
+    }
+}
+
+fn service_stream_tx_bind_addrs(streams: &[ResolvedServiceStream]) -> Vec<SocketAddr> {
+    streams
+        .iter()
+        .filter(|stream| stream.direction == ServiceStreamDirection::Tx)
+        .map(|stream| stream.local_udp)
+        .collect()
+}
+
+fn service_stream_rx_inputs(
+    streams: &[ResolvedServiceStream],
+    default_link_id: Option<u32>,
+) -> Option<ServiceStreamRxInputs> {
+    let mut rx_streams = streams
+        .iter()
+        .filter(|stream| stream.direction == ServiceStreamDirection::Rx);
+    let first = rx_streams.next()?;
+    let link_id = first.link_id.or(default_link_id);
+    let rx_forwards = rx_streams
+        .map(|stream| service_stream_rx_forward_arg(stream, default_link_id))
+        .collect();
+    Some(ServiceStreamRxInputs {
+        link_id,
+        radio_port: first.radio_port,
+        aggregator: first.local_udp,
+        rx_forwards,
+    })
+}
+
+fn service_stream_rx_forward_arg(
+    stream: &ResolvedServiceStream,
+    default_link_id: Option<u32>,
+) -> String {
+    match stream.link_id.or(default_link_id) {
+        Some(link_id) => format!("{link_id}:{}={}", stream.radio_port, stream.local_udp),
+        None => format!("{}={}", stream.radio_port, stream.local_udp),
+    }
 }
 
 fn service_runtime_rx_forwards(
@@ -1614,6 +1802,92 @@ profile = "current_default"
             resolved.calibration_profile,
             ServiceTxCalibrationProfile::LinuxParityCh36Ht20
         );
+    }
+
+    #[test]
+    fn service_multistream_config_resolves_runtime_sockets_and_metadata() {
+        let path = write_config(
+            "multi-stream",
+            r#"
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/config-fw.bin"
+
+[wfb]
+link_id = 1
+rx_wlan_idx = 2
+rx_mcs_index = 3
+
+[[streams]]
+name = "video-down"
+direction = "rx"
+radio_port = 4
+local_udp = "127.0.0.1:5804"
+payload_kind = "raw_application_datagram"
+
+[[streams]]
+name = "telemetry-down"
+direction = "rx"
+radio_port = 5
+local_udp = "127.0.0.1:5805"
+payload_kind = "wfb_distributor_datagram"
+criticality = "best_effort"
+
+[[streams]]
+name = "control-up"
+direction = "tx"
+radio_port = 6
+local_udp = "127.0.0.1:5606"
+payload_kind = "wfb_distributor_datagram"
+
+[[streams]]
+name = "best-effort-up"
+direction = "tx"
+radio_port = 7
+local_udp = "127.0.0.1:5607"
+criticality = "best_effort"
+
+[tunnel]
+local_ip = "10.5.0.1"
+peer_ip = "10.5.0.2"
+interface_name = "utun-test"
+"#,
+        );
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse service");
+
+        let resolved = resolve_service_run(&cli).expect("resolve");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(resolved.bind, "127.0.0.1:5606".parse().unwrap());
+        assert_eq!(resolved.tx_binds, vec!["127.0.0.1:5607".parse().unwrap()]);
+        assert_eq!(resolved.wfb_link_id, Some(1));
+        assert_eq!(resolved.wfb_radio_port, Some(4));
+        assert_eq!(
+            resolved.rx_aggregator,
+            Some("127.0.0.1:5804".parse().unwrap())
+        );
+        assert_eq!(resolved.rx_forwards, vec!["1:5=127.0.0.1:5805"]);
+        assert_eq!(resolved.rx_wlan_idx, 2);
+        assert_eq!(resolved.rx_mcs_index, 3);
+        assert_eq!(resolved.streams.len(), 4);
+        assert_eq!(
+            resolved.streams[1].payload_kind,
+            ServiceStreamPayloadKind::WfbDistributorDatagram
+        );
+        assert_eq!(
+            resolved.streams[1].criticality,
+            ServiceStreamCriticality::BestEffort
+        );
+        let tunnel = resolved.tunnel.expect("tunnel");
+        assert_eq!(tunnel.local_ip, "10.5.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(tunnel.peer_ip, "10.5.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(tunnel.interface_name.as_deref(), Some("utun-test"));
     }
 
     #[test]

@@ -524,6 +524,7 @@ pub struct RuntimeFlowRxTelemetry {
     pub data_frames: u64,
     pub extension_frames: u64,
     pub wfb_channel_observations: Vec<RuntimeWfbChannelObservation>,
+    pub last_rx_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -714,6 +715,20 @@ pub struct RuntimeFlowTxTelemetry {
     pub dropped_datagrams: u64,
     pub bytes_written: u64,
     pub wfb_channel_observations: Vec<RuntimeWfbChannelObservation>,
+    pub tx_binds: Vec<RuntimeTxBindTelemetry>,
+    pub last_submit_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeTxBindTelemetry {
+    pub report_index: usize,
+    pub bind_addr: SocketAddr,
+    pub datagrams_received: u64,
+    pub submitted_frames: u64,
+    pub failed_submissions: u64,
+    pub dropped_datagrams: u64,
+    pub last_submit_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1011,6 +1026,7 @@ pub struct ProductionRuntimeRxForwardRuntime {
     socket: Option<UdpSocket>,
     pub forwarded_bytes: u64,
     pub counters: RxCounters,
+    pub last_rx_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1020,6 +1036,7 @@ pub struct ProductionRuntimeRxForwardSnapshot {
     pub aggregator: Option<SocketAddr>,
     pub forwarded_bytes: u64,
     pub counters: RxCounters,
+    pub last_rx_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -1068,6 +1085,7 @@ pub fn create_production_rx_forward_runtimes(
                 socket,
                 forwarded_bytes: 0,
                 counters: RxCounters::default(),
+                last_rx_unix_ms: None,
             })
         })
         .collect()
@@ -1083,6 +1101,7 @@ pub fn production_rx_forward_snapshots(
             aggregator: runtime.aggregator,
             forwarded_bytes: runtime.forwarded_bytes,
             counters: runtime.counters.clone(),
+            last_rx_unix_ms: runtime.last_rx_unix_ms,
         })
         .collect()
 }
@@ -1189,6 +1208,7 @@ fn process_production_wfb_rx_forward(
         })?;
         runtime.counters.forwarded = runtime.counters.forwarded.saturating_add(1);
         runtime.forwarded_bytes = runtime.forwarded_bytes.saturating_add(bytes as u64);
+        runtime.last_rx_unix_ms = Some(runtime_unix_ms());
     }
     Ok(())
 }
@@ -6405,7 +6425,10 @@ where
             }
         };
     let mut rx = RuntimeFlowRxTelemetry::default();
-    let mut tx = RuntimeFlowTxTelemetry::default();
+    let mut tx = RuntimeFlowTxTelemetry {
+        tx_binds: production_runtime_tx_bind_telemetry(&validation.wfb_loop.tx_bind_addrs),
+        ..RuntimeFlowTxTelemetry::default()
+    };
     let mut bridge_counters = TxCounters::default();
     let mut submit_counters = TxSubmitCounters::default();
     let mut rx_buf = vec![0u8; 16 * 1024];
@@ -6435,6 +6458,7 @@ where
                 ProductionRuntimeBridgeLoopStep::TryTx => match tx_receiver.receiver.try_recv() {
                     Ok(queued) => {
                         tx.datagrams_received = tx.datagrams_received.saturating_add(1);
+                        apply_production_runtime_tx_bind_datagram(&mut tx, queued.report_index);
                         match handle_production_bridge_tx_datagram(
                             &mut **session_cell.borrow_mut(),
                             &queued,
@@ -6447,6 +6471,13 @@ where
                             &mut submit_counters,
                         ) {
                             Ok(outcome) => {
+                                apply_production_runtime_tx_bind_outcome(
+                                    &mut tx,
+                                    queued.report_index,
+                                    outcome.metadata.is_some(),
+                                    false,
+                                    outcome.metadata.is_none(),
+                                );
                                 observe_production_runtime_tx_metadata(
                                     &mut tx,
                                     outcome.metadata.as_ref(),
@@ -6461,6 +6492,13 @@ where
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
                             }
                             Err(error) => {
+                                apply_production_runtime_tx_bind_outcome(
+                                    &mut tx,
+                                    queued.report_index,
+                                    false,
+                                    true,
+                                    true,
+                                );
                                 observe_production_runtime_tx_metadata(
                                     &mut tx,
                                     error.metadata.as_ref(),
@@ -6509,6 +6547,11 @@ where
                                     .iter()
                                     .map(|forward| forward.counters.forwarded)
                                     .sum();
+                                rx.last_rx_unix_ms = rx
+                                    .rx_forwards
+                                    .iter()
+                                    .filter_map(|forward| forward.last_rx_unix_ms)
+                                    .max();
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
                             }
                             Err(error) => Err(error),
@@ -6819,6 +6862,62 @@ fn apply_production_runtime_rx_packet_telemetry(
         &mut rx.wfb_channel_observations,
         telemetry.wfb_channel_observations,
     );
+}
+
+fn production_runtime_tx_bind_telemetry(bind_addrs: &[SocketAddr]) -> Vec<RuntimeTxBindTelemetry> {
+    bind_addrs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(report_index, bind_addr)| RuntimeTxBindTelemetry {
+            report_index,
+            bind_addr,
+            datagrams_received: 0,
+            submitted_frames: 0,
+            failed_submissions: 0,
+            dropped_datagrams: 0,
+            last_submit_unix_ms: None,
+        })
+        .collect()
+}
+
+fn apply_production_runtime_tx_bind_datagram(tx: &mut RuntimeFlowTxTelemetry, report_index: usize) {
+    if let Some(bind) = tx
+        .tx_binds
+        .iter_mut()
+        .find(|bind| bind.report_index == report_index)
+    {
+        bind.datagrams_received = bind.datagrams_received.saturating_add(1);
+    }
+}
+
+fn apply_production_runtime_tx_bind_outcome(
+    tx: &mut RuntimeFlowTxTelemetry,
+    report_index: usize,
+    submitted: bool,
+    failed: bool,
+    dropped: bool,
+) {
+    let now = submitted.then(runtime_unix_ms);
+    if let Some(bind) = tx
+        .tx_binds
+        .iter_mut()
+        .find(|bind| bind.report_index == report_index)
+    {
+        if submitted {
+            bind.submitted_frames = bind.submitted_frames.saturating_add(1);
+            bind.last_submit_unix_ms = now;
+        }
+        if failed {
+            bind.failed_submissions = bind.failed_submissions.saturating_add(1);
+        }
+        if dropped {
+            bind.dropped_datagrams = bind.dropped_datagrams.saturating_add(1);
+        }
+    }
+    if let Some(now) = now {
+        tx.last_submit_unix_ms = Some(now);
+    }
 }
 
 fn apply_production_runtime_tx_telemetry(
@@ -14440,6 +14539,7 @@ mod tests {
             data_frames: 4,
             extension_frames: 5,
             wfb_channel_observations: Vec::new(),
+            last_rx_unix_ms: Some(1234),
         };
         let tx = RuntimeFlowTxTelemetry {
             ingress_datagrams_received: 5,
@@ -14452,6 +14552,8 @@ mod tests {
             dropped_datagrams: 1,
             bytes_written: 4096,
             wfb_channel_observations: Vec::new(),
+            tx_binds: Vec::new(),
+            last_submit_unix_ms: Some(5678),
         };
 
         assert_eq!(rx.forwarded_payloads, 3);
@@ -14904,6 +15006,8 @@ mod tests {
                     dropped_datagrams: 0,
                     bytes_written: 64,
                     wfb_channel_observations: Vec::new(),
+                    tx_binds: Vec::new(),
+                    last_submit_unix_ms: None,
                 },
                 counters: RuntimeRadioCounters::default(),
                 result: ProductionRuntimeFlowResult::Pass,
@@ -14977,6 +15081,8 @@ mod tests {
                     dropped_datagrams: 0,
                     bytes_written: 64,
                     wfb_channel_observations: Vec::new(),
+                    tx_binds: Vec::new(),
+                    last_submit_unix_ms: None,
                 },
                 counters: RuntimeRadioCounters::default(),
                 result: ProductionRuntimeFlowResult::Pass,
@@ -15009,6 +15115,7 @@ mod tests {
                 send_failed: 1,
                 ..RxCounters::default()
             },
+            last_rx_unix_ms: None,
         }];
         let degraded = ProductionRuntimeServiceHealth::from_report(
             &report,

@@ -20638,6 +20638,7 @@ fn runtime_rx_forward_snapshots_from_bridge_report(
                 aggregator: forward.aggregator,
                 forwarded_bytes: forward.forwarded_bytes,
                 counters: forward.counters.clone(),
+                last_rx_unix_ms: None,
             })
         })
         .collect()
@@ -24336,6 +24337,7 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             data_frames: bridge.rx.data_frames,
             extension_frames: bridge.rx.extension_frames,
             wfb_channel_observations: Vec::new(),
+            last_rx_unix_ms: None,
         },
         tx: RuntimeFlowTxTelemetry {
             ingress_datagrams_received: bridge.datagrams_received,
@@ -24348,6 +24350,8 @@ fn runtime_flow_report(args: RuntimeFlowArgs) -> RuntimeFlowReport {
             dropped_datagrams: bridge.bridge_counters.dropped,
             bytes_written: bridge.submit_counters.bytes_written,
             wfb_channel_observations: Vec::new(),
+            tx_binds: Vec::new(),
+            last_submit_unix_ms: None,
         },
         counters: bridge.counters,
         result: bridge.result,
