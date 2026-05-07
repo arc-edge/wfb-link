@@ -34,6 +34,9 @@ use wfb_radio_service::{
 };
 
 static NEXT_ARTIFACT_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_MANAGED_UDP_PORT: AtomicU64 = AtomicU64::new(0);
+const MANAGED_UDP_PORT_BASE: u16 = 39000;
+const MANAGED_UDP_PORT_SPAN: u16 = 2000;
 
 pub type Result<T> = std::result::Result<T, LinkError>;
 
@@ -1198,18 +1201,23 @@ fn validate_managed_wfb_streams(streams: &[ManagedWfbStreamConfig]) -> Result<()
 fn managed_wfb_stream_mappings(
     streams: &[ManagedWfbStreamConfig],
 ) -> Result<Vec<ManagedWfbStreamMapping>> {
-    streams
-        .iter()
-        .map(|stream| {
-            Ok(ManagedWfbStreamMapping {
-                direction: stream.direction,
-                link_id: stream.link_id,
-                radio_port: stream.radio_port,
-                app_udp: stream.app_udp,
-                radio_udp: stream.radio_udp.unwrap_or(reserve_loopback_udp_addr()?),
-            })
-        })
-        .collect()
+    let mut used_radio_udp = HashSet::new();
+    let mut mappings = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let radio_udp = match stream.radio_udp {
+            Some(radio_udp) => radio_udp,
+            None => reserve_loopback_udp_addr_excluding(&used_radio_udp)?,
+        };
+        used_radio_udp.insert(radio_udp);
+        mappings.push(ManagedWfbStreamMapping {
+            direction: stream.direction,
+            link_id: stream.link_id,
+            radio_port: stream.radio_port,
+            app_udp: stream.app_udp,
+            radio_udp,
+        });
+    }
+    Ok(mappings)
 }
 
 fn managed_radio_endpoints(
@@ -1290,17 +1298,53 @@ fn apply_managed_wfb_streams_to_radio(
 }
 
 fn reserve_loopback_udp_addr() -> Result<SocketAddr> {
-    let socket =
-        UdpSocket::bind("127.0.0.1:0").map_err(|source| LinkError::InvalidBackendConfig {
-            code: "managed_wfb_udp_reservation_failed",
-            message: format!("failed to reserve loopback UDP port: {source}"),
-        })?;
-    socket
-        .local_addr()
-        .map_err(|source| LinkError::InvalidBackendConfig {
-            code: "managed_wfb_udp_reservation_failed",
-            message: format!("failed to read reserved loopback UDP port: {source}"),
-        })
+    for _ in 0..MANAGED_UDP_PORT_SPAN {
+        let offset = (NEXT_MANAGED_UDP_PORT.fetch_add(1, Ordering::Relaxed)
+            % MANAGED_UDP_PORT_SPAN as u64) as u16;
+        let addr = SocketAddr::from(([127, 0, 0, 1], MANAGED_UDP_PORT_BASE + offset));
+        match UdpSocket::bind(addr) {
+            Ok(socket) => {
+                return socket
+                    .local_addr()
+                    .map_err(|source| LinkError::InvalidBackendConfig {
+                        code: "managed_wfb_udp_reservation_failed",
+                        message: format!("failed to read reserved loopback UDP port: {source}"),
+                    });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(source) => {
+                return Err(LinkError::InvalidBackendConfig {
+                    code: "managed_wfb_udp_reservation_failed",
+                    message: format!("failed to reserve loopback UDP port {addr}: {source}"),
+                });
+            }
+        }
+    }
+    Err(LinkError::InvalidBackendConfig {
+        code: "managed_wfb_udp_reservation_failed",
+        message: format!(
+            "failed to reserve a loopback UDP port in {}..{}",
+            MANAGED_UDP_PORT_BASE,
+            MANAGED_UDP_PORT_BASE + MANAGED_UDP_PORT_SPAN - 1
+        ),
+    })
+}
+
+fn reserve_loopback_udp_addr_excluding(used: &HashSet<SocketAddr>) -> Result<SocketAddr> {
+    for _ in 0..MANAGED_UDP_PORT_SPAN {
+        let addr = reserve_loopback_udp_addr()?;
+        if !used.contains(&addr) {
+            return Ok(addr);
+        }
+    }
+    Err(LinkError::InvalidBackendConfig {
+        code: "managed_wfb_udp_reservation_failed",
+        message: format!(
+            "failed to reserve a unique loopback UDP port in {}..{}",
+            MANAGED_UDP_PORT_BASE,
+            MANAGED_UDP_PORT_BASE + MANAGED_UDP_PORT_SPAN - 1
+        ),
+    })
 }
 
 fn apply_best_effort_tx_bind_preflight(
@@ -3134,6 +3178,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn managed_wfb_streams_generated_radio_ports_are_unique() {
+        let streams = vec![
+            ManagedWfbStreamConfig::rx("video-down", 4, "127.0.0.1:5804".parse().unwrap()),
+            ManagedWfbStreamConfig::rx("telemetry-down", 5, "127.0.0.1:5805".parse().unwrap()),
+            ManagedWfbStreamConfig::tx("control-up", 6, "127.0.0.1:5606".parse().unwrap()),
+        ];
+
+        let mappings = managed_wfb_stream_mappings(&streams).expect("mappings");
+        let unique = mappings
+            .iter()
+            .map(|mapping| mapping.radio_udp)
+            .collect::<HashSet<_>>();
+
+        assert_eq!(unique.len(), mappings.len());
     }
 
     #[test]

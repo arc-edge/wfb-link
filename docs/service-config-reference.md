@@ -275,3 +275,8 @@ WFB_KEY=/path/to/gs.key \
 LINUX_HOST=pi@drone-2f389.local \
 scripts/run-wfb-link-managed-streams-smoke.sh
 ```
+
+The managed-stream gate defaults to a conservative MCS0, `2/16` FEC profile
+with warmup payloads and post-session decrypt gating. Treat it as an adoption
+health check for raw application streams; set explicit stream profiles when
+measuring video throughput or long-range behavior.

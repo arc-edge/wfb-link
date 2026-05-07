@@ -133,7 +133,9 @@ scripts/run-wfb-link-managed-streams-smoke.sh
 That gate verifies raw UDP recovery on three managed streams: Linux-to-Mac
 video, Linux-to-Mac telemetry, and Mac-to-Linux control. It writes a
 `summary.json` with per-stream payload counters, WFB helper logs, and the final
-`ManagedWfbStreamsBackend` report.
+`ManagedWfbStreamsBackend` report. The default smoke profile is intentionally
+conservative for product-adoption checks; use explicit MCS, FEC, interval, and
+payload-count overrides for throughput or range profiling.
 
 Run the product-facing radio API smoke on a prepared Mac with an attached
 AWUS036ACH:

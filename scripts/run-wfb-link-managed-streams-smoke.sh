@@ -19,7 +19,9 @@ Common overrides:
   LINUX_WFB_KEY=/var/lib/arc/wfb/drone.key
   IFACE=wfb0 CHANNEL=36 LINK_ID=0x000001
   VIDEO_EXPECTED_PAYLOADS=80 TELEMETRY_EXPECTED_PAYLOADS=40 CONTROL_EXPECTED_PAYLOADS=40
-  VIDEO_MCS=2 VIDEO_FEC_K=4 VIDEO_FEC_N=8 VIDEO_INTERVAL_SEC=0.005
+  SOURCE_WARMUP_PAYLOADS=20
+  VIDEO_MCS=0 VIDEO_FEC_K=2 VIDEO_FEC_N=16 VIDEO_INTERVAL_SEC=0.040
+  TELEMETRY_MCS=0 TELEMETRY_FEC_K=2 TELEMETRY_FEC_N=16 TELEMETRY_INTERVAL_SEC=0.080
   CONTROL_MCS=0 CONTROL_FEC_K=2 CONTROL_FEC_N=16 CONTROL_INTERVAL_SEC=0.080
   OUT_DIR=/tmp/wfb-link-managed-streams-smoke
 
@@ -103,6 +105,7 @@ COUNTER_SECONDS=${COUNTER_SECONDS:-25}
 COUNTER_SETTLE_SECONDS=${COUNTER_SETTLE_SECONDS:-2}
 HELPER_SETTLE_SECONDS=${HELPER_SETTLE_SECONDS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
+SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-20}
 
 VIDEO_RADIO_PORT=${VIDEO_RADIO_PORT:-4}
 TELEMETRY_RADIO_PORT=${TELEMETRY_RADIO_PORT:-5}
@@ -129,17 +132,20 @@ CONTROL_MIN_UNIQUE=${CONTROL_MIN_UNIQUE:-$CONTROL_EXPECTED_PAYLOADS}
 VIDEO_MARKER=${VIDEO_MARKER:-MSVID001}
 TELEMETRY_MARKER=${TELEMETRY_MARKER:-MSTEL001}
 CONTROL_MARKER=${CONTROL_MARKER:-MSCTL001}
+VIDEO_WARMUP_MARKER=${VIDEO_WARMUP_MARKER:-MSVIDWRM}
+TELEMETRY_WARMUP_MARKER=${TELEMETRY_WARMUP_MARKER:-MSTELWRM}
+CONTROL_WARMUP_MARKER=${CONTROL_WARMUP_MARKER:-MSCTLWRM}
 
-VIDEO_INTERVAL_SEC=${VIDEO_INTERVAL_SEC:-0.005}
-TELEMETRY_INTERVAL_SEC=${TELEMETRY_INTERVAL_SEC:-0.020}
+VIDEO_INTERVAL_SEC=${VIDEO_INTERVAL_SEC:-0.040}
+TELEMETRY_INTERVAL_SEC=${TELEMETRY_INTERVAL_SEC:-0.080}
 CONTROL_INTERVAL_SEC=${CONTROL_INTERVAL_SEC:-0.080}
 
-VIDEO_MCS=${VIDEO_MCS:-2}
-VIDEO_FEC_K=${VIDEO_FEC_K:-4}
-VIDEO_FEC_N=${VIDEO_FEC_N:-8}
-TELEMETRY_MCS=${TELEMETRY_MCS:-1}
-TELEMETRY_FEC_K=${TELEMETRY_FEC_K:-3}
-TELEMETRY_FEC_N=${TELEMETRY_FEC_N:-12}
+VIDEO_MCS=${VIDEO_MCS:-0}
+VIDEO_FEC_K=${VIDEO_FEC_K:-2}
+VIDEO_FEC_N=${VIDEO_FEC_N:-16}
+TELEMETRY_MCS=${TELEMETRY_MCS:-0}
+TELEMETRY_FEC_K=${TELEMETRY_FEC_K:-2}
+TELEMETRY_FEC_N=${TELEMETRY_FEC_N:-16}
 CONTROL_MCS=${CONTROL_MCS:-0}
 CONTROL_FEC_K=${CONTROL_FEC_K:-2}
 CONTROL_FEC_N=${CONTROL_FEC_N:-16}
@@ -292,24 +298,29 @@ from pathlib import Path
 host = sys.argv[1]
 port = int(sys.argv[2])
 marker = sys.argv[3].encode("ascii")
-expected = int(sys.argv[4])
-payload_len = int(sys.argv[5])
-interval = float(sys.argv[6])
-out = Path(sys.argv[7])
+warmup_marker = sys.argv[4].encode("ascii")
+expected = int(sys.argv[5])
+warmup = int(sys.argv[6])
+payload_len = int(sys.argv[7])
+interval = float(sys.argv[8])
+out = Path(sys.argv[9])
 
-if len(marker) + 4 > payload_len:
+if len(marker) + 4 > payload_len or len(warmup_marker) + 4 > payload_len:
     raise SystemExit("marker plus sequence does not fit payload_len")
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 target = (host, port)
 started = time.time()
 
-def payload(seq):
-    fill_len = payload_len - len(marker) - 4
-    return marker + seq.to_bytes(4, "big") + bytes([(seq + i) % 251 for i in range(fill_len)])
+def payload(prefix, seq):
+    fill_len = payload_len - len(prefix) - 4
+    return prefix + seq.to_bytes(4, "big") + bytes([(seq + i) % 251 for i in range(fill_len)])
 
+for seq in range(warmup):
+    sock.sendto(payload(warmup_marker, seq), target)
+    time.sleep(interval)
 for seq in range(expected):
-    sock.sendto(payload(seq), target)
+    sock.sendto(payload(marker, seq), target)
     time.sleep(interval)
 
 out.write_text(json.dumps({
@@ -318,6 +329,8 @@ out.write_text(json.dumps({
     "interval_s": interval,
     "marker": marker.decode("ascii"),
     "payload_len": payload_len,
+    "warmup": warmup,
+    "warmup_marker": warmup_marker.decode("ascii"),
     "target": f"{host}:{port}",
 }, indent=2, sort_keys=True) + "\n")
 PY
@@ -426,16 +439,16 @@ wait_for_managed_ready() {
 
 start_sources() {
   log "starting marked payload sources"
-  python3 "$OUT_DIR/udp-source.py" "$CONTROL_APP_HOST" "$CONTROL_APP_PORT" "$CONTROL_MARKER" "$CONTROL_EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$CONTROL_INTERVAL_SEC" "$OUT_DIR/control-up-source.json" >"$OUT_DIR/control-up-source.log" 2>&1 &
+  python3 "$OUT_DIR/udp-source.py" "$CONTROL_APP_HOST" "$CONTROL_APP_PORT" "$CONTROL_MARKER" "$CONTROL_WARMUP_MARKER" "$CONTROL_EXPECTED_PAYLOADS" "$SOURCE_WARMUP_PAYLOADS" "$PAYLOAD_LEN" "$CONTROL_INTERVAL_SEC" "$OUT_DIR/control-up-source.json" >"$OUT_DIR/control-up-source.log" 2>&1 &
   local_pids+=("$!")
 
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX=$(quote "$REMOTE_PREFIX") VIDEO_SOURCE_PORT=$(quote "$VIDEO_SOURCE_PORT") TELEMETRY_SOURCE_PORT=$(quote "$TELEMETRY_SOURCE_PORT") VIDEO_MARKER=$(quote "$VIDEO_MARKER") TELEMETRY_MARKER=$(quote "$TELEMETRY_MARKER") VIDEO_EXPECTED_PAYLOADS=$(quote "$VIDEO_EXPECTED_PAYLOADS") TELEMETRY_EXPECTED_PAYLOADS=$(quote "$TELEMETRY_EXPECTED_PAYLOADS") PAYLOAD_LEN=$(quote "$PAYLOAD_LEN") VIDEO_INTERVAL_SEC=$(quote "$VIDEO_INTERVAL_SEC") TELEMETRY_INTERVAL_SEC=$(quote "$TELEMETRY_INTERVAL_SEC") bash -s" <<'REMOTE_SOURCES' &
+    "REMOTE_PREFIX=$(quote "$REMOTE_PREFIX") VIDEO_SOURCE_PORT=$(quote "$VIDEO_SOURCE_PORT") TELEMETRY_SOURCE_PORT=$(quote "$TELEMETRY_SOURCE_PORT") VIDEO_MARKER=$(quote "$VIDEO_MARKER") TELEMETRY_MARKER=$(quote "$TELEMETRY_MARKER") VIDEO_WARMUP_MARKER=$(quote "$VIDEO_WARMUP_MARKER") TELEMETRY_WARMUP_MARKER=$(quote "$TELEMETRY_WARMUP_MARKER") VIDEO_EXPECTED_PAYLOADS=$(quote "$VIDEO_EXPECTED_PAYLOADS") TELEMETRY_EXPECTED_PAYLOADS=$(quote "$TELEMETRY_EXPECTED_PAYLOADS") SOURCE_WARMUP_PAYLOADS=$(quote "$SOURCE_WARMUP_PAYLOADS") PAYLOAD_LEN=$(quote "$PAYLOAD_LEN") VIDEO_INTERVAL_SEC=$(quote "$VIDEO_INTERVAL_SEC") TELEMETRY_INTERVAL_SEC=$(quote "$TELEMETRY_INTERVAL_SEC") bash -s" <<'REMOTE_SOURCES' &
 set -euo pipefail
 prefix=$REMOTE_PREFIX
-python3 "$prefix/udp-source.py" 127.0.0.1 "$VIDEO_SOURCE_PORT" "$VIDEO_MARKER" "$VIDEO_EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$VIDEO_INTERVAL_SEC" "$prefix/video-down-source.json" > "$prefix/video-down-source.log" 2>&1 &
+python3 "$prefix/udp-source.py" 127.0.0.1 "$VIDEO_SOURCE_PORT" "$VIDEO_MARKER" "$VIDEO_WARMUP_MARKER" "$VIDEO_EXPECTED_PAYLOADS" "$SOURCE_WARMUP_PAYLOADS" "$PAYLOAD_LEN" "$VIDEO_INTERVAL_SEC" "$prefix/video-down-source.json" > "$prefix/video-down-source.log" 2>&1 &
 video_pid=$!
-python3 "$prefix/udp-source.py" 127.0.0.1 "$TELEMETRY_SOURCE_PORT" "$TELEMETRY_MARKER" "$TELEMETRY_EXPECTED_PAYLOADS" "$PAYLOAD_LEN" "$TELEMETRY_INTERVAL_SEC" "$prefix/telemetry-down-source.json" > "$prefix/telemetry-down-source.log" 2>&1 &
+python3 "$prefix/udp-source.py" 127.0.0.1 "$TELEMETRY_SOURCE_PORT" "$TELEMETRY_MARKER" "$TELEMETRY_WARMUP_MARKER" "$TELEMETRY_EXPECTED_PAYLOADS" "$SOURCE_WARMUP_PAYLOADS" "$PAYLOAD_LEN" "$TELEMETRY_INTERVAL_SEC" "$prefix/telemetry-down-source.json" > "$prefix/telemetry-down-source.log" 2>&1 &
 telemetry_pid=$!
 wait "$video_pid"
 wait "$telemetry_pid"
@@ -533,14 +546,22 @@ def parse_json_stream(path):
         objects.append(value)
     return objects, failures
 
-def count_decrypt(*paths):
+def decrypt_counts(*paths):
     total = 0
+    post_session = 0
+    saw_session = False
     for path in paths:
         try:
-            total += sum(1 for line in path.read_text(errors="replace").splitlines() if "Unable to decrypt" in line)
+            for line in path.read_text(errors="replace").splitlines():
+                if "\tSESSION\t" in line or line.startswith("SESSION"):
+                    saw_session = True
+                if "Unable to decrypt" in line:
+                    total += 1
+                    if saw_session:
+                        post_session += 1
         except Exception:
             pass
-    return total
+    return {"total": total, "post_session": post_session, "saw_session": saw_session}
 
 def unique(counter):
     try:
@@ -572,15 +593,15 @@ video_source = load(out / "peer" / "video-down-source.json")
 telemetry_source = load(out / "peer" / "telemetry-down-source.json")
 control_source = load(out / "control-up-source.json")
 
-video_decrypt = count_decrypt(
+video_decrypt = decrypt_counts(
     out / "wfb-rx-video-down.stderr.log",
     out / "wfb-rx-video-down.stdout.log",
 )
-telemetry_decrypt = count_decrypt(
+telemetry_decrypt = decrypt_counts(
     out / "wfb-rx-telemetry-down.stderr.log",
     out / "wfb-rx-telemetry-down.stdout.log",
 )
-control_decrypt = count_decrypt(out / "peer" / "control-up-wfb-rx.log")
+control_decrypt = decrypt_counts(out / "peer" / "control-up-wfb-rx.log")
 
 failures = list(parse_failures)
 if len(objects) != 3:
@@ -606,9 +627,9 @@ for name, counter, minimum in checks:
         failures.append(f"{name}_unique_sequences={unique(counter)}<{minimum}")
 
 decrypt_checks = [
-    ("video_down", video_decrypt, int(os.environ["MAX_VIDEO_DECRYPT_FAILURES"])),
-    ("telemetry_down", telemetry_decrypt, int(os.environ["MAX_TELEMETRY_DECRYPT_FAILURES"])),
-    ("control_up", control_decrypt, int(os.environ["MAX_CONTROL_DECRYPT_FAILURES"])),
+    ("video_down", video_decrypt["post_session"], int(os.environ["MAX_VIDEO_DECRYPT_FAILURES"])),
+    ("telemetry_down", telemetry_decrypt["post_session"], int(os.environ["MAX_TELEMETRY_DECRYPT_FAILURES"])),
+    ("control_up", control_decrypt["post_session"], int(os.environ["MAX_CONTROL_DECRYPT_FAILURES"])),
 ]
 for name, observed, maximum in decrypt_checks:
     if observed > maximum:
