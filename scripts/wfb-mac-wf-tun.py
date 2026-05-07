@@ -7,12 +7,13 @@ import ipaddress
 import json
 import os
 import selectors
+import signal
 import socket
 import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Iterable
 
 
@@ -21,6 +22,7 @@ UTUN_OPT_IFNAME = 2
 UTUN_CONTROL_NAME = b"com.apple.net.utun_control"
 DEFAULT_RADIO_MTU = 1445
 DEFAULT_TUN_MTU = DEFAULT_RADIO_MTU - 2
+SUMMARY_SCHEMA = "wfb_mac_wf_tun_summary/v1"
 
 
 @dataclass
@@ -143,6 +145,11 @@ def netmask(prefix_len: int) -> str:
     return str(ipaddress.IPv4Network(f"0.0.0.0/{prefix_len}").netmask)
 
 
+def log(event: str, **fields: object) -> None:
+    record = {"ts": time.time(), "event": event, **fields}
+    print(json.dumps(record, sort_keys=True), file=sys.stderr, flush=True)
+
+
 def configure_interface(ifname: str, local_ip: str, peer_ip: str, prefix_len: int, mtu: int) -> None:
     subprocess.run(
         [
@@ -159,12 +166,126 @@ def configure_interface(ifname: str, local_ip: str, peer_ip: str, prefix_len: in
         ],
         check=True,
     )
-    subprocess.run(["/sbin/route", "-n", "add", "-host", peer_ip, "-interface", ifname], check=False)
+    log("ifconfig_configured", ifname=ifname, local_ip=local_ip, peer_ip=peer_ip, prefix_len=prefix_len, mtu=mtu)
+
+    def current_route_interface() -> str | None:
+        route_get = subprocess.run(
+            ["/sbin/route", "-n", "get", peer_ip],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if route_get.returncode != 0:
+            return None
+        for line in route_get.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("interface:"):
+                return line.split(":", 1)[1].strip()
+        return None
+
+    def change_host_route() -> None:
+        changed = subprocess.run(
+            ["/sbin/route", "-n", "change", "-host", peer_ip, "-interface", ifname],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if changed.returncode == 0:
+            log(
+                "route_changed",
+                ifname=ifname,
+                peer_ip=peer_ip,
+                stdout=changed.stdout.strip(),
+                stderr=changed.stderr.strip(),
+            )
+            return
+        log(
+            "route_change_failed",
+            ifname=ifname,
+            peer_ip=peer_ip,
+            returncode=changed.returncode,
+            stdout=changed.stdout.strip(),
+            stderr=changed.stderr.strip(),
+        )
+        changed.check_returncode()
+
+    route = subprocess.run(
+        ["/sbin/route", "-n", "add", "-host", peer_ip, "-interface", ifname],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    stdout = route.stdout.strip()
+    stderr = route.stderr.strip()
+    if "File exists" in f"{stdout}\n{stderr}":
+        current_ifname = current_route_interface()
+        if current_ifname == ifname:
+            log("route_exists", ifname=ifname, peer_ip=peer_ip, stdout=stdout, stderr=stderr)
+        else:
+            log(
+                "route_exists_stale",
+                ifname=ifname,
+                current_ifname=current_ifname,
+                peer_ip=peer_ip,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            change_host_route()
+    elif route.returncode == 0:
+        log("route_added", ifname=ifname, peer_ip=peer_ip, stdout=stdout, stderr=stderr)
+    else:
+        log(
+            "route_add_failed",
+            ifname=ifname,
+            peer_ip=peer_ip,
+            returncode=route.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        route.check_returncode()
 
 
-def log(event: str, **fields: object) -> None:
-    record = {"ts": time.time(), "event": event, **fields}
-    print(json.dumps(record, sort_keys=True), file=sys.stderr, flush=True)
+def write_summary(
+    path: str | None,
+    args: argparse.Namespace,
+    ifname: str | None,
+    counters: Counters,
+    started_wall: float,
+    started_mono: float,
+    result: str,
+    stop_reason: str,
+    error: str | None,
+) -> None:
+    if not path:
+        return
+    duration_s = max(0.0, time.monotonic() - started_mono)
+    summary = {
+        "schema": SUMMARY_SCHEMA,
+        "result": result,
+        "stop_reason": stop_reason,
+        "error": error,
+        "started_at_unix": started_wall,
+        "ended_at_unix": time.time(),
+        "duration_s": duration_s,
+        "ifname": ifname,
+        "local_ip": args.local_ip,
+        "peer_ip": args.peer_ip,
+        "prefix_len": args.prefix_len,
+        "tun_mtu": args.tun_mtu,
+        "radio_mtu": args.radio_mtu,
+        "agg_timeout_ms": args.agg_timeout_ms,
+        "keepalive_interval_s": args.keepalive_interval_s,
+        "stats_interval_s": args.stats_interval_s,
+        "tx_peer": f"{args.tx_peer[0]}:{args.tx_peer[1]}",
+        "rx_bind": f"{args.rx_bind[0]}:{args.rx_bind[1]}",
+        "counters": asdict(counters),
+    }
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp_path, path)
+    log("summary_written", path=path, result=result, stop_reason=stop_reason)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -172,88 +293,152 @@ def run(args: argparse.Namespace) -> int:
         raise SystemExit("wfb-mac-wf-tun.py currently supports macOS utun only")
 
     counters = Counters()
-    tun, ifname = open_utun(args.utun_unit)
-    if args.configure:
-        configure_interface(ifname, args.local_ip, args.peer_ip, args.prefix_len, args.tun_mtu)
+    started_wall = time.time()
+    started_mono = time.monotonic()
+    ifname: str | None = None
+    tun: socket.socket | None = None
+    tx_sock: socket.socket | None = None
+    rx_sock: socket.socket | None = None
+    selector: selectors.BaseSelector | None = None
+    result = "error"
+    stop_reason = "startup"
+    error: str | None = None
+    stop_requested = False
 
-    tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx_sock.bind(args.rx_bind)
-    rx_sock.setblocking(False)
+    previous_handlers: dict[int, object] = {}
 
-    selector = selectors.DefaultSelector()
-    selector.register(tun, selectors.EVENT_READ, "tun")
-    selector.register(rx_sock, selectors.EVENT_READ, "udp")
+    def request_stop(signum: int, _frame: object) -> None:
+        nonlocal stop_requested, stop_reason
+        stop_requested = True
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = str(signum)
+        stop_reason = f"signal:{signal_name}"
+        log("signal_received", signal=signal_name)
 
-    aggregator = Aggregator(args.radio_mtu, args.agg_timeout_ms / 1000.0)
-    next_keepalive = time.monotonic() + args.keepalive_interval_s
-    next_stats = time.monotonic() + args.stats_interval_s if args.stats_interval_s > 0 else None
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, request_stop)
 
-    log(
-        "started",
-        ifname=ifname,
-        local_ip=args.local_ip,
-        peer_ip=args.peer_ip,
-        tun_mtu=args.tun_mtu,
-        radio_mtu=args.radio_mtu,
-        tx_peer=f"{args.tx_peer[0]}:{args.tx_peer[1]}",
-        rx_bind=f"{args.rx_bind[0]}:{args.rx_bind[1]}",
-    )
+    try:
+        tun, ifname = open_utun(args.utun_unit)
+        if args.configure:
+            configure_interface(ifname, args.local_ip, args.peer_ip, args.prefix_len, args.tun_mtu)
 
-    while True:
-        now = time.monotonic()
-        deadlines = [next_keepalive]
-        if aggregator.deadline is not None:
-            deadlines.append(aggregator.deadline)
-        if next_stats is not None:
-            deadlines.append(next_stats)
-        timeout = max(0.0, min(deadlines) - now)
+        tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx_sock.bind(args.rx_bind)
+        rx_sock.setblocking(False)
 
-        for key, _ in selector.select(timeout):
-            if key.data == "tun":
-                try:
-                    packet = strip_utun_header(tun.recv(args.tun_mtu + 4))
-                    counters.tun_packets_in += 1
-                    counters.tun_bytes_in += len(packet)
-                    for message in aggregator.add(packet, time.monotonic()):
-                        tx_sock.sendto(message, args.tx_peer)
-                        counters.tunnel_datagrams_out += 1
-                        counters.tunnel_bytes_out += len(message)
-                except BlockingIOError:
-                    pass
-                except Exception as exc:
-                    counters.dropped_packets += 1
-                    log("tun_packet_drop", error=str(exc))
-            elif key.data == "udp":
-                try:
-                    message, _addr = rx_sock.recvfrom(args.radio_mtu + 256)
-                    counters.tunnel_datagrams_in += 1
-                    counters.tunnel_bytes_in += len(message)
-                    for packet in parse_tunnel_message(message, counters):
-                        tun.send(utun_af_header(packet) + packet)
-                        counters.tun_packets_out += 1
-                        counters.tun_bytes_out += len(packet)
-                except BlockingIOError:
-                    pass
-                except Exception as exc:
-                    counters.dropped_packets += 1
-                    log("udp_packet_drop", error=str(exc))
+        selector = selectors.DefaultSelector()
+        selector.register(tun, selectors.EVENT_READ, "tun")
+        selector.register(rx_sock, selectors.EVENT_READ, "udp")
 
-        now = time.monotonic()
-        due = aggregator.flush_due(now)
-        if due:
-            tx_sock.sendto(due, args.tx_peer)
+        aggregator = Aggregator(args.radio_mtu, args.agg_timeout_ms / 1000.0)
+        next_keepalive = time.monotonic() + args.keepalive_interval_s
+        next_stats = time.monotonic() + args.stats_interval_s if args.stats_interval_s > 0 else None
+
+        log(
+            "started",
+            ifname=ifname,
+            local_ip=args.local_ip,
+            peer_ip=args.peer_ip,
+            tun_mtu=args.tun_mtu,
+            radio_mtu=args.radio_mtu,
+            tx_peer=f"{args.tx_peer[0]}:{args.tx_peer[1]}",
+            rx_bind=f"{args.rx_bind[0]}:{args.rx_bind[1]}",
+        )
+
+        while not stop_requested:
+            now = time.monotonic()
+            deadlines = [next_keepalive]
+            if aggregator.deadline is not None:
+                deadlines.append(aggregator.deadline)
+            if next_stats is not None:
+                deadlines.append(next_stats)
+            timeout = max(0.0, min(deadlines) - now)
+
+            for key, _ in selector.select(timeout):
+                if key.data == "tun":
+                    try:
+                        packet = strip_utun_header(tun.recv(args.tun_mtu + 4))
+                        counters.tun_packets_in += 1
+                        counters.tun_bytes_in += len(packet)
+                        for message in aggregator.add(packet, time.monotonic()):
+                            tx_sock.sendto(message, args.tx_peer)
+                            counters.tunnel_datagrams_out += 1
+                            counters.tunnel_bytes_out += len(message)
+                    except BlockingIOError:
+                        pass
+                    except Exception as exc:
+                        counters.dropped_packets += 1
+                        log("tun_packet_drop", error=str(exc))
+                elif key.data == "udp":
+                    try:
+                        message, _addr = rx_sock.recvfrom(args.radio_mtu + 256)
+                        counters.tunnel_datagrams_in += 1
+                        counters.tunnel_bytes_in += len(message)
+                        for packet in parse_tunnel_message(message, counters):
+                            tun.send(utun_af_header(packet) + packet)
+                            counters.tun_packets_out += 1
+                            counters.tun_bytes_out += len(packet)
+                    except BlockingIOError:
+                        pass
+                    except Exception as exc:
+                        counters.dropped_packets += 1
+                        log("udp_packet_drop", error=str(exc))
+
+            now = time.monotonic()
+            due = aggregator.flush_due(now)
+            if due:
+                tx_sock.sendto(due, args.tx_peer)
+                counters.tunnel_datagrams_out += 1
+                counters.tunnel_bytes_out += len(due)
+
+            if now >= next_keepalive:
+                tx_sock.sendto(b"", args.tx_peer)
+                counters.keepalives_out += 1
+                next_keepalive = now + args.keepalive_interval_s
+
+            if next_stats is not None and now >= next_stats:
+                log("stats", **counters.__dict__)
+                next_stats = now + args.stats_interval_s
+
+        pending = aggregator.flush()
+        if pending:
+            tx_sock.sendto(pending, args.tx_peer)
             counters.tunnel_datagrams_out += 1
-            counters.tunnel_bytes_out += len(due)
+            counters.tunnel_bytes_out += len(pending)
 
-        if now >= next_keepalive:
-            tx_sock.sendto(b"", args.tx_peer)
-            counters.keepalives_out += 1
-            next_keepalive = now + args.keepalive_interval_s
-
-        if next_stats is not None and now >= next_stats:
-            log("stats", **counters.__dict__)
-            next_stats = now + args.stats_interval_s
+        result = "pass"
+        if stop_reason == "startup":
+            stop_reason = "requested"
+        log("stopped", result=result, stop_reason=stop_reason, **counters.__dict__)
+        return 0
+    except Exception as exc:
+        error = str(exc)
+        log("fatal", error=error, **counters.__dict__)
+        raise
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+        if selector is not None:
+            selector.close()
+        for sock in (rx_sock, tx_sock, tun):
+            if sock is not None:
+                sock.close()
+        write_summary(
+            args.summary_file,
+            args,
+            ifname,
+            counters,
+            started_wall,
+            started_mono,
+            result,
+            stop_reason,
+            error,
+        )
 
 
 def self_test() -> int:
@@ -296,6 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agg-timeout-ms", type=float, default=5.0)
     parser.add_argument("--keepalive-interval-s", type=float, default=0.5)
     parser.add_argument("--stats-interval-s", type=float, default=5.0)
+    parser.add_argument("--summary-file", help="Write a final JSON summary on clean stop, signal, or fatal error")
     parser.add_argument("--no-configure", dest="configure", action="store_false")
     parser.set_defaults(configure=True)
     return parser
