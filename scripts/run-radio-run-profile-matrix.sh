@@ -30,6 +30,7 @@ Common configuration:
 
 Set PROFILE_FILE to a pipe-delimited profile list:
   name|description|m2l_k|m2l_n|l2m_k|l2m_n|m2l_mcs|l2m_mcs|interval_sec|m2l_min_pct|l2m_min_pct
+  name|description|m2l_k|m2l_n|l2m_k|l2m_n|m2l_mcs|l2m_mcs|interval_sec|m2l_min_pct|l2m_min_pct|m2l_interval_sec|l2m_interval_sec|m2l_expected_payloads|l2m_expected_payloads
 EOF
 }
 
@@ -331,7 +332,9 @@ keys = [
     "channel", "bandwidth_mhz", "tx_power_mode", "tx_calibration_profile",
     "enable_m2l", "enable_l2m",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
-    "l2m_mcs", "payload_interval_sec", "expected_payloads",
+    "l2m_mcs", "payload_interval_sec", "m2l_payload_interval_sec",
+    "l2m_payload_interval_sec", "expected_payloads",
+    "m2l_expected_payloads", "l2m_expected_payloads",
     "duplex_traffic_mode", "tdd_first_direction", "tdd_guard_sec",
     "source_warmup_payloads", "source_tail_payloads", "session_acquire_mode",
     "session_acquire_timeout_seconds", "session_acquire_poll_seconds",
@@ -343,6 +346,7 @@ data = {key: os.environ.get(key.upper(), os.environ.get(key)) for key in keys}
 for key in [
     "repeat_index", "channel", "bandwidth_mhz", "m2l_fec_k", "m2l_fec_n",
     "l2m_fec_k", "l2m_fec_n", "m2l_mcs", "l2m_mcs", "expected_payloads",
+    "m2l_expected_payloads", "l2m_expected_payloads",
     "source_warmup_payloads", "payload_len", "m2l_min_unique",
     "l2m_min_unique", "counter_seconds", "peer_wait_seconds",
     "radio_run_duration_ms",
@@ -350,8 +354,9 @@ for key in [
 ]:
     if data.get(key) is not None:
         data[key] = int(data[key])
-if data.get("payload_interval_sec") is not None:
-    data["payload_interval_sec"] = float(data["payload_interval_sec"])
+for key in ["payload_interval_sec", "m2l_payload_interval_sec", "l2m_payload_interval_sec"]:
+    if data.get(key) is not None:
+        data[key] = float(data[key])
 if data.get("tdd_guard_sec") is not None:
     data["tdd_guard_sec"] = float(data["tdd_guard_sec"])
 if data.get("session_acquire_poll_seconds") is not None:
@@ -380,14 +385,22 @@ run_one_profile() {
   local m2l_min_pct=$1
   local l2m_min_pct=$2
   local repeat_index=$3
+  local m2l_payload_interval_sec=${4:-$payload_interval_sec}
+  local l2m_payload_interval_sec=${5:-$payload_interval_sec}
+  local m2l_expected_payloads=${6:-$EXPECTED_PAYLOADS}
+  local l2m_expected_payloads=${7:-$EXPECTED_PAYLOADS}
+  [[ -n "$m2l_payload_interval_sec" ]] || m2l_payload_interval_sec=$payload_interval_sec
+  [[ -n "$l2m_payload_interval_sec" ]] || l2m_payload_interval_sec=$payload_interval_sec
+  [[ -n "$m2l_expected_payloads" ]] || m2l_expected_payloads=$EXPECTED_PAYLOADS
+  [[ -n "$l2m_expected_payloads" ]] || l2m_expected_payloads=$EXPECTED_PAYLOADS
 
   local run_name="${profile_name}-r${repeat_index}"
   local local_run_dir="$MATRIX_OUT_DIR/runs/$run_name"
   local remote_run_dir="$REMOTE_MATRIX_OUT_DIR/runs/$run_name"
   local m2l_min_unique
   local l2m_min_unique
-  m2l_min_unique=$(ceil_percent "$EXPECTED_PAYLOADS" "$m2l_min_pct")
-  l2m_min_unique=$(ceil_percent "$EXPECTED_PAYLOADS" "$l2m_min_pct")
+  m2l_min_unique=$(ceil_percent "$m2l_expected_payloads" "$m2l_min_pct")
+  l2m_min_unique=$(ceil_percent "$l2m_expected_payloads" "$l2m_min_pct")
   mkdir -p "$local_run_dir"
 
   PROFILE_NAME=$profile_name
@@ -402,18 +415,22 @@ run_one_profile() {
   M2L_MCS=$m2l_mcs
   L2M_MCS=$l2m_mcs
   PAYLOAD_INTERVAL_SEC=$payload_interval_sec
+  M2L_PAYLOAD_INTERVAL_SEC=$m2l_payload_interval_sec
+  L2M_PAYLOAD_INTERVAL_SEC=$l2m_payload_interval_sec
+  M2L_EXPECTED_PAYLOADS=$m2l_expected_payloads
+  L2M_EXPECTED_PAYLOADS=$l2m_expected_payloads
   M2L_MIN_UNIQUE=$m2l_min_unique
   L2M_MIN_UNIQUE=$l2m_min_unique
   export PROFILE_NAME PROFILE_DESCRIPTION REPEAT_INDEX OUT_DIR REMOTE_OUT_DIR
   export LOCAL_HW HW_MAC_HOST LINUX_HOST LINUX_LAN_IP MAC_LAN_IP CHANNEL BANDWIDTH_MHZ
   export TX_POWER_MODE TX_CALIBRATION_PROFILE ENABLE_M2L ENABLE_L2M M2L_FEC_K
-  export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS
+  export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
   export DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS
   export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
-  log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs} interval=${payload_interval_sec}s"
+  log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs}/${m2l_payload_interval_sec}s/${m2l_expected_payloads} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs}/${l2m_payload_interval_sec}s/${l2m_expected_payloads}"
 
   if (( DRY_RUN == 1 )); then
     write_run_status "$local_run_dir/matrix-run-status.json" 0
@@ -442,6 +459,8 @@ run_one_profile() {
       M2L_MCS="$M2L_MCS" \
       L2M_MCS="$L2M_MCS" \
       EXPECTED_PAYLOADS="$EXPECTED_PAYLOADS" \
+      M2L_EXPECTED_PAYLOADS="$M2L_EXPECTED_PAYLOADS" \
+      L2M_EXPECTED_PAYLOADS="$L2M_EXPECTED_PAYLOADS" \
       ENABLE_M2L="$ENABLE_M2L" \
       ENABLE_L2M="$ENABLE_L2M" \
       SOURCE_WARMUP_PAYLOADS="$SOURCE_WARMUP_PAYLOADS" \
@@ -460,6 +479,8 @@ run_one_profile() {
       AIRTIME_TDD_GUARD_MS="$AIRTIME_TDD_GUARD_MS" \
       AIRTIME_TDD_START_DELAY_MS="$AIRTIME_TDD_START_DELAY_MS" \
       PAYLOAD_INTERVAL_SEC="$PAYLOAD_INTERVAL_SEC" \
+      M2L_PAYLOAD_INTERVAL_SEC="$M2L_PAYLOAD_INTERVAL_SEC" \
+      L2M_PAYLOAD_INTERVAL_SEC="$L2M_PAYLOAD_INTERVAL_SEC" \
       M2L_MIN_UNIQUE="$M2L_MIN_UNIQUE" \
       L2M_MIN_UNIQUE="$L2M_MIN_UNIQUE" \
       COUNTER_SECONDS="$COUNTER_SECONDS" \
@@ -491,7 +512,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
@@ -537,6 +558,13 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
     network = summary.get("network") or {}
     m2l_enabled = bool(directions.get("m2l_enabled", str(meta.get("enable_m2l", "1")).lower() not in {"0", "false", "no"}))
     l2m_enabled = bool(directions.get("l2m_enabled", str(meta.get("enable_l2m", "1")).lower() not in {"0", "false", "no"}))
+    m2l_expected = int(m2l.get("expected") or meta.get("m2l_expected_payloads") or meta.get("expected_payloads") or 0)
+    l2m_expected = int(l2m.get("expected") or meta.get("l2m_expected_payloads") or meta.get("expected_payloads") or 0)
+    expected_payloads = max([
+        value
+        for value, enabled in [(m2l_expected, m2l_enabled), (l2m_expected, l2m_enabled)]
+        if enabled
+    ] or [m2l_expected, l2m_expected, int(meta.get("expected_payloads") or 0)])
     run = {
         "run_dir": str(run_dir),
         "profile": meta.get("profile_name") or run_dir.name,
@@ -546,7 +574,9 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
         "smoke_result": summary.get("smoke_result", "missing"),
         "radio_command": summary.get("radio_command") or meta.get("radio_command"),
         "failures": summary.get("failures") or ([] if "smoke_result" in summary else ["missing_summary"]),
-        "expected_payloads": int((m2l.get("expected") or l2m.get("expected") or meta.get("expected_payloads") or 0)),
+        "expected_payloads": expected_payloads,
+        "m2l_expected_payloads": m2l_expected,
+        "l2m_expected_payloads": l2m_expected,
         "source_warmup_payloads": int(meta.get("source_warmup_payloads") or 0),
         "source_gate_status": source_gate.get("status"),
         "source_gate_acquired": source_gate.get("acquired"),
@@ -580,15 +610,18 @@ for run_dir in sorted((root / "runs").iterdir() if (root / "runs").exists() else
             "m2l_mcs": meta.get("m2l_mcs"),
             "l2m_mcs": meta.get("l2m_mcs"),
             "payload_interval_sec": meta.get("payload_interval_sec"),
+            "m2l_payload_interval_sec": meta.get("m2l_payload_interval_sec"),
+            "l2m_payload_interval_sec": meta.get("l2m_payload_interval_sec"),
+            "m2l_expected_payloads": meta.get("m2l_expected_payloads"),
+            "l2m_expected_payloads": meta.get("l2m_expected_payloads"),
             "traffic_mode": meta.get("duplex_traffic_mode"),
             "tdd_first_direction": meta.get("tdd_first_direction"),
             "tdd_guard_sec": meta.get("tdd_guard_sec"),
         },
         "signal": signal,
     }
-    expected = max(run["expected_payloads"], 1)
-    run["m2l_recovery"] = run["m2l_unique"] / expected if m2l_enabled else None
-    run["l2m_recovery"] = run["l2m_unique"] / expected if l2m_enabled else None
+    run["m2l_recovery"] = run["m2l_unique"] / max(run["m2l_expected_payloads"], 1) if m2l_enabled else None
+    run["l2m_recovery"] = run["l2m_unique"] / max(run["l2m_expected_payloads"], 1) if l2m_enabled else None
     enabled_recoveries = [
         value for value in [run["m2l_recovery"], run["l2m_recovery"]]
         if value is not None
@@ -626,6 +659,8 @@ for run in runs:
 profiles = []
 for profile, items in groups.items():
     expected_values = [item["expected_payloads"] for item in items]
+    m2l_expected_values = [item["m2l_expected_payloads"] for item in items if item["m2l_enabled"]]
+    l2m_expected_values = [item["l2m_expected_payloads"] for item in items if item["l2m_enabled"]]
     decrypt_total = sum(item["decrypt_failures"] for item in items)
     pass_count = sum(1 for item in items if item["smoke_result"] == "pass")
     accepted_count = sum(1 for item in items if item["accepted"])
@@ -643,6 +678,8 @@ for profile, items in groups.items():
         "m2l_enabled_runs": len(m2l_values),
         "l2m_enabled_runs": len(l2m_values),
         "expected_payloads": sorted(set(expected_values)),
+        "m2l_expected_payloads": sorted(set(m2l_expected_values)),
+        "l2m_expected_payloads": sorted(set(l2m_expected_values)),
         "avg_m2l_recovery": statistics.fmean(m2l_values) if m2l_values else 0.0,
         "avg_l2m_recovery": statistics.fmean(l2m_values) if l2m_values else 0.0,
         "avg_min_recovery": statistics.fmean(min_values) if min_values else 0.0,
@@ -710,14 +747,15 @@ for item in profiles:
 lines.extend(["", "## Runs", ""])
 for run in runs:
     lines.append(
-        "- `{profile}` r{repeat}: command `{command}`, result `{result}`, M2L `{m2l}/{expected}`, L2M `{l2m}/{expected}`, decrypt `{decrypt}`, dir `{dir}`".format(
+        "- `{profile}` r{repeat}: command `{command}`, result `{result}`, M2L `{m2l}/{m2l_expected}`, L2M `{l2m}/{l2m_expected}`, decrypt `{decrypt}`, dir `{dir}`".format(
             profile=run["profile"],
             repeat=run.get("repeat_index"),
             command=run.get("radio_command"),
             result=run["smoke_result"],
             m2l=run["m2l_unique"],
             l2m=run["l2m_unique"],
-            expected=run["expected_payloads"],
+            m2l_expected=run["m2l_expected_payloads"],
+            l2m_expected=run["l2m_expected_payloads"],
             decrypt=run["decrypt_failures"],
             dir=run["run_dir"],
         )
@@ -750,12 +788,12 @@ else
 fi
 
 profile_count=0
-while IFS='|' read -r name description m2l_k m2l_n l2m_k l2m_n m2l_mcs l2m_mcs interval m2l_min_pct l2m_min_pct; do
+while IFS='|' read -r name description m2l_k m2l_n l2m_k l2m_n m2l_mcs l2m_mcs interval m2l_min_pct l2m_min_pct m2l_interval l2m_interval m2l_expected l2m_expected; do
   [[ -z "${name:-}" || "${name:0:1}" == "#" ]] && continue
   profile_count=$((profile_count + 1))
   repeat=1
   while (( repeat <= REPEATS )); do
-    run_one_profile "$name" "$description" "$m2l_k" "$m2l_n" "$l2m_k" "$l2m_n" "$m2l_mcs" "$l2m_mcs" "$interval" "$m2l_min_pct" "$l2m_min_pct" "$repeat"
+    run_one_profile "$name" "$description" "$m2l_k" "$m2l_n" "$l2m_k" "$l2m_n" "$m2l_mcs" "$l2m_mcs" "$interval" "$m2l_min_pct" "$l2m_min_pct" "$repeat" "${m2l_interval:-}" "${l2m_interval:-}" "${m2l_expected:-}" "${l2m_expected:-}"
     repeat=$((repeat + 1))
   done
 done < <(profile_lines)

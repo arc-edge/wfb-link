@@ -345,6 +345,12 @@ def summarize_run(run_dir: Path, lateness_warn_sec: float) -> dict[str, Any]:
             "direction_counts": source_summary.get("direction_counts"),
             "max_lateness_sec": source_summary.get("max_lateness_sec"),
             "payload_interval_sec": source_summary.get("payload_interval_sec"),
+            "payload_interval_sec_by_direction": source_summary.get(
+                "payload_interval_sec_by_direction"
+            ),
+            "expected_payloads_by_direction": source_summary.get(
+                "expected_payloads_by_direction"
+            ),
             "source_phase_sec": source_summary.get("source_phase_sec"),
         },
         "m2l": m2l,

@@ -27,6 +27,9 @@ Configuration is via environment variables. Common overrides:
   AIRTIME_TDD_FIRST_WINDOW=rx AIRTIME_TDD_RX_WINDOW_MS=7000
   AIRTIME_TDD_TX_WINDOW_MS=20000 AIRTIME_TDD_GUARD_MS=500
   M2L_SOURCE_PHASE_SEC=0 L2M_SOURCE_PHASE_SEC=0
+  PAYLOAD_INTERVAL_SEC=0.020
+  M2L_PAYLOAD_INTERVAL_SEC=0.100 L2M_PAYLOAD_INTERVAL_SEC=0.005
+  M2L_EXPECTED_PAYLOADS=100 L2M_EXPECTED_PAYLOADS=2000
   ENABLE_M2L=1 ENABLE_L2M=1
   M2L_FEC_K=3 M2L_FEC_N=12 L2M_FEC_K=3 L2M_FEC_N=12
   M2L_MCS=1 L2M_MCS=1
@@ -96,14 +99,16 @@ L2M_MCS=${L2M_MCS:-1}
 EXPECTED_PAYLOADS=${EXPECTED_PAYLOADS:-80}
 ENABLE_M2L=${ENABLE_M2L:-1}
 ENABLE_L2M=${ENABLE_L2M:-1}
-M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
-L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$EXPECTED_PAYLOADS}
+M2L_EXPECTED_PAYLOADS=${M2L_EXPECTED_PAYLOADS:-$EXPECTED_PAYLOADS}
+L2M_EXPECTED_PAYLOADS=${L2M_EXPECTED_PAYLOADS:-$EXPECTED_PAYLOADS}
+M2L_MIN_UNIQUE=${M2L_MIN_UNIQUE:-$M2L_EXPECTED_PAYLOADS}
+L2M_MIN_UNIQUE=${L2M_MIN_UNIQUE:-$L2M_EXPECTED_PAYLOADS}
 MIN_RADIO_RX_FORWARDED=${MIN_RADIO_RX_FORWARDED:-1}
 MAX_M2L_DECRYPT_FAILURES=${MAX_M2L_DECRYPT_FAILURES:-0}
 MAX_L2M_DECRYPT_FAILURES=${MAX_L2M_DECRYPT_FAILURES:-0}
 DECRYPT_FAILURE_GATE=${DECRYPT_FAILURE_GATE:-post-session}
 REQUIRE_CALIBRATION_SUCCESS=${REQUIRE_CALIBRATION_SUCCESS:-auto}
-export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES DECRYPT_FAILURE_GATE REQUIRE_CALIBRATION_SUCCESS
+export M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M M2L_MIN_UNIQUE L2M_MIN_UNIQUE MIN_RADIO_RX_FORWARDED MAX_M2L_DECRYPT_FAILURES MAX_L2M_DECRYPT_FAILURES DECRYPT_FAILURE_GATE REQUIRE_CALIBRATION_SUCCESS
 SOURCE_WARMUP_PAYLOADS=${SOURCE_WARMUP_PAYLOADS:-100}
 SOURCE_TAIL_PAYLOADS=${SOURCE_TAIL_PAYLOADS:-auto}
 SESSION_ACQUIRE_MODE=${SESSION_ACQUIRE_MODE:-observed}
@@ -112,6 +117,8 @@ SESSION_ACQUIRE_POLL_SECONDS=${SESSION_ACQUIRE_POLL_SECONDS:-0.2}
 SESSION_ACQUIRE_SETTLE_SECONDS=${SESSION_ACQUIRE_SETTLE_SECONDS:-1}
 PAYLOAD_LEN=${PAYLOAD_LEN:-1000}
 PAYLOAD_INTERVAL_SEC=${PAYLOAD_INTERVAL_SEC:-0.020}
+M2L_PAYLOAD_INTERVAL_SEC=${M2L_PAYLOAD_INTERVAL_SEC:-$PAYLOAD_INTERVAL_SEC}
+L2M_PAYLOAD_INTERVAL_SEC=${L2M_PAYLOAD_INTERVAL_SEC:-$PAYLOAD_INTERVAL_SEC}
 DUPLEX_TRAFFIC_MODE=${DUPLEX_TRAFFIC_MODE:-simultaneous}
 case "$DUPLEX_TRAFFIC_MODE" in
   simultaneous|phased|tdd) ;;
@@ -139,7 +146,7 @@ AIRTIME_TDD_GUARD_MS=${AIRTIME_TDD_GUARD_MS:-0}
 AIRTIME_TDD_START_DELAY_MS=${AIRTIME_TDD_START_DELAY_MS:-0}
 M2L_SOURCE_PHASE_SEC=${M2L_SOURCE_PHASE_SEC:-0}
 L2M_SOURCE_PHASE_SEC=${L2M_SOURCE_PHASE_SEC:-0}
-export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
+export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS SESSION_ACQUIRE_SETTLE_SECONDS PAYLOAD_LEN PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS M2L_SOURCE_PHASE_SEC L2M_SOURCE_PHASE_SEC
 M2L_MARKER=${M2L_MARKER:-M2LRSMK1}
 L2M_MARKER=${L2M_MARKER:-L2MRSMK1}
 M2L_WARMUP_MARKER=${M2L_WARMUP_MARKER:-M2LWARM1}
@@ -623,7 +630,7 @@ wait_for_radio_ready() {
 run_peer_traffic() {
   log "running peer TX/RX traffic"
   ssh "${SSH_OPTS_ARRAY[@]}" "$LINUX_HOST" \
-    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' M2L_DISTRIBUTOR_HOST='$M2L_DISTRIBUTOR_HOST' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' DUPLEX_TRAFFIC_MODE='$DUPLEX_TRAFFIC_MODE' TDD_FIRST_DIRECTION='$TDD_FIRST_DIRECTION' TDD_GUARD_SEC='$TDD_GUARD_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' WFB_RX_RCV_BUF_BYTES='$WFB_RX_RCV_BUF_BYTES' WFB_RX_SND_BUF_BYTES='$WFB_RX_SND_BUF_BYTES' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
+    "REMOTE_PREFIX='$REMOTE_PREFIX' LINUX_REMOTE_PATH='$LINUX_REMOTE_PATH' IFACE='$IFACE' CHANNEL='$CHANNEL' WFB_KEY='$WFB_KEY' WFB_CLI_LINK_ID='$WFB_CLI_LINK_ID' MAC_LAN_IP='$MAC_LAN_IP' M2L_DISTRIBUTOR_HOST='$M2L_DISTRIBUTOR_HOST' RADIO_BIND_PORT='$RADIO_BIND_PORT' M2L_RADIO_PORT='$M2L_RADIO_PORT' L2M_RADIO_PORT='$L2M_RADIO_PORT' M2L_FEC_K='$M2L_FEC_K' M2L_FEC_N='$M2L_FEC_N' L2M_FEC_K='$L2M_FEC_K' L2M_FEC_N='$L2M_FEC_N' M2L_MCS='$M2L_MCS' L2M_MCS='$L2M_MCS' EXPECTED_PAYLOADS='$EXPECTED_PAYLOADS' M2L_EXPECTED_PAYLOADS='$M2L_EXPECTED_PAYLOADS' L2M_EXPECTED_PAYLOADS='$L2M_EXPECTED_PAYLOADS' ENABLE_M2L='$ENABLE_M2L' ENABLE_L2M='$ENABLE_L2M' SOURCE_WARMUP_PAYLOADS='$SOURCE_WARMUP_PAYLOADS' SOURCE_TAIL_PAYLOADS='$SOURCE_TAIL_PAYLOADS' SESSION_ACQUIRE_MODE='$SESSION_ACQUIRE_MODE' SESSION_ACQUIRE_TIMEOUT_SECONDS='$SESSION_ACQUIRE_TIMEOUT_SECONDS' SESSION_ACQUIRE_POLL_SECONDS='$SESSION_ACQUIRE_POLL_SECONDS' SESSION_ACQUIRE_SETTLE_SECONDS='$SESSION_ACQUIRE_SETTLE_SECONDS' PAYLOAD_LEN='$PAYLOAD_LEN' PAYLOAD_INTERVAL_SEC='$PAYLOAD_INTERVAL_SEC' M2L_PAYLOAD_INTERVAL_SEC='$M2L_PAYLOAD_INTERVAL_SEC' L2M_PAYLOAD_INTERVAL_SEC='$L2M_PAYLOAD_INTERVAL_SEC' DUPLEX_TRAFFIC_MODE='$DUPLEX_TRAFFIC_MODE' TDD_FIRST_DIRECTION='$TDD_FIRST_DIRECTION' TDD_GUARD_SEC='$TDD_GUARD_SEC' M2L_SOURCE_PHASE_SEC='$M2L_SOURCE_PHASE_SEC' L2M_SOURCE_PHASE_SEC='$L2M_SOURCE_PHASE_SEC' M2L_MARKER='$M2L_MARKER' L2M_MARKER='$L2M_MARKER' M2L_WARMUP_MARKER='$M2L_WARMUP_MARKER' L2M_WARMUP_MARKER='$L2M_WARMUP_MARKER' M2L_TAIL_MARKER='$M2L_TAIL_MARKER' L2M_TAIL_MARKER='$L2M_TAIL_MARKER' LINUX_M2L_SOURCE_PORT='$LINUX_M2L_SOURCE_PORT' LINUX_L2M_SOURCE_PORT='$LINUX_L2M_SOURCE_PORT' M2L_COUNTER_PORT='$M2L_COUNTER_PORT' L2M_AGG_PORT='$L2M_AGG_PORT' L2M_COUNTER_PORT='$L2M_COUNTER_PORT' WFB_RX_RCV_BUF_BYTES='$WFB_RX_RCV_BUF_BYTES' WFB_RX_SND_BUF_BYTES='$WFB_RX_SND_BUF_BYTES' COUNTER_SECONDS='$COUNTER_SECONDS' PEER_WAIT_SECONDS='$PEER_WAIT_SECONDS' bash -s" <<'REMOTE_TRAFFIC'
 set -euo pipefail
 export PATH="$LINUX_REMOTE_PATH:$PATH"
 enabled() {
@@ -638,7 +645,8 @@ write_disabled_counter() {
   local host=$2
   local port=$3
   local marker=$4
-  python3 - "$path" "$host" "$port" "$marker" "$EXPECTED_PAYLOADS" <<'PY'
+  local expected=$5
+  python3 - "$path" "$host" "$port" "$marker" "$expected" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -748,16 +756,16 @@ if command -v stdbuf >/dev/null 2>&1; then
 fi
 
 if enabled "$ENABLE_M2L"; then
-  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-m2l.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-m2l.log" 2>&1 &
+  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$M2L_EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-m2l.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-m2l.log" 2>&1 &
   echo $! > "$REMOTE_PREFIX/counter-m2l.pid"
 else
-  write_disabled_counter "$REMOTE_PREFIX/counter-m2l.json" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER"
+  write_disabled_counter "$REMOTE_PREFIX/counter-m2l.json" 127.0.0.1 "$M2L_COUNTER_PORT" "$M2L_MARKER" "$M2L_EXPECTED_PAYLOADS"
 fi
 if enabled "$ENABLE_L2M"; then
-  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-l2m.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-l2m.log" 2>&1 &
+  python3 -u "$REMOTE_PREFIX/counter.py" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$L2M_EXPECTED_PAYLOADS" "$REMOTE_PREFIX/counter-l2m.json" "$COUNTER_SECONDS" > "$REMOTE_PREFIX/counter-l2m.log" 2>&1 &
   echo $! > "$REMOTE_PREFIX/counter-l2m.pid"
 else
-  write_disabled_counter "$REMOTE_PREFIX/counter-l2m.json" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER"
+  write_disabled_counter "$REMOTE_PREFIX/counter-l2m.json" 127.0.0.1 "$L2M_COUNTER_PORT" "$L2M_MARKER" "$L2M_EXPECTED_PAYLOADS"
 fi
 
 sudo -n tcpdump -i "$IFACE" -y IEEE802_11_RADIO -s 256 -w "$REMOTE_PREFIX/rf.pcap" > "$REMOTE_PREFIX/tcpdump.log" 2>&1 &
@@ -811,7 +819,9 @@ remote_prefix = Path(os.environ["REMOTE_PREFIX"])
 payload_len = int(os.environ["PAYLOAD_LEN"])
 warmup = int(os.environ["SOURCE_WARMUP_PAYLOADS"])
 expected = int(os.environ["EXPECTED_PAYLOADS"])
-interval = float(os.environ["PAYLOAD_INTERVAL_SEC"])
+default_interval = float(os.environ["PAYLOAD_INTERVAL_SEC"])
+m2l_interval = float(os.environ.get("M2L_PAYLOAD_INTERVAL_SEC", default_interval))
+l2m_interval = float(os.environ.get("L2M_PAYLOAD_INTERVAL_SEC", default_interval))
 traffic_mode = os.environ.get("DUPLEX_TRAFFIC_MODE", "simultaneous")
 tdd_first_direction = os.environ.get("TDD_FIRST_DIRECTION", "l2m")
 tdd_guard = max(0.0, float(os.environ.get("TDD_GUARD_SEC", "2.0")))
@@ -823,6 +833,35 @@ session_poll = float(os.environ.get("SESSION_ACQUIRE_POLL_SECONDS", "0.2"))
 session_settle = float(os.environ.get("SESSION_ACQUIRE_SETTLE_SECONDS", "1"))
 enable_m2l = enabled("ENABLE_M2L")
 enable_l2m = enabled("ENABLE_L2M")
+m2l_expected = int(os.environ.get("M2L_EXPECTED_PAYLOADS", expected))
+l2m_expected = int(os.environ.get("L2M_EXPECTED_PAYLOADS", expected))
+expected_by_direction = {
+    "m2l": m2l_expected,
+    "l2m": l2m_expected,
+}
+interval_by_direction = {
+    "m2l": m2l_interval,
+    "l2m": l2m_interval,
+}
+phase_by_direction = {
+    "m2l": m2l_phase,
+    "l2m": l2m_phase,
+}
+enabled_by_direction = {
+    "m2l": enable_m2l,
+    "l2m": enable_l2m,
+}
+for direction, is_enabled in enabled_by_direction.items():
+    if is_enabled and interval_by_direction[direction] <= 0:
+        raise SystemExit(f"{direction.upper()}_PAYLOAD_INTERVAL_SEC must be > 0")
+    if is_enabled and expected_by_direction[direction] < 0:
+        raise SystemExit(f"{direction.upper()}_EXPECTED_PAYLOADS must be >= 0")
+active_intervals = [
+    interval_by_direction[direction]
+    for direction, is_enabled in enabled_by_direction.items()
+    if is_enabled
+]
+min_active_interval = min(active_intervals or [default_interval])
 m2l_fec_k = int(os.environ["M2L_FEC_K"])
 l2m_fec_k = int(os.environ["L2M_FEC_K"])
 tail_config = os.environ.get("SOURCE_TAIL_PAYLOADS", "auto").strip().lower()
@@ -844,17 +883,14 @@ def payload(marker, seq, fill):
     marker = marker.encode()
     return marker + seq.to_bytes(4, "big") + fill * (payload_len - len(marker) - 4)
 
-def send_warmup(seq):
-    if enable_m2l:
-        sock_m2l.sendto(payload(os.environ["M2L_WARMUP_MARKER"], seq, b"w"), source_m2l)
-    if enable_l2m:
-        sock_l2m.sendto(payload(os.environ["L2M_WARMUP_MARKER"], seq, b"w"), source_l2m)
+def send_direction(direction, marker, seq, fill):
+    if direction == "m2l":
+        sock_m2l.sendto(payload(marker, seq, fill), source_m2l)
+    else:
+        sock_l2m.sendto(payload(marker, seq, fill), source_l2m)
 
-def send_tail(seq):
-    if enable_m2l:
-        sock_m2l.sendto(payload(os.environ["M2L_TAIL_MARKER"], seq, b"t"), source_m2l)
-    if enable_l2m:
-        sock_l2m.sendto(payload(os.environ["L2M_TAIL_MARKER"], seq, b"t"), source_l2m)
+def marker_for(direction, kind):
+    return os.environ[f"{direction.upper()}_{kind}_MARKER"]
 
 def has_session(path):
     try:
@@ -869,10 +905,26 @@ def session_state():
     return observed, missing
 
 warmup_sent = 0
-for seq in range(warmup):
-    send_warmup(seq)
-    warmup_sent += 1
-    time.sleep(interval)
+warmup_sent_by_direction = {"m2l": 0, "l2m": 0}
+warmup_started_at = time.time()
+warmup_schedule = []
+for direction in ("m2l", "l2m"):
+    if not enabled_by_direction[direction]:
+        continue
+    for seq in range(warmup):
+        warmup_schedule.append((
+            warmup_started_at + seq * interval_by_direction[direction],
+            direction,
+            seq,
+        ))
+warmup_schedule.sort()
+for send_at, direction, seq in warmup_schedule:
+    delay = send_at - time.time()
+    if delay > 0:
+        time.sleep(delay)
+    send_direction(direction, marker_for(direction, "WARMUP"), seq, b"w")
+    warmup_sent_by_direction[direction] += 1
+warmup_sent = max(warmup_sent_by_direction.values())
 warmup_completed_at = time.time()
 observed_sessions, missing_sessions = session_state()
 timed_out = False
@@ -884,9 +936,17 @@ if session_mode == "observed" and missing_sessions:
     deadline = time.time() + session_timeout
     next_poll = time.time()
     while time.time() < deadline:
-        send_warmup(warmup_sent)
-        warmup_sent += 1
-        time.sleep(interval)
+        missing_set = set(missing_sessions)
+        interval_candidates = []
+        for direction in ("m2l", "l2m"):
+            if direction not in missing_set:
+                continue
+            seq = warmup_sent_by_direction[direction]
+            send_direction(direction, marker_for(direction, "WARMUP"), seq, b"w")
+            warmup_sent_by_direction[direction] += 1
+            interval_candidates.append(interval_by_direction[direction])
+        warmup_sent = max(warmup_sent_by_direction.values())
+        time.sleep(min(interval_candidates or [min_active_interval]))
         if time.time() >= next_poll:
             observed_sessions, missing_sessions = session_state()
             next_poll = time.time() + session_poll
@@ -908,8 +968,12 @@ measured_started_at = time.time()
     "configured_warmup_payloads": warmup,
     "configured_tail_payloads": tail_config,
     "warmup_payloads": warmup_sent,
+    "warmup_payloads_by_direction": warmup_sent_by_direction,
     "tail_payloads": tail,
     "expected_payloads": expected,
+    "expected_payloads_by_direction": expected_by_direction,
+    "payload_interval_sec": default_interval,
+    "payload_interval_sec_by_direction": interval_by_direction,
     "timeout_sec": session_timeout,
     "poll_sec": session_poll,
     "settle_sec": session_settle if not timed_out and not missing_sessions else 0,
@@ -925,6 +989,11 @@ measured_started_at = time.time()
 source_started_at = time.time()
 schedule = []
 source_events = []
+def append_direction_schedule(block_start, direction, count):
+    interval = interval_by_direction[direction]
+    for seq in range(count):
+        schedule.append((block_start + seq * interval, direction, seq))
+
 if traffic_mode == "tdd":
     enabled_order = []
     if tdd_first_direction == "m2l":
@@ -936,17 +1005,20 @@ if traffic_mode == "tdd":
             enabled_order.append(direction)
         if direction == "l2m" and enable_l2m:
             enabled_order.append(direction)
+    block_offset = 0.0
     for block_index, direction in enumerate(enabled_order):
-        block_start = source_started_at + block_index * (expected * interval + tdd_guard)
-        for seq in range(expected):
-            schedule.append((block_start + seq * interval, direction, seq))
+        count = expected_by_direction[direction]
+        interval = interval_by_direction[direction]
+        block_start = source_started_at + block_offset
+        append_direction_schedule(block_start, direction, count)
+        block_offset += count * interval
+        if block_index != len(enabled_order) - 1:
+            block_offset += tdd_guard
 else:
-    for seq in range(expected):
-        send_base = source_started_at + seq * interval
-        if enable_m2l:
-            schedule.append((send_base + m2l_phase, "m2l", seq))
-        if enable_l2m:
-            schedule.append((send_base + l2m_phase, "l2m", seq))
+    if enable_m2l:
+        append_direction_schedule(source_started_at + phase_by_direction["m2l"], "m2l", m2l_expected)
+    if enable_l2m:
+        append_direction_schedule(source_started_at + phase_by_direction["l2m"], "l2m", l2m_expected)
 schedule.sort()
 for send_at, direction, seq in schedule:
     delay = send_at - time.time()
@@ -975,14 +1047,25 @@ for event in source_events:
     max_lateness[direction] = max(max_lateness.get(direction, 0.0), event["lateness_sec"])
 marked_completed_at = time.time()
 tail_started_at = marked_completed_at
-for seq in range(tail):
-    send_tail(seq)
-    time.sleep(interval)
+tail_schedule = []
+for direction in ("m2l", "l2m"):
+    if not enabled_by_direction[direction]:
+        continue
+    for seq in range(tail):
+        tail_schedule.append((tail_started_at + seq * interval_by_direction[direction], direction, seq))
+tail_schedule.sort()
+for send_at, direction, seq in tail_schedule:
+    delay = send_at - time.time()
+    if delay > 0:
+        time.sleep(delay)
+    send_direction(direction, marker_for(direction, "TAIL"), seq, b"t")
 tail_completed_at = time.time()
 (remote_prefix / "source-summary.json").write_text(json.dumps({
     "source_started_at": source_started_at,
     "expected_payloads": expected,
-    "payload_interval_sec": interval,
+    "expected_payloads_by_direction": expected_by_direction,
+    "payload_interval_sec": default_interval,
+    "payload_interval_sec_by_direction": interval_by_direction,
     "tail_payloads": tail,
     "traffic_mode": traffic_mode,
     "tdd_first_direction": tdd_first_direction,
@@ -999,7 +1082,7 @@ tail_completed_at = time.time()
     "duration_sec": round(tail_completed_at - source_started_at, 6),
 }, indent=2, sort_keys=True) + "\n")
 PY
-printf 'sent configured_warmup=%s configured_tail=%s marked=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$SOURCE_TAIL_PAYLOADS" "$EXPECTED_PAYLOADS" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
+printf 'sent configured_warmup=%s configured_tail=%s marked=%s m2l_expected=%s l2m_expected=%s m2l_interval=%s l2m_interval=%s enable_m2l=%s enable_l2m=%s link_cli=%s\n' "$SOURCE_WARMUP_PAYLOADS" "$SOURCE_TAIL_PAYLOADS" "$EXPECTED_PAYLOADS" "$M2L_EXPECTED_PAYLOADS" "$L2M_EXPECTED_PAYLOADS" "$M2L_PAYLOAD_INTERVAL_SEC" "$L2M_PAYLOAD_INTERVAL_SEC" "$ENABLE_M2L" "$ENABLE_L2M" "$WFB_CLI_LINK_ID" > "$REMOTE_PREFIX/sources-done.txt"
 
 for _ in $(seq 1 "$PEER_WAIT_SECONDS"); do
   [[ -f "$REMOTE_PREFIX/counter-m2l.json" && -f "$REMOTE_PREFIX/counter-l2m.json" ]] && break
@@ -1153,7 +1236,12 @@ else:
 m2l_enabled = os.environ.get("ENABLE_M2L", "1").lower() not in {"0", "false", "no"}
 l2m_enabled = os.environ.get("ENABLE_L2M", "1").lower() not in {"0", "false", "no"}
 expected_payloads = int(os.environ.get("EXPECTED_PAYLOADS", 0))
-expected_source_events = expected_payloads * int(m2l_enabled) + expected_payloads * int(l2m_enabled)
+m2l_expected_payloads = int(os.environ.get("M2L_EXPECTED_PAYLOADS", expected_payloads))
+l2m_expected_payloads = int(os.environ.get("L2M_EXPECTED_PAYLOADS", expected_payloads))
+expected_source_events = (
+    m2l_expected_payloads * int(m2l_enabled)
+    + l2m_expected_payloads * int(l2m_enabled)
+)
 m2l_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-m2l.log")
 l2m_decrypt_stats = decrypt_stats(run / "peer" / "wfb-rx-l2m-agg.log")
 if decrypt_failure_gate == "total":
@@ -1248,8 +1336,12 @@ summary = {
         "m2l_mcs": int(os.environ.get("M2L_MCS", 0)),
         "l2m_mcs": int(os.environ.get("L2M_MCS", 0)),
         "payload_interval_sec": float(os.environ.get("PAYLOAD_INTERVAL_SEC", 0)),
+        "m2l_payload_interval_sec": float(os.environ.get("M2L_PAYLOAD_INTERVAL_SEC", os.environ.get("PAYLOAD_INTERVAL_SEC", 0))),
+        "l2m_payload_interval_sec": float(os.environ.get("L2M_PAYLOAD_INTERVAL_SEC", os.environ.get("PAYLOAD_INTERVAL_SEC", 0))),
         "payload_len": int(os.environ.get("PAYLOAD_LEN", 0)),
         "expected_payloads": expected_payloads,
+        "m2l_expected_payloads": m2l_expected_payloads,
+        "l2m_expected_payloads": l2m_expected_payloads,
         "traffic_mode": os.environ.get("DUPLEX_TRAFFIC_MODE"),
         "tdd_first_direction": os.environ.get("TDD_FIRST_DIRECTION"),
         "tdd_guard_sec": float(os.environ.get("TDD_GUARD_SEC", 0)),
