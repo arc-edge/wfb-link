@@ -19,6 +19,8 @@ Common configuration:
   MATRIX_ENFORCE_THRESHOLDS=1
   PING_MAX_LOSS_PCT=0 PING_MAX_AVG_MS=500 PING_MAX_MAX_MS=1500
   SSH_MAX_DURATION_S=5 SSH_DD_MAX_DURATION_S=10
+  DATA_LOAD_MODE=duplex          # optional: none, m2l, l2m, or duplex
+  DATA_LOAD_PRE_PROBE_SECONDS=0  # optional warmup delay after data sources start
 
 Set PROFILE_FILE to a pipe-delimited profile list:
   name|description|rx_window_ms|tx_window_ms|guard_ms|probe_kind|settle_seconds
@@ -114,6 +116,25 @@ MCS=${MCS:-1}
 FEC_K=${FEC_K:-2}
 FEC_N=${FEC_N:-4}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+DATA_LOAD_MODE=${DATA_LOAD_MODE:-none}
+DATA_LOAD_EXPECTED_PAYLOADS=${DATA_LOAD_EXPECTED_PAYLOADS:-100}
+DATA_LOAD_MIN_M2L_UNIQUE=${DATA_LOAD_MIN_M2L_UNIQUE:-$DATA_LOAD_EXPECTED_PAYLOADS}
+DATA_LOAD_MIN_L2M_UNIQUE=${DATA_LOAD_MIN_L2M_UNIQUE:-$DATA_LOAD_EXPECTED_PAYLOADS}
+DATA_LOAD_PAYLOAD_LEN=${DATA_LOAD_PAYLOAD_LEN:-512}
+DATA_LOAD_INTERVAL_SEC=${DATA_LOAD_INTERVAL_SEC:-0.020}
+DATA_LOAD_WARMUP_PAYLOADS=${DATA_LOAD_WARMUP_PAYLOADS:-20}
+DATA_LOAD_TAIL_PAYLOADS=${DATA_LOAD_TAIL_PAYLOADS:-8}
+DATA_LOAD_PRE_PROBE_SECONDS=${DATA_LOAD_PRE_PROBE_SECONDS:-0}
+DATA_LOAD_COUNTER_SECONDS=${DATA_LOAD_COUNTER_SECONDS:-20}
+DATA_LOAD_MCS=${DATA_LOAD_MCS:-1}
+DATA_LOAD_FEC_K=${DATA_LOAD_FEC_K:-2}
+DATA_LOAD_FEC_N=${DATA_LOAD_FEC_N:-4}
+DATA_M2L_RADIO_PORT=${DATA_M2L_RADIO_PORT:-6}
+DATA_L2M_RADIO_PORT=${DATA_L2M_RADIO_PORT:-7}
+DATA_LOAD_LINUX_HOST=${DATA_LOAD_LINUX_HOST:-pi@drone-2f389.local}
+DATA_LOAD_LINUX_WFB_KEY=${DATA_LOAD_LINUX_WFB_KEY:-/var/lib/arc/wfb/drone.key}
+DATA_LOAD_IFACE=${DATA_LOAD_IFACE:-wfb0}
+DATA_LOAD_REQUIRE_PASS=${DATA_LOAD_REQUIRE_PASS:-1}
 
 if (( REPEATS < 1 )); then
   die "REPEATS must be >= 1"
@@ -255,8 +276,8 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
 
     log "profile=$name repeat=$repeat probe=$probe_kind rx=${rx_ms}ms tx=${tx_ms}ms guard=${guard_ms}ms"
     if (( DRY_RUN == 1 )); then
-      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
-        "$run_dir" "$WFB_KEY" "$PEER_IP" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
+      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q DATA_LOAD_MODE=%q DATA_LOAD_PRE_PROBE_SECONDS=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
+        "$run_dir" "$WFB_KEY" "$PEER_IP" "$DATA_LOAD_MODE" "$DATA_LOAD_PRE_PROBE_SECONDS" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
       status=0
     else
       if OUT_DIR="$run_dir" \
@@ -269,6 +290,25 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
         FEC_K="$FEC_K" \
         FEC_N="$FEC_N" \
         TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
+        DATA_LOAD_MODE="$DATA_LOAD_MODE" \
+        DATA_LOAD_EXPECTED_PAYLOADS="$DATA_LOAD_EXPECTED_PAYLOADS" \
+        DATA_LOAD_MIN_M2L_UNIQUE="$DATA_LOAD_MIN_M2L_UNIQUE" \
+        DATA_LOAD_MIN_L2M_UNIQUE="$DATA_LOAD_MIN_L2M_UNIQUE" \
+        DATA_LOAD_PAYLOAD_LEN="$DATA_LOAD_PAYLOAD_LEN" \
+        DATA_LOAD_INTERVAL_SEC="$DATA_LOAD_INTERVAL_SEC" \
+        DATA_LOAD_WARMUP_PAYLOADS="$DATA_LOAD_WARMUP_PAYLOADS" \
+        DATA_LOAD_TAIL_PAYLOADS="$DATA_LOAD_TAIL_PAYLOADS" \
+        DATA_LOAD_PRE_PROBE_SECONDS="$DATA_LOAD_PRE_PROBE_SECONDS" \
+        DATA_LOAD_COUNTER_SECONDS="$DATA_LOAD_COUNTER_SECONDS" \
+        DATA_LOAD_MCS="$DATA_LOAD_MCS" \
+        DATA_LOAD_FEC_K="$DATA_LOAD_FEC_K" \
+        DATA_LOAD_FEC_N="$DATA_LOAD_FEC_N" \
+        DATA_M2L_RADIO_PORT="$DATA_M2L_RADIO_PORT" \
+        DATA_L2M_RADIO_PORT="$DATA_L2M_RADIO_PORT" \
+        DATA_LOAD_LINUX_HOST="$DATA_LOAD_LINUX_HOST" \
+        DATA_LOAD_LINUX_WFB_KEY="$DATA_LOAD_LINUX_WFB_KEY" \
+        DATA_LOAD_IFACE="$DATA_LOAD_IFACE" \
+        DATA_LOAD_REQUIRE_PASS="$DATA_LOAD_REQUIRE_PASS" \
         AIRTIME_MODE=tdd \
         AIRTIME_TDD_FIRST_WINDOW=rx \
         AIRTIME_TDD_RX_WINDOW_MS="$rx_ms" \
@@ -308,6 +348,7 @@ TUNNEL_MAX_DROPPED_PACKETS="$TUNNEL_MAX_DROPPED_PACKETS" \
 TUNNEL_MAX_CORRUPT_MESSAGES="$TUNNEL_MAX_CORRUPT_MESSAGES" \
 TUNNEL_MAX_TRUNCATED_MESSAGES="$TUNNEL_MAX_TRUNCATED_MESSAGES" \
 RADIO_REQUIRE_PASS="$RADIO_REQUIRE_PASS" \
+DATA_LOAD_REQUIRE_PASS="$DATA_LOAD_REQUIRE_PASS" \
 python3 - <<'PY'
 import json
 import os
@@ -341,6 +382,7 @@ thresholds = {
     "tunnel_max_corrupt_messages": int(os.environ["TUNNEL_MAX_CORRUPT_MESSAGES"]),
     "tunnel_max_truncated_messages": int(os.environ["TUNNEL_MAX_TRUNCATED_MESSAGES"]),
     "radio_require_pass": os.environ["RADIO_REQUIRE_PASS"] == "1",
+    "data_load_require_pass": os.environ["DATA_LOAD_REQUIRE_PASS"] == "1",
 }
 
 
@@ -384,6 +426,8 @@ def run_acceptance(entry, run, counters, probe_metrics):
         reasons.append("probe_not_passed")
     if thresholds["radio_require_pass"] and run.get("radio_result") != "pass":
         reasons.append(f"radio_result={run.get('radio_result')}")
+    if thresholds["data_load_require_pass"] and run.get("data_load_result") not in {None, "pass"}:
+        reasons.append(f"data_load_result={run.get('data_load_result')}")
 
     if int(counters.get("dropped_packets") or 0) > thresholds["tunnel_max_dropped_packets"]:
         reasons.append(f"tunnel_dropped_packets={counters.get('dropped_packets')}")
@@ -436,6 +480,7 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
     summary = read_json(run_dir / "summary.json")
     tunnel = summary.get("tunnel") if isinstance(summary, dict) else None
     radio = summary.get("radio") if isinstance(summary, dict) else None
+    data_load = summary.get("data_load") if isinstance(summary, dict) else None
     probe = summary.get("probe") if isinstance(summary, dict) else None
     probe_status = probe.get("status") if isinstance(probe, dict) else None
     probe_log_tail = probe.get("log_tail") if isinstance(probe, dict) else None
@@ -454,6 +499,10 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
         "tunnel_datagrams_out": counters.get("tunnel_datagrams_out"),
         "tunnel_datagrams_in": counters.get("tunnel_datagrams_in"),
         "radio_result": radio.get("result") if isinstance(radio, dict) else None,
+        "data_load_result": data_load.get("result") if isinstance(data_load, dict) else None,
+        "data_load_mode": data_load.get("mode") if isinstance(data_load, dict) else None,
+        "data_load_m2l_unique": ((data_load.get("m2l") or {}).get("counter") or {}).get("unique_sequences") if isinstance(data_load, dict) else None,
+        "data_load_l2m_unique": ((data_load.get("l2m") or {}).get("counter") or {}).get("unique_sequences") if isinstance(data_load, dict) else None,
         "probe_metrics": probe_metrics,
         "tunnel_dropped_packets": counters.get("dropped_packets"),
         "tunnel_corrupt_messages": counters.get("corrupt_messages"),
@@ -493,8 +542,8 @@ lines = [
     f"- Runs: {accepted_count}/{len(runs)} accepted",
     f"- Artifacts: `{out_dir}`",
     "",
-    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Accepted | Probe | Tun in/out | Tunnel dg in/out | Reject Reasons |",
-    "|---|---:|---|---:|---|---:|---:|---:|---|",
+    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Accepted | Probe | Data Load | Tun in/out | Tunnel dg in/out | Reject Reasons |",
+    "|---|---:|---|---:|---|---:|---:|---:|---:|---|",
 ]
 for run in runs:
     probe_detail = ""
@@ -505,9 +554,17 @@ for run in runs:
     metrics = run.get("probe_metrics") or {}
     if metrics.get("packet_loss_pct") is not None:
         probe_detail = f"{probe_detail} loss={metrics['packet_loss_pct']:.1f}% avg={metrics.get('rtt_avg_ms')}ms max={metrics.get('rtt_max_ms')}ms".strip()
+    data_load_detail = ""
+    if run.get("data_load_mode"):
+        data_load_detail = f"{run.get('data_load_mode')} {run.get('data_load_result')}"
+        if run.get("data_load_m2l_unique") is not None:
+            data_load_detail += f" m2l={run.get('data_load_m2l_unique')}"
+        if run.get("data_load_l2m_unique") is not None:
+            data_load_detail += f" l2m={run.get('data_load_l2m_unique')}"
     lines.append(
-        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {accepted_label} | {probe_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} | {reject_reason_text} |".format(
+        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {accepted_label} | {probe_detail} | {data_load_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} | {reject_reason_text} |".format(
             probe_detail=probe_detail,
+            data_load_detail=data_load_detail,
             accepted_label="yes" if run.get("accepted") else "no",
             reject_reason_text=", ".join(run.get("reject_reasons") or []),
             **run,
