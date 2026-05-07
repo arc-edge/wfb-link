@@ -1967,6 +1967,7 @@ pub struct ProductionRuntimeFlowExecutionInputs {
     pub tx_power_control: ProductionRuntimeTxPowerControlInput,
     pub heartbeat_led: LedHeartbeatConfig,
     pub process_signal_stop: bool,
+    pub external_stop_requested: Option<Arc<AtomicBool>>,
 }
 
 impl ProductionRuntimeFlowExecutionInputs {
@@ -6422,7 +6423,13 @@ where
         |now| {
             heartbeat.maybe_toggle(&&session_cell.borrow().transport, now);
         },
-        || inputs.process_signal_stop && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst),
+        || {
+            (inputs.process_signal_stop && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst))
+                || inputs
+                    .external_stop_requested
+                    .as_ref()
+                    .is_some_and(|stop| stop.load(Ordering::SeqCst))
+        },
         |step| -> Result<ProductionRuntimeBridgeLoopStepOutcome, RuntimeRadioError> {
             match step {
                 ProductionRuntimeBridgeLoopStep::TryTx => match tx_receiver.receiver.try_recv() {
@@ -6512,8 +6519,12 @@ where
                         Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
                     }
                     Err(_error)
-                        if inputs.process_signal_stop
-                            && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst) =>
+                        if (inputs.process_signal_stop
+                            && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst))
+                            || inputs
+                                .external_stop_requested
+                                .as_ref()
+                                .is_some_and(|stop| stop.load(Ordering::SeqCst)) =>
                     {
                         Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
                             ProductionRuntimeBridgeLoopStopReason::Signal,

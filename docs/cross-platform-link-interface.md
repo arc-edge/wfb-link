@@ -13,7 +13,8 @@ Product binary
 
 ## Product Boundary
 
-The product boundary should be WFB stream or tunnel semantics, not raw RF.
+The product boundary should be WFB stream or tunnel semantics, not raw RF. The
+initial Rust facade lives in `crates/wfb-link`.
 
 The common control plane is:
 
@@ -41,10 +42,15 @@ pub struct LinkEndpoints {
 
 pub struct LinkStreamEndpoint {
     pub name: String,
-    pub radio_port: u8,
     pub direction: LinkDirection,
     pub local_udp: SocketAddr,
     pub payload_kind: PayloadKind,
+    pub stream: Option<WfbStreamId>,
+}
+
+pub struct WfbStreamId {
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
 }
 
 pub enum PayloadKind {
@@ -55,7 +61,9 @@ pub enum PayloadKind {
 
 Prefer `RawApplicationDatagram` for product-facing streams when the backend
 supervises WFB-NG `wfb_tx`/`wfb_rx` helpers. Use `WfbDistributorDatagram` only
-when the caller owns WFB-NG codec/session work.
+when the caller owns WFB-NG codec/session work. Distributor datagram endpoints
+may leave `stream` unset because one local UDP ingress can carry multiple WFB
+streams.
 
 ## macOS Backend
 
@@ -72,6 +80,17 @@ For the 8-hour integration path, the backend can first expose WFB distributor
 datagram endpoints and embed `run_production_runtime_flow` without installing
 process signal handlers. The next step is supervising `wfb_tx`, `wfb_rx`, and
 optional `wf_tun` helpers so the product only sees raw stream/tunnel endpoints.
+
+The current `wfb-link` macOS backend does the first slice:
+
+- `MacosUserspaceRadioConfig::from_service_config_path` resolves an existing
+  `wfb-radio-service` TOML profile.
+- `MacosUserspaceRadioBackend` starts `run_production_runtime_flow` on a
+  thread.
+- `request_stop` sets a cooperative in-process stop flag instead of relying on
+  process-wide signal handlers.
+- `wait_ready`, `health`, and `join` normalize runtime artifacts while keeping
+  the full `ProductionRuntimeFlowReport` under backend-specific evidence.
 
 ## Linux Backend
 

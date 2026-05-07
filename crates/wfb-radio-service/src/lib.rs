@@ -460,6 +460,64 @@ impl ServiceAdapterConfig {
     }
 }
 
+impl ServiceCli {
+    pub fn config_only(config: impl Into<PathBuf>) -> Self {
+        Self {
+            json: false,
+            report: None,
+            config: config.into(),
+            vid: None,
+            pid: None,
+            bus: None,
+            address: None,
+            macos_usbhost: false,
+            macos_configuration_value: None,
+            macos_interface_number: None,
+            macos_bulk_in_endpoint: None,
+            macos_bulk_out_endpoint: None,
+            macos_bulk_out_endpoint_count: None,
+            macos_poll_attempts: None,
+            macos_poll_delay_ms: None,
+            channel: None,
+            bandwidth: None,
+            firmware: None,
+            bind: None,
+            tx_binds: Vec::new(),
+            duration_ms: None,
+            rx_timeout_ms: None,
+            tx_burst_limit: None,
+            tx_min_interval_us: None,
+            max_datagrams: None,
+            airtime_mode: None,
+            airtime_tdd_first_window: None,
+            airtime_tdd_rx_window_ms: None,
+            airtime_tdd_tx_window_ms: None,
+            airtime_tdd_guard_ms: None,
+            airtime_tdd_start_delay_ms: None,
+            ready_file: None,
+            health_file: None,
+            i_understand_this_transmits: false,
+            i_understand_this_writes_registers: false,
+            tx_power_index: None,
+            tx_power_mode: None,
+            tx_power_path: None,
+            tx_power_efuse_report: None,
+            tx_power_efuse_logical_map: None,
+            tx_power_safety_profile: None,
+            tx_power_max_index: None,
+            tx_calibration_profile: None,
+            no_heartbeat_led: false,
+            heartbeat_led_half_period_ms: None,
+            wfb_link_id: None,
+            wfb_radio_port: None,
+            rx_aggregator: None,
+            rx_forwards: Vec::new(),
+            rx_wlan_idx: None,
+            rx_mcs_index: None,
+        }
+    }
+}
+
 pub fn load_service_config_file(
     path: &Path,
 ) -> std::result::Result<ServiceConfigFile, RuntimeRadioError> {
@@ -794,6 +852,7 @@ pub fn service_runtime_inputs_from_resolved(
             half_period_ms: resolved.heartbeat_half_period_ms,
         },
         process_signal_stop: true,
+        external_stop_requested: None,
     })
 }
 

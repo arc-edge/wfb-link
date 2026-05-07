@@ -7,16 +7,24 @@
 
 ## 2. Embedding API
 
-- [ ] 2.1 Add a small product-facing Rust interface module/crate with
+- [x] 2.1 Add a small product-facing Rust interface module/crate with
       `LinkBackend`, `LinkHandle`, endpoint, health, and report types.
-- [ ] 2.2 Add a macOS backend handle that starts the existing production
+- [x] 2.2 Add a macOS backend handle that starts the existing production
       runtime on a thread without installing process signal handlers.
-- [ ] 2.3 Add cooperative stop plumbing for embedded runtime use.
+- [x] 2.3 Add cooperative stop plumbing for embedded runtime use.
 
 ## 3. Examples And Validation
 
-- [ ] 3.1 Add an example Rust binary that starts the macOS backend, waits for
+- [x] 3.1 Add an example Rust binary that starts the macOS backend, waits for
       ready, prints endpoints/health, requests stop, and prints the report.
-- [ ] 3.2 Add unit tests for endpoint shape, embedded no-signal behavior, and
+- [x] 3.2 Add unit tests for endpoint shape, embedded no-signal behavior, and
       cooperative stop/report behavior.
 - [ ] 3.3 Run the hardware `PROFILE_SET=loaded` gate after embedding changes.
+      Attempted on 2026-05-07 after deploying the rebuilt
+      `wfb-radio-service` to the remote macOS host. Radio/runtime and tunnel
+      probes passed, but the strict duplex side-load gate rejected the run due
+      to Mac-to-Linux side-stream recovery below 100/100:
+      `/tmp/wfb-mac-wf-tun-loaded-profile-link-20260507-010003` recovered
+      90/100 M2L, and
+      `/tmp/wfb-mac-wf-tun-loaded-profile-link-rerun-20260507-010104`
+      recovered 88/100 M2L.

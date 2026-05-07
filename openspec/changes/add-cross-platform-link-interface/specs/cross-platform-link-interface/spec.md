@@ -28,8 +28,8 @@ semantics are stable across macOS and Linux backends.
 
 #### Scenario: Stream endpoints are exposed
 - **WHEN** a backend starts streams
-- **THEN** it reports each stream's name, direction, WFB radio port, local UDP
-  endpoint, and payload kind
+- **THEN** it reports each stream's name, direction, local UDP endpoint,
+  payload kind, and WFB stream identity when that endpoint maps to one stream
 
 #### Scenario: Product code avoids raw RF dependency
 - **WHEN** product code sends or receives normal payload traffic
@@ -40,6 +40,8 @@ semantics are stable across macOS and Linux backends.
 - **WHEN** a backend exposes WFB distributor datagram endpoints directly
 - **THEN** the endpoint payload kind MUST identify that the product or caller
   owns the WFB-NG codec/session layer
+- **AND** endpoints that can carry multiple WFB streams MAY omit a single
+  stream identity
 
 ### Requirement: Platform Backend Responsibilities
 The system SHALL let macOS and Linux use different backend implementations

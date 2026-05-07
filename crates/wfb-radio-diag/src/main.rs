@@ -23741,6 +23741,7 @@ fn radio_run_execution_inputs(
         tx_power_control: radio_run_tx_power_input(&args.tx_power, channel, args.bandwidth)?,
         heartbeat_led: args.heartbeat_led.to_config(),
         process_signal_stop: false,
+        external_stop_requested: None,
     };
     Ok((inputs, init_assets))
 }

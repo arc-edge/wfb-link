@@ -645,6 +645,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wfb-link"
+version = "0.1.0"
+dependencies = [
+ "radio-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wfb-radio-runtime",
+ "wfb-radio-service",
+]
+
+[[package]]
 name = "wfb-radio-diag"
 version = "0.1.0"
 dependencies = [
