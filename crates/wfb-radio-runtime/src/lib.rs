@@ -11,7 +11,7 @@ use std::{
     net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
     },
     thread,
@@ -548,19 +548,16 @@ fn split_wfb_observed_channel_id(raw: u32) -> (u32, u8) {
     (raw >> 8, (raw & 0xff) as u8)
 }
 
-fn observe_runtime_wfb_channel_id(
-    observations: &mut Vec<RuntimeWfbChannelObservation>,
-    frame: &[u8],
-) {
+fn runtime_wfb_channel_observation(frame: &[u8]) -> Option<RuntimeWfbChannelObservation> {
     if frame.len() < WFB_OBSERVED_HEADER_LEN {
-        return;
+        return None;
     }
     if frame[WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET..WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET + 2]
         != WFB_OBSERVED_MAC_PREFIX
         || frame[WFB_OBSERVED_DST_MAC_PREFIX_OFFSET..WFB_OBSERVED_DST_MAC_PREFIX_OFFSET + 2]
             != WFB_OBSERVED_MAC_PREFIX
     {
-        return;
+        return None;
     }
 
     let source_channel_id = u32::from_be_bytes(
@@ -574,21 +571,10 @@ fn observe_runtime_wfb_channel_id(
             .expect("slice length checked by frame length"),
     );
 
-    if let Some(existing) = observations.iter_mut().find(|observation| {
-        observation.source_channel_id == source_channel_id
-            && observation.destination_channel_id == destination_channel_id
-    }) {
-        existing.count = existing.count.saturating_add(1);
-        return;
-    }
-    if observations.len() >= WFB_MAX_CHANNEL_OBSERVATIONS {
-        return;
-    }
-
     let (source_link_id, source_radio_port) = split_wfb_observed_channel_id(source_channel_id);
     let (destination_link_id, destination_radio_port) =
         split_wfb_observed_channel_id(destination_channel_id);
-    observations.push(RuntimeWfbChannelObservation {
+    Some(RuntimeWfbChannelObservation {
         source_channel_id,
         source_channel_id_hex: format_wfb_observed_channel_id(source_channel_id),
         source_link_id,
@@ -598,7 +584,26 @@ fn observe_runtime_wfb_channel_id(
         destination_link_id,
         destination_radio_port,
         count: 1,
-    });
+    })
+}
+
+fn observe_runtime_wfb_channel_id(
+    observations: &mut Vec<RuntimeWfbChannelObservation>,
+    frame: &[u8],
+) {
+    let Some(observation) = runtime_wfb_channel_observation(frame) else {
+        return;
+    };
+    if let Some(existing) = observations.iter_mut().find(|existing| {
+        existing.source_channel_id == observation.source_channel_id
+            && existing.destination_channel_id == observation.destination_channel_id
+    }) {
+        existing.count = existing.count.saturating_add(1);
+        return;
+    }
+    if observations.len() < WFB_MAX_CHANNEL_OBSERVATIONS {
+        observations.push(observation);
+    }
 }
 
 fn merge_runtime_wfb_channel_observations(
@@ -696,14 +701,19 @@ fn rounded_average_i64(sum: i64, count: u64) -> i64 {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeFlowTxTelemetry {
+    pub ingress_datagrams_received: u64,
+    pub ingress_bytes_received: u64,
+    pub ingress_queue_send_failed: u64,
+    pub ingress_pending_datagrams: u64,
     pub datagrams_received: u64,
     pub submitted_frames: u64,
     pub failed_submissions: u64,
     pub dropped_datagrams: u64,
     pub bytes_written: u64,
+    pub wfb_channel_observations: Vec<RuntimeWfbChannelObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1187,6 +1197,31 @@ pub struct ProductionRuntimeTxIngressSocket {
     pub report_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProductionRuntimeTxIngressTelemetry {
+    pub datagrams_received: u64,
+    pub bytes_received: u64,
+    pub queue_send_failed: u64,
+}
+
+#[derive(Debug, Default)]
+struct ProductionRuntimeTxIngressSharedCounters {
+    datagrams_received: AtomicU64,
+    bytes_received: AtomicU64,
+    queue_send_failed: AtomicU64,
+}
+
+impl ProductionRuntimeTxIngressSharedCounters {
+    fn snapshot(&self) -> ProductionRuntimeTxIngressTelemetry {
+        ProductionRuntimeTxIngressTelemetry {
+            datagrams_received: self.datagrams_received.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            queue_send_failed: self.queue_send_failed.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionRuntimeQueuedDatagram {
     pub report_index: usize,
@@ -1198,6 +1233,7 @@ pub struct ProductionRuntimeQueuedDatagram {
 pub struct ProductionRuntimeTxIngressReceiver {
     pub receiver: mpsc::Receiver<ProductionRuntimeQueuedDatagram>,
     stop: Arc<AtomicBool>,
+    counters: Arc<ProductionRuntimeTxIngressSharedCounters>,
     handles: Vec<thread::JoinHandle<()>>,
 }
 
@@ -1207,6 +1243,12 @@ impl Drop for ProductionRuntimeTxIngressReceiver {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
+    }
+}
+
+impl ProductionRuntimeTxIngressReceiver {
+    pub fn telemetry(&self) -> ProductionRuntimeTxIngressTelemetry {
+        self.counters.snapshot()
     }
 }
 
@@ -1253,6 +1295,7 @@ pub fn spawn_production_tx_ingress_receivers(
 ) -> Result<ProductionRuntimeTxIngressReceiver, RuntimeRadioError> {
     let (sender, receiver) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
+    let counters = Arc::new(ProductionRuntimeTxIngressSharedCounters::default());
     let mut handles = Vec::with_capacity(sockets.len());
 
     for tx_socket in sockets {
@@ -1268,17 +1311,23 @@ pub fn spawn_production_tx_ingress_receivers(
             })?;
         let sender = sender.clone();
         let stop = Arc::clone(&stop);
+        let counters = Arc::clone(&counters);
         let handle = thread::spawn(move || {
             let mut buf = vec![0u8; u16::MAX as usize];
             while !stop.load(Ordering::Relaxed) {
                 match tx_socket.socket.recv_from(&mut buf) {
                     Ok((len, peer)) => {
+                        counters.datagrams_received.fetch_add(1, Ordering::Relaxed);
+                        counters
+                            .bytes_received
+                            .fetch_add(len as u64, Ordering::Relaxed);
                         let queued = ProductionRuntimeQueuedDatagram {
                             report_index: tx_socket.report_index,
                             peer,
                             data: buf[..len].to_vec(),
                         };
                         if sender.send(queued).is_err() {
+                            counters.queue_send_failed.fetch_add(1, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -1301,6 +1350,7 @@ pub fn spawn_production_tx_ingress_receivers(
     Ok(ProductionRuntimeTxIngressReceiver {
         receiver,
         stop,
+        counters,
         handles,
     })
 }
@@ -1619,6 +1669,8 @@ pub struct ProductionRuntimeBridgeTxDatagramMetadata {
     pub frame_len: usize,
     pub packet_len: usize,
     pub tx_descriptor_preview_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wfb_channel_observation: Option<RuntimeWfbChannelObservation>,
     pub tx_profile: ProductionRuntimeBridgeTxProfile,
     pub tx_options: TxOptions,
 }
@@ -1774,6 +1826,7 @@ where
         frame_len: parsed.ieee80211_frame.len(),
         packet_len: packet.len(),
         tx_descriptor_preview_hex: encode_runtime_hex(&packet[..TX_DESC_SIZE.min(packet.len())]),
+        wfb_channel_observation: runtime_wfb_channel_observation(parsed.ieee80211_frame),
         tx_profile: config.overrides.tx_profile,
         tx_options,
     };
@@ -2367,7 +2420,7 @@ impl ProductionRuntimeServiceHealth {
             init: report.init,
             heartbeat_led: report.heartbeat_led,
             rx: report.rx.clone(),
-            tx: report.tx,
+            tx: report.tx.clone(),
             counters: report.counters,
             error: report.error.clone(),
         }
@@ -6364,6 +6417,10 @@ where
                             &mut submit_counters,
                         ) {
                             Ok(outcome) => {
+                                observe_production_runtime_tx_metadata(
+                                    &mut tx,
+                                    outcome.metadata.as_ref(),
+                                );
                                 bridge_counters = outcome.bridge_counters;
                                 submit_counters = outcome.submit_counters;
                                 apply_production_runtime_tx_telemetry(
@@ -6374,6 +6431,10 @@ where
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
                             }
                             Err(error) => {
+                                observe_production_runtime_tx_metadata(
+                                    &mut tx,
+                                    error.metadata.as_ref(),
+                                );
                                 bridge_counters = error.bridge_counters;
                                 submit_counters = error.submit_counters;
                                 apply_production_runtime_tx_telemetry(
@@ -6459,6 +6520,7 @@ where
                 .map(|forward| forward.counters.forwarded)
                 .sum();
             apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
+            apply_production_runtime_tx_ingress_telemetry(&mut tx, tx_receiver.telemetry());
             return production_runtime_flow_report_from_state_with_health(
                 &config,
                 session,
@@ -6480,6 +6542,7 @@ where
         .map(|forward| forward.counters.forwarded)
         .sum();
     apply_production_runtime_tx_telemetry(&mut tx, &bridge_counters, &submit_counters);
+    apply_production_runtime_tx_ingress_telemetry(&mut tx, tx_receiver.telemetry());
 
     production_runtime_flow_report_from_state_with_airtime_and_health(
         &config,
@@ -6732,6 +6795,29 @@ fn apply_production_runtime_tx_telemetry(
     tx.failed_submissions = submit_counters.failed;
     tx.dropped_datagrams = bridge_counters.dropped;
     tx.bytes_written = submit_counters.bytes_written;
+}
+
+fn apply_production_runtime_tx_ingress_telemetry(
+    tx: &mut RuntimeFlowTxTelemetry,
+    ingress: ProductionRuntimeTxIngressTelemetry,
+) {
+    tx.ingress_datagrams_received = ingress.datagrams_received;
+    tx.ingress_bytes_received = ingress.bytes_received;
+    tx.ingress_queue_send_failed = ingress.queue_send_failed;
+    tx.ingress_pending_datagrams = ingress
+        .datagrams_received
+        .saturating_sub(tx.datagrams_received);
+}
+
+fn observe_production_runtime_tx_metadata(
+    tx: &mut RuntimeFlowTxTelemetry,
+    metadata: Option<&ProductionRuntimeBridgeTxDatagramMetadata>,
+) {
+    let Some(observation) = metadata.and_then(|metadata| metadata.wfb_channel_observation.clone())
+    else {
+        return;
+    };
+    merge_runtime_wfb_channel_observations(&mut tx.wfb_channel_observations, vec![observation]);
 }
 
 fn production_runtime_init_telemetry(
@@ -14321,11 +14407,16 @@ mod tests {
             wfb_channel_observations: Vec::new(),
         };
         let tx = RuntimeFlowTxTelemetry {
+            ingress_datagrams_received: 5,
+            ingress_bytes_received: 4096,
+            ingress_queue_send_failed: 0,
+            ingress_pending_datagrams: 0,
             datagrams_received: 5,
             submitted_frames: 5,
             failed_submissions: 0,
             dropped_datagrams: 1,
             bytes_written: 4096,
+            wfb_channel_observations: Vec::new(),
         };
 
         assert_eq!(rx.forwarded_payloads, 3);
@@ -14765,11 +14856,16 @@ mod tests {
                 },
                 rx: RuntimeFlowRxTelemetry::default(),
                 tx: RuntimeFlowTxTelemetry {
+                    ingress_datagrams_received: 1,
+                    ingress_bytes_received: 64,
+                    ingress_queue_send_failed: 0,
+                    ingress_pending_datagrams: 0,
                     datagrams_received: 1,
                     submitted_frames: 1,
                     failed_submissions: 0,
                     dropped_datagrams: 0,
                     bytes_written: 64,
+                    wfb_channel_observations: Vec::new(),
                 },
                 counters: RuntimeRadioCounters::default(),
                 result: ProductionRuntimeFlowResult::Pass,
@@ -14833,11 +14929,16 @@ mod tests {
                 },
                 rx: RuntimeFlowRxTelemetry::default(),
                 tx: RuntimeFlowTxTelemetry {
+                    ingress_datagrams_received: 1,
+                    ingress_bytes_received: 64,
+                    ingress_queue_send_failed: 0,
+                    ingress_pending_datagrams: 0,
                     datagrams_received: 1,
                     submitted_frames: 1,
                     failed_submissions: 0,
                     dropped_datagrams: 0,
                     bytes_written: 64,
+                    wfb_channel_observations: Vec::new(),
                 },
                 counters: RuntimeRadioCounters::default(),
                 result: ProductionRuntimeFlowResult::Pass,
@@ -15186,10 +15287,14 @@ mod tests {
             .receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("queued datagram");
+        let telemetry = receiver.telemetry();
 
         assert_eq!(queued.report_index, 0);
         assert_eq!(queued.data, b"wfb-test");
         assert_eq!(queued.peer, sender.local_addr().expect("sender addr"));
+        assert_eq!(telemetry.datagrams_received, 1);
+        assert_eq!(telemetry.bytes_received, b"wfb-test".len() as u64);
+        assert_eq!(telemetry.queue_send_failed, 0);
     }
 
     fn runtime_tx_session(transport: MockTransport) -> RuntimeRadioSession<MockTransport> {
@@ -15215,7 +15320,10 @@ mod tests {
         packet.extend_from_slice(&[
             0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x01, 0x03,
         ]);
-        packet.extend_from_slice(&[0x08; 24]);
+        packet.extend_from_slice(&build_wfb_data_header(
+            WfbChannelId::new(0x000102, 0x03).expect("channel ID"),
+            0,
+        ));
         packet
     }
 
@@ -15490,6 +15598,13 @@ mod tests {
             metadata.tx_descriptor_preview_hex.len(),
             super::TX_DESC_SIZE * 2
         );
+        let observation = metadata
+            .wfb_channel_observation
+            .expect("WFB channel observation");
+        assert_eq!(observation.source_channel_id_hex, "0x00010203");
+        assert_eq!(observation.source_radio_port, 0x03);
+        assert_eq!(observation.destination_channel_id_hex, "0x00010203");
+        assert_eq!(observation.count, 1);
         assert_eq!(outcome.datagram_bytes, queued.data.len() as u64);
         assert_eq!(outcome.frame_bytes, 24);
         assert_eq!(outcome.bridge_counters.incoming, 1);

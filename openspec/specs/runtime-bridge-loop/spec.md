@@ -71,5 +71,6 @@ outcomes used by production reports.
   harness
 - **THEN** runtime telemetry records RX metadata coverage, incomplete-tail
   counters, frame-type counters, RX forwarding counters, TX datagrams,
-  submitted frames, failures, drops, byte counts, last TX datagram facts, loop
-  stop reason, and USB counters without depending on diagnostic report structs
+  submitted frames, failures, drops, byte counts, ingress-vs-processed TX
+  counts, observed WFB RX/TX channel IDs, last TX datagram facts, loop stop
+  reason, and USB counters without depending on diagnostic report structs

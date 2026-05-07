@@ -49,3 +49,24 @@ buffer and read-timeout policy before receiver threads are started.
 - **WHEN** the operating system rejects the requested receiver read timeout
 - **THEN** the runtime library fails receiver setup with a stable runtime error
   code
+
+### Requirement: Runtime TX Ingress Telemetry
+The runtime library SHALL expose production TX ingress telemetry that separates
+UDP socket ingress from bridge-loop TX processing and radio submission.
+
+#### Scenario: Datagram ingress is counted
+- **WHEN** a datagram arrives on a production TX ingress socket
+- **THEN** the runtime receiver increments datagram and byte ingress counters
+  before queueing the datagram for bridge-loop processing
+
+#### Scenario: Receiver queue send fails
+- **WHEN** an ingress receiver cannot send a datagram into the bridge-loop queue
+- **THEN** the runtime receiver increments a stable queue-send-failure counter
+  before stopping that receiver thread
+
+#### Scenario: Final report separates ingress from processing
+- **WHEN** a production runtime flow emits final TX telemetry
+- **THEN** the report includes ingress datagram count, ingress byte count,
+  queue-send failures, pending ingress datagrams, processed datagrams,
+  submitted frames, failed submissions, drops, submitted bytes, and observed
+  WFB TX channel IDs

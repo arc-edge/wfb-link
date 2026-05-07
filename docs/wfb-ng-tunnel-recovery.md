@@ -78,3 +78,21 @@ For stock WFB-NG GS tunnel semantics, override:
 LINK_ID=0x000001 TUN_RX_RADIO_PORT=0x20 TUN_TX_RADIO_PORT=0xa0 FEC_K=1 FEC_N=2 \
 scripts/run-mac-wf-tun-recovery.sh
 ```
+
+## Loaded Tunnel Gate
+
+`scripts/run-mac-wf-tun-profile-matrix.sh` can run independent WFB data load
+beside the tunnel probe:
+
+```bash
+DATA_LOAD_MODE=duplex DATA_LOAD_EXPECTED_PAYLOADS=100 \
+DATA_LOAD_MIN_M2L_UNIQUE=95 DATA_LOAD_MIN_L2M_UNIQUE=95 \
+DATA_LOAD_INTERVAL_SEC=0.040 scripts/run-mac-wf-tun-profile-matrix.sh
+```
+
+The current accepted short-range loaded gate is a 95/100 side-stream minimum
+with 40 ms marked payloads. Exact 100/100 side delivery during a 256 KiB SSH
+download is not accepted yet: May 6 telemetry showed every Mac TX ingress
+datagram was processed and submitted with zero pending queue depth, while the
+Linux peer still missed several Mac-to-Linux side payloads. That makes the
+remaining issue peer airtime/contention rather than Mac UDP ingress loss.
