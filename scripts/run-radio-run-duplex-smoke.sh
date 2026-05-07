@@ -1124,6 +1124,15 @@ def count_lines(path, needle):
     except Exception:
         return 0
 
+def read_text(path):
+    try:
+        return path.read_text(errors="replace")
+    except Exception:
+        return ""
+
+def log_contains(path, needle):
+    return needle in read_text(path)
+
 def decrypt_stats(path):
     stats = {
         "total": 0,
@@ -1198,6 +1207,39 @@ def parse_iw_channel_state(path):
                 pass
     return state
 
+def observation_matches(observations, link_id, radio_port):
+    if not isinstance(observations, list):
+        return False
+    def int_field(observation, name, default=-1):
+        value = observation.get(name)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        if int_field(observation, "count", 0) <= 0:
+            continue
+        if int_field(observation, "source_link_id") != link_id:
+            continue
+        if int_field(observation, "destination_link_id") != link_id:
+            continue
+        if int_field(observation, "source_radio_port") != radio_port:
+            continue
+        if int_field(observation, "destination_radio_port") != radio_port:
+            continue
+        return True
+    return False
+
+def metric_sample_count(signal, metric):
+    values = signal.get(metric) if isinstance(signal, dict) else {}
+    if not isinstance(values, dict):
+        return 0
+    return int(values.get("sample_count") or 0)
+
 report = load(run / "radio-run.json")
 health = load(run / "radio-health.json")
 m2l = load(run / "peer" / "counter-m2l.json")
@@ -1255,6 +1297,61 @@ require_calibration_success = os.environ["REQUIRE_CALIBRATION_SUCCESS"]
 calibration_success_required = require_calibration_success in {"1", "true", "yes"}
 if require_calibration_success == "auto":
     calibration_success_required = report.get("calibration_profile") == "rtl8812a_runtime_iqk"
+link_id = int(os.environ.get("WFB_CLI_LINK_ID") or "1")
+m2l_radio_port = int(os.environ.get("M2L_RADIO_PORT", "0"))
+l2m_radio_port = int(os.environ.get("L2M_RADIO_PORT", "1"))
+l2m_source_port = os.environ.get("LINUX_L2M_SOURCE_PORT", "5621")
+iface = os.environ.get("IFACE", "wfb0")
+expected_channel = int(os.environ.get("CHANNEL", "36"))
+health_counters = health.get("counters") if isinstance(health.get("counters"), dict) else {}
+signal = rx.get("signal") if isinstance(rx.get("signal"), dict) else {}
+peer_wfb0_monitor_ready = (
+    peer_channel_state["traffic"].get("type") == "monitor"
+    and peer_channel_state["traffic"].get("channel") == expected_channel
+    and peer_channel_state["traffic"].get("width_mhz") == 20
+)
+l2m_peer_wfb_tx_on_iface = log_contains(
+    run / "peer" / "wfb-tx-l2m-rf.log",
+    f"Listen on {l2m_source_port} for {iface}",
+)
+l2m_mac_usb_rx_advanced = (
+    int(health_counters.get("usb_bulk_in_reads") or 0) > 0
+    and int(health_counters.get("rx_frames") or 0) > 0
+)
+l2m_mac_rx_wfb_channel_matched = observation_matches(
+    rx.get("wfb_channel_observations"),
+    link_id,
+    l2m_radio_port,
+)
+l2m_mac_rx_signal_present = (
+    metric_sample_count(signal, "snr_db") > 0
+    and metric_sample_count(signal, "rssi_dbm") > 0
+)
+m2l_mac_tx_submitted = int(tx.get("submitted_frames") or 0) > 0
+m2l_mac_tx_wfb_channel_matched = observation_matches(
+    tx.get("wfb_channel_observations"),
+    link_id,
+    m2l_radio_port,
+)
+rf_proof = {
+    "peer_wfb0_monitor_ready": peer_wfb0_monitor_ready,
+    "l2m": {
+        "enabled": l2m_enabled,
+        "peer_wfb_tx_on_iface": l2m_peer_wfb_tx_on_iface,
+        "mac_usb_rx_advanced": l2m_mac_usb_rx_advanced,
+        "mac_rx_wfb_channel_matched": l2m_mac_rx_wfb_channel_matched,
+        "mac_rx_signal_present": l2m_mac_rx_signal_present,
+        "radio_rx_forwarded": radio_rx_forwarded,
+        "wfb_rx_session_observed": l2m_decrypt_stats["session_observed"],
+    },
+    "m2l": {
+        "enabled": m2l_enabled,
+        "mac_tx_submitted": m2l_mac_tx_submitted,
+        "mac_tx_wfb_channel_matched": m2l_mac_tx_wfb_channel_matched,
+        "peer_wfb_rx_session_observed": m2l_decrypt_stats["session_observed"],
+        "peer_counter_unique_sequences": m2l_unique,
+    },
+}
 failures = []
 if report.get("result") != "pass":
     failures.append(f"radio_result={report.get('result')}")
@@ -1269,10 +1366,30 @@ traffic_width_mhz = peer_channel_state["traffic"].get("width_mhz")
 traffic_type = peer_channel_state["traffic"].get("type")
 if traffic_type != "monitor":
     failures.append(f"peer_wfb0_type={traffic_type}")
-if traffic_channel != int(os.environ["CHANNEL"]):
-    failures.append(f"peer_wfb0_channel={traffic_channel}!={os.environ['CHANNEL']}")
+if traffic_channel != expected_channel:
+    failures.append(f"peer_wfb0_channel={traffic_channel}!={expected_channel}")
 if traffic_width_mhz != 20:
     failures.append(f"peer_wfb0_width_mhz={traffic_width_mhz}!=20")
+if not peer_wfb0_monitor_ready:
+    failures.append("rf_proof_peer_wfb0_monitor_ready=false")
+if l2m_enabled:
+    if not l2m_peer_wfb_tx_on_iface:
+        failures.append("rf_proof_l2m_peer_wfb_tx_on_iface=false")
+    if not l2m_mac_usb_rx_advanced:
+        failures.append("rf_proof_l2m_mac_usb_rx_advanced=false")
+    if not l2m_mac_rx_wfb_channel_matched:
+        failures.append("rf_proof_l2m_mac_rx_wfb_channel_matched=false")
+    if not l2m_mac_rx_signal_present:
+        failures.append("rf_proof_l2m_mac_rx_signal_present=false")
+    if not l2m_decrypt_stats["session_observed"]:
+        failures.append("rf_proof_l2m_wfb_rx_session_observed=false")
+if m2l_enabled:
+    if not m2l_mac_tx_submitted:
+        failures.append("rf_proof_m2l_mac_tx_submitted=false")
+    if not m2l_mac_tx_wfb_channel_matched:
+        failures.append("rf_proof_m2l_mac_tx_wfb_channel_matched=false")
+    if not m2l_decrypt_stats["session_observed"]:
+        failures.append("rf_proof_m2l_peer_wfb_rx_session_observed=false")
 if (tx.get("failed_submissions") or 0) != 0:
     failures.append(f"tx_failed_submissions={tx.get('failed_submissions')}")
 if (tx.get("dropped_datagrams") or 0) != 0:
@@ -1324,6 +1441,7 @@ summary = {
     "rx": rx,
     "radio_rx_forwarded_from_snapshots": radio_rx_forwarded,
     "radio_rx_forwards": rx_forwards,
+    "rf_proof": rf_proof,
     "directions": {
         "m2l_enabled": m2l_enabled,
         "l2m_enabled": l2m_enabled,

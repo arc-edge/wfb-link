@@ -22,6 +22,7 @@ Common configuration:
   ENABLE_M2L=1 ENABLE_L2M=1
   RADIO_COMMAND=service       # service or diagnostic
   REPEATS=1
+  MATRIX_MIN_CLEAN_REPEATS=1
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100 SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
   DUPLEX_TRAFFIC_MODE=simultaneous TDD_FIRST_DIRECTION=l2m TDD_GUARD_SEC=2.0
@@ -156,6 +157,7 @@ RX_TIMEOUT_MS=${RX_TIMEOUT_MS:-20}
 TX_BURST_LIMIT=${TX_BURST_LIMIT:-4}
 RADIO_COMMAND=${RADIO_COMMAND:-service}
 MATRIX_SUSTAINED_PAYLOADS=${MATRIX_SUSTAINED_PAYLOADS:-200}
+MATRIX_MIN_CLEAN_REPEATS=${MATRIX_MIN_CLEAN_REPEATS:-1}
 PROFILE_SET=${PROFILE_SET:-short}
 PROFILE_FILE=${PROFILE_FILE:-}
 REPEATS=${REPEATS:-1}
@@ -187,6 +189,9 @@ fi
 
 if (( REPEATS < 1 )); then
   die "REPEATS must be >= 1"
+fi
+if (( MATRIX_MIN_CLEAN_REPEATS < 1 )); then
+  die "MATRIX_MIN_CLEAN_REPEATS must be >= 1"
 fi
 case "$RADIO_COMMAND" in
   service|diagnostic) ;;
@@ -526,7 +531,7 @@ run_one_profile() {
 
 write_matrix_summary() {
   log "writing matrix summary"
-  python3 - "$MATRIX_OUT_DIR" "$MATRIX_SUSTAINED_PAYLOADS" <<'PY'
+  python3 - "$MATRIX_OUT_DIR" "$MATRIX_SUSTAINED_PAYLOADS" "$MATRIX_MIN_CLEAN_REPEATS" <<'PY'
 import json
 import statistics
 import sys
@@ -534,6 +539,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 sustained_payloads = int(sys.argv[2])
+min_clean_repeats = int(sys.argv[3])
 runs = []
 
 def load(path):
@@ -665,15 +671,22 @@ for profile, items in groups.items():
     pass_count = sum(1 for item in items if item["smoke_result"] == "pass")
     accepted_count = sum(1 for item in items if item["accepted"])
     short_pass_count = sum(1 for item in items if item["short_smoke_pass"])
+    all_runs_clean = accepted_count == len(items)
+    all_short_runs_clean = short_pass_count == len(items)
+    enough_clean_repeats = accepted_count >= min_clean_repeats
+    enough_short_clean_repeats = short_pass_count >= min_clean_repeats
     m2l_values = [item["m2l_recovery"] for item in items if item["m2l_recovery"] is not None]
     l2m_values = [item["l2m_recovery"] for item in items if item["l2m_recovery"] is not None]
     min_values = [item["min_recovery"] for item in items]
+    worst_run = min(items, key=lambda item: (item["min_recovery"], -len(item["failures"])))
     profile_summary = {
         "profile": profile,
         "description": items[0].get("description"),
         "runs": len(items),
         "pass_count": pass_count,
         "accepted_count": accepted_count,
+        "required_clean_repeats": min_clean_repeats,
+        "all_runs_clean": all_runs_clean,
         "short_smoke_pass_count": short_pass_count,
         "m2l_enabled_runs": len(m2l_values),
         "l2m_enabled_runs": len(l2m_values),
@@ -692,8 +705,19 @@ for profile, items in groups.items():
         "tx_failed_submissions": sum(item["tx_failed_submissions"] for item in items),
         "tx_dropped_datagrams": sum(item["tx_dropped_datagrams"] for item in items),
         "representative_link_profile": items[0].get("link_profile"),
-        "status": "accepted" if accepted_count == len(items) else (
-            "short_smoke_pass" if short_pass_count == len(items) else "failed"
+        "worst_run": {
+            "run_dir": worst_run["run_dir"],
+            "repeat_index": worst_run.get("repeat_index"),
+            "smoke_result": worst_run.get("smoke_result"),
+            "min_recovery": worst_run.get("min_recovery"),
+            "m2l_recovery": worst_run.get("m2l_recovery"),
+            "l2m_recovery": worst_run.get("l2m_recovery"),
+            "failures": worst_run.get("failures") or [],
+        },
+        "status": "accepted" if all_runs_clean and enough_clean_repeats else (
+            "short_smoke_pass" if all_short_runs_clean and enough_short_clean_repeats else (
+                "insufficient_repeats" if accepted_count and not enough_clean_repeats else "failed"
+            )
         ),
     }
     profile_summary["rank_key"] = [
@@ -713,6 +737,7 @@ for idx, item in enumerate(profiles, 1):
 result = {
     "result": "pass" if any(item["status"] in {"accepted", "short_smoke_pass"} for item in profiles) else "fail",
     "sustained_payload_threshold": sustained_payloads,
+    "required_clean_repeats": min_clean_repeats,
     "profiles": profiles,
     "runs": runs,
 }
@@ -723,24 +748,30 @@ lines = [
     "",
     f"Result: `{result['result']}`",
     f"Sustained payload threshold: `{sustained_payloads}`",
+    f"Required clean repeats: `{min_clean_repeats}`",
     "",
-    "| Rank | Profile | Status | Runs | Avg M2L | Avg L2M | Worst M2L | Worst L2M | Decrypt Failures |",
-    "|---:|---|---|---:|---:|---:|---:|---:|---:|",
+    "| Rank | Profile | Status | Clean | Runs | Avg M2L | Avg L2M | Worst M2L | Worst L2M | Worst Run | Decrypt Failures |",
+    "|---:|---|---|---:|---:|---:|---:|---:|---:|---|---:|",
 ]
 def pct(value):
     return "n/a" if value is None else f"{value:.1%}"
 
 for item in profiles:
     lines.append(
-        "| {rank} | `{profile}` | {status} | {runs} | {avg_m2l} | {avg_l2m} | {worst_m2l} | {worst_l2m} | {decrypt} |".format(
+        "| {rank} | `{profile}` | {status} | {clean}/{required} | {runs} | {avg_m2l} | {avg_l2m} | {worst_m2l} | {worst_l2m} | r{worst_repeat} {worst_result} {worst_min} | {decrypt} |".format(
             rank=item["rank"],
             profile=item["profile"],
             status=item["status"],
+            clean=item["accepted_count"],
+            required=item["required_clean_repeats"],
             runs=item["runs"],
             avg_m2l=pct(item["avg_m2l_recovery"] if item["m2l_enabled_runs"] else None),
             avg_l2m=pct(item["avg_l2m_recovery"] if item["l2m_enabled_runs"] else None),
             worst_m2l=pct(item["worst_m2l_recovery"] if item["m2l_enabled_runs"] else None),
             worst_l2m=pct(item["worst_l2m_recovery"] if item["l2m_enabled_runs"] else None),
+            worst_repeat=(item.get("worst_run") or {}).get("repeat_index"),
+            worst_result=(item.get("worst_run") or {}).get("smoke_result"),
+            worst_min=pct((item.get("worst_run") or {}).get("min_recovery")),
             decrypt=item["decrypt_failures"],
         )
     )
