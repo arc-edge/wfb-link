@@ -20,8 +20,8 @@ Product code
 | Need | Backend | Status |
 | --- | --- | --- |
 | Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
+| Managed raw application multi-streams | `ManagedWfbStreamsBackend` | Product-facing initial implementation. Supervises one WFB-NG helper per configured stream and exposes raw UDP endpoints with named health. |
 | Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in transport is macOS IOUSBHost; Android should reuse this contract with an Android USB transport. |
-| Generic raw application multi-streams | Product/helper layer above `UserspaceRadioBackend` | Not built into `wfb-link` yet. Convert raw app UDP to WFB distributor datagrams before handing it to the radio backend, or use a future managed multi-stream codec backend tracked in [issue #3](https://github.com/arc-edge/wfb-link/issues/3). |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
 | Android | `UserspaceRadioBackend` plus Android USB transport | Planned. Keep the same lifecycle, endpoint, health, and report contracts. |
 
@@ -33,6 +33,8 @@ The important distinction is `payload_kind`:
 Today, `UserspaceRadioBackend` consumes and emits `WfbDistributorDatagram`.
 It rejects `RawApplicationDatagram` endpoints before startup because it does
 not supervise WFB codec processes itself.
+`ManagedWfbStreamsBackend` exposes `RawApplicationDatagram` streams by starting
+WFB-NG `wfb_tx`/`wfb_rx` helpers around the direct radio runtime.
 `MacosWfbTunnelBackend` exposes raw IP tunnel endpoints because it starts the
 WFB-NG helper processes and `wfb-tun-macos` bridge for that specific tunnel use.
 
@@ -57,6 +59,10 @@ For fully reproducible product releases, Cargo.lock will record the resolved
 commit. A product can also pin the exact release commit explicitly with `rev`
 after the tag has been validated in its own CI. Keep the service TOML and helper
 binaries under product release management; do not depend on `wfb-radio-diag`.
+
+`v0.1.0-alpha.2` predates `ManagedWfbStreamsBackend`. Until the next alpha is
+cut, products that need managed raw streams should pin an audited commit from
+`main`.
 
 ## Managed macOS Tunnel
 
@@ -100,6 +106,88 @@ Operational requirements:
 - The `gs.key` must match the Linux peer.
 - The Linux peer must be on the same channel, bandwidth, link ID, and tunnel
   radio ports.
+
+## Managed Raw Application Streams
+
+Use this path when the product wants named raw UDP streams, such as video
+downlink, telemetry downlink, and sparse control uplink, and does not want to
+spawn WFB-NG helpers itself. The service TOML is still the radio/runtime base;
+the managed raw streams are configured through the Rust builder so product code
+can own product port assignments explicitly.
+
+```rust
+use std::{net::SocketAddr, time::Duration};
+use wfb_link::{
+    LinkBackend, LinkConfig, ManagedWfbStreamConfig, ManagedWfbStreamsBackend,
+    ManagedWfbStreamsConfig, ManagedWfbTxProfile, UserspaceRadioConfig,
+};
+
+fn run_streams() -> Result<(), Box<dyn std::error::Error>> {
+    let radio = UserspaceRadioConfig::from_service_config_path(
+        "configs/radio-run-video-control-tdd.toml",
+    )?;
+    let config = ManagedWfbStreamsConfig::from_radio_config(radio, "/path/to/gs.key")
+        .with_stream(
+            ManagedWfbStreamConfig::rx(
+                "video-down",
+                4,
+                "127.0.0.1:5804".parse::<SocketAddr>()?,
+            )
+            .with_link_id(1),
+        )
+        .with_stream(
+            ManagedWfbStreamConfig::rx(
+                "telemetry-down",
+                5,
+                "127.0.0.1:5805".parse::<SocketAddr>()?,
+            )
+            .with_link_id(1),
+        )
+        .with_stream(
+            ManagedWfbStreamConfig::tx(
+                "control-up",
+                6,
+                "127.0.0.1:5606".parse::<SocketAddr>()?,
+            )
+            .with_link_id(1)
+            .with_tx_profile(ManagedWfbTxProfile {
+                bandwidth_mhz: 20,
+                mcs: 0,
+                fec_k: 2,
+                fec_n: 16,
+            }),
+        );
+
+    let mut backend = ManagedWfbStreamsBackend::default();
+    let handle = backend.start(LinkConfig::managed_wfb_streams(config))?;
+    handle.wait_ready(Duration::from_secs(90))?;
+
+    for stream in &handle.endpoints().streams {
+        println!("{} {:?} raw UDP at {}", stream.name, stream.direction, stream.local_udp);
+    }
+
+    handle.request_stop()?;
+    let _report = handle.join()?;
+    Ok(())
+}
+```
+
+For RX, `wfb-link` starts `wfb_rx`, listens for matching WFB aggregator
+datagrams from the radio runtime, decrypts/decodes them through WFB-NG, and
+forwards raw payload bytes to the stream's `app_udp`. For TX, `wfb-link` starts
+`wfb_tx`, listens for raw payload bytes on `app_udp`, encodes them with the
+stream's FEC/MCS profile, and sends WFB distributor datagrams into the internal
+radio endpoint.
+
+Current managed-stream limitations:
+
+- All managed streams must be `Required`; best-effort helper degradation is not
+  implemented yet.
+- Helper binaries and the `gs.key` are product release artifacts.
+- The API owns stream supervision, not stream semantics. Product code still
+  decides which UDP port is video, telemetry, or control.
+- Receiver-backed adoption gates should be run before depending on a new
+  stream profile in production.
 
 ## Userspace Distributor Streams
 
@@ -232,6 +320,9 @@ Current userspace radio behavior:
   `userspace_radio_rx_best_effort_unsupported`. UDP forward-target reachability
   is not reliably knowable at startup, so pretending RX had TX-like degradation
   semantics is too easy to misuse.
+- `ManagedWfbStreamsBackend` currently rejects all best-effort streams with
+  `managed_wfb_best_effort_unsupported` because helper child-process
+  degradation needs explicit stream-level semantics before production use.
 
 ## Platform Selection Shape
 

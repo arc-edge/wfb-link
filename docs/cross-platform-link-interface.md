@@ -75,8 +75,8 @@ streams.
 
 `UserspaceRadioBackend` is a direct-radio backend, not a codec supervisor. It
 therefore rejects `RawApplicationDatagram` streams before startup. Raw
-application endpoints are currently valid for `MacosWfbTunnelBackend`'s managed
-IP tunnel path, or for future managed codec backends.
+application endpoints are valid for `MacosWfbTunnelBackend`'s managed IP
+tunnel path and for `ManagedWfbStreamsBackend`'s managed raw UDP stream path.
 
 Do not treat endpoint metadata as a runtime rewrite mechanism. Runtime sockets
 come from `UserspaceRadioConfig` / `wfb-radio-service` resolution. If a
@@ -107,20 +107,23 @@ raw app UDP or tunnel
   <-> AWUS036ACH over userspace USB
 ```
 
-The `wfb-link` macOS layer has two backend shapes:
+The `wfb-link` macOS layer has three backend shapes:
 
 - `UserspaceRadioConfig::from_service_config_path` resolves an existing
   `wfb-radio-service` TOML profile.
 - `UserspaceRadioBackend` starts `run_production_runtime_flow` on a
   thread and exposes WFB distributor datagram endpoints. Use this when the
   caller owns WFB-NG codec/session framing.
+- `ManagedWfbStreamsBackend` supervises the production radio runtime plus one
+  stock `wfb_tx` or `wfb_rx` helper per configured stream. Use this when a
+  product wants named raw UDP streams without owning WFB-NG helper processes.
 - `MacosWfbTunnelBackend` supervises the production radio runtime, stock
   `wfb_tx`/`wfb_rx` helpers, and the Rust `wfb-tun-macos` bridge. Use this when
   a product wants a raw IP tunnel endpoint and a single Rust lifecycle handle.
 
-Both backends use `request_stop` with cooperative runtime shutdown and managed
-child termination instead of relying on process-wide signal handlers. Both
-return normalized `wait_ready`, `health`, and `join` evidence while keeping
+The managed backends use `request_stop` with cooperative runtime shutdown and
+managed child termination instead of relying on process-wide signal handlers.
+They return normalized `wait_ready`, `health`, and `join` evidence while keeping
 backend-specific reports attached for diagnostics.
 
 The tunnel backend is a process supervisor by design. That keeps WFB-NG codec
@@ -193,8 +196,9 @@ peer_ip = "10.5.0.2"
 
 When this shape is handed to `UserspaceRadioBackend`, every stream must use
 `wfb_distributor_datagram`, and RX streams must be `required`. Raw application
-streams require a backend/helper that owns WFB codec supervision; best-effort RX
-needs explicit managed degradation semantics before it is safe to expose.
+streams require a backend/helper that owns WFB codec supervision, such as
+`ManagedWfbStreamsBackend`. Best-effort RX and managed-helper degradation need
+explicit stream-level semantics before they are safe to expose.
 
 `LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
 entries expose submitted frames, failed submissions, dropped datagrams, and
@@ -206,8 +210,9 @@ For the current userspace radio backend, `BestEffort` is implemented for
 TX UDP bind preflight: an unavailable best-effort TX socket is removed from the
 runtime bind set and reported as degraded instead of failing the whole link.
 Required bind failures still abort. RX forward sockets are runtime-owned
-ephemeral sockets today, so RX best-effort currently acts as health metadata;
-there is no operator-specified RX bind to skip.
+ephemeral sockets today, so `UserspaceRadioBackend` rejects best-effort RX
+before startup. `ManagedWfbStreamsBackend` also rejects best-effort streams
+until child-process degradation can be attributed cleanly to named streams.
 
 See [Product integration](product-integration.md) for backend selection and
 [Service config reference](service-config-reference.md) for field-level TOML

@@ -3,7 +3,9 @@
 `wfb-radio-service` reads one TOML file and resolves it into a
 `ProductionRuntimeFlowConfig`. `wfb-link` also reads the resolved stream and
 tunnel metadata from the same file when using
-`UserspaceRadioConfig::from_service_config_path`.
+`UserspaceRadioConfig::from_service_config_path`. Managed raw application
+streams use this file as the radio/runtime base and define product-facing raw
+UDP streams through `ManagedWfbStreamsConfig`.
 
 The stream, WFB, tunnel, artifact, and calibration sections are platform-neutral
 contracts. `[macos_usbhost]` is intentionally macOS-only transport config; a
@@ -81,7 +83,7 @@ Fields:
 | `radio_port` | yes | WFB radio port used for RX filtering and health attribution. |
 | `local_udp` | yes | Local UDP socket. TX streams bind this address. RX streams forward matching WFB payloads to this address. |
 | `link_id` | no | WFB link ID for this stream. Defaults to `[wfb].link_id` when present. |
-| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Service `[[streams]]` default to `"wfb_distributor_datagram"` because `UserspaceRadioBackend` is the direct-radio stream backend. Use `"raw_application_datagram"` only with a backend/helper layer that supervises WFB codec processes. |
+| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Service `[[streams]]` default to `"wfb_distributor_datagram"` because `UserspaceRadioBackend` is the direct-radio stream backend. Use `"raw_application_datagram"` only with a managed backend/helper layer that supervises WFB codec processes. |
 | `criticality` | no | `"required"` or `"best_effort"`. Defaults to `"required"`. |
 
 Validation:
@@ -206,13 +208,18 @@ Use this decision table:
 | --- | --- | --- |
 | Raw IP tunnel packets | `raw_application_datagram` endpoint exposed by `MacosWfbTunnelBackend` | Managed tunnel backend |
 | WFB-NG distributor datagrams | `wfb_distributor_datagram` | `UserspaceRadioBackend` |
-| Raw app UDP for arbitrary streams | `raw_application_datagram` plus a helper/codec layer | Not native in `UserspaceRadioBackend` today; tracked as [issue #3](https://github.com/arc-edge/wfb-link/issues/3) |
+| Raw app UDP for arbitrary streams | `raw_application_datagram` endpoints exposed by `ManagedWfbStreamsBackend` | Managed stream backend |
 
 If a product sends raw payload bytes to a `WfbDistributorDatagram` endpoint, the
 runtime will treat the bytes as malformed WFB distributor input and drop them.
 `UserspaceRadioBackend` rejects `raw_application_datagram` streams before start
 so this mistake fails during integration instead of becoming a silent data-plane
 failure.
+
+`ManagedWfbStreamsBackend` does not currently populate streams from service
+`[[streams]]`; product code constructs `ManagedWfbStreamConfig` entries in Rust.
+That keeps application port ownership in the product while allowing the same
+service TOML to remain the radio/channel/calibration base.
 
 ## Criticality
 
@@ -226,6 +233,10 @@ reliably knowable at startup. For that reason `UserspaceRadioBackend` currently
 rejects best-effort RX streams with
 `userspace_radio_rx_best_effort_unsupported`; model RX streams as `required`
 until managed RX degradation semantics exist.
+
+`ManagedWfbStreamsBackend` currently rejects all best-effort streams with
+`managed_wfb_best_effort_unsupported` because helper child-process degradation
+needs explicit stream-level semantics before production use.
 
 ## Artifacts
 

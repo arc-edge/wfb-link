@@ -52,6 +52,9 @@ remote. Update them before adding Cargo git dependencies or release automation.
   wait for readiness, read health, request cooperative stop, and join for a
   final report. The facade also includes a macOS tunnel supervisor that manages
   the radio runtime, WFB-NG codec helpers, and `wfb-tun-macos`.
+- A managed macOS raw-application multi-stream backend that supervises one
+  `wfb_tx`/`wfb_rx` helper per stream while exposing product-facing UDP
+  endpoints and named per-stream health.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
@@ -105,6 +108,19 @@ cargo run -p wfb-link --example multi-stream-link -- \
 That profile exposes named WFB distributor/aggregator datagram streams. It is
 for products that already own WFB-NG datagrams or supervise helper processes;
 raw application UDP streams need a codec/helper layer above the radio backend.
+
+Run the managed raw-application multi-stream example:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+cargo run -p wfb-link --example managed-streams-link -- \
+  configs/radio-run-video-control-tdd.toml
+```
+
+That example starts the radio runtime plus WFB-NG helper processes for separate
+raw UDP streams such as video downlink, telemetry downlink, and sparse control
+uplink. Override `VIDEO_DOWN_UDP`, `TELEMETRY_DOWN_UDP`, `CONTROL_UP_UDP`,
+`WFB_TX_BIN`, `WFB_RX_BIN`, and `LINK_ID` as needed for the product.
 
 Run the product-facing radio API smoke on a prepared Mac with an attached
 AWUS036ACH:
@@ -203,6 +219,8 @@ fn start_link() -> Result<(), Box<dyn std::error::Error>> {
 
 Use `UserspaceRadioBackend` instead only when the product owns WFB-NG
 codec/session framing and wants direct WFB distributor datagram endpoints.
+Use `ManagedWfbStreamsBackend` when the product wants ordinary raw UDP streams
+and wants `wfb-link` to supervise one WFB-NG codec helper pair per stream.
 The old `MacosUserspaceRadio*` names are deprecated aliases; new integration
 code should use `UserspaceRadio*` for the portable direct-radio contract.
 
@@ -222,6 +240,10 @@ For the first alpha integration from another Rust repository:
 wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.2" }
 ```
 
+`v0.1.0-alpha.2` does not include `ManagedWfbStreamsBackend`; pin an audited
+`main` commit until the next alpha release is cut if the product needs managed
+raw application streams.
+
 ## Current Limitations
 
 - Hardware scope is RTL8812AU/AWUS036ACH class adapters.
@@ -234,10 +256,10 @@ wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alp
   receiver-backed validation.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
-- The managed macOS tunnel backend is product-facing for IP tunnel use. Generic
-  raw application streams still require either WFB-NG helper supervision or a
-  future managed codec backend. `UserspaceRadioBackend` accepts WFB
-  distributor/aggregator datagrams only.
+- `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
+  path. Its required-stream path is implemented; best-effort child-process
+  degradation and receiver-backed adoption gates are still follow-up work.
+- `UserspaceRadioBackend` accepts WFB distributor/aggregator datagrams only.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
 - The old Python `utun` helper is kept only under `scripts/development/` as a
   bring-up fallback; the default tunnel path is the Rust `wfb-tun-macos`

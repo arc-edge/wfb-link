@@ -24,7 +24,8 @@ use serde_json::Value;
 use thiserror::Error;
 use wfb_radio_runtime::{
     run_production_runtime_flow, ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
-    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult, RuntimeRadioError,
+    ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig, RuntimeRadioError,
 };
 use wfb_radio_service::{
     resolve_service_run, service_runtime_config_from_resolved,
@@ -56,7 +57,7 @@ pub enum LinkError {
     MissingPath { label: &'static str, path: PathBuf },
     #[error("failed to spawn {label}: {source}")]
     Spawn {
-        label: &'static str,
+        label: String,
         source: std::io::Error,
     },
     #[error("{label} exited before ready with status {status}")]
@@ -119,6 +120,12 @@ impl LinkConfig {
         }
     }
 
+    pub fn managed_wfb_streams(config: ManagedWfbStreamsConfig) -> Self {
+        Self {
+            backend: LinkBackendConfig::ManagedWfbStreams(config),
+        }
+    }
+
     pub fn linux_native_wfb(config: LinuxNativeWfbConfig) -> Self {
         Self {
             backend: LinkBackendConfig::LinuxNativeWfb(config),
@@ -132,6 +139,7 @@ pub enum LinkBackendConfig {
     #[deprecated(note = "use LinkBackendConfig::UserspaceRadio")]
     MacosUserspaceRadio(UserspaceRadioConfig),
     MacosWfbTunnel(MacosWfbTunnelConfig),
+    ManagedWfbStreams(ManagedWfbStreamsConfig),
     LinuxNativeWfb(LinuxNativeWfbConfig),
 }
 
@@ -372,6 +380,195 @@ impl MacosWfbTunnelConfig {
         });
         self.endpoints = endpoints;
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedWfbStreamsConfig {
+    pub radio: UserspaceRadioConfig,
+    pub wfb_key: PathBuf,
+    pub wfb_tx_bin: PathBuf,
+    pub wfb_rx_bin: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub streams: Vec<ManagedWfbStreamConfig>,
+    pub startup_settle: Duration,
+    pub endpoints: LinkEndpoints,
+}
+
+impl ManagedWfbStreamsConfig {
+    pub fn from_radio_config(radio: UserspaceRadioConfig, wfb_key: impl Into<PathBuf>) -> Self {
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "wfb-link-managed-streams-{}",
+            NEXT_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        Self {
+            radio,
+            wfb_key: wfb_key.into(),
+            wfb_tx_bin: PathBuf::from("target/wfb-ng-macos/bin/wfb_tx"),
+            wfb_rx_bin: PathBuf::from("target/wfb-ng-macos/bin/wfb_rx"),
+            artifact_dir,
+            streams: Vec::new(),
+            startup_settle: Duration::from_millis(500),
+            endpoints: LinkEndpoints::empty(),
+        }
+    }
+
+    pub fn from_service_config_path(
+        config: impl AsRef<Path>,
+        wfb_key: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let radio = UserspaceRadioConfig::from_service_config_path(config)?;
+        Ok(Self::from_radio_config(radio, wfb_key))
+    }
+
+    pub fn with_bins(
+        mut self,
+        wfb_tx_bin: impl Into<PathBuf>,
+        wfb_rx_bin: impl Into<PathBuf>,
+    ) -> Self {
+        self.wfb_tx_bin = wfb_tx_bin.into();
+        self.wfb_rx_bin = wfb_rx_bin.into();
+        self
+    }
+
+    pub fn with_artifact_dir(mut self, artifact_dir: impl Into<PathBuf>) -> Self {
+        self.artifact_dir = artifact_dir.into();
+        self
+    }
+
+    pub fn with_startup_settle(mut self, startup_settle: Duration) -> Self {
+        self.startup_settle = startup_settle;
+        self
+    }
+
+    pub fn with_stream(mut self, stream: ManagedWfbStreamConfig) -> Self {
+        self.streams.push(stream);
+        self.refresh_endpoints();
+        self
+    }
+
+    pub fn with_streams(
+        mut self,
+        streams: impl IntoIterator<Item = ManagedWfbStreamConfig>,
+    ) -> Self {
+        self.streams.extend(streams);
+        self.refresh_endpoints();
+        self
+    }
+
+    pub fn refresh_endpoints(&mut self) {
+        self.endpoints = LinkEndpoints {
+            streams: self
+                .streams
+                .iter()
+                .map(ManagedWfbStreamConfig::product_endpoint)
+                .collect(),
+            tunnel: None,
+        };
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedWfbStreamConfig {
+    pub name: String,
+    pub direction: LinkDirection,
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
+    pub app_udp: SocketAddr,
+    pub radio_udp: Option<SocketAddr>,
+    pub criticality: StreamCriticality,
+    pub tx_profile: ManagedWfbTxProfile,
+}
+
+impl ManagedWfbStreamConfig {
+    pub fn tx(name: impl Into<String>, radio_port: u8, app_udp: SocketAddr) -> Self {
+        Self::new(name, LinkDirection::Tx, radio_port, app_udp)
+    }
+
+    pub fn rx(name: impl Into<String>, radio_port: u8, app_udp: SocketAddr) -> Self {
+        Self::new(name, LinkDirection::Rx, radio_port, app_udp)
+    }
+
+    pub fn new(
+        name: impl Into<String>,
+        direction: LinkDirection,
+        radio_port: u8,
+        app_udp: SocketAddr,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            direction,
+            link_id: None,
+            radio_port,
+            app_udp,
+            radio_udp: None,
+            criticality: StreamCriticality::Required,
+            tx_profile: ManagedWfbTxProfile::default(),
+        }
+    }
+
+    pub fn with_link_id(mut self, link_id: u32) -> Self {
+        self.link_id = Some(link_id);
+        self
+    }
+
+    pub fn with_radio_udp(mut self, radio_udp: SocketAddr) -> Self {
+        self.radio_udp = Some(radio_udp);
+        self
+    }
+
+    pub fn with_tx_profile(mut self, profile: ManagedWfbTxProfile) -> Self {
+        self.tx_profile = profile;
+        self
+    }
+
+    pub fn with_criticality(mut self, criticality: StreamCriticality) -> Self {
+        self.criticality = criticality;
+        self
+    }
+
+    fn product_endpoint(&self) -> LinkStreamEndpoint {
+        LinkStreamEndpoint {
+            name: self.name.clone(),
+            direction: self.direction,
+            local_udp: self.app_udp,
+            payload_kind: PayloadKind::RawApplicationDatagram,
+            criticality: self.criticality,
+            stream: Some(WfbStreamId {
+                link_id: self.link_id,
+                radio_port: self.radio_port,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ManagedWfbTxProfile {
+    pub bandwidth_mhz: u16,
+    pub mcs: u8,
+    pub fec_k: u8,
+    pub fec_n: u8,
+}
+
+impl Default for ManagedWfbTxProfile {
+    fn default() -> Self {
+        Self {
+            bandwidth_mhz: 20,
+            mcs: 1,
+            fec_k: 2,
+            fec_n: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ManagedWfbStreamMapping {
+    pub direction: LinkDirection,
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
+    pub app_udp: SocketAddr,
+    pub radio_udp: SocketAddr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -812,6 +1009,7 @@ pub enum LinkBackendReport {
     #[deprecated(note = "use LinkBackendReport::UserspaceRadio")]
     MacosUserspaceRadio(ProductionRuntimeFlowReport),
     MacosWfbTunnel(MacosWfbTunnelReport),
+    ManagedWfbStreams(ManagedWfbStreamsReport),
     LinuxNativeWfb(Value),
 }
 
@@ -822,6 +1020,27 @@ pub struct MacosWfbTunnelReport {
     pub tunnel_summary: Option<Value>,
     pub artifacts_dir: PathBuf,
     pub children: Vec<ChildProcessReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ManagedWfbStreamsReport {
+    pub radio: ProductionRuntimeFlowReport,
+    pub artifacts_dir: PathBuf,
+    pub streams: Vec<ManagedWfbStreamReport>,
+    pub children: Vec<ChildProcessReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ManagedWfbStreamReport {
+    pub name: String,
+    pub direction: LinkDirection,
+    pub link_id: Option<u32>,
+    pub radio_port: u8,
+    pub app_udp: SocketAddr,
+    pub radio_udp: SocketAddr,
+    pub tx_profile: Option<ManagedWfbTxProfile>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -843,6 +1062,9 @@ pub type MacosUserspaceRadioBackend = UserspaceRadioBackend;
 #[derive(Debug, Default)]
 pub struct MacosWfbTunnelBackend;
 
+#[derive(Debug, Default)]
+pub struct ManagedWfbStreamsBackend;
+
 #[allow(deprecated)]
 impl LinkBackend for UserspaceRadioBackend {
     fn start(&mut self, config: LinkConfig) -> Result<Box<dyn LinkHandle>> {
@@ -862,6 +1084,18 @@ impl LinkBackend for MacosWfbTunnelBackend {
             return Err(LinkError::UnsupportedBackend("expected macos_wfb_tunnel"));
         };
         let handle = MacosWfbTunnelHandle::start(config)?;
+        Ok(Box::new(handle))
+    }
+}
+
+impl LinkBackend for ManagedWfbStreamsBackend {
+    fn start(&mut self, config: LinkConfig) -> Result<Box<dyn LinkHandle>> {
+        let LinkBackendConfig::ManagedWfbStreams(config) = config.backend else {
+            return Err(LinkError::UnsupportedBackend(
+                "expected managed_wfb_streams",
+            ));
+        };
+        let handle = ManagedWfbStreamsHandle::start(config)?;
         Ok(Box::new(handle))
     }
 }
@@ -932,6 +1166,141 @@ fn validate_userspace_radio_endpoint_contract(endpoints: &LinkEndpoints) -> Resu
         }
     }
     Ok(())
+}
+
+fn validate_managed_wfb_streams(streams: &[ManagedWfbStreamConfig]) -> Result<()> {
+    if streams.is_empty() {
+        return Err(LinkError::InvalidBackendConfig {
+            code: "managed_wfb_streams_empty",
+            message: "ManagedWfbStreamsBackend requires at least one stream".to_string(),
+        });
+    }
+    for stream in streams {
+        if stream.name.trim().is_empty() {
+            return Err(LinkError::InvalidBackendConfig {
+                code: "managed_wfb_stream_empty_name",
+                message: "managed WFB stream name cannot be empty".to_string(),
+            });
+        }
+        if stream.criticality != StreamCriticality::Required {
+            return Err(LinkError::InvalidBackendConfig {
+                code: "managed_wfb_best_effort_unsupported",
+                message: format!(
+                    "stream '{}' is best-effort; managed WFB stream child-process degradation semantics are not implemented yet",
+                    stream.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn managed_wfb_stream_mappings(
+    streams: &[ManagedWfbStreamConfig],
+) -> Result<Vec<ManagedWfbStreamMapping>> {
+    streams
+        .iter()
+        .map(|stream| {
+            Ok(ManagedWfbStreamMapping {
+                direction: stream.direction,
+                link_id: stream.link_id,
+                radio_port: stream.radio_port,
+                app_udp: stream.app_udp,
+                radio_udp: stream.radio_udp.unwrap_or(reserve_loopback_udp_addr()?),
+            })
+        })
+        .collect()
+}
+
+fn managed_radio_endpoints(
+    streams: &[ManagedWfbStreamConfig],
+    mappings: &[ManagedWfbStreamMapping],
+) -> Result<LinkEndpoints> {
+    if streams.len() != mappings.len() {
+        return Err(LinkError::InvalidBackendConfig {
+            code: "managed_wfb_stream_mapping_mismatch",
+            message: "managed WFB stream mapping count did not match stream count".to_string(),
+        });
+    }
+    Ok(LinkEndpoints {
+        streams: streams
+            .iter()
+            .zip(mappings.iter())
+            .map(|(stream, mapping)| LinkStreamEndpoint {
+                name: stream.name.clone(),
+                direction: stream.direction,
+                local_udp: mapping.radio_udp,
+                payload_kind: PayloadKind::WfbDistributorDatagram,
+                criticality: stream.criticality,
+                stream: Some(WfbStreamId {
+                    link_id: stream.link_id,
+                    radio_port: stream.radio_port,
+                }),
+            })
+            .collect(),
+        tunnel: None,
+    })
+}
+
+fn apply_managed_wfb_streams_to_radio(
+    radio: &mut UserspaceRadioConfig,
+    radio_endpoints: &LinkEndpoints,
+    mappings: &[ManagedWfbStreamMapping],
+) {
+    let tx_addrs = mappings
+        .iter()
+        .filter(|mapping| mapping.direction == LinkDirection::Tx)
+        .map(|mapping| mapping.radio_udp)
+        .collect::<Vec<_>>();
+    if let Some((first, rest)) = tx_addrs.split_first() {
+        radio.runtime_config.bind_addr = *first;
+        radio.runtime_config.tx_binds = rest.to_vec();
+    } else {
+        radio.runtime_config.tx_binds.clear();
+    }
+
+    let rx_mappings = mappings
+        .iter()
+        .filter(|mapping| mapping.direction == LinkDirection::Rx)
+        .collect::<Vec<_>>();
+    if let Some((first, rest)) = rx_mappings.split_first() {
+        radio.runtime_config.primary_rx_forward = ProductionRuntimePrimaryRxForwardConfig {
+            link_id: first.link_id,
+            radio_port: Some(first.radio_port),
+            aggregator: Some(first.radio_udp),
+        };
+        radio.runtime_config.rx_forwards = rest
+            .iter()
+            .map(|mapping| ProductionRuntimeRxForwardConfig {
+                link_id: mapping.link_id,
+                radio_port: mapping.radio_port,
+                aggregator: Some(mapping.radio_udp),
+            })
+            .collect();
+    } else {
+        radio.runtime_config.primary_rx_forward = ProductionRuntimePrimaryRxForwardConfig {
+            link_id: None,
+            radio_port: None,
+            aggregator: None,
+        };
+        radio.runtime_config.rx_forwards.clear();
+    }
+
+    radio.endpoints = radio_endpoints.clone();
+}
+
+fn reserve_loopback_udp_addr() -> Result<SocketAddr> {
+    let socket =
+        UdpSocket::bind("127.0.0.1:0").map_err(|source| LinkError::InvalidBackendConfig {
+            code: "managed_wfb_udp_reservation_failed",
+            message: format!("failed to reserve loopback UDP port: {source}"),
+        })?;
+    socket
+        .local_addr()
+        .map_err(|source| LinkError::InvalidBackendConfig {
+            code: "managed_wfb_udp_reservation_failed",
+            message: format!("failed to read reserved loopback UDP port: {source}"),
+        })
 }
 
 fn apply_best_effort_tx_bind_preflight(
@@ -1366,6 +1735,250 @@ impl LinkHandle for MacosWfbTunnelHandle {
     }
 }
 
+#[derive(Debug)]
+pub struct ManagedWfbStreamsHandle {
+    endpoints: LinkEndpoints,
+    radio_endpoints: LinkEndpoints,
+    radio_handle: UserspaceRadioHandle,
+    children: Mutex<Vec<ManagedChild>>,
+    artifact_dir: PathBuf,
+    stream_reports: Vec<ManagedWfbStreamReport>,
+    startup_settle: Duration,
+}
+
+impl ManagedWfbStreamsHandle {
+    fn start(mut config: ManagedWfbStreamsConfig) -> Result<Self> {
+        config.refresh_endpoints();
+        require_existing_path(&config.wfb_key, "WFB key")?;
+        require_existing_path(&config.wfb_tx_bin, "wfb_tx binary")?;
+        require_existing_path(&config.wfb_rx_bin, "wfb_rx binary")?;
+        fs::create_dir_all(&config.artifact_dir).map_err(|source| LinkError::Io {
+            path: config.artifact_dir.clone(),
+            source,
+        })?;
+
+        validate_link_endpoints(&config.endpoints)?;
+        validate_managed_wfb_streams(&config.streams)?;
+        let mappings = managed_wfb_stream_mappings(&config.streams)?;
+        let radio_endpoints = managed_radio_endpoints(&config.streams, &mappings)?;
+        validate_link_endpoints(&radio_endpoints)?;
+        validate_userspace_radio_endpoint_contract(&radio_endpoints)?;
+
+        let mut radio = config.radio.clone();
+        apply_managed_wfb_streams_to_radio(&mut radio, &radio_endpoints, &mappings);
+        let radio_handle = UserspaceRadioHandle::start(radio)?;
+
+        let mut children = Vec::new();
+        for (stream, mapping) in config.streams.iter().zip(mappings.iter()) {
+            match stream.direction {
+                LinkDirection::Tx => children.push(spawn_logged(
+                    format!("wfb-tx-{}", stream.name),
+                    managed_wfb_tx_command(&config, stream, mapping),
+                    &config.artifact_dir,
+                )?),
+                LinkDirection::Rx => children.push(spawn_logged(
+                    format!("wfb-rx-{}", stream.name),
+                    managed_wfb_rx_command(&config, stream, mapping),
+                    &config.artifact_dir,
+                )?),
+            }
+        }
+
+        let stream_reports = config
+            .streams
+            .iter()
+            .zip(mappings.iter())
+            .map(|(stream, mapping)| ManagedWfbStreamReport {
+                name: stream.name.clone(),
+                direction: stream.direction,
+                link_id: stream.link_id,
+                radio_port: stream.radio_port,
+                app_udp: stream.app_udp,
+                radio_udp: mapping.radio_udp,
+                tx_profile: (stream.direction == LinkDirection::Tx).then_some(stream.tx_profile),
+            })
+            .collect();
+
+        Ok(Self {
+            endpoints: config.endpoints,
+            radio_endpoints,
+            radio_handle,
+            children: Mutex::new(children),
+            artifact_dir: config.artifact_dir,
+            stream_reports,
+            startup_settle: config.startup_settle,
+        })
+    }
+
+    fn child_reports(&self) -> Result<Vec<ChildProcessReport>> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        children.iter_mut().map(ManagedChild::report).collect()
+    }
+
+    fn check_children_alive(&self) -> Result<()> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        for child in children.iter_mut() {
+            if let Some(status) = child.try_wait()? {
+                return Err(LinkError::ProcessExitedBeforeReady {
+                    label: child.name.clone(),
+                    status: exit_status_label(status),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate_children(&self) -> Result<Vec<ChildProcessReport>> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        terminate_child_processes(&mut children);
+        children.iter_mut().map(ManagedChild::report).collect()
+    }
+}
+
+impl LinkHandle for ManagedWfbStreamsHandle {
+    fn endpoints(&self) -> &LinkEndpoints {
+        &self.endpoints
+    }
+
+    fn wait_ready(&self, timeout: Duration) -> Result<LinkReady> {
+        let started = Instant::now();
+        loop {
+            self.check_children_alive()?;
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(LinkError::ReadyTimeout(timeout));
+            }
+            match self.radio_handle.wait_ready(remaining) {
+                Ok(ready) => {
+                    if !self.startup_settle.is_zero() {
+                        thread::sleep(self.startup_settle);
+                    }
+                    self.check_children_alive()?;
+                    return Ok(LinkReady {
+                        endpoints: self.endpoints.clone(),
+                        ready_file: ready.ready_file,
+                        ready_at_unix_ms: ready.ready_at_unix_ms,
+                        backend: serde_json::json!({
+                            "kind": "managed_wfb_streams",
+                            "radio": ready.backend,
+                            "artifacts_dir": self.artifact_dir,
+                            "streams": self.stream_reports,
+                            "children": self.child_reports()?,
+                        }),
+                    });
+                }
+                Err(LinkError::ReadyTimeout(_)) => return Err(LinkError::ReadyTimeout(timeout)),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn health(&self) -> Result<LinkHealth> {
+        let radio_health = self.radio_handle.health()?;
+        let children = self.child_reports()?;
+        let child_failed = children.iter().any(|child| {
+            child
+                .status
+                .as_deref()
+                .is_some_and(|status| !status.starts_with("running"))
+        });
+        let lifecycle = if child_failed {
+            LinkLifecycle::Degraded
+        } else {
+            radio_health.lifecycle
+        };
+        let streams = managed_stream_health_from_backend_json(
+            &self.endpoints,
+            &self.radio_endpoints,
+            &radio_health.backend,
+        );
+        let degraded_streams = degraded_stream_names(&streams);
+        Ok(LinkHealth {
+            lifecycle,
+            ready: radio_health.ready && !child_failed,
+            endpoints: self.endpoints.clone(),
+            tx: radio_health.tx,
+            rx: radio_health.rx,
+            streams,
+            degraded_streams,
+            backend: serde_json::json!({
+                "kind": "managed_wfb_streams",
+                "radio": radio_health.backend,
+                "artifacts_dir": self.artifact_dir,
+                "streams": self.stream_reports,
+                "children": children,
+            }),
+        })
+    }
+
+    fn request_stop(&self) -> Result<()> {
+        self.radio_handle.request_stop()?;
+        let _ = self.terminate_children()?;
+        Ok(())
+    }
+
+    fn join(self: Box<Self>) -> Result<LinkReport> {
+        let ManagedWfbStreamsHandle {
+            endpoints,
+            radio_endpoints,
+            radio_handle,
+            children,
+            artifact_dir,
+            stream_reports,
+            ..
+        } = *self;
+        radio_handle.request_stop()?;
+        let mut children = children
+            .into_inner()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        terminate_child_processes(&mut children);
+        let child_reports = children
+            .iter_mut()
+            .map(ManagedChild::report)
+            .collect::<Result<Vec<_>>>()?;
+        let radio_report = Box::new(radio_handle).join()?;
+        let LinkBackendReport::UserspaceRadio(radio) = radio_report.backend else {
+            unreachable!("managed WFB streams owns a userspace radio handle");
+        };
+        let child_failed = child_reports.iter().any(|child| {
+            child
+                .status
+                .as_deref()
+                .is_some_and(|status| !status.starts_with("exit:0") && status != "signal")
+        });
+        let lifecycle = if radio_report.lifecycle == LinkLifecycle::Stopped && !child_failed {
+            LinkLifecycle::Stopped
+        } else {
+            LinkLifecycle::Failed
+        };
+        let backend_json = serde_json::to_value(&radio).unwrap_or(Value::Null);
+        let streams =
+            managed_stream_health_from_backend_json(&endpoints, &radio_endpoints, &backend_json);
+        let degraded_streams = degraded_stream_names(&streams);
+        Ok(LinkReport {
+            lifecycle,
+            endpoints,
+            streams,
+            degraded_streams,
+            backend: LinkBackendReport::ManagedWfbStreams(ManagedWfbStreamsReport {
+                radio,
+                artifacts_dir: artifact_dir,
+                streams: stream_reports,
+                children: child_reports,
+            }),
+        })
+    }
+}
+
 pub fn userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> LinkEndpoints {
     let mut streams = Vec::with_capacity(2 + config.tx_binds.len() + config.rx_forwards.len());
     for (index, local_udp) in std::iter::once(config.bind_addr)
@@ -1529,7 +2142,7 @@ impl ManagedChild {
             return Ok(Some(status));
         }
         let status = self.child.try_wait().map_err(|source| LinkError::Spawn {
-            label: "poll child process",
+            label: "poll child process".to_string(),
             source,
         })?;
         if let Some(status) = status {
@@ -1562,12 +2175,14 @@ fn require_existing_path(path: &Path, label: &'static str) -> Result<()> {
 }
 
 fn spawn_logged(
-    label: &'static str,
+    label: impl Into<String>,
     mut command: Command,
     artifact_dir: &Path,
 ) -> Result<ManagedChild> {
-    let stdout_log = artifact_dir.join(format!("{label}.stdout.log"));
-    let stderr_log = artifact_dir.join(format!("{label}.stderr.log"));
+    let label = label.into();
+    let file_label = artifact_file_label(&label);
+    let stdout_log = artifact_dir.join(format!("{file_label}.stdout.log"));
+    let stderr_log = artifact_dir.join(format!("{file_label}.stderr.log"));
     let stdout = File::create(&stdout_log).map_err(|source| LinkError::Io {
         path: stdout_log.clone(),
         source,
@@ -1581,14 +2196,30 @@ fn spawn_logged(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|source| LinkError::Spawn { label, source })?;
+        .map_err(|source| LinkError::Spawn {
+            label: label.clone(),
+            source,
+        })?;
     Ok(ManagedChild {
-        name: label.to_string(),
+        name: label,
         child,
         stdout_log,
         stderr_log,
         status: None,
     })
+}
+
+fn artifact_file_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn wfb_rx_command(config: &MacosWfbTunnelConfig) -> Command {
@@ -1660,6 +2291,56 @@ fn wfb_tun_command(config: &MacosWfbTunnelConfig, summary_file: &Path) -> Comman
         .arg(config.tunnel_rx_udp.to_string())
         .arg("--summary-file")
         .arg(summary_file);
+    command
+}
+
+fn managed_wfb_rx_command(
+    config: &ManagedWfbStreamsConfig,
+    stream: &ManagedWfbStreamConfig,
+    mapping: &ManagedWfbStreamMapping,
+) -> Command {
+    let mut command = Command::new(&config.wfb_rx_bin);
+    command
+        .arg("-a")
+        .arg(mapping.radio_udp.port().to_string())
+        .arg("-K")
+        .arg(&config.wfb_key)
+        .arg("-i")
+        .arg(stream.link_id.unwrap_or(0).to_string())
+        .arg("-p")
+        .arg(stream.radio_port.to_string())
+        .arg("-c")
+        .arg(stream.app_udp.ip().to_string())
+        .arg("-u")
+        .arg(stream.app_udp.port().to_string());
+    command
+}
+
+fn managed_wfb_tx_command(
+    config: &ManagedWfbStreamsConfig,
+    stream: &ManagedWfbStreamConfig,
+    mapping: &ManagedWfbStreamMapping,
+) -> Command {
+    let mut command = Command::new(&config.wfb_tx_bin);
+    command
+        .arg("-d")
+        .arg("-K")
+        .arg(&config.wfb_key)
+        .arg("-i")
+        .arg(stream.link_id.unwrap_or(0).to_string())
+        .arg("-p")
+        .arg(stream.radio_port.to_string())
+        .arg("-B")
+        .arg(stream.tx_profile.bandwidth_mhz.to_string())
+        .arg("-M")
+        .arg(stream.tx_profile.mcs.to_string())
+        .arg("-k")
+        .arg(stream.tx_profile.fec_k.to_string())
+        .arg("-n")
+        .arg(stream.tx_profile.fec_n.to_string())
+        .arg("-u")
+        .arg(stream.app_udp.port().to_string())
+        .arg(mapping.radio_udp.to_string());
     command
 }
 
@@ -1834,6 +2515,27 @@ fn link_stream_health_from_backend_json(
                 rx: (stream.direction == LinkDirection::Rx)
                     .then(|| link_stream_rx_health_from_json(backend.get("rx"), stream)),
             }
+        })
+        .collect()
+}
+
+fn managed_stream_health_from_backend_json(
+    product_endpoints: &LinkEndpoints,
+    radio_endpoints: &LinkEndpoints,
+    backend: &Value,
+) -> Vec<LinkStreamHealth> {
+    let radio_streams = link_stream_health_from_backend_json(radio_endpoints, backend, &[]);
+    radio_streams
+        .into_iter()
+        .zip(product_endpoints.streams.iter())
+        .map(|(mut health, product)| {
+            health.name = product.name.clone();
+            health.direction = product.direction;
+            health.local_udp = product.local_udp;
+            health.payload_kind = product.payload_kind;
+            health.criticality = product.criticality;
+            health.stream = product.stream;
+            health
         })
         .collect()
 }
@@ -2368,6 +3070,213 @@ mod tests {
                         link_id: Some(0),
                         radio_port: 3,
                     })));
+    }
+
+    #[test]
+    fn managed_wfb_streams_rewrite_runtime_to_internal_radio_ports() {
+        let radio =
+            UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), Default::default());
+        let mut config = ManagedWfbStreamsConfig::from_radio_config(radio, "/tmp/gs.key")
+            .with_stream(
+                ManagedWfbStreamConfig::rx("video-down", 4, "127.0.0.1:5804".parse().unwrap())
+                    .with_link_id(1)
+                    .with_radio_udp("127.0.0.1:5904".parse().unwrap()),
+            )
+            .with_stream(
+                ManagedWfbStreamConfig::tx("control-up", 6, "127.0.0.1:5606".parse().unwrap())
+                    .with_link_id(1)
+                    .with_radio_udp("127.0.0.1:5906".parse().unwrap()),
+            );
+
+        validate_managed_wfb_streams(&config.streams).expect("managed streams");
+        let mappings = managed_wfb_stream_mappings(&config.streams).expect("mappings");
+        let radio_endpoints =
+            managed_radio_endpoints(&config.streams, &mappings).expect("radio endpoints");
+        apply_managed_wfb_streams_to_radio(&mut config.radio, &radio_endpoints, &mappings);
+
+        assert_eq!(config.endpoints.streams.len(), 2);
+        assert_eq!(
+            config.endpoints.streams[0].payload_kind,
+            PayloadKind::RawApplicationDatagram
+        );
+        assert_eq!(
+            radio_endpoints.streams[0].payload_kind,
+            PayloadKind::WfbDistributorDatagram
+        );
+        assert_eq!(
+            config.radio.runtime_config.primary_rx_forward,
+            ProductionRuntimePrimaryRxForwardConfig {
+                link_id: Some(1),
+                radio_port: Some(4),
+                aggregator: Some("127.0.0.1:5904".parse().unwrap()),
+            }
+        );
+        assert_eq!(
+            config.radio.runtime_config.bind_addr,
+            "127.0.0.1:5906".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn managed_wfb_streams_reject_best_effort_until_child_degradation_exists() {
+        let streams =
+            vec![
+                ManagedWfbStreamConfig::tx("control-up", 6, "127.0.0.1:5606".parse().unwrap())
+                    .with_criticality(StreamCriticality::BestEffort),
+            ];
+
+        let error = validate_managed_wfb_streams(&streams).expect_err("best effort rejected");
+
+        assert!(matches!(
+            error,
+            LinkError::InvalidBackendConfig {
+                code: "managed_wfb_best_effort_unsupported",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn managed_stream_health_uses_product_endpoints_with_radio_counters() {
+        let product = LinkEndpoints {
+            tunnel: None,
+            streams: vec![LinkStreamEndpoint {
+                name: "control-up".to_string(),
+                direction: LinkDirection::Tx,
+                local_udp: "127.0.0.1:5606".parse().unwrap(),
+                payload_kind: PayloadKind::RawApplicationDatagram,
+                criticality: StreamCriticality::Required,
+                stream: Some(WfbStreamId {
+                    link_id: Some(1),
+                    radio_port: 6,
+                }),
+            }],
+        };
+        let radio = LinkEndpoints {
+            tunnel: None,
+            streams: vec![LinkStreamEndpoint {
+                name: "control-up".to_string(),
+                direction: LinkDirection::Tx,
+                local_udp: "127.0.0.1:5906".parse().unwrap(),
+                payload_kind: PayloadKind::WfbDistributorDatagram,
+                criticality: StreamCriticality::Required,
+                stream: Some(WfbStreamId {
+                    link_id: Some(1),
+                    radio_port: 6,
+                }),
+            }],
+        };
+        let backend = serde_json::json!({
+            "tx": {
+                "tx_binds": [{
+                    "bind_addr": "127.0.0.1:5906",
+                    "submitted_frames": 7,
+                    "failed_submissions": 1,
+                    "dropped_datagrams": 2,
+                    "last_submit_unix_ms": 1234
+                }]
+            }
+        });
+
+        let streams = managed_stream_health_from_backend_json(&product, &radio, &backend);
+
+        assert_eq!(streams[0].local_udp, "127.0.0.1:5606".parse().unwrap());
+        assert_eq!(streams[0].payload_kind, PayloadKind::RawApplicationDatagram);
+        assert_eq!(
+            streams[0].tx,
+            Some(LinkStreamTxHealth {
+                submitted_frames: 7,
+                failed_submissions: 1,
+                dropped_datagrams: 2,
+                last_submit_unix_ms: Some(1234),
+            })
+        );
+    }
+
+    #[test]
+    fn managed_wfb_stream_commands_bridge_raw_app_and_radio_datagrams() {
+        let radio =
+            UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), Default::default());
+        let config = ManagedWfbStreamsConfig::from_radio_config(radio, "/tmp/gs.key")
+            .with_bins("/opt/wfb-ng/bin/wfb_tx", "/opt/wfb-ng/bin/wfb_rx");
+        let rx = ManagedWfbStreamConfig::rx("video-down", 4, "127.0.0.1:5804".parse().unwrap())
+            .with_link_id(1);
+        let tx = ManagedWfbStreamConfig::tx("control-up", 6, "127.0.0.1:5606".parse().unwrap())
+            .with_link_id(1)
+            .with_tx_profile(ManagedWfbTxProfile {
+                bandwidth_mhz: 20,
+                mcs: 0,
+                fec_k: 2,
+                fec_n: 16,
+            });
+        let rx_mapping = ManagedWfbStreamMapping {
+            direction: LinkDirection::Rx,
+            link_id: Some(1),
+            radio_port: 4,
+            app_udp: "127.0.0.1:5804".parse().unwrap(),
+            radio_udp: "127.0.0.1:5904".parse().unwrap(),
+        };
+        let tx_mapping = ManagedWfbStreamMapping {
+            direction: LinkDirection::Tx,
+            link_id: Some(1),
+            radio_port: 6,
+            app_udp: "127.0.0.1:5606".parse().unwrap(),
+            radio_udp: "127.0.0.1:5906".parse().unwrap(),
+        };
+
+        let rx_command = managed_wfb_rx_command(&config, &rx, &rx_mapping);
+        let tx_command = managed_wfb_tx_command(&config, &tx, &tx_mapping);
+        let rx_args = rx_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let tx_args = tx_command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rx_command.get_program(), "/opt/wfb-ng/bin/wfb_rx");
+        assert_eq!(
+            rx_args,
+            vec![
+                "-a",
+                "5904",
+                "-K",
+                "/tmp/gs.key",
+                "-i",
+                "1",
+                "-p",
+                "4",
+                "-c",
+                "127.0.0.1",
+                "-u",
+                "5804"
+            ]
+        );
+        assert_eq!(tx_command.get_program(), "/opt/wfb-ng/bin/wfb_tx");
+        assert_eq!(
+            tx_args,
+            vec![
+                "-d",
+                "-K",
+                "/tmp/gs.key",
+                "-i",
+                "1",
+                "-p",
+                "6",
+                "-B",
+                "20",
+                "-M",
+                "0",
+                "-k",
+                "2",
+                "-n",
+                "16",
+                "-u",
+                "5606",
+                "127.0.0.1:5906"
+            ]
+        );
     }
 
     #[test]
