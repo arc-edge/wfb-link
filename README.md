@@ -25,6 +25,7 @@ Main crates:
 - `wfb-radio-service`: production-oriented macOS service binary.
 - `wfb-radio-runtime`: runtime library for USB ownership, init, RX/TX, health,
   and reports.
+- `wfb-tun`: Rust macOS `utun` bridge for WFB-NG tunnel UDP messages.
 - `wfb-radio-diag`: diagnostic and bring-up binary. This is intentionally
   broad; production code should not depend on it.
 - `radio-core` and `wfb-bridge`: lower-level USB, RTL8812AU, and WFB datagram
@@ -39,7 +40,7 @@ Main crates:
 - A product-facing Rust facade that can start the macOS production runtime,
   wait for readiness, read health, request cooperative stop, and join for a
   final report.
-- Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 500 us
+- Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
   TX pacing default.
 
 ## Quick Start
@@ -48,6 +49,7 @@ Build the production service and facade example:
 
 ```sh
 cargo build -p wfb-radio-service -p wfb-link --examples
+cargo build -p wfb-tun --bin wfb-tun-macos
 ```
 
 Run the production macOS radio service:
@@ -87,7 +89,7 @@ scripts/run-mac-wf-tun-profile-matrix.sh
 ```
 
 By default, `PROFILE_SET=loaded` uses duplex side traffic, exact 100/100 side
-payload acceptance in both directions, and `TX_MIN_INTERVAL_US=500`.
+payload acceptance in both directions, and `TX_MIN_INTERVAL_US=700`.
 
 ## Product Integration
 
@@ -138,6 +140,9 @@ to share implementation; share the `wfb-link` lifecycle and endpoint contract.
 - The current macOS product-facing data endpoint is still
   `WfbDistributorDatagram`, not raw application datagrams.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
+- The old Python `utun` helper is kept only under `scripts/development/` as a
+  bring-up fallback; the default tunnel path is the Rust `wfb-tun-macos`
+  binary.
 - This software can transmit RF. Operators are responsible for local radio
   regulations, antenna setup, channel choice, and bench isolation.
 

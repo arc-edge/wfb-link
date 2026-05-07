@@ -13,7 +13,9 @@ RADIO_SERVICE_BIN=${RADIO_SERVICE_BIN:-$REPO_ROOT/target/debug/wfb-radio-service
 RADIO_CONFIG=${RADIO_CONFIG:-$REPO_ROOT/configs/radio-run-robust-short-range.toml}
 WFB_TX_BIN=${WFB_TX_BIN:-$REPO_ROOT/target/wfb-ng-macos/bin/wfb_tx}
 WFB_RX_BIN=${WFB_RX_BIN:-$REPO_ROOT/target/wfb-ng-macos/bin/wfb_rx}
-TUN_SCRIPT=${TUN_SCRIPT:-$REPO_ROOT/scripts/wfb-mac-wf-tun.py}
+TUN_BIN=${TUN_BIN:-$REPO_ROOT/target/debug/wfb-tun-macos}
+TUN_IMPL=${TUN_IMPL:-rust}
+TUN_SCRIPT=${TUN_SCRIPT:-$REPO_ROOT/scripts/development/wfb-mac-wf-tun.py}
 PYTHON=${PYTHON:-python3}
 
 WFB_KEY=${WFB_KEY:-}
@@ -236,7 +238,14 @@ require_file "$RADIO_SERVICE_BIN" "wfb-radio-service binary"
 require_file "$RADIO_CONFIG" "radio config"
 require_file "$WFB_TX_BIN" "wfb_tx binary"
 require_file "$WFB_RX_BIN" "wfb_rx binary"
-require_file "$TUN_SCRIPT" "Mac wf_tun script"
+case "$TUN_IMPL" in
+  rust) require_file "$TUN_BIN" "wfb-tun-macos binary" ;;
+  python) require_file "$TUN_SCRIPT" "development Mac wf_tun script" ;;
+  *)
+    echo "Invalid TUN_IMPL=$TUN_IMPL (expected rust or python)." >&2
+    exit 1
+    ;;
+esac
 if [[ -z "$WFB_KEY" || ! -r "$WFB_KEY" ]]; then
   echo "Set WFB_KEY to the GS-side WFB-NG keypair file, normally gs.key, readable on this Mac." >&2
   exit 1
@@ -742,16 +751,20 @@ start_data_load_receivers
 
 echo "Starting macOS utun bridge. It needs sudo because macOS gates utun creation/configuration." >&2
 echo "Try SSH after it starts: ssh pi@$PEER_IP" >&2
-tun_cmd=(
-  sudo -n "$PYTHON" "$TUN_SCRIPT"
-  --local-ip "$LOCAL_IP" \
-  --peer-ip "$PEER_IP" \
-  --prefix-len "$PREFIX_LEN" \
-  --tun-mtu "$TUN_MTU" \
-  --radio-mtu "$RADIO_MTU" \
-  --agg-timeout-ms "$TUN_AGG_TIMEOUT_MS" \
-  --tx-peer "127.0.0.1:$TUN_TX_PORT" \
-  --rx-bind "127.0.0.1:$TUN_RX_PORT" \
+if [[ "$TUN_IMPL" == "rust" ]]; then
+  tun_cmd=(sudo -n "$TUN_BIN")
+else
+  tun_cmd=(sudo -n "$PYTHON" "$TUN_SCRIPT")
+fi
+tun_cmd+=(
+  --local-ip "$LOCAL_IP"
+  --peer-ip "$PEER_IP"
+  --prefix-len "$PREFIX_LEN"
+  --tun-mtu "$TUN_MTU"
+  --radio-mtu "$RADIO_MTU"
+  --agg-timeout-ms "$TUN_AGG_TIMEOUT_MS"
+  --tx-peer "127.0.0.1:$TUN_TX_PORT"
+  --rx-bind "127.0.0.1:$TUN_RX_PORT"
   --summary-file "$TUN_SUMMARY_FILE"
 )
 if [[ -n "$TUN_PROBE_COMMAND" ]]; then

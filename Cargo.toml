@@ -4,6 +4,7 @@ members = [
     "crates/radio-core",
     "crates/wfb-bridge",
     "crates/wfb-link",
+    "crates/wfb-tun",
     "crates/wfb-radio-diag",
     "crates/wfb-radio-service",
     "crates/wfb-radio-runtime",
@@ -32,3 +33,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wfb-bridge = { path = "crates/wfb-bridge" }
 wfb-radio-runtime = { path = "crates/wfb-radio-runtime" }
 wfb-radio-service = { path = "crates/wfb-radio-service" }
+wfb-tun = { path = "crates/wfb-tun" }

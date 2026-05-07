@@ -18,4 +18,6 @@ detailed for the root README.
   register-function checklist.
 - [Calibration state](../rtl8812au-calibration-state.md): IQK/LCK/TX-power
   evidence and known gaps.
-
+- [Python tunnel fallback](../../scripts/development/wfb-mac-wf-tun.py): the
+  original macOS `utun` prototype. It is preserved for comparison only; the
+  production wrapper defaults to the Rust `wfb-tun-macos` binary.

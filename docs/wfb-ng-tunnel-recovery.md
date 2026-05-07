@@ -5,7 +5,7 @@ WFB-NG tunnel profile:
 
 ```text
 macOS utun
-  <-> scripts/wfb-mac-wf-tun.py
+  <-> wfb-tun-macos
   <-> WFB-NG wfb_tx/wfb_rx UDP codec
   <-> wfb-radio-service distributor/aggregator UDP
   <-> AWUS036ACH USB radio
@@ -34,6 +34,12 @@ builds `wfb_keygen` so matching `drone.key`/`gs.key` files can be regenerated if
 the original WFB-NG password is known.
 
 ## Run the recovery tunnel
+
+Build the Rust tunnel bridge before running the wrapper:
+
+```bash
+cargo build -p wfb-tun --bin wfb-tun-macos
+```
 
 The tunnel needs the matching GS-side WFB-NG keypair file on the Mac. Stock
 WFB-NG creates `drone.key` for the drone and `gs.key` for the ground station;
@@ -70,8 +76,12 @@ PEER_IP=10.5.0.2
 MCS=1
 FEC_K=2
 FEC_N=4
-TX_MIN_INTERVAL_US=500  # optional TX pacing for loaded bidirectional runs
+TX_MIN_INTERVAL_US=700  # optional TX pacing for loaded bidirectional runs
 ```
+
+The wrapper defaults to the Rust `wfb-tun-macos` binary. The original Python
+helper remains available only as a development fallback with
+`TUN_IMPL=python`; adopters should use the Rust path.
 
 For stock WFB-NG GS tunnel semantics, override:
 
@@ -98,7 +108,7 @@ PROFILE_SET=loaded REPEATS=3 scripts/run-mac-wf-tun-profile-matrix.sh
 ```
 
 When `PROFILE_SET=loaded` is used without a custom `PROFILE_FILE`, the matrix
-defaults to the accepted short-range profile: `TX_MIN_INTERVAL_US=500`,
+defaults to the accepted short-range profile: `TX_MIN_INTERVAL_US=700`,
 `DATA_LOAD_MODE=duplex`, 100 expected side payloads per direction, 40 ms side
 payload spacing, and a 1 s/1 s/100 ms TDD SSH-download probe. The matrix
 summary includes TX ingress/processed/submitted/pending counts and gates TX
@@ -116,12 +126,13 @@ datagram submissions. It is intended for loaded bidirectional profiles where a
 Linux peer is transmitting at the same time and has no shared airtime scheduler
 with the Mac.
 
-The current accepted short-range loaded gate uses `TX_MIN_INTERVAL_US=500` with
+The current accepted short-range loaded gate uses `TX_MIN_INTERVAL_US=700` with
 40 ms marked side payloads, 100 expected each direction, and an exact 100/100
 side-stream minimum during a 256 KiB SSH download. On May 7, 2026,
-`/tmp/wfb-mac-wf-tun-loaded-profile-link-500us-20260507-010322` accepted the
-loaded gate after two `400 us` repeats recovered only 90/100 and 88/100
-Mac-to-Linux side payloads. The accepted run moved 262,144 bytes in `7.997 s`,
+`/tmp/wfb-mac-wf-tun-rust-loaded-default-20260507-012952` accepted the Rust
+tunnel gate after `500 us` and `600 us` Rust repeats recovered only 90/100 and
+98/100 Mac-to-Linux side payloads. The accepted run moved 262,144 bytes in
+`8.065 s`,
 recovered side streams `100/100` in both directions, reported zero tunnel
 drops/corrupt/truncated messages, zero radio TX failures, zero ingress
 queue-send failures, and one pending TX ingress datagram.
@@ -131,6 +142,7 @@ being processed and submitted while the Linux peer still missed side payloads,
 so the failure was downstream airtime/contention rather than Mac UDP ingress
 loss. Sub-millisecond pacing narrowed the useful local range: `250 us` and
 `350 us` were still lossy, `400 us` passed an earlier repeat gate but later
-regressed under the loaded side gate, and `500 us` is the current short-range
-default that preserves side traffic while staying under the 10 s SSH-download
-gate in the latest validation.
+regressed under the loaded side gate, and `500 us`/`600 us` were close but not
+strictly lossless with the Rust tunnel bridge. `700 us` is the current
+short-range default that preserves side traffic while staying under the 10 s
+SSH-download gate in the latest validation.
