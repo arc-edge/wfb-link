@@ -21,7 +21,7 @@ Product code
 | --- | --- | --- |
 | Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
 | Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in transport is macOS IOUSBHost; Android should reuse this contract with an Android USB transport. |
-| Generic raw application multi-streams | Product/helper layer above `UserspaceRadioBackend` | Not built into `wfb-link` yet. Convert raw app UDP to WFB distributor datagrams before handing it to the radio backend. |
+| Generic raw application multi-streams | Product/helper layer above `UserspaceRadioBackend` | Not built into `wfb-link` yet. Convert raw app UDP to WFB distributor datagrams before handing it to the radio backend, or use a future managed multi-stream codec backend tracked in [issue #3](https://github.com/arc-edge/wfb-link/issues/3). |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
 | Android | `UserspaceRadioBackend` plus Android USB transport | Planned. Keep the same lifecycle, endpoint, health, and report contracts. |
 
@@ -31,6 +31,8 @@ The important distinction is `payload_kind`:
 - `RawApplicationDatagram`: local UDP carries product payload bytes. A backend or helper must supervise WFB-NG `wfb_tx`/`wfb_rx` or provide an equivalent codec layer.
 
 Today, `UserspaceRadioBackend` consumes and emits `WfbDistributorDatagram`.
+It rejects `RawApplicationDatagram` endpoints before startup because it does
+not supervise WFB codec processes itself.
 `MacosWfbTunnelBackend` exposes raw IP tunnel endpoints because it starts the
 WFB-NG helper processes and `wfb-tun-macos` bridge for that specific tunnel use.
 
@@ -44,8 +46,17 @@ wfb-link = { path = "crates/wfb-link" }
 ```
 
 From another repo, use the final Git location and revision policy chosen for the
-product. Keep the service TOML and helper binaries under product release
-management; do not depend on `wfb-radio-diag`.
+product. For the first alpha integration, pin the Git tag:
+
+```toml
+[dependencies]
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.2" }
+```
+
+For fully reproducible product releases, Cargo.lock will record the resolved
+commit. A product can also pin the exact release commit explicitly with `rev`
+after the tag has been validated in its own CI. Keep the service TOML and helper
+binaries under product release management; do not depend on `wfb-radio-diag`.
 
 ## Managed macOS Tunnel
 
@@ -217,8 +228,10 @@ Current userspace radio behavior:
 
 - Required TX bind failures abort startup.
 - Best-effort TX bind failures are preflighted, skipped, and reported degraded.
-- RX forwarding uses runtime-owned ephemeral sockets; RX best-effort is
-  currently health metadata rather than a separate bind-skip path.
+- Best-effort RX streams are rejected before startup with
+  `userspace_radio_rx_best_effort_unsupported`. UDP forward-target reachability
+  is not reliably knowable at startup, so pretending RX had TX-like degradation
+  semantics is too easy to misuse.
 
 ## Platform Selection Shape
 

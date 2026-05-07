@@ -58,7 +58,7 @@ direction = "rx"
 radio_port = 5
 local_udp = "127.0.0.1:5805"
 payload_kind = "wfb_distributor_datagram"
-criticality = "best_effort"
+criticality = "required"
 
 [[streams]]
 name = "uplink-control"

@@ -33,6 +33,15 @@ Main crates:
 - `radio-core` and `wfb-bridge`: lower-level USB, RTL8812AU, and WFB datagram
   helpers.
 
+Canonical repository:
+
+```sh
+git remote set-url origin git@github.com:arc-edge/wfb-link.git
+```
+
+Older clones may still point at the pre-rename `llamadrone/wfb-mac-radio`
+remote. Update them before adding Cargo git dependencies or release automation.
+
 ## What Works Now
 
 - macOS userspace control of an AWUS036ACH through libusb or direct IOUSBHost.
@@ -207,6 +216,12 @@ For the full integration contract, backend selection rules, payload-kind
 semantics, and health/report shape, read
 [Product integration](docs/product-integration.md).
 
+For the first alpha integration from another Rust repository:
+
+```toml
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.2" }
+```
+
 ## Current Limitations
 
 - Hardware scope is RTL8812AU/AWUS036ACH class adapters.
@@ -221,7 +236,8 @@ semantics, and health/report shape, read
   native Linux supervisor.
 - The managed macOS tunnel backend is product-facing for IP tunnel use. Generic
   raw application streams still require either WFB-NG helper supervision or a
-  future native Rust WFB codec.
+  future managed codec backend. `UserspaceRadioBackend` accepts WFB
+  distributor/aggregator datagrams only.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
 - The old Python `utun` helper is kept only under `scripts/development/` as a
   bring-up fallback; the default tunnel path is the Rust `wfb-tun-macos`

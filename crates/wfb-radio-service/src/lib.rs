@@ -1027,7 +1027,7 @@ fn service_resolved_streams(
                 link_id: stream.link_id.or(default_link_id),
                 payload_kind: stream
                     .payload_kind
-                    .unwrap_or(ServiceStreamPayloadKind::RawApplicationDatagram),
+                    .unwrap_or(ServiceStreamPayloadKind::WfbDistributorDatagram),
                 criticality: stream
                     .criticality
                     .unwrap_or(ServiceStreamCriticality::Required),
@@ -1873,6 +1873,10 @@ interface_name = "utun-test"
         assert_eq!(
             resolved.streams[1].criticality,
             ServiceStreamCriticality::BestEffort
+        );
+        assert_eq!(
+            resolved.streams[3].payload_kind,
+            ServiceStreamPayloadKind::WfbDistributorDatagram
         );
         let tunnel = resolved.tunnel.expect("tunnel");
         assert_eq!(tunnel.local_ip, "10.5.0.1".parse::<IpAddr>().unwrap());

@@ -81,7 +81,7 @@ Fields:
 | `radio_port` | yes | WFB radio port used for RX filtering and health attribution. |
 | `local_udp` | yes | Local UDP socket. TX streams bind this address. RX streams forward matching WFB payloads to this address. |
 | `link_id` | no | WFB link ID for this stream. Defaults to `[wfb].link_id` when present. |
-| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Defaults to `"raw_application_datagram"` in the endpoint model. For `UserspaceRadioBackend`, use `"wfb_distributor_datagram"` unless another layer converts raw app UDP to WFB datagrams. |
+| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Service `[[streams]]` default to `"wfb_distributor_datagram"` because `UserspaceRadioBackend` is the direct-radio stream backend. Use `"raw_application_datagram"` only with a backend/helper layer that supervises WFB codec processes. |
 | `criticality` | no | `"required"` or `"best_effort"`. Defaults to `"required"`. |
 
 Validation:
@@ -131,7 +131,7 @@ direction = "rx"
 radio_port = 5
 local_udp = "127.0.0.1:5805"
 payload_kind = "wfb_distributor_datagram"
-criticality = "best_effort"
+criticality = "required"
 
 [[streams]]
 name = "uplink-control"
@@ -206,10 +206,13 @@ Use this decision table:
 | --- | --- | --- |
 | Raw IP tunnel packets | `raw_application_datagram` endpoint exposed by `MacosWfbTunnelBackend` | Managed tunnel backend |
 | WFB-NG distributor datagrams | `wfb_distributor_datagram` | `UserspaceRadioBackend` |
-| Raw app UDP for arbitrary streams | `raw_application_datagram` plus a helper/codec layer | Not native in `UserspaceRadioBackend` today |
+| Raw app UDP for arbitrary streams | `raw_application_datagram` plus a helper/codec layer | Not native in `UserspaceRadioBackend` today; tracked as [issue #3](https://github.com/arc-edge/wfb-link/issues/3) |
 
 If a product sends raw payload bytes to a `WfbDistributorDatagram` endpoint, the
 runtime will treat the bytes as malformed WFB distributor input and drop them.
+`UserspaceRadioBackend` rejects `raw_application_datagram` streams before start
+so this mistake fails during integration instead of becoming a silent data-plane
+failure.
 
 ## Criticality
 
@@ -218,8 +221,11 @@ runtime will treat the bytes as malformed WFB distributor input and drop them.
 `best_effort` streams should be exposed in health as degraded when they cannot
 start. Current macOS behavior skips unavailable best-effort TX binds during
 startup and reports the stream name in `degraded_streams`. RX forwards use
-runtime-owned ephemeral send sockets, so RX criticality is currently reported as
-metadata rather than a bind-skip mechanism.
+runtime-owned ephemeral send sockets, and UDP forward-target reachability is not
+reliably knowable at startup. For that reason `UserspaceRadioBackend` currently
+rejects best-effort RX streams with
+`userspace_radio_rx_best_effort_unsupported`; model RX streams as `required`
+until managed RX degradation semantics exist.
 
 ## Artifacts
 

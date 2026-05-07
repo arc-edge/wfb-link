@@ -73,6 +73,11 @@ when the caller owns WFB-NG codec/session work. Distributor datagram endpoints
 may leave `stream` unset because one local UDP ingress can carry multiple WFB
 streams.
 
+`UserspaceRadioBackend` is a direct-radio backend, not a codec supervisor. It
+therefore rejects `RawApplicationDatagram` streams before startup. Raw
+application endpoints are currently valid for `MacosWfbTunnelBackend`'s managed
+IP tunnel path, or for future managed codec backends.
+
 Do not treat endpoint metadata as a runtime rewrite mechanism. Runtime sockets
 come from `UserspaceRadioConfig` / `wfb-radio-service` resolution. If a
 product needs named streams, put them in `[[streams]]` or build the complete
@@ -164,7 +169,7 @@ name = "s0"
 direction = "rx"
 radio_port = 0
 local_udp = "127.0.0.1:5800"
-payload_kind = "raw_application_datagram"
+payload_kind = "wfb_distributor_datagram"
 criticality = "required"
 
 [[streams]]
@@ -172,19 +177,24 @@ name = "s1"
 direction = "rx"
 radio_port = 1
 local_udp = "127.0.0.1:5801"
-criticality = "best_effort"
+criticality = "required"
 
 [[streams]]
 name = "s2"
 direction = "tx"
 radio_port = 2
 local_udp = "127.0.0.1:5802"
-payload_kind = "raw_application_datagram"
+payload_kind = "wfb_distributor_datagram"
 
 [tunnel]
 local_ip = "10.5.0.1"
 peer_ip = "10.5.0.2"
 ```
+
+When this shape is handed to `UserspaceRadioBackend`, every stream must use
+`wfb_distributor_datagram`, and RX streams must be `required`. Raw application
+streams require a backend/helper that owns WFB codec supervision; best-effort RX
+needs explicit managed degradation semantics before it is safe to expose.
 
 `LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
 entries expose submitted frames, failed submissions, dropped datagrams, and

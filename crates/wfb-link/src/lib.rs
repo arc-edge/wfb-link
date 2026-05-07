@@ -42,6 +42,8 @@ pub enum LinkError {
     Runtime { code: &'static str, message: String },
     #[error("invalid link endpoints: {0}")]
     InvalidEndpoints(#[from] LinkBuilderError),
+    #[error("invalid backend config ({code}): {message}")]
+    InvalidBackendConfig { code: &'static str, message: String },
     #[error("unsupported backend config: {0}")]
     UnsupportedBackend(&'static str),
     #[error("backend exited before ready")]
@@ -152,6 +154,7 @@ impl UserspaceRadioConfig {
         if resolved.tunnel.is_some() || !resolved.streams.is_empty() {
             config.endpoints = link_endpoints_from_service_resolved(&resolved)?;
         }
+        validate_userspace_radio_endpoint_contract(&config.endpoints)?;
         Ok(config)
     }
 
@@ -871,6 +874,7 @@ impl UserspaceRadioHandle {
             endpoints,
             ready_poll_interval,
         } = config;
+        validate_userspace_radio_endpoint_contract(&endpoints)?;
         let startup_degraded_streams =
             apply_best_effort_tx_bind_preflight(&mut runtime_config, &endpoints);
 
@@ -902,6 +906,32 @@ impl UserspaceRadioHandle {
             ready_poll_interval,
         })
     }
+}
+
+fn validate_userspace_radio_endpoint_contract(endpoints: &LinkEndpoints) -> Result<()> {
+    for stream in &endpoints.streams {
+        if stream.payload_kind != PayloadKind::WfbDistributorDatagram {
+            return Err(LinkError::InvalidBackendConfig {
+                code: "userspace_radio_requires_wfb_distributor_datagram",
+                message: format!(
+                    "stream '{}' is {:?}; UserspaceRadioBackend only accepts WFB distributor/aggregator datagrams. Use MacosWfbTunnelBackend or a codec/helper layer for raw application datagrams.",
+                    stream.name, stream.payload_kind
+                ),
+            });
+        }
+        if stream.direction == LinkDirection::Rx
+            && stream.criticality == StreamCriticality::BestEffort
+        {
+            return Err(LinkError::InvalidBackendConfig {
+                code: "userspace_radio_rx_best_effort_unsupported",
+                message: format!(
+                    "stream '{}' is a best-effort RX stream. UserspaceRadioBackend cannot preflight UDP forward-target reachability, so RX streams must be required until managed RX degradation semantics are implemented.",
+                    stream.name
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn apply_best_effort_tx_bind_preflight(
@@ -2262,6 +2292,46 @@ mod tests {
 
         assert!(!config.execution_inputs.process_signal_stop);
         assert!(config.execution_inputs.external_stop_requested.is_none());
+    }
+
+    #[test]
+    fn userspace_radio_rejects_raw_application_streams_before_start() {
+        let mut config =
+            UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), Default::default());
+        config.endpoints.streams[0].payload_kind = PayloadKind::RawApplicationDatagram;
+
+        let error = UserspaceRadioHandle::start(config).expect_err("raw stream rejected");
+
+        assert!(matches!(
+            error,
+            LinkError::InvalidBackendConfig {
+                code: "userspace_radio_requires_wfb_distributor_datagram",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn userspace_radio_rejects_best_effort_rx_before_start() {
+        let mut config =
+            UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), Default::default());
+        let rx = config
+            .endpoints
+            .streams
+            .iter_mut()
+            .find(|stream| stream.direction == LinkDirection::Rx)
+            .expect("rx stream");
+        rx.criticality = StreamCriticality::BestEffort;
+
+        let error = UserspaceRadioHandle::start(config).expect_err("best-effort rx rejected");
+
+        assert!(matches!(
+            error,
+            LinkError::InvalidBackendConfig {
+                code: "userspace_radio_rx_best_effort_unsupported",
+                ..
+            }
+        ));
     }
 
     #[test]
