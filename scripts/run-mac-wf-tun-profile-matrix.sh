@@ -14,11 +14,12 @@ Common configuration:
   SSH_KEY=/Users/rownd/.ssh/id_ed25519_drone
   PEER_IP=10.5.0.2
   MATRIX_OUT_DIR=/tmp/wfb-mac-wf-tun-profile-matrix
-  PROFILE_SET=short             # short, latency, throughput, soak, or minimal
+  PROFILE_SET=short             # minimal, short, latency, throughput, soak, loaded
   REPEATS=1
   MATRIX_ENFORCE_THRESHOLDS=1
   PING_MAX_LOSS_PCT=0 PING_MAX_AVG_MS=500 PING_MAX_MAX_MS=1500
   SSH_MAX_DURATION_S=5 SSH_DD_MAX_DURATION_S=10
+  TX_INGRESS_MAX_PENDING=64 TX_INGRESS_MAX_PENDING_PCT=10
   DATA_LOAD_MODE=duplex          # optional: none, m2l, l2m, or duplex
   DATA_LOAD_PRE_PROBE_SECONDS=0  # optional warmup delay after data sources start
 
@@ -87,6 +88,10 @@ PROFILE_SET=${PROFILE_SET:-short}
 PROFILE_FILE=${PROFILE_FILE:-}
 REPEATS=${REPEATS:-1}
 MATRIX_CONTINUE_ON_FAIL=${MATRIX_CONTINUE_ON_FAIL:-1}
+LOADED_PROFILE_DEFAULTS=0
+if [[ -z "$PROFILE_FILE" && "$PROFILE_SET" == "loaded" ]]; then
+  LOADED_PROFILE_DEFAULTS=1
+fi
 
 WFB_KEY=${WFB_KEY:-}
 PEER_IP=${PEER_IP:-10.5.0.2}
@@ -108,6 +113,10 @@ SSH_DD_MAX_DURATION_S=${SSH_DD_MAX_DURATION_S:-10}
 TUNNEL_MAX_DROPPED_PACKETS=${TUNNEL_MAX_DROPPED_PACKETS:-0}
 TUNNEL_MAX_CORRUPT_MESSAGES=${TUNNEL_MAX_CORRUPT_MESSAGES:-0}
 TUNNEL_MAX_TRUNCATED_MESSAGES=${TUNNEL_MAX_TRUNCATED_MESSAGES:-0}
+TX_MAX_FAILED_SUBMISSIONS=${TX_MAX_FAILED_SUBMISSIONS:-0}
+TX_INGRESS_MAX_QUEUE_SEND_FAILED=${TX_INGRESS_MAX_QUEUE_SEND_FAILED:-0}
+TX_INGRESS_MAX_PENDING=${TX_INGRESS_MAX_PENDING:-64}
+TX_INGRESS_MAX_PENDING_PCT=${TX_INGRESS_MAX_PENDING_PCT:-10}
 RADIO_REQUIRE_PASS=${RADIO_REQUIRE_PASS:-1}
 
 CHANNEL=${CHANNEL:-161}
@@ -116,13 +125,19 @@ MCS=${MCS:-1}
 FEC_K=${FEC_K:-2}
 FEC_N=${FEC_N:-4}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
-TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-0}
-DATA_LOAD_MODE=${DATA_LOAD_MODE:-none}
+if (( LOADED_PROFILE_DEFAULTS == 1 )); then
+  TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-400}
+  DATA_LOAD_MODE=${DATA_LOAD_MODE:-duplex}
+  DATA_LOAD_INTERVAL_SEC=${DATA_LOAD_INTERVAL_SEC:-0.040}
+else
+  TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-0}
+  DATA_LOAD_MODE=${DATA_LOAD_MODE:-none}
+  DATA_LOAD_INTERVAL_SEC=${DATA_LOAD_INTERVAL_SEC:-0.020}
+fi
 DATA_LOAD_EXPECTED_PAYLOADS=${DATA_LOAD_EXPECTED_PAYLOADS:-100}
 DATA_LOAD_MIN_M2L_UNIQUE=${DATA_LOAD_MIN_M2L_UNIQUE:-$DATA_LOAD_EXPECTED_PAYLOADS}
 DATA_LOAD_MIN_L2M_UNIQUE=${DATA_LOAD_MIN_L2M_UNIQUE:-$DATA_LOAD_EXPECTED_PAYLOADS}
 DATA_LOAD_PAYLOAD_LEN=${DATA_LOAD_PAYLOAD_LEN:-512}
-DATA_LOAD_INTERVAL_SEC=${DATA_LOAD_INTERVAL_SEC:-0.020}
 DATA_LOAD_WARMUP_PAYLOADS=${DATA_LOAD_WARMUP_PAYLOADS:-20}
 DATA_LOAD_TAIL_PAYLOADS=${DATA_LOAD_TAIL_PAYLOADS:-8}
 DATA_LOAD_PRE_PROBE_SECONDS=${DATA_LOAD_PRE_PROBE_SECONDS:-0}
@@ -189,6 +204,11 @@ EOF
 ping-500ms|Symmetric half-second TDD ping production gate|500|500|50|ping|3
 ssh-1s|Symmetric one-second TDD SSH production gate|1000|1000|100|ssh|3
 ssh-dd-1s|Symmetric one-second TDD SSH download production gate|1000|1000|100|ssh-dd|3
+EOF
+      ;;
+    loaded)
+      cat <<'EOF'
+ssh-dd-1s-load|Symmetric one-second TDD SSH download with duplex WFB side load|1000|1000|100|ssh-dd|3
 EOF
       ;;
     *)
@@ -349,6 +369,10 @@ SSH_DD_MAX_DURATION_S="$SSH_DD_MAX_DURATION_S" \
 TUNNEL_MAX_DROPPED_PACKETS="$TUNNEL_MAX_DROPPED_PACKETS" \
 TUNNEL_MAX_CORRUPT_MESSAGES="$TUNNEL_MAX_CORRUPT_MESSAGES" \
 TUNNEL_MAX_TRUNCATED_MESSAGES="$TUNNEL_MAX_TRUNCATED_MESSAGES" \
+TX_MAX_FAILED_SUBMISSIONS="$TX_MAX_FAILED_SUBMISSIONS" \
+TX_INGRESS_MAX_QUEUE_SEND_FAILED="$TX_INGRESS_MAX_QUEUE_SEND_FAILED" \
+TX_INGRESS_MAX_PENDING="$TX_INGRESS_MAX_PENDING" \
+TX_INGRESS_MAX_PENDING_PCT="$TX_INGRESS_MAX_PENDING_PCT" \
 RADIO_REQUIRE_PASS="$RADIO_REQUIRE_PASS" \
 DATA_LOAD_REQUIRE_PASS="$DATA_LOAD_REQUIRE_PASS" \
 python3 - <<'PY'
@@ -383,6 +407,10 @@ thresholds = {
     "tunnel_max_dropped_packets": int(os.environ["TUNNEL_MAX_DROPPED_PACKETS"]),
     "tunnel_max_corrupt_messages": int(os.environ["TUNNEL_MAX_CORRUPT_MESSAGES"]),
     "tunnel_max_truncated_messages": int(os.environ["TUNNEL_MAX_TRUNCATED_MESSAGES"]),
+    "tx_max_failed_submissions": int(os.environ["TX_MAX_FAILED_SUBMISSIONS"]),
+    "tx_ingress_max_queue_send_failed": int(os.environ["TX_INGRESS_MAX_QUEUE_SEND_FAILED"]),
+    "tx_ingress_max_pending": int(os.environ["TX_INGRESS_MAX_PENDING"]),
+    "tx_ingress_max_pending_pct": float(os.environ["TX_INGRESS_MAX_PENDING_PCT"]),
     "radio_require_pass": os.environ["RADIO_REQUIRE_PASS"] == "1",
     "data_load_require_pass": os.environ["DATA_LOAD_REQUIRE_PASS"] == "1",
 }
@@ -430,6 +458,19 @@ def run_acceptance(entry, run, counters, probe_metrics):
         reasons.append(f"radio_result={run.get('radio_result')}")
     if thresholds["data_load_require_pass"] and run.get("data_load_result") not in {None, "pass"}:
         reasons.append(f"data_load_result={run.get('data_load_result')}")
+    if run.get("tx_failed_submissions") is not None and run["tx_failed_submissions"] > thresholds["tx_max_failed_submissions"]:
+        reasons.append(f"tx_failed_submissions={run['tx_failed_submissions']}")
+    if run.get("tx_ingress_queue_send_failed") is not None and run["tx_ingress_queue_send_failed"] > thresholds["tx_ingress_max_queue_send_failed"]:
+        reasons.append(f"tx_ingress_queue_send_failed={run['tx_ingress_queue_send_failed']}")
+    if run.get("tx_ingress_pending_datagrams") is not None:
+        pending = run["tx_ingress_pending_datagrams"]
+        if pending > thresholds["tx_ingress_max_pending"]:
+            reasons.append(f"tx_ingress_pending_datagrams={pending}")
+        ingress = run.get("tx_ingress_datagrams_received") or 0
+        if ingress > 0:
+            pending_pct = (pending * 100.0) / ingress
+            if pending_pct > thresholds["tx_ingress_max_pending_pct"]:
+                reasons.append(f"tx_ingress_pending_pct={pending_pct:.2f}")
 
     if int(counters.get("dropped_packets") or 0) > thresholds["tunnel_max_dropped_packets"]:
         reasons.append(f"tunnel_dropped_packets={counters.get('dropped_packets')}")
@@ -482,6 +523,7 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
     summary = read_json(run_dir / "summary.json")
     tunnel = summary.get("tunnel") if isinstance(summary, dict) else None
     radio = summary.get("radio") if isinstance(summary, dict) else None
+    radio_tx = radio.get("tx") if isinstance(radio, dict) and isinstance(radio.get("tx"), dict) else {}
     data_load = summary.get("data_load") if isinstance(summary, dict) else None
     probe = summary.get("probe") if isinstance(summary, dict) else None
     probe_status = probe.get("status") if isinstance(probe, dict) else None
@@ -501,6 +543,12 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
         "tunnel_datagrams_out": counters.get("tunnel_datagrams_out"),
         "tunnel_datagrams_in": counters.get("tunnel_datagrams_in"),
         "radio_result": radio.get("result") if isinstance(radio, dict) else None,
+        "tx_ingress_datagrams_received": radio_tx.get("ingress_datagrams_received"),
+        "tx_datagrams_processed": radio_tx.get("datagrams_received"),
+        "tx_submitted_frames": radio_tx.get("submitted_frames"),
+        "tx_failed_submissions": radio_tx.get("failed_submissions"),
+        "tx_ingress_queue_send_failed": radio_tx.get("ingress_queue_send_failed"),
+        "tx_ingress_pending_datagrams": radio_tx.get("ingress_pending_datagrams"),
         "data_load_result": data_load.get("result") if isinstance(data_load, dict) else None,
         "data_load_mode": data_load.get("mode") if isinstance(data_load, dict) else None,
         "tx_min_interval_us": (summary.get("settings") or {}).get("tx_min_interval_us") if isinstance(summary, dict) else None,
@@ -545,8 +593,8 @@ lines = [
     f"- Runs: {accepted_count}/{len(runs)} accepted",
     f"- Artifacts: `{out_dir}`",
     "",
-    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Accepted | Probe | Data Load | Tun in/out | Tunnel dg in/out | Reject Reasons |",
-    "|---|---:|---|---:|---|---:|---:|---:|---:|---|",
+    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Accepted | Probe | Data Load | TX ingress/proc/sub/pending | Tun in/out | Tunnel dg in/out | Reject Reasons |",
+    "|---|---:|---|---:|---|---:|---:|---:|---:|---:|---|",
 ]
 for run in runs:
     probe_detail = ""
@@ -564,10 +612,19 @@ for run in runs:
             data_load_detail += f" m2l={run.get('data_load_m2l_unique')}"
         if run.get("data_load_l2m_unique") is not None:
             data_load_detail += f" l2m={run.get('data_load_l2m_unique')}"
+    tx_detail = ""
+    if run.get("tx_ingress_datagrams_received") is not None:
+        tx_detail = "{}/{}/{}/{}".format(
+            run.get("tx_ingress_datagrams_received"),
+            run.get("tx_datagrams_processed"),
+            run.get("tx_submitted_frames"),
+            run.get("tx_ingress_pending_datagrams"),
+        )
     lines.append(
-        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {accepted_label} | {probe_detail} | {data_load_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} | {reject_reason_text} |".format(
+        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {accepted_label} | {probe_detail} | {data_load_detail} | {tx_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} | {reject_reason_text} |".format(
             probe_detail=probe_detail,
             data_load_detail=data_load_detail,
+            tx_detail=tx_detail,
             accepted_label="yes" if run.get("accepted") else "no",
             reject_reason_text=", ".join(run.get("reject_reasons") or []),
             **run,

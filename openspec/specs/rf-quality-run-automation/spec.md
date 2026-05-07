@@ -98,6 +98,13 @@ The system SHALL collect Mac and Linux run artifacts into a timestamped local ou
   for the collected run artifacts, or explicit empty summaries when the matrix
   was dry-run-only and no run evidence exists
 
+#### Scenario: Loaded tunnel matrix gate is available
+- **WHEN** the operator selects the loaded macOS `wf_tun` profile set
+- **THEN** the matrix command MUST run the accepted SSH-download tunnel profile
+  with duplex WFB side load, record TX ingress/processed/submitted/pending
+  telemetry, and reject TX submission failures, ingress queue-send failures, or
+  pending TX backlog above the configured bounds
+
 #### Scenario: Artifact collection is partial
 - **WHEN** a remote artifact cannot be copied
 - **THEN** the command records the failed artifact path and continues collecting remaining artifacts

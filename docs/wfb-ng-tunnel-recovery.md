@@ -91,6 +91,26 @@ DATA_LOAD_MIN_M2L_UNIQUE=95 DATA_LOAD_MIN_L2M_UNIQUE=95 \
 DATA_LOAD_INTERVAL_SEC=0.040 scripts/run-mac-wf-tun-profile-matrix.sh
 ```
 
+The accepted loaded production gate is now available directly:
+
+```bash
+PROFILE_SET=loaded REPEATS=3 scripts/run-mac-wf-tun-profile-matrix.sh
+```
+
+When `PROFILE_SET=loaded` is used without a custom `PROFILE_FILE`, the matrix
+defaults to the accepted short-range profile: `TX_MIN_INTERVAL_US=400`,
+`DATA_LOAD_MODE=duplex`, 100 expected side payloads per direction, 40 ms side
+payload spacing, and a 1 s/1 s/100 ms TDD SSH-download probe. The matrix
+summary includes TX ingress/processed/submitted/pending counts and gates TX
+submission failures, TX ingress queue-send failures, and excessive pending TX
+backlog.
+
+The first named-profile hardware run passed at
+`/tmp/wfb-mac-wf-tun-loaded-profile-20260507-002904`: 262,144 SSH-download
+bytes in `8.640 s`, side streams `100/100` in both directions, TX ingress
+`476`, TX processed/submitted `471`, pending TX ingress `5`, and zero TX
+submission or ingress queue-send failures.
+
 `TX_MIN_INTERVAL_US` applies optional microsecond pacing between Mac TX
 datagram submissions. It is intended for loaded bidirectional profiles where a
 Linux peer is transmitting at the same time and has no shared airtime scheduler
