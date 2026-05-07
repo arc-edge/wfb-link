@@ -6,6 +6,7 @@
 //! expected to use the native monitor-mode WFB stack.
 
 use std::{
+    collections::HashSet,
     fs::{self, File},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -363,6 +364,205 @@ impl LinkEndpoints {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LinkEndpointsBuilder {
+    streams: Vec<LinkStreamEndpointDraft>,
+    tunnel: Option<LinkTunnelEndpointDraft>,
+}
+
+impl LinkEndpointsBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn rx_stream(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+    ) -> Self {
+        self.stream(
+            name,
+            LinkDirection::Rx,
+            radio_port,
+            local_udp,
+            PayloadKind::RawApplicationDatagram,
+        )
+    }
+
+    pub fn tx_stream(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+    ) -> Self {
+        self.stream(
+            name,
+            LinkDirection::Tx,
+            radio_port,
+            local_udp,
+            PayloadKind::RawApplicationDatagram,
+        )
+    }
+
+    pub fn rx_stream_with_payload_kind(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+    ) -> Self {
+        self.stream(name, LinkDirection::Rx, radio_port, local_udp, payload_kind)
+    }
+
+    pub fn tx_stream_with_payload_kind(
+        self,
+        name: impl Into<String>,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+    ) -> Self {
+        self.stream(name, LinkDirection::Tx, radio_port, local_udp, payload_kind)
+    }
+
+    pub fn with_tunnel(self, local_ip: impl ToString, peer_ip: impl ToString) -> Self {
+        Self {
+            tunnel: Some(LinkTunnelEndpointDraft {
+                local_ip: local_ip.to_string(),
+                peer_ip: peer_ip.to_string(),
+            }),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> std::result::Result<LinkEndpoints, LinkBuilderError> {
+        let mut names = HashSet::new();
+        let mut sockets = HashSet::new();
+        let mut stream_ports = HashSet::new();
+        let mut streams = Vec::with_capacity(self.streams.len());
+
+        for draft in self.streams {
+            if !names.insert(draft.name.clone()) {
+                return Err(LinkBuilderError::DuplicateStreamName { name: draft.name });
+            }
+            let local_udp = parse_socket_addr(&draft.name, &draft.local_udp)?;
+            if !sockets.insert(local_udp) {
+                return Err(LinkBuilderError::DuplicateLocalUdp { local_udp });
+            }
+            if !stream_ports.insert((draft.direction, draft.radio_port)) {
+                return Err(LinkBuilderError::DuplicateDirectionRadioPort {
+                    direction: draft.direction,
+                    radio_port: draft.radio_port,
+                });
+            }
+            streams.push(LinkStreamEndpoint {
+                name: draft.name,
+                direction: draft.direction,
+                local_udp,
+                payload_kind: draft.payload_kind,
+                stream: Some(WfbStreamId {
+                    link_id: None,
+                    radio_port: draft.radio_port,
+                }),
+            });
+        }
+
+        let tunnel = self.tunnel.map(|draft| draft.parse()).transpose()?;
+
+        Ok(LinkEndpoints { streams, tunnel })
+    }
+
+    fn stream(
+        mut self,
+        name: impl Into<String>,
+        direction: LinkDirection,
+        radio_port: u8,
+        local_udp: impl ToString,
+        payload_kind: PayloadKind,
+    ) -> Self {
+        self.streams.push(LinkStreamEndpointDraft {
+            name: name.into(),
+            direction,
+            radio_port,
+            local_udp: local_udp.to_string(),
+            payload_kind,
+        });
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LinkStreamEndpointDraft {
+    name: String,
+    direction: LinkDirection,
+    radio_port: u8,
+    local_udp: String,
+    payload_kind: PayloadKind,
+}
+
+#[derive(Debug, Clone)]
+struct LinkTunnelEndpointDraft {
+    local_ip: String,
+    peer_ip: String,
+}
+
+impl LinkTunnelEndpointDraft {
+    fn parse(self) -> std::result::Result<LinkTunnelEndpoint, LinkBuilderError> {
+        Ok(LinkTunnelEndpoint {
+            local_ip: self.local_ip.parse::<IpAddr>().map_err(|error| {
+                LinkBuilderError::InvalidTunnelIp {
+                    field: "local_ip",
+                    value: self.local_ip.clone(),
+                    message: error.to_string(),
+                }
+            })?,
+            peer_ip: self.peer_ip.parse::<IpAddr>().map_err(|error| {
+                LinkBuilderError::InvalidTunnelIp {
+                    field: "peer_ip",
+                    value: self.peer_ip.clone(),
+                    message: error.to_string(),
+                }
+            })?,
+            interface_name: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum LinkBuilderError {
+    #[error("invalid local UDP socket for stream {name}: {value}: {message}")]
+    InvalidLocalUdp {
+        name: String,
+        value: String,
+        message: String,
+    },
+    #[error("invalid tunnel {field}: {value}: {message}")]
+    InvalidTunnelIp {
+        field: &'static str,
+        value: String,
+        message: String,
+    },
+    #[error("duplicate stream name: {name}")]
+    DuplicateStreamName { name: String },
+    #[error("duplicate local UDP socket: {local_udp}")]
+    DuplicateLocalUdp { local_udp: SocketAddr },
+    #[error("duplicate {direction:?} stream radio port: {radio_port}")]
+    DuplicateDirectionRadioPort {
+        direction: LinkDirection,
+        radio_port: u8,
+    },
+}
+
+fn parse_socket_addr(name: &str, value: &str) -> std::result::Result<SocketAddr, LinkBuilderError> {
+    value.parse().map_err(
+        |error: std::net::AddrParseError| LinkBuilderError::InvalidLocalUdp {
+            name: name.to_string(),
+            value: value.to_string(),
+            message: error.to_string(),
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct LinkStreamEndpoint {
@@ -381,7 +581,7 @@ pub struct WfbStreamId {
     pub radio_port: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkDirection {
     Tx,
@@ -1309,6 +1509,115 @@ mod tests {
                 radio_port: 0,
             })
         );
+    }
+
+    #[test]
+    fn endpoint_builder_constructs_named_streams_and_tunnel() {
+        let endpoints = LinkEndpointsBuilder::new()
+            .rx_stream("s0", 0, "127.0.0.1:5800")
+            .rx_stream("s1", 1, "127.0.0.1:5801")
+            .tx_stream_with_payload_kind(
+                "s2",
+                2,
+                "127.0.0.1:5802",
+                PayloadKind::WfbDistributorDatagram,
+            )
+            .with_tunnel("10.5.0.1", "10.5.0.2")
+            .build()
+            .expect("endpoints");
+
+        assert_eq!(endpoints.streams.len(), 3);
+        assert_eq!(endpoints.streams[0].name, "s0");
+        assert_eq!(endpoints.streams[0].direction, LinkDirection::Rx);
+        assert_eq!(
+            endpoints.streams[0].payload_kind,
+            PayloadKind::RawApplicationDatagram
+        );
+        assert_eq!(
+            endpoints.streams[0].stream,
+            Some(WfbStreamId {
+                link_id: None,
+                radio_port: 0,
+            })
+        );
+        assert_eq!(endpoints.streams[2].direction, LinkDirection::Tx);
+        assert_eq!(
+            endpoints.streams[2].payload_kind,
+            PayloadKind::WfbDistributorDatagram
+        );
+        let tunnel = endpoints.tunnel.expect("tunnel");
+        assert_eq!(tunnel.local_ip, "10.5.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(tunnel.peer_ip, "10.5.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn endpoint_builder_rejects_duplicate_stream_names() {
+        let error = LinkEndpointsBuilder::new()
+            .rx_stream("s0", 0, "127.0.0.1:5800")
+            .tx_stream("s0", 1, "127.0.0.1:5801")
+            .build()
+            .expect_err("duplicate name");
+
+        assert_eq!(
+            error,
+            LinkBuilderError::DuplicateStreamName {
+                name: "s0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn endpoint_builder_rejects_duplicate_sockets() {
+        let error = LinkEndpointsBuilder::new()
+            .rx_stream("s0", 0, "127.0.0.1:5800")
+            .tx_stream("s1", 1, "127.0.0.1:5800")
+            .build()
+            .expect_err("duplicate socket");
+
+        assert_eq!(
+            error,
+            LinkBuilderError::DuplicateLocalUdp {
+                local_udp: "127.0.0.1:5800".parse().unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn endpoint_builder_rejects_duplicate_direction_and_radio_port() {
+        let error = LinkEndpointsBuilder::new()
+            .rx_stream("s0", 0, "127.0.0.1:5800")
+            .rx_stream("s1", 0, "127.0.0.1:5801")
+            .build()
+            .expect_err("duplicate direction radio port");
+
+        assert_eq!(
+            error,
+            LinkBuilderError::DuplicateDirectionRadioPort {
+                direction: LinkDirection::Rx,
+                radio_port: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn endpoint_builder_rejects_invalid_addresses() {
+        let error = LinkEndpointsBuilder::new()
+            .rx_stream("s0", 0, "not-a-socket")
+            .build()
+            .expect_err("invalid socket");
+        assert!(matches!(error, LinkBuilderError::InvalidLocalUdp { .. }));
+
+        let error = LinkEndpointsBuilder::new()
+            .with_tunnel("not-an-ip", "10.5.0.2")
+            .build()
+            .expect_err("invalid tunnel ip");
+        assert!(matches!(
+            error,
+            LinkBuilderError::InvalidTunnelIp {
+                field: "local_ip",
+                ..
+            }
+        ));
     }
 
     #[test]

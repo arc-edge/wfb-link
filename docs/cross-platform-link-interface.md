@@ -96,6 +96,38 @@ The tunnel backend is a process supervisor by design. That keeps WFB-NG codec
 compatibility intact for the production cutover and lets a later native Rust
 codec/helper replacement fit behind the same `LinkBackend` contract.
 
+## Integration Boundary
+
+`wfb-link` is a generic WFB driver boundary. It exposes operator-named streams
+on WFB `radio_port`s and local UDP sockets, plus an optional IP tunnel endpoint.
+Those stream names are labels for humans and supervisors; the crate should not
+encode application meanings such as "video", "control", or product-specific
+port conventions. Higher-level systems own those mappings, build a
+`LinkEndpoints` value, and hand it to the selected backend.
+
+Use `LinkEndpointsBuilder` when a product needs to construct a multi-stream
+shape directly:
+
+```rust
+use wfb_link::{LinkEndpointsBuilder, PayloadKind};
+
+let endpoints = LinkEndpointsBuilder::new()
+    .rx_stream("s0", 0, "127.0.0.1:5800")
+    .rx_stream("s1", 1, "127.0.0.1:5801")
+    .tx_stream_with_payload_kind(
+        "s2",
+        2,
+        "127.0.0.1:5802",
+        PayloadKind::WfbDistributorDatagram,
+    )
+    .with_tunnel("10.5.0.1", "10.5.0.2")
+    .build()?;
+```
+
+The builder validates duplicate stream names, duplicate local UDP sockets, and
+duplicate `(direction, radio_port)` pairs, returning typed
+`LinkBuilderError` variants so callers can surface clean operator errors.
+
 Example:
 
 ```rust
