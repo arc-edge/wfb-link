@@ -14,8 +14,11 @@ Common configuration:
   SSH_KEY=/Users/rownd/.ssh/id_ed25519_drone
   PEER_IP=10.5.0.2
   MATRIX_OUT_DIR=/tmp/wfb-mac-wf-tun-profile-matrix
-  PROFILE_SET=short             # short, latency, throughput, or minimal
+  PROFILE_SET=short             # short, latency, throughput, soak, or minimal
   REPEATS=1
+  MATRIX_ENFORCE_THRESHOLDS=1
+  PING_MAX_LOSS_PCT=0 PING_MAX_AVG_MS=500 PING_MAX_MAX_MS=1500
+  SSH_MAX_DURATION_S=5 SSH_DD_MAX_DURATION_S=10
 
 Set PROFILE_FILE to a pipe-delimited profile list:
   name|description|rx_window_ms|tx_window_ms|guard_ms|probe_kind|settle_seconds
@@ -92,7 +95,18 @@ PING_COUNT=${PING_COUNT:-8}
 PING_INTERVAL=${PING_INTERVAL:-0.25}
 SSH_DD_BLOCK_SIZE=${SSH_DD_BLOCK_SIZE:-1024}
 SSH_DD_COUNT=${SSH_DD_COUNT:-256}
+SSH_DD_MIN_BYTES=${SSH_DD_MIN_BYTES:-$((SSH_DD_BLOCK_SIZE * SSH_DD_COUNT))}
 CUSTOM_PROBE_COMMAND=${CUSTOM_PROBE_COMMAND:-}
+MATRIX_ENFORCE_THRESHOLDS=${MATRIX_ENFORCE_THRESHOLDS:-1}
+PING_MAX_LOSS_PCT=${PING_MAX_LOSS_PCT:-0}
+PING_MAX_AVG_MS=${PING_MAX_AVG_MS:-500}
+PING_MAX_MAX_MS=${PING_MAX_MAX_MS:-1500}
+SSH_MAX_DURATION_S=${SSH_MAX_DURATION_S:-5}
+SSH_DD_MAX_DURATION_S=${SSH_DD_MAX_DURATION_S:-10}
+TUNNEL_MAX_DROPPED_PACKETS=${TUNNEL_MAX_DROPPED_PACKETS:-0}
+TUNNEL_MAX_CORRUPT_MESSAGES=${TUNNEL_MAX_CORRUPT_MESSAGES:-0}
+TUNNEL_MAX_TRUNCATED_MESSAGES=${TUNNEL_MAX_TRUNCATED_MESSAGES:-0}
+RADIO_REQUIRE_PASS=${RADIO_REQUIRE_PASS:-1}
 
 CHANNEL=${CHANNEL:-161}
 BANDWIDTH_MHZ=${BANDWIDTH_MHZ:-20}
@@ -146,6 +160,13 @@ EOF
       cat <<'EOF'
 ssh-dd-default|Baseline TDD SSH download probe|7000|20000|500|ssh-dd|3
 ssh-dd-1s|Symmetric one-second TDD SSH download probe|1000|1000|100|ssh-dd|3
+EOF
+      ;;
+    soak)
+      cat <<'EOF'
+ping-500ms|Symmetric half-second TDD ping production gate|500|500|50|ping|3
+ssh-1s|Symmetric one-second TDD SSH production gate|1000|1000|100|ssh|3
+ssh-dd-1s|Symmetric one-second TDD SSH download production gate|1000|1000|100|ssh-dd|3
 EOF
       ;;
     *)
@@ -275,9 +296,23 @@ done < <(profile_lines)
 MANIFEST="$MANIFEST" \
 MATRIX_OUT_DIR="$MATRIX_OUT_DIR" \
 RUN_ID="$RUN_ID" \
+DRY_RUN="$DRY_RUN" \
+MATRIX_ENFORCE_THRESHOLDS="$MATRIX_ENFORCE_THRESHOLDS" \
+PING_MAX_LOSS_PCT="$PING_MAX_LOSS_PCT" \
+PING_MAX_AVG_MS="$PING_MAX_AVG_MS" \
+PING_MAX_MAX_MS="$PING_MAX_MAX_MS" \
+SSH_MAX_DURATION_S="$SSH_MAX_DURATION_S" \
+SSH_DD_MIN_BYTES="$SSH_DD_MIN_BYTES" \
+SSH_DD_MAX_DURATION_S="$SSH_DD_MAX_DURATION_S" \
+TUNNEL_MAX_DROPPED_PACKETS="$TUNNEL_MAX_DROPPED_PACKETS" \
+TUNNEL_MAX_CORRUPT_MESSAGES="$TUNNEL_MAX_CORRUPT_MESSAGES" \
+TUNNEL_MAX_TRUNCATED_MESSAGES="$TUNNEL_MAX_TRUNCATED_MESSAGES" \
+RADIO_REQUIRE_PASS="$RADIO_REQUIRE_PASS" \
 python3 - <<'PY'
 import json
 import os
+import re
+import sys
 from pathlib import Path
 
 
@@ -293,6 +328,105 @@ def read_json(path):
 
 manifest_path = Path(os.environ["MANIFEST"])
 out_dir = Path(os.environ["MATRIX_OUT_DIR"])
+dry_run = os.environ["DRY_RUN"] == "1"
+thresholds = {
+    "enforce": os.environ["MATRIX_ENFORCE_THRESHOLDS"] == "1" and not dry_run,
+    "ping_max_loss_pct": float(os.environ["PING_MAX_LOSS_PCT"]),
+    "ping_max_avg_ms": float(os.environ["PING_MAX_AVG_MS"]),
+    "ping_max_max_ms": float(os.environ["PING_MAX_MAX_MS"]),
+    "ssh_max_duration_s": float(os.environ["SSH_MAX_DURATION_S"]),
+    "ssh_dd_min_bytes": int(os.environ["SSH_DD_MIN_BYTES"]),
+    "ssh_dd_max_duration_s": float(os.environ["SSH_DD_MAX_DURATION_S"]),
+    "tunnel_max_dropped_packets": int(os.environ["TUNNEL_MAX_DROPPED_PACKETS"]),
+    "tunnel_max_corrupt_messages": int(os.environ["TUNNEL_MAX_CORRUPT_MESSAGES"]),
+    "tunnel_max_truncated_messages": int(os.environ["TUNNEL_MAX_TRUNCATED_MESSAGES"]),
+    "radio_require_pass": os.environ["RADIO_REQUIRE_PASS"] == "1",
+}
+
+
+def parse_ping_metrics(log_tail):
+    if not isinstance(log_tail, str):
+        return {}
+    metrics = {}
+    loss_match = re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+packets received,\s+([0-9.]+)% packet loss", log_tail)
+    if loss_match:
+        metrics["packets_transmitted"] = int(loss_match.group(1))
+        metrics["packets_received"] = int(loss_match.group(2))
+        metrics["packet_loss_pct"] = float(loss_match.group(3))
+    rtt_match = re.search(r"(?:round-trip|rtt) min/avg/max/(?:stddev|mdev) = ([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+) ms", log_tail)
+    if rtt_match:
+        metrics["rtt_min_ms"] = float(rtt_match.group(1))
+        metrics["rtt_avg_ms"] = float(rtt_match.group(2))
+        metrics["rtt_max_ms"] = float(rtt_match.group(3))
+        metrics["rtt_stddev_ms"] = float(rtt_match.group(4))
+    return metrics
+
+
+def parse_numeric_tail(log_tail):
+    if not isinstance(log_tail, str):
+        return None
+    for line in reversed(log_tail.splitlines()):
+        stripped = line.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def run_acceptance(entry, run, counters, probe_metrics):
+    if dry_run:
+        return True, []
+    reasons = []
+    if run["status"] != 0:
+        reasons.append(f"exit_status={run['status']}")
+    if run["result"] != "pass":
+        reasons.append(f"summary_result={run['result']}")
+    if not run["probe_passed"]:
+        reasons.append("probe_not_passed")
+    if thresholds["radio_require_pass"] and run.get("radio_result") != "pass":
+        reasons.append(f"radio_result={run.get('radio_result')}")
+
+    if int(counters.get("dropped_packets") or 0) > thresholds["tunnel_max_dropped_packets"]:
+        reasons.append(f"tunnel_dropped_packets={counters.get('dropped_packets')}")
+    if int(counters.get("corrupt_messages") or 0) > thresholds["tunnel_max_corrupt_messages"]:
+        reasons.append(f"tunnel_corrupt_messages={counters.get('corrupt_messages')}")
+    if int(counters.get("truncated_messages") or 0) > thresholds["tunnel_max_truncated_messages"]:
+        reasons.append(f"tunnel_truncated_messages={counters.get('truncated_messages')}")
+
+    probe_kind = entry["probe_kind"]
+    duration_s = run.get("probe_duration_s")
+    if probe_kind == "ping":
+        loss_pct = probe_metrics.get("packet_loss_pct")
+        avg_ms = probe_metrics.get("rtt_avg_ms")
+        max_ms = probe_metrics.get("rtt_max_ms")
+        if loss_pct is None:
+            reasons.append("ping_loss_missing")
+        elif loss_pct > thresholds["ping_max_loss_pct"]:
+            reasons.append(f"ping_loss_pct={loss_pct}")
+        if avg_ms is None:
+            reasons.append("ping_avg_missing")
+        elif avg_ms > thresholds["ping_max_avg_ms"]:
+            reasons.append(f"ping_avg_ms={avg_ms}")
+        if max_ms is None:
+            reasons.append("ping_max_missing")
+        elif max_ms > thresholds["ping_max_max_ms"]:
+            reasons.append(f"ping_max_ms={max_ms}")
+    elif probe_kind == "ssh":
+        if duration_s is None:
+            reasons.append("ssh_duration_missing")
+        elif duration_s > thresholds["ssh_max_duration_s"]:
+            reasons.append(f"ssh_duration_s={duration_s:.3f}")
+    elif probe_kind == "ssh-dd":
+        if run.get("probe_bytes") is None:
+            reasons.append("ssh_dd_bytes_missing")
+        elif run["probe_bytes"] < thresholds["ssh_dd_min_bytes"]:
+            reasons.append(f"ssh_dd_bytes={run['probe_bytes']}")
+        if duration_s is None:
+            reasons.append("ssh_dd_duration_missing")
+        elif duration_s > thresholds["ssh_dd_max_duration_s"]:
+            reasons.append(f"ssh_dd_duration_s={duration_s:.3f}")
+    return not reasons, reasons
+
+
 runs = []
 for line in manifest_path.read_text(encoding="utf-8").splitlines():
     if not line.strip():
@@ -306,13 +440,8 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
     probe_status = probe.get("status") if isinstance(probe, dict) else None
     probe_log_tail = probe.get("log_tail") if isinstance(probe, dict) else None
     counters = tunnel.get("counters") if isinstance(tunnel, dict) else {}
-    probe_bytes = None
-    if isinstance(probe_log_tail, str):
-        for probe_line in reversed(probe_log_tail.splitlines()):
-            stripped = probe_line.strip()
-            if stripped.isdigit():
-                probe_bytes = int(stripped)
-                break
+    probe_metrics = parse_ping_metrics(probe_log_tail) if entry["probe_kind"] == "ping" else {}
+    probe_bytes = parse_numeric_tail(probe_log_tail)
     run = {
         **entry,
         "summary_path": str(run_dir / "summary.json"),
@@ -325,18 +454,28 @@ for line in manifest_path.read_text(encoding="utf-8").splitlines():
         "tunnel_datagrams_out": counters.get("tunnel_datagrams_out"),
         "tunnel_datagrams_in": counters.get("tunnel_datagrams_in"),
         "radio_result": radio.get("result") if isinstance(radio, dict) else None,
+        "probe_metrics": probe_metrics,
+        "tunnel_dropped_packets": counters.get("dropped_packets"),
+        "tunnel_corrupt_messages": counters.get("corrupt_messages"),
+        "tunnel_truncated_messages": counters.get("truncated_messages"),
     }
+    accepted, reject_reasons = run_acceptance(entry, run, counters, probe_metrics)
+    run["accepted"] = accepted
+    run["reject_reasons"] = reject_reasons
     runs.append(run)
 
 pass_count = sum(1 for run in runs if run["status"] == 0 and run["result"] == "pass")
+accepted_count = sum(1 for run in runs if run["accepted"])
 summary = {
     "schema": "wfb_mac_wf_tun_profile_matrix/v1",
     "run_id": os.environ["RUN_ID"],
     "out_dir": str(out_dir),
+    "thresholds": thresholds,
     "run_count": len(runs),
     "pass_count": pass_count,
-    "fail_count": len(runs) - pass_count,
-    "result": "pass" if runs and pass_count == len(runs) else "fail",
+    "accepted_count": accepted_count,
+    "fail_count": len(runs) - accepted_count,
+    "result": "dry-run" if dry_run else ("pass" if runs and accepted_count == len(runs) else "fail"),
     "runs": runs,
 }
 
@@ -351,11 +490,11 @@ lines = [
     "# macOS wf_tun Profile Matrix",
     "",
     f"- Result: {summary['result']}",
-    f"- Runs: {pass_count}/{len(runs)} passed",
+    f"- Runs: {accepted_count}/{len(runs)} accepted",
     f"- Artifacts: `{out_dir}`",
     "",
-    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Result | Probe | Tun in/out | Tunnel dg in/out |",
-    "|---|---:|---|---:|---|---:|---:|---:|",
+    "| Profile | Repeat | Probe | TDD rx/tx/guard ms | Accepted | Probe | Tun in/out | Tunnel dg in/out | Reject Reasons |",
+    "|---|---:|---|---:|---|---:|---:|---:|---|",
 ]
 for run in runs:
     probe_detail = ""
@@ -363,14 +502,21 @@ for run in runs:
         probe_detail = f"{run['probe_duration_s']:.3f}s"
     if run.get("probe_bytes") is not None:
         probe_detail = f"{probe_detail} {run['probe_bytes']}B".strip()
+    metrics = run.get("probe_metrics") or {}
+    if metrics.get("packet_loss_pct") is not None:
+        probe_detail = f"{probe_detail} loss={metrics['packet_loss_pct']:.1f}% avg={metrics.get('rtt_avg_ms')}ms max={metrics.get('rtt_max_ms')}ms".strip()
     lines.append(
-        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {result} | {probe_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} |".format(
+        "| {profile} | {repeat} | {probe_kind} | {rx_window_ms}/{tx_window_ms}/{guard_ms} | {accepted_label} | {probe_detail} | {tun_packets_in}/{tun_packets_out} | {tunnel_datagrams_in}/{tunnel_datagrams_out} | {reject_reason_text} |".format(
             probe_detail=probe_detail,
+            accepted_label="yes" if run.get("accepted") else "no",
+            reject_reason_text=", ".join(run.get("reject_reasons") or []),
             **run,
         )
     )
 lines.append("")
 md_path.write_text("\n".join(lines), encoding="utf-8")
+if thresholds["enforce"] and summary["result"] != "pass":
+    sys.exit(1)
 PY
 
 log "matrix artifacts: $MATRIX_OUT_DIR"
