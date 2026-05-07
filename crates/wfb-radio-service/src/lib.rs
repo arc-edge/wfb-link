@@ -1696,6 +1696,49 @@ profile = "does_not_exist"
     }
 
     #[test]
+    fn service_checked_in_video_control_tdd_config_is_valid() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/radio-run-video-control-tdd.toml");
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in video/control config");
+
+        let resolved = resolve_service_run(&cli).expect("resolve checked-in config");
+        let config = service_runtime_config_from_resolved(&resolved)
+            .expect("runtime config from checked-in config");
+
+        assert_eq!(resolved.channel, 36);
+        assert_eq!(resolved.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(
+            resolved.airtime_schedule.mode,
+            ProductionRuntimeAirtimeMode::Tdd
+        );
+        assert_eq!(
+            resolved.airtime_schedule.tdd_first_window,
+            ProductionRuntimeTddWindow::Rx
+        );
+        assert_eq!(resolved.airtime_schedule.tdd_rx_window_ms, 2200);
+        assert_eq!(resolved.airtime_schedule.tdd_tx_window_ms, 3600);
+        assert_eq!(resolved.airtime_schedule.tdd_guard_ms, 200);
+        assert_eq!(resolved.airtime_schedule.tdd_start_delay_ms, 0);
+        assert_eq!(resolved.rx_mcs_index, 2);
+        assert_eq!(resolved.wfb_link_id, Some(1));
+        assert_eq!(resolved.wfb_radio_port, Some(1));
+        assert!(resolved.tx_authorized);
+        assert_eq!(
+            resolved.calibration_profile,
+            ServiceTxCalibrationProfile::CurrentDefault
+        );
+        config
+            .validate()
+            .expect("valid checked-in video/control config");
+    }
+
+    #[test]
     fn service_config_rejects_diagnostic_only_fields() {
         let path = write_config(
             "bad",

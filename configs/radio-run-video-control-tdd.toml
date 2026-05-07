@@ -1,0 +1,64 @@
+# Production radio-run profile for short-range video downlink plus sparse
+# control uplink. This profile promotes the receiver-backed TDD profile matrix
+# that recovered 300/300 L2M and 30/30 M2L payloads in two clean repeats.
+#
+# Peer traffic recipe used for the acceptance gate:
+#   L2M: 4/12 FEC, MCS2, 1000-byte payload every 5 ms
+#   M2L: 2/16 FEC, MCS0, 1000-byte payload every 100 ms
+#
+# Dynamic LAN addresses and artifact paths are supplied by product code or
+# smoke scripts as CLI overrides.
+
+[adapter]
+vid = 3034
+pid = 34834
+
+[macos_usbhost]
+enabled = true
+configuration_value = 1
+interface_number = 0
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+bulk_out_endpoint_count = 3
+poll_attempts = 25
+poll_delay_ms = 100
+
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/rtl8812aefw.bin"
+duration_ms = 55000
+rx_timeout_ms = 20
+tx_burst_limit = 4
+max_datagrams = 0
+
+[airtime]
+mode = "tdd"
+tdd_first_window = "rx"
+tdd_rx_window_ms = 2200
+tdd_tx_window_ms = 3600
+tdd_guard_ms = 200
+tdd_start_delay_ms = 0
+
+[wfb]
+bind = "0.0.0.0:5611"
+link_id = 1
+radio_port = 1
+rx_aggregator = "127.0.0.1:5801"
+rx_wlan_idx = 0
+rx_mcs_index = 2
+
+[calibration]
+profile = "current_default"
+
+[heartbeat]
+enabled = true
+half_period_ms = 500
+
+[authorization]
+transmit = true
+live_register_writes = false
+
+[artifacts]
+ready_file = "/tmp/wfb-radio-run-video-control-ready.json"
+health_file = "/tmp/wfb-radio-run-video-control-health.json"

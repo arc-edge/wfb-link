@@ -41,6 +41,8 @@ Main crates:
   wait for readiness, read health, request cooperative stop, and join for a
   final report. The facade also includes a macOS tunnel supervisor that manages
   the radio runtime, WFB-NG codec helpers, and `wfb-tun-macos`.
+- A checked-in short-range TDD radio profile for video downlink plus sparse
+  control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
   TX pacing default.
 
@@ -74,6 +76,17 @@ Run the embedded-link example:
 cargo run -p wfb-link --example embed-radio-service -- \
   configs/radio-run-robust-short-range.toml
 ```
+
+For the accepted short-range video/control TDD profile, use:
+
+```sh
+cargo run -p wfb-link --example embed-radio-service -- \
+  configs/radio-run-video-control-tdd.toml
+```
+
+That runtime profile uses channel 36 HT20 with TDD airtime windows validated
+against Linux WFB peer traffic shaped as L2M `4/12` MCS2 at 5 ms and sparse M2L
+`2/16` MCS0 at 100 ms.
 
 That example demonstrates the lifecycle API: start, wait-ready, print health,
 request stop, and print the final report. It is not a full application data
@@ -111,8 +124,24 @@ scripts/run-production-readiness-gate.sh
 ```
 
 Set `RUN_API_TUNNEL_SMOKE=1`, `RUN_LOADED_TUNNEL_GATE=1`,
-`RUN_RF_CLOSE_RANGE=1`, or `RUN_CALIBRATION_REGRESSION=1` to include hardware
-and RF gates when the bench is set up.
+`RUN_VIDEO_CONTROL_RADIO_GATE=1`, `RUN_RF_CLOSE_RANGE=1`, or
+`RUN_CALIBRATION_REGRESSION=1` to include hardware and RF gates when the bench
+is set up.
+
+Run the receiver-backed video/control radio gate:
+
+```sh
+PROFILE_SET=video-control-tdd \
+LOCAL_HW=1 \
+LINUX_HOST=pi@drone-2f389.local \
+MAC_LAN_IP=192.168.122.98 \
+LINUX_LAN_IP=192.168.122.95 \
+scripts/run-radio-run-profile-matrix.sh
+```
+
+`PROFILE_SET=video-control-tdd` selects
+`configs/radio-run-video-control-tdd.toml`, requires two clean repeats, and
+uses the accepted TDD timing profile.
 
 ## Product Integration
 

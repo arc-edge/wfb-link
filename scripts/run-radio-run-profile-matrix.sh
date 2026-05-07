@@ -18,7 +18,7 @@ Common configuration:
   LINUX_HOST=pi@drone-2f389.local
   LINUX_LAN_IP=10.42.0.1    # Linux peer LAN IP visible to remote hardware Mac
   MAC_LAN_IP=10.42.0.162     # remote Mac LAN IP visible to Linux peer
-  PROFILE_SET=short          # short, range, or minimal
+  PROFILE_SET=short          # short, range, minimal, or video-control-tdd
   ENABLE_M2L=1 ENABLE_L2M=1
   RADIO_COMMAND=service       # service or diagnostic
   REPEATS=1
@@ -26,6 +26,7 @@ Common configuration:
   EXPECTED_PAYLOADS=80 SOURCE_WARMUP_PAYLOADS=100 SOURCE_TAIL_PAYLOADS=auto
   SESSION_ACQUIRE_MODE=observed SESSION_ACQUIRE_TIMEOUT_SECONDS=15
   DUPLEX_TRAFFIC_MODE=simultaneous TDD_FIRST_DIRECTION=l2m TDD_GUARD_SEC=2.0
+  RADIO_RUN_CONFIG=configs/radio-run-robust-short-range.toml
   AIRTIME_MODE=continuous AIRTIME_TDD_FIRST_WINDOW=rx
   MATRIX_OUT_DIR=/tmp/wfb-radio-profile-matrix
 
@@ -86,6 +87,44 @@ done
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
+
+PROFILE_SET=${PROFILE_SET:-short}
+
+profile_set_default() {
+  local name=$1
+  local value=$2
+  if [[ -z ${!name+x} ]]; then
+    printf -v "$name" '%s' "$value"
+  fi
+}
+
+case "$PROFILE_SET" in
+  video-control|video-control-tdd)
+    profile_set_default RADIO_RUN_CONFIG "configs/radio-run-video-control-tdd.toml"
+    profile_set_default RADIO_COMMAND "service"
+    profile_set_default EXPECTED_PAYLOADS "300"
+    profile_set_default SOURCE_WARMUP_PAYLOADS "30"
+    profile_set_default SOURCE_TAIL_PAYLOADS "auto"
+    profile_set_default SESSION_ACQUIRE_MODE "observed"
+    profile_set_default SESSION_ACQUIRE_TIMEOUT_SECONDS "20"
+    profile_set_default SESSION_ACQUIRE_POLL_SECONDS "0.2"
+    profile_set_default DUPLEX_TRAFFIC_MODE "tdd"
+    profile_set_default TDD_FIRST_DIRECTION "l2m"
+    profile_set_default TDD_GUARD_SEC "0.3"
+    profile_set_default AIRTIME_MODE "tdd"
+    profile_set_default AIRTIME_TDD_FIRST_WINDOW "rx"
+    profile_set_default AIRTIME_TDD_RX_WINDOW_MS "2200"
+    profile_set_default AIRTIME_TDD_TX_WINDOW_MS "3600"
+    profile_set_default AIRTIME_TDD_GUARD_MS "200"
+    profile_set_default AIRTIME_TDD_START_DELAY_MS "0"
+    profile_set_default MATRIX_SUSTAINED_PAYLOADS "200"
+    profile_set_default MATRIX_MIN_CLEAN_REPEATS "2"
+    profile_set_default REPEATS "2"
+    profile_set_default RADIO_RUN_DURATION_MS "45000"
+    profile_set_default COUNTER_SECONDS "40"
+    profile_set_default PEER_WAIT_SECONDS "20"
+    ;;
+esac
 
 HW_MAC_HOST=${HW_MAC_HOST:-rownd@rownds-macbook-pro.tail5c793f.ts.net}
 LOCAL_HW=${LOCAL_HW:-0}
@@ -155,10 +194,10 @@ RADIO_RUN_DURATION_MS=${RADIO_RUN_DURATION_MS:-60000}
 RADIO_READY_WAIT_SECONDS=${RADIO_READY_WAIT_SECONDS:-90}
 RX_TIMEOUT_MS=${RX_TIMEOUT_MS:-20}
 TX_BURST_LIMIT=${TX_BURST_LIMIT:-4}
+RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
 RADIO_COMMAND=${RADIO_COMMAND:-service}
 MATRIX_SUSTAINED_PAYLOADS=${MATRIX_SUSTAINED_PAYLOADS:-200}
 MATRIX_MIN_CLEAN_REPEATS=${MATRIX_MIN_CLEAN_REPEATS:-1}
-PROFILE_SET=${PROFILE_SET:-short}
 PROFILE_FILE=${PROFILE_FILE:-}
 REPEATS=${REPEATS:-1}
 
@@ -228,6 +267,12 @@ symmetric-4x12-mcs1-20ms|Symmetric stronger FEC and slower source cadence|4|12|4
 duplex-m2l5x12-l2m3x12-mcs2-20ms|Accepted short-range duplex sustained candidate|5|12|3|12|1|2|0.020|95|90
 asym-4x12-3x12-mcs2-20ms|Higher-overhead Mac TX candidate; failed one sustained repeat|4|12|3|12|1|2|0.020|95|90
 asym-4x12-4x10-mcs2-20ms|Lower-overhead reverse MCS2 candidate|4|12|4|10|1|2|0.020|95|85
+EOF
+      ;;
+    video-control|video-control-tdd)
+      cat <<'EOF'
+videoctl-tdd-l2m-4x12-mcs2-5ms|Accepted TDD video downlink plus sparse control uplink|2|16|4|12|0|2|0.005|95|98|0.100|0.005|30|300
+videoctl-tdd-l2m-4x12-mcs2-8ms|Conservative TDD video downlink plus sparse control uplink|2|16|4|12|0|2|0.008|95|98|0.100|0.008|30|300
 EOF
       ;;
     *)
@@ -335,6 +380,7 @@ keys = [
     "remote_out_dir", "local_hw", "hw_mac_host", "linux_host",
     "linux_lan_ip", "mac_lan_ip",
     "channel", "bandwidth_mhz", "tx_power_mode", "tx_calibration_profile",
+    "radio_run_config",
     "enable_m2l", "enable_l2m",
     "m2l_fec_k", "m2l_fec_n", "l2m_fec_k", "l2m_fec_n", "m2l_mcs",
     "l2m_mcs", "payload_interval_sec", "m2l_payload_interval_sec",
@@ -432,7 +478,7 @@ run_one_profile() {
   export M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS
   export SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN M2L_MIN_UNIQUE L2M_MIN_UNIQUE
   export DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS
-  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND DECRYPT_FAILURE_GATE
+  export COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_RUN_CONFIG RADIO_COMMAND DECRYPT_FAILURE_GATE
   write_run_meta "$local_run_dir/matrix-run-meta.json"
 
   log "profile=$profile_name repeat=$repeat_index m2l=${m2l_fec_k}/${m2l_fec_n}@mcs${m2l_mcs}/${m2l_payload_interval_sec}s/${m2l_expected_payloads} l2m=${l2m_fec_k}/${l2m_fec_n}@mcs${l2m_mcs}/${l2m_payload_interval_sec}s/${l2m_expected_payloads}"
@@ -491,6 +537,7 @@ run_one_profile() {
       COUNTER_SECONDS="$COUNTER_SECONDS" \
       PEER_WAIT_SECONDS="$PEER_WAIT_SECONDS" \
       RADIO_RUN_DURATION_MS="$RADIO_RUN_DURATION_MS" \
+      RADIO_RUN_CONFIG="$RADIO_RUN_CONFIG" \
       RADIO_COMMAND="$RADIO_COMMAND" \
       RADIO_READY_WAIT_SECONDS="$RADIO_READY_WAIT_SECONDS" \
       RX_TIMEOUT_MS="$RX_TIMEOUT_MS" \
@@ -517,7 +564,7 @@ run_one_profile() {
   else
     local remote_cmd
     OUT_DIR=$remote_run_dir
-    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
+    remote_cmd="$(env_assignments OUT_DIR LINUX_HOST LINUX_LAN_IP LINUX_REMOTE_PATH MAC_LAN_IP CHANNEL BANDWIDTH_MHZ LINK_ID WFB_CLI_LINK_ID M2L_RADIO_PORT L2M_RADIO_PORT M2L_FEC_K M2L_FEC_N L2M_FEC_K L2M_FEC_N M2L_MCS L2M_MCS EXPECTED_PAYLOADS M2L_EXPECTED_PAYLOADS L2M_EXPECTED_PAYLOADS ENABLE_M2L ENABLE_L2M SOURCE_WARMUP_PAYLOADS SOURCE_TAIL_PAYLOADS SESSION_ACQUIRE_MODE SESSION_ACQUIRE_TIMEOUT_SECONDS SESSION_ACQUIRE_POLL_SECONDS PAYLOAD_LEN DUPLEX_TRAFFIC_MODE TDD_FIRST_DIRECTION TDD_GUARD_SEC AIRTIME_MODE AIRTIME_TDD_FIRST_WINDOW AIRTIME_TDD_RX_WINDOW_MS AIRTIME_TDD_TX_WINDOW_MS AIRTIME_TDD_GUARD_MS AIRTIME_TDD_START_DELAY_MS PAYLOAD_INTERVAL_SEC M2L_PAYLOAD_INTERVAL_SEC L2M_PAYLOAD_INTERVAL_SEC M2L_MIN_UNIQUE L2M_MIN_UNIQUE COUNTER_SECONDS PEER_WAIT_SECONDS RADIO_RUN_DURATION_MS RADIO_RUN_CONFIG RADIO_COMMAND RADIO_READY_WAIT_SECONDS RX_TIMEOUT_MS TX_BURST_LIMIT FIRMWARE EFUSE_REPORT TX_POWER_MODE TX_POWER_SAFETY_PROFILE TX_CALIBRATION_PROFILE REQUIRE_CALIBRATION_SUCCESS DECRYPT_FAILURE_GATE AUTO_EFUSE_DUMP RADIO_BIND_PORT LINUX_M2L_SOURCE_PORT LINUX_L2M_SOURCE_PORT M2L_COUNTER_PORT L2M_AGG_PORT L2M_COUNTER_PORT IFACE WFB_SERVICE WFB_KEY) scripts/run-radio-run-duplex-smoke.sh"
     ssh -n "${SSH_OPTS_ARRAY[@]}" "$HW_MAC_HOST" "cd $(quote "$HW_REPO_PATH") && $remote_cmd"
     status=$?
     rm -rf "$local_run_dir/remote-copy"
