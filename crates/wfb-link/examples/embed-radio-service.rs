@@ -6,8 +6,8 @@ use std::{
 };
 
 use wfb_link::{
-    LinkBackend, LinkConfig, LinkDirection, LinkEndpoints, MacosUserspaceRadioBackend,
-    MacosUserspaceRadioConfig, PayloadKind,
+    LinkBackend, LinkConfig, LinkDirection, LinkEndpoints, PayloadKind, UserspaceRadioBackend,
+    UserspaceRadioConfig,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -20,9 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(60));
 
-    let radio = MacosUserspaceRadioConfig::from_service_config_path(config_path)?;
-    let mut backend = MacosUserspaceRadioBackend::default();
-    let handle = backend.start(LinkConfig::macos_userspace_radio(radio))?;
+    let radio = UserspaceRadioConfig::from_service_config_path(config_path)?;
+    let mut backend = UserspaceRadioBackend::default();
+    let handle = backend.start(LinkConfig::userspace_radio(radio))?;
 
     let ready = handle.wait_ready(wait_ready_timeout)?;
     println!("{}", serde_json::to_string_pretty(&ready)?);

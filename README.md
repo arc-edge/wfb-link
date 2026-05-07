@@ -1,14 +1,15 @@
-# wfb-mac-radio
+# wfb-link
 
-`wfb-mac-radio` is a native macOS userspace radio backend for WFB-NG traffic on
-RTL8812AU USB adapters, currently tested with the ALFA AWUS036ACH.
+`wfb-link` is a cross-platform WFB link stack and product-facing Rust facade.
+Its current direct-radio implementation is a native macOS userspace backend for
+WFB-NG traffic on RTL8812AU USB adapters, tested with the ALFA AWUS036ACH.
 
 The project lets a Mac treat the adapter as a USB radio peripheral: initialize
 the chip, submit raw 802.11 WFB frames through bulk OUT, receive frames through
 bulk IN, and bridge those frames to WFB-NG's existing UDP distributor and
 aggregator protocols. It also contains a small Rust facade crate so a product
-binary can use one link lifecycle API on macOS and Linux while each platform
-uses the right native radio path.
+binary can use one link lifecycle API across macOS, Linux, and future Android
+support while each platform uses the right radio path.
 
 ## Current Shape
 
@@ -17,6 +18,7 @@ Product binary
   -> wfb-link
      -> macOS: wfb-radio-runtime + AWUS036ACH userspace USB
      -> Linux: native WFB-NG + wfb0 monitor mode + rtl88xxau
+     -> Android: wfb-radio-runtime + Android USB host transport (planned)
 ```
 
 Main crates:
@@ -62,8 +64,7 @@ cargo run -p wfb-radio-service -- \
   --config configs/radio-run-video-control-tdd.toml \
   --report /tmp/wfb-radio-service.json \
   --ready-file /tmp/wfb-radio-service-ready.json \
-  --health-file /tmp/wfb-radio-service-health.json \
-  --i-understand-this-transmits
+  --health-file /tmp/wfb-radio-service-health.json
 ```
 
 The recommended checked-in config is the short-range video/control TDD profile.
@@ -103,7 +104,7 @@ AWUS036ACH:
 scripts/run-wfb-link-radio-smoke.sh
 ```
 
-The smoke uses `MacosUserspaceRadioBackend`, holds the runtime long enough to
+The smoke uses `UserspaceRadioBackend`, holds the runtime long enough to
 exercise the TDD airtime gate, injects synthetic WFB distributor datagrams into
 the exposed TX endpoint, and checks the final TX/RX counters and cooperative
 stop report.
@@ -191,12 +192,16 @@ fn start_link() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Use `MacosUserspaceRadioBackend` instead only when the product owns WFB-NG
+Use `UserspaceRadioBackend` instead only when the product owns WFB-NG
 codec/session framing and wants direct WFB distributor datagram endpoints.
+The old `MacosUserspaceRadio*` names are deprecated aliases; new integration
+code should use `UserspaceRadio*` for the portable direct-radio contract.
 
 On Linux, the intended backend is native WFB-NG over `wfb0` monitor mode with
-the aircrack/rtl88xxau driver. Do not port the macOS USB bridge to Linux just
-to share implementation; share the `wfb-link` lifecycle and endpoint contract.
+the aircrack/rtl88xxau driver. Android is expected to reuse the userspace radio
+contract with an Android USB host transport. Do not port the userspace USB
+bridge to Linux just to share implementation; share the `wfb-link` lifecycle
+and endpoint contract.
 
 For the full integration contract, backend selection rules, payload-kind
 semantics, and health/report shape, read

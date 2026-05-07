@@ -24,7 +24,7 @@ None.
 
 ## Impact
 
-- New repository under `~/projects/arc/wfb-mac-radio`.
+- New repository under `~/projects/arc/wfb-link`.
 - New Rust crate or workspace for the radio backend and bridge CLI.
 - Dependencies likely include `rusb`/libusb, `tokio`, `bytes`, `clap`, packet parsing helpers, and WFB-compatible serialization.
 - Reference code and behavior will be mined from WFB-ng, the Linux RTL8812AU driver, and the existing `wifikit` userspace RTL8812AU implementation.

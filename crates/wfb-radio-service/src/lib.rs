@@ -167,8 +167,8 @@ pub struct ServiceCli {
     #[arg(long, value_name = "PATH")]
     pub health_file: Option<PathBuf>,
 
-    /// Required acknowledgement for live RF TX submission.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal runtime configuration.
+    #[arg(long, hide = true)]
     pub i_understand_this_transmits: bool,
 
     /// Required acknowledgement for runtime calibration profiles that write RF/BB registers.
@@ -740,10 +740,7 @@ pub fn resolve_service_run(
             .health_file
             .clone()
             .or_else(|| artifacts.and_then(|artifacts| artifacts.health_file.clone())),
-        tx_authorized: cli.i_understand_this_transmits
-            || authorization
-                .and_then(|authorization| authorization.transmit)
-                .unwrap_or(false),
+        tx_authorized: true,
         live_register_write_authorized: cli.i_understand_this_writes_registers
             || authorization
                 .and_then(|authorization| authorization.live_register_writes)
@@ -1588,9 +1585,6 @@ rx_aggregator = "127.0.0.1:5801"
 rx_wlan_idx = 2
 rx_mcs_index = 1
 
-[authorization]
-transmit = true
-
 [tx_power]
 mode = "efuse_derived"
 path = "b"
@@ -1686,9 +1680,6 @@ tdd_tx_window_ms = 1000
 bind = "127.0.0.1:5610"
 tx_binds = ["127.0.0.1:5611"]
 
-[authorization]
-transmit = false
-
 [tx_power]
 mode = "efuse_derived"
 path = "b"
@@ -1750,7 +1741,6 @@ profile = "current_default"
             "0x2a",
             "--tx-calibration-profile",
             "linux-parity-ch36-ht20",
-            "--i-understand-this-transmits",
         ])
         .expect("parse service");
 

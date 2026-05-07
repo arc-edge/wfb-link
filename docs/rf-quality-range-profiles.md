@@ -571,7 +571,7 @@ Example short-range remote hardware run:
 ```sh
 HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net \
 HW_DEPLOY=1 \
-HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy \
+HW_DEPLOY_PATH=projects/arc/wfb-link-deploy \
 MAC_LAN_IP=10.42.0.162 \
 LINUX_LAN_IP=10.42.0.1 \
 LINUX_HOST=pi@drone-2f389.local \

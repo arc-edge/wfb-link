@@ -3,7 +3,12 @@
 `wfb-radio-service` reads one TOML file and resolves it into a
 `ProductionRuntimeFlowConfig`. `wfb-link` also reads the resolved stream and
 tunnel metadata from the same file when using
-`MacosUserspaceRadioConfig::from_service_config_path`.
+`UserspaceRadioConfig::from_service_config_path`.
+
+The stream, WFB, tunnel, artifact, and calibration sections are platform-neutral
+contracts. `[macos_usbhost]` is intentionally macOS-only transport config; a
+future Android transport should add its own transport section while preserving
+the resolved `UserspaceRadioConfig` and `LinkEndpoints` shape.
 
 The checked-in examples are:
 
@@ -42,14 +47,15 @@ enabled = true
 channel = 36
 bandwidth_mhz = 20
 firmware = "/tmp/rtl8812aefw.bin"
-
-[authorization]
-transmit = true
 ```
 
 `firmware` is resolved before USB init. The default examples assume
 `/tmp/rtl8812aefw.bin`; product packaging should install the firmware at a
 stable path or override the field.
+
+`[authorization].transmit` is no longer required. `[authorization]` is retained
+only for `live_register_writes = true`, which is still required for runtime
+calibration profiles that write BB/RF registers.
 
 ## Stream Schema
 
@@ -75,7 +81,7 @@ Fields:
 | `radio_port` | yes | WFB radio port used for RX filtering and health attribution. |
 | `local_udp` | yes | Local UDP socket. TX streams bind this address. RX streams forward matching WFB payloads to this address. |
 | `link_id` | no | WFB link ID for this stream. Defaults to `[wfb].link_id` when present. |
-| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Defaults to `"raw_application_datagram"` in the endpoint model. For `MacosUserspaceRadioBackend`, use `"wfb_distributor_datagram"` unless another layer converts raw app UDP to WFB datagrams. |
+| `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Defaults to `"raw_application_datagram"` in the endpoint model. For `UserspaceRadioBackend`, use `"wfb_distributor_datagram"` unless another layer converts raw app UDP to WFB datagrams. |
 | `criticality` | no | `"required"` or `"best_effort"`. Defaults to `"required"`. |
 
 Validation:
@@ -164,7 +170,7 @@ Fields:
 
 Important backend behavior:
 
-- `MacosUserspaceRadioBackend` preserves `[tunnel]` as endpoint metadata but
+- `UserspaceRadioBackend` preserves `[tunnel]` as endpoint metadata but
   does not start `wfb_tx`, `wfb_rx`, or `wfb-tun-macos`.
 - `MacosWfbTunnelBackend` is the managed IP tunnel path. It starts the helper
   processes for the tunnel use case.
@@ -199,8 +205,8 @@ Use this decision table:
 | Product sends/receives | Config value | Backend |
 | --- | --- | --- |
 | Raw IP tunnel packets | `raw_application_datagram` endpoint exposed by `MacosWfbTunnelBackend` | Managed tunnel backend |
-| WFB-NG distributor datagrams | `wfb_distributor_datagram` | `MacosUserspaceRadioBackend` |
-| Raw app UDP for arbitrary streams | `raw_application_datagram` plus a helper/codec layer | Not native in `MacosUserspaceRadioBackend` today |
+| WFB-NG distributor datagrams | `wfb_distributor_datagram` | `UserspaceRadioBackend` |
+| Raw app UDP for arbitrary streams | `raw_application_datagram` plus a helper/codec layer | Not native in `UserspaceRadioBackend` today |
 
 If a product sends raw payload bytes to a `WfbDistributorDatagram` endpoint, the
 runtime will treat the bytes as malformed WFB distributor input and drop them.

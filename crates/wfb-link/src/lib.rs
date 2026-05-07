@@ -100,10 +100,15 @@ pub struct LinkConfig {
 }
 
 impl LinkConfig {
-    pub fn macos_userspace_radio(config: MacosUserspaceRadioConfig) -> Self {
+    pub fn userspace_radio(config: UserspaceRadioConfig) -> Self {
         Self {
-            backend: LinkBackendConfig::MacosUserspaceRadio(config),
+            backend: LinkBackendConfig::UserspaceRadio(config),
         }
+    }
+
+    #[deprecated(note = "use LinkConfig::userspace_radio")]
+    pub fn macos_userspace_radio(config: UserspaceRadioConfig) -> Self {
+        Self::userspace_radio(config)
     }
 
     pub fn macos_wfb_tunnel(config: MacosWfbTunnelConfig) -> Self {
@@ -121,20 +126,22 @@ impl LinkConfig {
 
 #[derive(Debug, Clone)]
 pub enum LinkBackendConfig {
-    MacosUserspaceRadio(MacosUserspaceRadioConfig),
+    UserspaceRadio(UserspaceRadioConfig),
+    #[deprecated(note = "use LinkBackendConfig::UserspaceRadio")]
+    MacosUserspaceRadio(UserspaceRadioConfig),
     MacosWfbTunnel(MacosWfbTunnelConfig),
     LinuxNativeWfb(LinuxNativeWfbConfig),
 }
 
 #[derive(Debug, Clone)]
-pub struct MacosUserspaceRadioConfig {
+pub struct UserspaceRadioConfig {
     pub runtime_config: ProductionRuntimeFlowConfig,
     pub execution_inputs: ProductionRuntimeFlowExecutionInputs,
     pub endpoints: LinkEndpoints,
     pub ready_poll_interval: Duration,
 }
 
-impl MacosUserspaceRadioConfig {
+impl UserspaceRadioConfig {
     pub fn from_service_config_path(config: impl AsRef<Path>) -> Result<Self> {
         let cli = ServiceCli::config_only(config.as_ref().to_path_buf());
         let resolved = resolve_service_run(&cli)?;
@@ -154,7 +161,7 @@ impl MacosUserspaceRadioConfig {
     ) -> Self {
         execution_inputs.process_signal_stop = false;
         execution_inputs.external_stop_requested = None;
-        let endpoints = macos_userspace_radio_endpoints(&runtime_config);
+        let endpoints = userspace_radio_endpoints(&runtime_config);
         Self {
             runtime_config,
             execution_inputs,
@@ -169,6 +176,9 @@ impl MacosUserspaceRadioConfig {
     }
 }
 
+#[deprecated(note = "use UserspaceRadioConfig")]
+pub type MacosUserspaceRadioConfig = UserspaceRadioConfig;
+
 #[derive(Debug, Clone)]
 pub struct LinuxNativeWfbConfig {
     pub interface_name: String,
@@ -180,7 +190,7 @@ pub struct LinuxNativeWfbConfig {
 
 #[derive(Debug, Clone)]
 pub struct MacosWfbTunnelConfig {
-    pub radio: MacosUserspaceRadioConfig,
+    pub radio: UserspaceRadioConfig,
     pub wfb_key: PathBuf,
     pub wfb_tx_bin: PathBuf,
     pub wfb_rx_bin: PathBuf,
@@ -210,10 +220,7 @@ pub struct MacosWfbTunnelConfig {
 }
 
 impl MacosWfbTunnelConfig {
-    pub fn from_radio_config(
-        radio: MacosUserspaceRadioConfig,
-        wfb_key: impl Into<PathBuf>,
-    ) -> Self {
+    pub fn from_radio_config(radio: UserspaceRadioConfig, wfb_key: impl Into<PathBuf>) -> Self {
         let service_tunnel = radio.endpoints.tunnel.clone();
         let tunnel_rx_aggregator = radio
             .runtime_config
@@ -275,7 +282,7 @@ impl MacosWfbTunnelConfig {
         config: impl AsRef<Path>,
         wfb_key: impl Into<PathBuf>,
     ) -> Result<Self> {
-        let radio = MacosUserspaceRadioConfig::from_service_config_path(config)?;
+        let radio = UserspaceRadioConfig::from_service_config_path(config)?;
         Ok(Self::from_radio_config(radio, wfb_key))
     }
 
@@ -332,7 +339,7 @@ impl MacosWfbTunnelConfig {
     }
 
     pub fn refresh_endpoints(&mut self) {
-        let mut endpoints = macos_userspace_radio_endpoints(&self.radio.runtime_config);
+        let mut endpoints = userspace_radio_endpoints(&self.radio.runtime_config);
         endpoints.streams.push(LinkStreamEndpoint {
             name: "tunnel-tx".to_string(),
             direction: LinkDirection::Tx,
@@ -798,6 +805,8 @@ pub struct LinkReport {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkBackendReport {
+    UserspaceRadio(ProductionRuntimeFlowReport),
+    #[deprecated(note = "use LinkBackendReport::UserspaceRadio")]
     MacosUserspaceRadio(ProductionRuntimeFlowReport),
     MacosWfbTunnel(MacosWfbTunnelReport),
     LinuxNativeWfb(Value),
@@ -823,19 +832,23 @@ pub struct ChildProcessReport {
 }
 
 #[derive(Debug, Default)]
-pub struct MacosUserspaceRadioBackend;
+pub struct UserspaceRadioBackend;
+
+#[deprecated(note = "use UserspaceRadioBackend")]
+pub type MacosUserspaceRadioBackend = UserspaceRadioBackend;
 
 #[derive(Debug, Default)]
 pub struct MacosWfbTunnelBackend;
 
-impl LinkBackend for MacosUserspaceRadioBackend {
+#[allow(deprecated)]
+impl LinkBackend for UserspaceRadioBackend {
     fn start(&mut self, config: LinkConfig) -> Result<Box<dyn LinkHandle>> {
-        let LinkBackendConfig::MacosUserspaceRadio(config) = config.backend else {
-            return Err(LinkError::UnsupportedBackend(
-                "expected macos_userspace_radio",
-            ));
+        let config = match config.backend {
+            LinkBackendConfig::UserspaceRadio(config)
+            | LinkBackendConfig::MacosUserspaceRadio(config) => config,
+            _ => return Err(LinkError::UnsupportedBackend("expected userspace_radio")),
         };
-        let handle = MacosUserspaceRadioHandle::start(config)?;
+        let handle = UserspaceRadioHandle::start(config)?;
         Ok(Box::new(handle))
     }
 }
@@ -850,9 +863,9 @@ impl LinkBackend for MacosWfbTunnelBackend {
     }
 }
 
-impl MacosUserspaceRadioHandle {
-    fn start(config: MacosUserspaceRadioConfig) -> Result<Self> {
-        let MacosUserspaceRadioConfig {
+impl UserspaceRadioHandle {
+    fn start(config: UserspaceRadioConfig) -> Result<Self> {
+        let UserspaceRadioConfig {
             mut runtime_config,
             mut execution_inputs,
             endpoints,
@@ -941,7 +954,7 @@ fn remove_runtime_tx_bind(config: &mut ProductionRuntimeFlowConfig, local_udp: S
 }
 
 #[derive(Debug)]
-pub struct MacosUserspaceRadioHandle {
+pub struct UserspaceRadioHandle {
     endpoints: LinkEndpoints,
     startup_degraded_streams: Vec<LinkStreamDegradation>,
     stop_requested: Arc<AtomicBool>,
@@ -951,7 +964,7 @@ pub struct MacosUserspaceRadioHandle {
     ready_poll_interval: Duration,
 }
 
-impl LinkHandle for MacosUserspaceRadioHandle {
+impl LinkHandle for UserspaceRadioHandle {
     fn endpoints(&self) -> &LinkEndpoints {
         &self.endpoints
     }
@@ -1067,7 +1080,7 @@ impl LinkHandle for MacosUserspaceRadioHandle {
     }
 
     fn join(self: Box<Self>) -> Result<LinkReport> {
-        let MacosUserspaceRadioHandle {
+        let UserspaceRadioHandle {
             endpoints,
             startup_degraded_streams,
             join_handle,
@@ -1090,15 +1103,18 @@ impl LinkHandle for MacosUserspaceRadioHandle {
             endpoints,
             streams,
             degraded_streams,
-            backend: LinkBackendReport::MacosUserspaceRadio(report),
+            backend: LinkBackendReport::UserspaceRadio(report),
         })
     }
 }
 
+#[deprecated(note = "use UserspaceRadioHandle")]
+pub type MacosUserspaceRadioHandle = UserspaceRadioHandle;
+
 #[derive(Debug)]
 pub struct MacosWfbTunnelHandle {
     endpoints: LinkEndpoints,
-    radio_handle: MacosUserspaceRadioHandle,
+    radio_handle: UserspaceRadioHandle,
     children: Mutex<Vec<ManagedChild>>,
     tun_summary_file: PathBuf,
     artifact_dir: PathBuf,
@@ -1125,7 +1141,7 @@ impl MacosWfbTunnelHandle {
         radio.runtime_config.primary_rx_forward.link_id = Some(config.link_id);
         radio.runtime_config.primary_rx_forward.radio_port = Some(config.tunnel_rx_radio_port);
         radio.runtime_config.bind_addr = config.tunnel_tx_radio_bind;
-        let radio_handle = MacosUserspaceRadioHandle::start(radio)?;
+        let radio_handle = UserspaceRadioHandle::start(radio)?;
 
         let mut children = Vec::new();
         children.push(spawn_logged(
@@ -1287,8 +1303,8 @@ impl LinkHandle for MacosWfbTunnelHandle {
             .map(ManagedChild::report)
             .collect::<Result<Vec<_>>>()?;
         let radio_report = Box::new(radio_handle).join()?;
-        let LinkBackendReport::MacosUserspaceRadio(radio) = radio_report.backend else {
-            unreachable!("macOS tunnel owns a macOS radio handle");
+        let LinkBackendReport::UserspaceRadio(radio) = radio_report.backend else {
+            unreachable!("macOS tunnel owns a userspace radio handle");
         };
         let tunnel_summary = read_json_file(&tun_summary_file).ok();
         let child_failed = child_reports.iter().any(|child| {
@@ -1320,7 +1336,7 @@ impl LinkHandle for MacosWfbTunnelHandle {
     }
 }
 
-pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> LinkEndpoints {
+pub fn userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> LinkEndpoints {
     let mut streams = Vec::with_capacity(2 + config.tx_binds.len() + config.rx_forwards.len());
     for (index, local_udp) in std::iter::once(config.bind_addr)
         .chain(config.tx_binds.iter().copied())
@@ -1374,6 +1390,11 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
         streams,
         tunnel: None,
     }
+}
+
+#[deprecated(note = "use userspace_radio_endpoints")]
+pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> LinkEndpoints {
+    userspace_radio_endpoints(config)
 }
 
 fn link_endpoints_from_service_resolved(
@@ -1989,7 +2010,7 @@ mod tests {
 
     #[test]
     fn endpoint_shape_uses_wfb_distributor_datagrams() {
-        let endpoints = macos_userspace_radio_endpoints(&fixture_runtime_config());
+        let endpoints = userspace_radio_endpoints(&fixture_runtime_config());
 
         assert_eq!(endpoints.tunnel, None);
         assert_eq!(endpoints.streams.len(), 4);
@@ -2232,13 +2253,12 @@ mod tests {
     }
 
     #[test]
-    fn macos_config_from_runtime_parts_disables_process_signal_stop() {
+    fn userspace_radio_config_from_runtime_parts_disables_process_signal_stop() {
         let mut inputs = ProductionRuntimeFlowExecutionInputs::default();
         inputs.process_signal_stop = true;
         inputs.external_stop_requested = Some(Arc::new(AtomicBool::new(false)));
 
-        let config =
-            MacosUserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), inputs);
+        let config = UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), inputs);
 
         assert!(!config.execution_inputs.process_signal_stop);
         assert!(config.execution_inputs.external_stop_requested.is_none());
@@ -2246,10 +2266,8 @@ mod tests {
 
     #[test]
     fn tunnel_config_exposes_ip_tunnel_and_internal_streams() {
-        let radio = MacosUserspaceRadioConfig::from_runtime_parts(
-            fixture_runtime_config(),
-            Default::default(),
-        );
+        let radio =
+            UserspaceRadioConfig::from_runtime_parts(fixture_runtime_config(), Default::default());
         let config = MacosWfbTunnelConfig::from_radio_config(radio, "/tmp/gs.key")
             .with_tunnel_streams(0, 3, 4);
 
@@ -2283,9 +2301,9 @@ mod tests {
     }
 
     #[test]
-    fn macos_handle_request_stop_sets_cooperative_flag_and_join_reports() {
+    fn userspace_radio_handle_request_stop_sets_cooperative_flag_and_join_reports() {
         let runtime_config = fixture_runtime_config();
-        let endpoints = macos_userspace_radio_endpoints(&runtime_config);
+        let endpoints = userspace_radio_endpoints(&runtime_config);
         let stop_requested = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop_requested);
         let join_handle = thread::spawn(move || {
@@ -2297,7 +2315,7 @@ mod tests {
                 RuntimeRadioError::new("test_stop", "stopped by test"),
             )
         });
-        let handle = MacosUserspaceRadioHandle {
+        let handle = UserspaceRadioHandle {
             endpoints: endpoints.clone(),
             startup_degraded_streams: Vec::new(),
             stop_requested: Arc::clone(&stop_requested),
@@ -2314,8 +2332,13 @@ mod tests {
         let report = Box::new(handle).join().expect("join report");
         assert_eq!(report.lifecycle, LinkLifecycle::Failed);
         assert_eq!(report.endpoints, endpoints);
-        let LinkBackendReport::MacosUserspaceRadio(runtime_report) = report.backend else {
-            panic!("expected macOS runtime report");
+        let report_json = serde_json::to_value(&report).expect("report json");
+        assert!(report_json
+            .get("backend")
+            .and_then(|backend| backend.get("userspace_radio"))
+            .is_some());
+        let LinkBackendReport::UserspaceRadio(runtime_report) = report.backend else {
+            panic!("expected userspace radio runtime report");
         };
         assert_eq!(runtime_report.stop_reason, "not_started");
         assert_eq!(

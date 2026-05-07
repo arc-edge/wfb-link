@@ -12,6 +12,7 @@ Product code
   -> wfb_link::LinkBackend
      -> macOS: userspace AWUS036ACH runtime from this repo
      -> Linux: native WFB-NG/wfb0 supervisor, using the same trait contract
+     -> Android: userspace AWUS036ACH runtime with Android USB host transport
 ```
 
 ## Current Backend Choices
@@ -19,16 +20,17 @@ Product code
 | Need | Backend | Status |
 | --- | --- | --- |
 | Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
-| macOS WFB distributor datagram streams | `MacosUserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. |
-| Generic raw application multi-streams | Product/helper layer above `MacosUserspaceRadioBackend` | Not built into `wfb-link` yet. Convert raw app UDP to WFB distributor datagrams before handing it to the radio backend. |
-| Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the macOS USB bridge to Linux. |
+| Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in transport is macOS IOUSBHost; Android should reuse this contract with an Android USB transport. |
+| Generic raw application multi-streams | Product/helper layer above `UserspaceRadioBackend` | Not built into `wfb-link` yet. Convert raw app UDP to WFB distributor datagrams before handing it to the radio backend. |
+| Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
+| Android | `UserspaceRadioBackend` plus Android USB transport | Planned. Keep the same lifecycle, endpoint, health, and report contracts. |
 
 The important distinction is `payload_kind`:
 
 - `WfbDistributorDatagram`: local UDP carries WFB-NG distributor or aggregator datagrams. The product or helper process owns WFB framing, encryption, FEC, and radio-port selection.
 - `RawApplicationDatagram`: local UDP carries product payload bytes. A backend or helper must supervise WFB-NG `wfb_tx`/`wfb_rx` or provide an equivalent codec layer.
 
-Today, `MacosUserspaceRadioBackend` consumes and emits `WfbDistributorDatagram`.
+Today, `UserspaceRadioBackend` consumes and emits `WfbDistributorDatagram`.
 `MacosWfbTunnelBackend` exposes raw IP tunnel endpoints because it starts the
 WFB-NG helper processes and `wfb-tun-macos` bridge for that specific tunnel use.
 
@@ -88,25 +90,27 @@ Operational requirements:
 - The Linux peer must be on the same channel, bandwidth, link ID, and tunnel
   radio ports.
 
-## macOS Distributor Streams
+## Userspace Distributor Streams
 
 Use this path when the product already owns WFB-NG datagrams or supervises its
-own helper processes.
+own helper processes. On macOS, the service TOML currently selects
+`[macos_usbhost]`; Android should select a future Android USB runtime transport
+without changing this top-level link code.
 
 ```rust
 use std::time::Duration;
 use wfb_link::{
-    LinkBackend, LinkConfig, LinkDirection, MacosUserspaceRadioBackend,
-    MacosUserspaceRadioConfig, PayloadKind,
+    LinkBackend, LinkConfig, LinkDirection, UserspaceRadioBackend,
+    UserspaceRadioConfig, PayloadKind,
 };
 
 fn run_radio() -> Result<(), Box<dyn std::error::Error>> {
-    let radio = MacosUserspaceRadioConfig::from_service_config_path(
+    let radio = UserspaceRadioConfig::from_service_config_path(
         "configs/radio-run-multi-stream-example.toml",
     )?;
 
-    let mut backend = MacosUserspaceRadioBackend::default();
-    let handle = backend.start(LinkConfig::macos_userspace_radio(radio))?;
+    let mut backend = UserspaceRadioBackend::default();
+    let handle = backend.start(LinkConfig::userspace_radio(radio))?;
     handle.wait_ready(Duration::from_secs(90))?;
 
     for stream in &handle.endpoints().streams {
@@ -209,20 +213,22 @@ application acceptance should still be measured at the receiver.
 `StreamCriticality::BestEffort` means the link should start if possible and
 surface the stream in `degraded_streams`.
 
-Current macOS behavior:
+Current userspace radio behavior:
 
 - Required TX bind failures abort startup.
 - Best-effort TX bind failures are preflighted, skipped, and reported degraded.
 - RX forwarding uses runtime-owned ephemeral sockets; RX best-effort is
   currently health metadata rather than a separate bind-skip path.
 
-## Linux Shape
+## Platform Selection Shape
 
-The product should target the same trait on Linux:
+The product should target the same trait on every platform:
 
 ```rust
 let mut backend: Box<dyn LinkBackend> = if cfg!(target_os = "macos") {
     Box::new(MacosWfbTunnelBackend::default())
+} else if cfg!(target_os = "android") {
+    Box::new(UserspaceRadioBackend::default())
 } else {
     Box::new(ProductLinuxWfbBackend::new())
 };

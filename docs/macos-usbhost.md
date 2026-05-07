@@ -113,8 +113,6 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-tx-once-usb
   --pid 0x8812 \
   --channel 36 \
   --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" \
-  --i-understand-this-transmits
-
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-tx-repeat-usbhost.json tx-repeat \
   --macos-usbhost \
   --vid 0x0bda \
@@ -122,8 +120,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-remote-macos-tx-repeat-u
   --channel 36 \
   --count 3 \
   --interval-ms 100 \
-  --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" \
-  --i-understand-this-transmits
+  --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
 ```
 
 ## April 30, 2026 Remote Result

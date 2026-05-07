@@ -33,8 +33,8 @@ to be run manually and is easy to drift from the production gate.
   existing smoke defaults and avoids requiring EFUSE artifacts for the baseline
   current-default gate.
 - Require the write-register acknowledgement only for non-default TX power
-  modes. This matches the guarded service/diagnostic command surface while still
-  keeping `--i-understand-this-transmits` mandatory for all smoke modes.
+  modes. This matches the guarded service/diagnostic command surface; ordinary
+  transmit paths no longer require a separate acknowledgement flag.
 - Add RF profile fields to generated summaries rather than parsing logs. The
   JSON reports already contain authoritative TX power control and calibration
   evidence.

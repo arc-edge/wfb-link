@@ -145,7 +145,6 @@ pub(crate) struct ResolvedRadioRunArgs {
     pub(crate) max_datagrams: u32,
     pub(crate) ready_file: Option<PathBuf>,
     pub(crate) health_file: Option<PathBuf>,
-    pub(crate) i_understand_this_transmits: bool,
     pub(crate) i_understand_this_writes_registers: bool,
     pub(crate) wfb_link_id: Option<u32>,
     pub(crate) wfb_radio_port: Option<u8>,
@@ -365,10 +364,6 @@ pub(crate) fn radio_run_resolved_args(
             .health_file
             .clone()
             .or_else(|| artifacts.and_then(|artifacts| artifacts.health_file.clone())),
-        i_understand_this_transmits: args.i_understand_this_transmits
-            || authorization
-                .and_then(|authorization| authorization.transmit)
-                .unwrap_or(false),
         i_understand_this_writes_registers: args.i_understand_this_writes_registers
             || authorization
                 .and_then(|authorization| authorization.live_register_writes)

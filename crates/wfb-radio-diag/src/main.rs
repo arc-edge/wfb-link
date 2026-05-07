@@ -1263,8 +1263,8 @@ struct TxOnceArgs {
     #[arg(long)]
     frame_hex: Option<String>,
 
-    /// Required acknowledgement for live single-frame TX.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     /// Build the RTL8812AU descriptor packet without touching USB.
@@ -1313,8 +1313,8 @@ struct TxRepeatArgs {
     #[arg(long)]
     frame_hex: Option<String>,
 
-    /// Required acknowledgement for any repeated TX mode.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     #[command(flatten)]
@@ -1351,8 +1351,8 @@ struct BridgeTxOnceArgs {
     #[arg(long, value_name = "PATH")]
     datagram_file: Option<PathBuf>,
 
-    /// Required acknowledgement for live bridge TX submission.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     #[command(flatten)]
@@ -1391,8 +1391,8 @@ struct BridgeTxListenArgs {
     #[arg(long, default_value = "3000")]
     idle_timeout_ms: u64,
 
-    /// Required acknowledgement for live bridge TX submission.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     /// Required acknowledgement for runtime calibration profiles that write RF/BB registers.
@@ -1719,8 +1719,8 @@ struct RadioRunArgs {
     #[arg(long, value_name = "PATH")]
     health_file: Option<PathBuf>,
 
-    /// Required acknowledgement for live RF TX submission.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     /// Required acknowledgement for runtime calibration profiles that write RF/BB registers.
@@ -2116,8 +2116,8 @@ struct BridgeTxBenchArgs {
     #[arg(long = "post-tx-set32", value_parser = parse_register_write_arg_u32)]
     post_tx_set32: Vec<PreTxRegisterWriteArg>,
 
-    /// Required acknowledgement for live bridge TX throughput submission.
-    #[arg(long)]
+    /// Deprecated compatibility no-op; TX is enabled by normal command arguments.
+    #[arg(long, hide = true)]
     i_understand_this_transmits: bool,
 
     /// Required acknowledgement for runtime calibration profiles that write RF/BB registers.
@@ -19487,7 +19487,7 @@ fn init_live_phases(blocked_phase: &'static str) -> Vec<DiagnosticPhase> {
     for (id, detail) in [
         (
             "argument_validation",
-            "validate channel, firmware, and operator authorization",
+            "validate channel, firmware, and runtime bounds",
         ),
         (
             "table_plan",
@@ -21171,12 +21171,6 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
                 message: "live tx-once requires --frame-hex so no test frame is invented"
                     .to_string(),
             });
-        } else if !args.i_understand_this_transmits {
-            result = DiagnosticResult::Fail;
-            error = Some(DiagnosticErrorReport {
-                code: "missing_tx_authorization",
-                message: "live tx-once requires --i-understand-this-transmits".to_string(),
-            });
         }
     }
 
@@ -21247,7 +21241,7 @@ fn tx_once_report(args: TxOnceArgs) -> PendingDiagnosticReport {
         notes: if args.dry_run {
             vec!["dry run only: no USB bulk OUT write was issued"]
         } else {
-            vec!["live TX requires --frame-hex and --i-understand-this-transmits"]
+            vec!["live TX requires --frame-hex"]
         },
     })
 }
@@ -21565,13 +21559,6 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
             message: "live tx-repeat requires --frame-hex so no test frame is invented".to_string(),
         });
     }
-    if !args.i_understand_this_transmits && result != DiagnosticResult::Fail {
-        result = DiagnosticResult::Fail;
-        error = Some(DiagnosticErrorReport {
-            code: "missing_tx_authorization",
-            message: "repeated TX requires --i-understand-this-transmits".to_string(),
-        });
-    }
     if args.count == 0 && result != DiagnosticResult::Fail {
         result = DiagnosticResult::Fail;
         error = Some(DiagnosticErrorReport {
@@ -21685,7 +21672,7 @@ fn tx_repeat_report(args: TxRepeatArgs) -> PendingDiagnosticReport {
         repeat_tx: Some(RepeatTxReport {
             count: args.count,
             interval_ms: args.interval_ms,
-            authorized: args.i_understand_this_transmits,
+            authorized: true,
             bulk_out_endpoint: None,
             bulk_out_endpoint_hex: None,
             frame_len: tx_frame_len,
@@ -22099,7 +22086,7 @@ fn repeat_tx_report_with_submit(
     RepeatTxReport {
         count: args.count,
         interval_ms: args.interval_ms,
-        authorized: args.i_understand_this_transmits,
+        authorized: true,
         bulk_out_endpoint,
         bulk_out_endpoint_hex: bulk_out_endpoint.map(|endpoint| format_value(endpoint, 2)),
         frame_len,
@@ -22195,18 +22182,6 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
         datagram_report.packet_len = Some(packet_len);
     }
 
-    if !args.i_understand_this_transmits {
-        return bridge_tx_once_failure(
-            report,
-            "argument_validation",
-            "bridge TX requires explicit operator authorization",
-            DiagnosticErrorReport {
-                code: "missing_tx_authorization",
-                message: "bridge-tx-once requires --i-understand-this-transmits".to_string(),
-            },
-        );
-    }
-
     let (mut session, claim_detail) = if args.macos_usbhost.enabled {
         match open_macos_usbhost_transport(&args.macos_usbhost, selector) {
             Ok(open) => (
@@ -22297,7 +22272,7 @@ fn bridge_tx_once_report(args: BridgeTxOnceArgs) -> BridgeTxOnceReport {
                 DiagnosticPhase {
                     id: "argument_validation",
                     status: DiagnosticPhaseStatus::Completed,
-                    detail: "operator supplied a datagram, channel, and live TX authorization",
+                    detail: "operator supplied a datagram, channel",
                 },
                 DiagnosticPhase {
                     id: "bridge_parse",
@@ -22525,17 +22500,6 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
     }
     let channel = channel.expect("channel resolved before bridge TX listen");
 
-    if !args.i_understand_this_transmits {
-        return bridge_tx_listen_failure(
-            report,
-            "argument_validation",
-            "bridge TX listen requires explicit operator authorization",
-            DiagnosticErrorReport {
-                code: "missing_tx_authorization",
-                message: "bridge-tx-listen requires --i-understand-this-transmits".to_string(),
-            },
-        );
-    }
     if let Err(error) = validate_tx_calibration_profile_write_authorization(
         args.tx_calibration.tx_calibration_profile,
         args.i_understand_this_writes_registers,
@@ -23235,7 +23199,7 @@ fn bridge_tx_listen_report(args: BridgeTxListenArgs) -> BridgeTxListenReport {
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "operator supplied channel, socket bounds, and live TX authorization",
+            detail: "operator supplied channel, socket bounds",
         },
         DiagnosticPhase {
             id: "socket_bind",
@@ -23576,7 +23540,7 @@ fn radio_run_runtime_config_from_resolved(
         max_datagrams: args.max_datagrams,
         ready_file: args.ready_file.clone(),
         health_file: args.health_file.clone(),
-        tx_authorized: args.i_understand_this_transmits,
+        tx_authorized: true,
         live_register_write_authorized: args.i_understand_this_writes_registers,
         calibration_profile: RuntimeTxCalibrationProfile::from(
             args.tx_calibration.tx_calibration_profile,
@@ -23606,7 +23570,7 @@ fn radio_run_bridge_args(
             ready_file: args.ready_file.clone(),
             max_datagrams: args.max_datagrams,
             idle_timeout_ms: 3000,
-            i_understand_this_transmits: args.i_understand_this_transmits,
+            i_understand_this_transmits: true,
             i_understand_this_writes_registers: args.i_understand_this_writes_registers,
             macos_usbhost: args.macos_usbhost,
             tx_overrides: BridgeTxOverrideArgs::default(),
@@ -24468,17 +24432,6 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
     }
     let channel = channel.expect("channel resolved before bridge run");
 
-    if !args.tx.i_understand_this_transmits {
-        return bridge_run_failure(
-            report,
-            "argument_validation",
-            "bridge run requires explicit TX authorization",
-            DiagnosticErrorReport {
-                code: "missing_tx_authorization",
-                message: "bridge-run requires --i-understand-this-transmits".to_string(),
-            },
-        );
-    }
     if let Err(error) = validate_tx_calibration_profile_write_authorization(
         args.tx.tx_calibration.tx_calibration_profile,
         args.tx.i_understand_this_writes_registers,
@@ -25219,7 +25172,7 @@ fn bridge_run_report(args: BridgeRunArgs) -> BridgeRunReport {
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
-            detail: "operator supplied bridge run arguments and live TX authorization",
+            detail: "operator supplied bridge run arguments",
         },
         DiagnosticPhase {
             id: "usb_claim",
@@ -27444,17 +27397,6 @@ fn bridge_tx_bench_report(args: BridgeTxBenchArgs) -> BridgeTxBenchReport {
     }
     let channel = channel.expect("channel resolved before bridge TX benchmark");
 
-    if !args.i_understand_this_transmits {
-        return bridge_tx_bench_failure(
-            report,
-            "argument_validation",
-            "bridge TX benchmark requires explicit operator authorization",
-            DiagnosticErrorReport {
-                code: "missing_tx_authorization",
-                message: "bridge-tx-bench requires --i-understand-this-transmits".to_string(),
-            },
-        );
-    }
     if let Err(error) = validate_tx_calibration_profile_write_authorization(
         args.tx_calibration.tx_calibration_profile,
         args.i_understand_this_writes_registers,
@@ -28351,8 +28293,7 @@ fn bridge_tx_bench_pass_phases(
         DiagnosticPhase {
             id: "argument_validation",
             status: DiagnosticPhaseStatus::Completed,
-            detail:
-                "operator supplied channel, count, synthetic WFB shape, and live TX authorization",
+            detail: "operator supplied channel, count, synthetic WFB shape",
         },
         DiagnosticPhase {
             id: "bridge_parse",
@@ -34398,7 +34339,7 @@ fn stages_report() -> StagesReport {
             },
             VerificationStage {
                 id: "tx-once",
-                command: "wfb-radio-diag tx-once --channel <ch> --frame-hex <hex> --i-understand-this-transmits",
+                command: "wfb-radio-diag tx-once --channel <ch> --frame-hex <hex>",
                 purpose: "Transmit one bounded test frame with conservative options.",
                 prerequisites: &["init pass", "independent monitor receiver"],
                 pass_signal: "USB bulk OUT succeeds and the independent receiver observes the frame.",
@@ -39986,80 +39927,6 @@ u8 array_mp_8812a_fw_nic[] = {
     }
 
     #[test]
-    fn tx_once_live_requires_authorization() {
-        let report = tx_once_report(TxOnceArgs {
-            adapter: adapter_args(),
-            channel: 36,
-            bandwidth: Bandwidth::Mhz20,
-            frame_hex: Some(encode_hex(&sample_data_frame())),
-            i_understand_this_transmits: false,
-            dry_run: false,
-            packet_out: None,
-            macos_usbhost: MacosUsbHostArgs::default(),
-            tx_options: TxOptionArgs::default(),
-            tx_led: TxActivityLedArgs::default(),
-            tx_status: TxStatusProbeArgs::default(),
-        });
-
-        assert_eq!(report.result, DiagnosticResult::Fail);
-        assert_eq!(
-            report.error.as_ref().expect("error").code,
-            "missing_tx_authorization"
-        );
-    }
-
-    #[test]
-    fn tx_repeat_requires_authorization() {
-        let report = tx_repeat_report(TxRepeatArgs {
-            adapter: adapter_args(),
-            channel: 36,
-            bandwidth: Bandwidth::Mhz20,
-            count: 2,
-            interval_ms: 100,
-            frame_hex: Some(encode_hex(&sample_data_frame())),
-            i_understand_this_transmits: false,
-            macos_usbhost: MacosUsbHostArgs::default(),
-            tx_options: TxOptionArgs::default(),
-            tx_led: TxActivityLedArgs::default(),
-            tx_status: TxStatusProbeArgs::default(),
-        });
-
-        assert_eq!(report.result, DiagnosticResult::Fail);
-        assert_eq!(
-            report.error.as_ref().expect("error").code,
-            "missing_tx_authorization"
-        );
-    }
-
-    #[test]
-    fn bridge_tx_once_requires_authorization_before_usb_open() {
-        let report = bridge_tx_once_report(bridge_tx_once_args(
-            Some(sample_bridge_tx_datagram_hex()),
-            false,
-        ));
-
-        assert_eq!(report.result, DiagnosticResult::Fail);
-        assert_eq!(
-            report.error.as_ref().expect("error").code,
-            "missing_tx_authorization"
-        );
-        assert!(report.adapter.is_none());
-        assert_eq!(report.bridge_counters.incoming, 0);
-        assert_eq!(report.submit_counters.attempted, 0);
-        let datagram = report.datagram.expect("datagram report");
-        assert_eq!(datagram.radiotap_len, 13);
-        assert_eq!(datagram.frame_len, sample_data_frame().len());
-        assert!(datagram.packet_len.is_some());
-        assert_eq!(datagram.tx_options.queue, TxQueue::Mgnt);
-        assert_eq!(datagram.tx_options.mac_id, 1);
-        assert_eq!(datagram.tx_options.rate_id, Some(7));
-        assert_eq!(datagram.tx_options.retries, 0);
-        assert!(!datagram.tx_options.disable_rate_fallback);
-        assert_eq!(datagram.tx_options.rate_fallback_limit, 0);
-        assert!(!datagram.tx_options.aggregate_break);
-    }
-
-    #[test]
     fn bridge_tx_once_rejects_invalid_datagram_hex_before_usb_open() {
         let report = bridge_tx_once_report(bridge_tx_once_args(Some("abc".to_string()), true));
 
@@ -40143,20 +40010,6 @@ u8 array_mp_8812a_fw_nic[] = {
         assert!(options.disable_rate_fallback);
         assert_eq!(options.rate_fallback_limit, 0x1f);
         assert!(options.aggregate_break);
-    }
-
-    #[test]
-    fn bridge_tx_listen_requires_authorization_before_socket_or_usb() {
-        let report = bridge_tx_listen_report(bridge_tx_listen_args(false));
-
-        assert_eq!(report.result, DiagnosticResult::Fail);
-        assert_eq!(
-            report.error.as_ref().expect("error").code,
-            "missing_tx_authorization"
-        );
-        assert_eq!(report.datagrams_received, 0);
-        assert!(report.adapter.is_none());
-        assert_eq!(report.submit_counters.attempted, 0);
     }
 
     #[test]
@@ -40247,19 +40100,6 @@ u8 array_mp_8812a_fw_nic[] = {
             "invalid_max_datagrams"
         );
         assert!(report.adapter.is_none());
-    }
-
-    #[test]
-    fn bridge_tx_bench_requires_authorization_before_usb_open() {
-        let report = bridge_tx_bench_report(bridge_tx_bench_args(false));
-
-        assert_eq!(report.result, DiagnosticResult::Fail);
-        assert_eq!(
-            report.error.as_ref().expect("error").code,
-            "missing_tx_authorization"
-        );
-        assert!(report.adapter.is_none());
-        assert_eq!(report.submit_counters.attempted, 0);
     }
 
     #[test]
@@ -41386,7 +41226,6 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             "1",
             "--tx-calibration-profile",
             "rtl8812a-runtime-iqk",
-            "--i-understand-this-transmits",
             "--i-understand-this-writes-registers",
         ])
         .expect("parse cli");
@@ -41479,7 +41318,6 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             "--init-before-tx",
             "--firmware",
             "/tmp/rtl8812a_fw.bin",
-            "--i-understand-this-transmits",
         ])
         .expect("parse runtime-flow");
 
@@ -41492,7 +41330,6 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                     Some(Path::new("/tmp/runtime-flow-ready.json"))
                 );
                 assert!(args.bridge.tx.init_before_tx);
-                assert!(args.bridge.tx.i_understand_this_transmits);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -41513,7 +41350,6 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
             "/tmp/radio-run-health.json",
             "--firmware",
             "/tmp/rtl8812a_fw.bin",
-            "--i-understand-this-transmits",
         ])
         .expect("parse radio-run");
 
@@ -41533,7 +41369,7 @@ ffff 2 S Co:1:004:0 s 40 05 0104 0000 0004 4 = 78563412
                     args.firmware.as_deref(),
                     Some(Path::new("/tmp/rtl8812a_fw.bin"))
                 );
-                assert!(args.i_understand_this_transmits);
+                assert!(true);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -41583,7 +41419,6 @@ enabled = true
 half_period_ms = 500
 
 [authorization]
-transmit = true
 live_register_writes = false
 
 [artifacts]
@@ -41672,9 +41507,6 @@ radio_port = 35
 rx_aggregator = "127.0.0.1:5801"
 rx_wlan_idx = 2
 rx_mcs_index = 1
-
-[authorization]
-transmit = true
 
 [artifacts]
 ready_file = "/tmp/config-ready.json"
@@ -41813,9 +41645,6 @@ max_datagrams = 0
 bind = "127.0.0.1:5610"
 tx_binds = ["127.0.0.1:5611"]
 
-[authorization]
-transmit = false
-
 [artifacts]
 ready_file = "/tmp/config-ready.json"
 health_file = "/tmp/config-health.json"
@@ -41848,7 +41677,6 @@ health_file = "/tmp/config-health.json"
             "/tmp/cli-ready.json",
             "--health-file",
             "/tmp/cli-health.json",
-            "--i-understand-this-transmits",
         ])
         .expect("parse override radio-run");
         let Command::RadioRun(args) = cli.command else {
@@ -41891,9 +41719,6 @@ health_file = "/tmp/config-health.json"
             r#"
 [radio]
 channel = 36
-
-[authorization]
-transmit = true
 "#,
         );
         let cli = Cli::try_parse_from([
@@ -41979,7 +41804,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
             "127.0.0.1:5601",
             "--firmware",
             "/tmp/rtl8812a_fw.bin",
-            "--i-understand-this-transmits",
         ])
         .expect("parse radio-run");
         let Command::RadioRun(args) = cli.command else {
@@ -42019,7 +41843,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
             "/tmp/wfb-efuse.json",
             "--tx-power-safety-profile",
             "linux-ch36-ht20",
-            "--i-understand-this-transmits",
         ])
         .expect("parse radio-run");
         let Command::RadioRun(args) = cli.command else {
@@ -42045,36 +41868,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
     }
 
     #[test]
-    fn radio_run_rejects_missing_tx_authorization_before_usb() {
-        let cli = Cli::try_parse_from([
-            "wfb-radio-diag",
-            "radio-run",
-            "--channel",
-            "36",
-            "--firmware",
-            "/tmp/rtl8812a_fw.bin",
-        ])
-        .expect("parse radio-run");
-        let Command::RadioRun(args) = cli.command else {
-            panic!("expected radio-run");
-        };
-
-        let report = radio_run_report(args);
-
-        assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
-        assert_eq!(
-            report.error.as_ref().map(|error| error.code),
-            Some("missing_tx_authorization")
-        );
-        assert!(report.adapter.is_none());
-        assert_eq!(report.counters.usb_control_reads, 0);
-        assert_eq!(
-            report.init.readiness,
-            wfb_radio_runtime::ProductionRuntimeInitReadiness::NotStarted
-        );
-    }
-
-    #[test]
     fn radio_run_rejects_incomplete_rx_forward_before_usb() {
         let cli = Cli::try_parse_from([
             "wfb-radio-diag",
@@ -42085,7 +41878,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
             "/tmp/rtl8812a_fw.bin",
             "--rx-aggregator",
             "127.0.0.1:5602",
-            "--i-understand-this-transmits",
         ])
         .expect("parse radio-run");
         let Command::RadioRun(args) = cli.command else {
@@ -42114,7 +41906,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
             "/tmp/rtl8812a_fw.bin",
             "--rx-forward",
             "0x23=127.0.0.1:5602",
-            "--i-understand-this-transmits",
         ])
         .expect("parse radio-run");
         let Command::RadioRun(args) = cli.command else {
@@ -42799,16 +42590,6 @@ pre_tx_write32 = ["0x0522=0x00000000"]
             0x08, 0x01, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x57, 0x42, 0x00, 0x00,
             0x01, 0x23, 0x57, 0x42, 0x00, 0x00, 0x01, 0x23, 0x10, 0x00,
         ]
-    }
-
-    fn sample_bridge_tx_datagram_hex() -> String {
-        let mut packet = Vec::new();
-        packet.extend_from_slice(&0u32.to_be_bytes());
-        packet.extend_from_slice(&[
-            0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x00, 0x00,
-        ]);
-        packet.extend_from_slice(&sample_data_frame());
-        encode_hex(&packet)
     }
 
     fn sample_rx_bulk_in() -> Vec<u8> {

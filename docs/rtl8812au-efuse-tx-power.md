@@ -66,8 +66,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-efuse-power-listen.json 
   --max-datagrams 300 \
   --tx-power-mode efuse-derived \
   --tx-power-efuse-report /tmp/wfb-live-efuse-dump.json \
-  --tx-power-safety-profile linux-ch36-ht20 \
-  --i-understand-this-transmits
+  --tx-power-safety-profile linux-ch36-ht20
 ```
 
 Use `--tx-power-mode manual-index --tx-power-index 0x1a` or the shorthand

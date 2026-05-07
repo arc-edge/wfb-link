@@ -176,26 +176,26 @@ cargo run -p wfb-radio-diag -- --json rx-scan --macos-usbhost --vid 0x0bda --pid
 cargo run -p wfb-radio-diag -- --json rx-scan --channel 36 --bandwidth 80 --duration-ms 1000
 cargo run -p wfb-radio-diag -- --json rx-scan --channel 36 --pcap /tmp/wfb-rx.pcap --frame-jsonl /tmp/wfb-rx-frames.jsonl
 cargo run -p wfb-radio-diag -- --json rx-scan --channel 36 --fixture-bulk-in /path/to/bulk-in.bin --pcap /tmp/wfb-rx-fixture.pcap --frame-jsonl /tmp/wfb-rx-fixture.jsonl
-cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-once --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-led-hold-ms 700 --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50 --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --short-gi --ldpc --stbc --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --bandwidth 80 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc --i-understand-this-transmits
+cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
+cargo run -p wfb-radio-diag -- --json tx-once --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
+cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-led-hold-ms 700
+cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50
+cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --short-gi --ldpc --stbc
+cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --bandwidth 80 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc
 cargo run -p wfb-radio-diag -- --json tx-once --channel 36 --dry-run --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
-cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 2 --interval-ms 100 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-repeat --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --count 3 --interval-ms 100 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-led-hold-ms 700 --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50 --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --bandwidth 80 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50 --i-understand-this-transmits
-cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --bandwidth 80 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc --tx-led --tx-status --tx-status-delay-ms 50 --i-understand-this-transmits
+cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 2 --interval-ms 100 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
+cargo run -p wfb-radio-diag -- --json tx-repeat --macos-usbhost --vid 0x0bda --pid 0x8812 --channel 36 --count 3 --interval-ms 100 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)"
+cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-led-hold-ms 700
+cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50
+cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --bandwidth 80 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-led --tx-status --tx-status-delay-ms 50
+cargo run -p wfb-radio-diag -- --json tx-repeat --channel 36 --bandwidth 80 --count 3 --interval-ms 200 --frame-hex "$(cat fixtures/frames/wfb-data-frame.hex)" --tx-rate vht2ss-mcs9 --short-gi --ldpc --stbc --tx-led --tx-status --tx-status-delay-ms 50
 cargo run -p wfb-radio-diag -- --json trace-import --input fixtures/traces/usbmon-sample.txt --output /tmp/usbmon-sample.json
 cargo run -p wfb-radio-diag -- --json trace-compare --expected fixtures/traces/init-minimal-expected.json --observed fixtures/traces/init-minimal-observed.json
 ```
 
 `rx-scan` is live: it assumes `init` already completed on the requested channel, claims the adapter, reads the bulk-IN endpoint for a bounded duration, parses RTL8812AU RX descriptors, and can write captured frames to PCAP plus JSONL metadata records. It does not issue control writes, run init, submit bulk OUT, or transmit frames.
 
-`tx-once` is live: it assumes `init` already completed on the requested channel, claims the adapter, validates the supplied IEEE 802.11 frame hex, builds the RTL8812AU descriptor-prefixed packet, and writes exactly one packet to the selected bulk-OUT endpoint. It requires `--frame-hex` and `--i-understand-this-transmits`. The live April 30, 2026 run on macOS 15.7.4 wrote one 64-byte packet to endpoint `0x02` with `attempted=1`, `submitted=1`, and `failed=0`; independent over-the-air confirmation still needs a second monitor receiver.
+`tx-once` is live: it assumes `init` already completed on the requested channel, claims the adapter, validates the supplied IEEE 802.11 frame hex, builds the RTL8812AU descriptor-prefixed packet, and writes exactly one packet to the selected bulk-OUT endpoint. It requires `--frame-hex`. The live April 30, 2026 run on macOS 15.7.4 wrote one 64-byte packet to endpoint `0x02` with `attempted=1`, `submitted=1`, and `failed=0`; independent over-the-air confirmation still needs a second monitor receiver.
 
 `tx-once` and `tx-repeat` accept visible optional descriptor flags: `--short-gi`, `--ldpc`, and `--stbc`. These are explicit opt-ins and are reported back in JSON under `tx_options`. The April 30, 2026 flagged `tx-once` run confirmed those options reached the live descriptor path and still completed one bulk-OUT submission.
 
@@ -205,7 +205,7 @@ cargo run -p wfb-radio-diag -- --json trace-compare --expected fixtures/traces/i
 
 `tx-once` and `tx-repeat` accept `--tx-status` to read selected RTL8812AU interrupt, TXDMA, queue, TX pause, scheduler, and C2H event registers before and after live bulk-OUT submissions. The JSON report includes `tx_status.pre`, `tx_status.post`, `tx_status.changed`, counters, and probe errors. This is read-only chip-side telemetry around USB submission, not RF confirmation. Live reports: `/tmp/wfb-live-tx-once-status.json`, `/tmp/wfb-live-tx-repeat-status.json`.
 
-`tx-repeat` is live with stronger gating: it requires an explicit frame, count, interval, channel, and `--i-understand-this-transmits`. The live April 30, 2026 run on macOS 15.7.4 sent three 64-byte descriptor-prefixed packets to endpoint `0x02` at 100 ms spacing with `attempted=3`, `submitted=3`, and `failed=0`. This is a USB submission and pacing diagnostic until an independent receiver confirms RF packet reception.
+`tx-repeat` is live requires an explicit frame, count, interval, and channel. The live April 30, 2026 run on macOS 15.7.4 sent three 64-byte descriptor-prefixed packets to endpoint `0x02` at 100 ms spacing with `attempted=3`, `submitted=3`, and `failed=0`. This is a USB submission and pacing diagnostic until an independent receiver confirms RF packet reception.
 
 `bridge-tx-once` is live and write-gated: it reads one WFB distributor/injector datagram from `--datagram-hex` or `--datagram-file`, parses the firmware mark plus radiotap-prefixed IEEE 802.11 frame, maps HT/VHT radiotap metadata into radio TX options, and submits the stripped 802.11 frame through the live radio TX backend. The first macOS 26 IOUSBHost run on April 30, 2026 parsed a 41-byte datagram and submitted one 64-byte descriptor-prefixed HT MCS0 packet to endpoint `0x02` with bridge counters `incoming=1`, `injected=1`, `dropped=0`. Report: `/tmp/wfb-remote-macos-bridge-tx-once-usbhost.json`. This still needs a stock WFB-ng distributor plus Linux receiver before the TX bridge is considered end-to-end verified.
 
@@ -242,8 +242,7 @@ cargo run -p wfb-radio-service -- \
   --tx-power-mode efuse-derived \
   --tx-power-efuse-report /tmp/wfb-remote-macos-efuse-dump.json \
   --tx-power-safety-profile linux-ch36-ht20 \
-  --tx-calibration-profile current-default \
-  --i-understand-this-transmits
+  --tx-calibration-profile current-default
 ```
 
 `reg-smoke` is live but read-only: it claims the adapter, reads a small set of RTL8812AU registers through vendor control requests, reports the values, and then releases the interface. It does not issue control writes, bulk transfers, RF changes, or TX operations.

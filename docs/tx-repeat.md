@@ -1,6 +1,6 @@
 # TX Repeat
 
-`tx-repeat` is the guarded live repeated-TX diagnostic. It assumes `init` has already completed on the requested channel, then claims the adapter and submits the same validated IEEE 802.11 frame a bounded number of times with explicit pacing.
+`tx-repeat` is the live repeated-TX diagnostic. It assumes `init` has already completed on the requested channel, then claims the adapter and submits the same validated IEEE 802.11 frame a bounded number of times with explicit pacing.
 
 ## Command
 
@@ -11,8 +11,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-repeat.json tx-r
   --vid 0x0bda --pid 0x8812 \
   --channel 36 --bandwidth 20 \
   --count 3 --interval-ms 100 \
-  --frame-hex "$FRAME_HEX" \
-  --i-understand-this-transmits
+  --frame-hex "$FRAME_HEX"
 ```
 
 On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
@@ -34,8 +33,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-repeat-vht-rate.
   --tx-rate vht2ss-mcs9 \
   --short-gi --ldpc --stbc \
   --tx-led --tx-led-hold-ms 700 \
-  --tx-status --tx-status-delay-ms 50 \
-  --i-understand-this-transmits
+  --tx-status --tx-status-delay-ms 50
 ```
 
 Optional software TX activity LED indication can be added explicitly:
@@ -46,8 +44,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-repeat-led.json 
   --channel 36 --bandwidth 20 \
   --count 3 --interval-ms 200 \
   --frame-hex "$FRAME_HEX" \
-  --tx-led --tx-led-hold-ms 700 \
-  --i-understand-this-transmits
+  --tx-led --tx-led-hold-ms 700
 ```
 
 Optional read-only TX status sampling can be added explicitly:
@@ -59,8 +56,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-repeat-status.js
   --count 3 --interval-ms 200 \
   --frame-hex "$FRAME_HEX" \
   --tx-led --tx-led-hold-ms 700 \
-  --tx-status --tx-status-delay-ms 50 \
-  --i-understand-this-transmits
+  --tx-status --tx-status-delay-ms 50
 ```
 
 ## Live Result
@@ -104,7 +100,6 @@ This proves a bounded, paced bulk-OUT loop against the initialized adapter. It i
 - `--count`
 - `--interval-ms`
 - `--channel`
-- `--i-understand-this-transmits`
 
 `--tx-rate`, `--short-gi`, `--ldpc`, and `--stbc` are visible opt-ins that set TX descriptor fields and are echoed in the JSON `tx_options` field. Supported `--tx-rate` forms include legacy rates such as `ofdm6m`, HT rates such as `mcs7`, and VHT rates such as `vht2ss-mcs9`.
 

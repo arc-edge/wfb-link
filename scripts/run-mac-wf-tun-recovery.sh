@@ -310,7 +310,6 @@ service_cmd=(
   --ready-file "$OUT_DIR/radio-ready.json"
   --health-file "$OUT_DIR/radio-health.json"
   --report "$OUT_DIR/radio-service-report.json"
-  --i-understand-this-transmits
   --i-understand-this-writes-registers
 )
 if data_load_l2m_enabled; then

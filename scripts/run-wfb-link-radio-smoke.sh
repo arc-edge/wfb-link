@@ -93,7 +93,13 @@ else:
 backend = report.get("backend", {})
 runtime_report = {}
 if isinstance(backend, dict):
-    runtime_report = backend.get("macos_userspace_radio") or backend.get("MacosUserspaceRadio") or {}
+    runtime_report = (
+        backend.get("userspace_radio")
+        or backend.get("macos_userspace_radio")
+        or backend.get("UserspaceRadio")
+        or backend.get("MacosUserspaceRadio")
+        or {}
+    )
 airtime = runtime_report.get("airtime", {})
 schedule = airtime.get("schedule", {})
 tx = runtime_report.get("tx", {})

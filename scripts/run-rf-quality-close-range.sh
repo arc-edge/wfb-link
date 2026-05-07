@@ -13,8 +13,8 @@ Configuration is via environment variables. Common overrides:
   HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net
   LOCAL_HW=1                 # run the hardware-Mac side on this checkout
   HW_MAC_HOST=local          # shorthand for LOCAL_HW=1
-  HW_REPO_PATH=projects/arc/wfb-mac-radio-agent
-  HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
+  HW_REPO_PATH=projects/arc/wfb-link-agent
+  HW_DEPLOY=1 HW_DEPLOY_PATH=projects/arc/wfb-link-deploy
   MAC_RADIO_COMMAND=bridge-tx-listen  # bridge-tx-listen, radio-run, or radio-service
   LINUX_HOST=drone-2f389.local
   LINUX_SSH_JUMP=rownd@rownds-macbook-pro.tail5c793f.ts.net
@@ -105,7 +105,7 @@ HW_REPO_PATH=${HW_REPO_PATH:-}
 if [[ "$LOCAL_HW" == "1" && -z "${HW_REPO_PATH_WAS_SET:-}" ]]; then
   HW_REPO_PATH=$REPO_ROOT
 elif [[ -z "$HW_REPO_PATH" ]]; then
-  HW_REPO_PATH='projects/arc/wfb-mac-radio-agent'
+  HW_REPO_PATH='projects/arc/wfb-link-agent'
 fi
 LINUX_HOST=${LINUX_HOST:-drone-2f389.local}
 LINUX_SSH_JUMP=${LINUX_SSH_JUMP:-}
@@ -120,7 +120,7 @@ MAC_LAN_IP=${MAC_LAN_IP:-10.42.0.162}
 REMOTE_PREFIX=${REMOTE_PREFIX:-/tmp/wfb-rfq-auto-$RUN_ID}
 SYNC_HW_REPO=${SYNC_HW_REPO:-0}
 HW_DEPLOY=${HW_DEPLOY:-0}
-HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-deploy}
+HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-link-deploy}
 ALLOW_DEPLOY_OVER_WORKTREE=${ALLOW_DEPLOY_OVER_WORKTREE:-0}
 
 CHANNEL=${CHANNEL:-36}
@@ -523,7 +523,6 @@ case "$MAC_RADIO_COMMAND" in
       --idle-timeout-ms "$BRIDGE_IDLE_TIMEOUT_MS" \
       ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-      --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
       > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
     ;;
@@ -541,7 +540,6 @@ case "$MAC_RADIO_COMMAND" in
       --duration-ms "$RADIO_RUN_DURATION_MS" \
       ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-      --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
       > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
     ;;
@@ -560,7 +558,6 @@ case "$MAC_RADIO_COMMAND" in
       --duration-ms "$RADIO_RUN_DURATION_MS" \
       ${tx_power_args[@]+"${tx_power_args[@]}"} \
       --tx-calibration-profile "$TX_CALIBRATION_PROFILE" \
-      --i-understand-this-transmits \
       ${write_auth_arg:+"$write_auth_arg"} \
       > "${REMOTE_PREFIX}-bridge.log" 2>&1 &
     ;;

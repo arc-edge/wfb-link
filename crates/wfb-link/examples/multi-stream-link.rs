@@ -1,6 +1,6 @@
 use std::{error::Error, thread, time::Duration};
 
-use wfb_link::{LinkBackend, LinkConfig, MacosUserspaceRadioBackend, MacosUserspaceRadioConfig};
+use wfb_link::{LinkBackend, LinkConfig, UserspaceRadioBackend, UserspaceRadioConfig};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let config_path = std::env::args_os()
@@ -8,13 +8,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("usage: multi-stream-link <wfb-radio-service.toml>")?;
     let wait_ready_timeout = env_duration_s("WFB_LINK_READY_TIMEOUT_S", 90);
 
-    let radio = MacosUserspaceRadioConfig::from_service_config_path(config_path)?;
+    let radio = UserspaceRadioConfig::from_service_config_path(config_path)?;
     if radio.endpoints.streams.is_empty() {
         return Err("config did not resolve any named link streams".into());
     }
 
-    let mut backend = MacosUserspaceRadioBackend::default();
-    let handle = backend.start(LinkConfig::macos_userspace_radio(radio))?;
+    let mut backend = UserspaceRadioBackend::default();
+    let handle = backend.start(LinkConfig::userspace_radio(radio))?;
     let ready = handle.wait_ready(wait_ready_timeout)?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
 

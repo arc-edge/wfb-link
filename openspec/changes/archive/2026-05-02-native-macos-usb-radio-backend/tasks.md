@@ -49,9 +49,9 @@
 - [x] 5.3 Map conservative TX options for queue, rate, retry limit, bandwidth, SGI, LDPC, and STBC
 - [x] 5.4 Implement bulk OUT frame submission and TX counters
 - [x] 5.5 Add `wfb-radio-diag tx-once` command for single-frame TX verification
-  - Live result: April 30, 2026 macOS 15.7.4 `tx-once --channel 36 --bandwidth 20 --frame-hex <fixture> --i-understand-this-transmits` claimed the initialized adapter and wrote one 64-byte descriptor-prefixed packet to bulk OUT endpoint `0x02`. Report: `/tmp/wfb-live-tx-once.json`.
-- [x] 5.6 Add repeated-TX diagnostic mode gated by explicit count, interval, channel, and authorization flag
-  - Live result: April 30, 2026 macOS 15.7.4 `tx-repeat --channel 36 --bandwidth 20 --count 3 --interval-ms 100 --frame-hex <fixture> --i-understand-this-transmits` submitted 3 descriptor-prefixed packets to bulk OUT endpoint `0x02` with no failed or short writes. Report: `/tmp/wfb-live-tx-repeat.json`.
+  - Live result: April 30, 2026 macOS 15.7.4 `tx-once --channel 36 --bandwidth 20 --frame-hex <fixture>` claimed the initialized adapter and wrote one 64-byte descriptor-prefixed packet to bulk OUT endpoint `0x02`. Report: `/tmp/wfb-live-tx-once.json`.
+- [x] 5.6 Add repeated-TX diagnostic mode gated by explicit count, interval, and channel
+  - Live result: April 30, 2026 macOS 15.7.4 `tx-repeat --channel 36 --bandwidth 20 --count 3 --interval-ms 100 --frame-hex <fixture>` submitted 3 descriptor-prefixed packets to bulk OUT endpoint `0x02` with no failed or short writes. Report: `/tmp/wfb-live-tx-repeat.json`.
 
 ## 6. WFB Bridge RX
 

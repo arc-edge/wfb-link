@@ -10,7 +10,7 @@ Runs repeatable `radio-run` production smokes on the hardware Mac.
 
 Configuration is via environment variables:
   HW_MAC_HOST=rownd@100.104.12.123
-  HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-snr-deploy
+  HW_DEPLOY_PATH=projects/arc/wfb-link-snr-deploy
   LOCAL_HW=1              # run on this checkout instead of SSH deployment
   RADIO_COMMAND=service    # service or diagnostic
   FIRMWARE=/tmp/rtl8812aefw.bin
@@ -89,7 +89,7 @@ cd "$REPO_ROOT"
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)}
 HW_MAC_HOST=${HW_MAC_HOST:-rownd@100.104.12.123}
 HW_DEPLOY_PATH_WAS_SET=${HW_DEPLOY_PATH+x}
-HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-snr-deploy}
+HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-link-snr-deploy}
 FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
 RADIO_COMMAND=${RADIO_COMMAND:-service}
@@ -303,7 +303,6 @@ run_radio_smoke() {
         ${TX_POWER_ARGS[@]+"${TX_POWER_ARGS[@]}"} \
         ${TX_CALIBRATION_ARGS[@]+"${TX_CALIBRATION_ARGS[@]}"} \
         ${WRITE_AUTH_ARGS[@]+"${WRITE_AUTH_ARGS[@]}"} \
-        --i-understand-this-transmits \
         >"$log_file" 2>&1 &
       ;;
     diagnostic)
@@ -324,7 +323,6 @@ run_radio_smoke() {
         ${TX_POWER_ARGS[@]+"${TX_POWER_ARGS[@]}"} \
         ${TX_CALIBRATION_ARGS[@]+"${TX_CALIBRATION_ARGS[@]}"} \
         ${WRITE_AUTH_ARGS[@]+"${WRITE_AUTH_ARGS[@]}"} \
-        --i-understand-this-transmits \
         >"$log_file" 2>&1 &
       ;;
   esac

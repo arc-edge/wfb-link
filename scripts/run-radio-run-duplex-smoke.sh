@@ -483,7 +483,6 @@ start_radio() {
         --wfb-radio-port "$L2M_RADIO_PORT" \
         --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
         --rx-mcs-index "$L2M_MCS" \
-        --i-understand-this-transmits \
         > "$OUT_DIR/radio-run.log" 2>&1 &
       ;;
     diagnostic)
@@ -507,7 +506,6 @@ start_radio() {
         --wfb-radio-port "$L2M_RADIO_PORT" \
         --rx-aggregator "$LINUX_LAN_IP:$L2M_AGG_PORT" \
         --rx-mcs-index "$L2M_MCS" \
-        --i-understand-this-transmits \
         > "$OUT_DIR/radio-run.log" 2>&1 &
       ;;
   esac

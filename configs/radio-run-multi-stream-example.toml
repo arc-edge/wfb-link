@@ -1,7 +1,7 @@
-# Example multi-stream macOS radio profile for products that own WFB-NG
+# Example multi-stream userspace radio profile for products that own WFB-NG
 # distributor datagrams or supervise their own WFB-NG helper processes.
 #
-# This is not a raw-application datagram profile. `MacosUserspaceRadioBackend`
+# This is not a raw-application datagram profile. `UserspaceRadioBackend`
 # consumes WFB distributor datagrams on TX sockets and emits WFB aggregator
 # datagrams on RX sockets. Use `MacosWfbTunnelBackend` for the managed IP tunnel
 # path, or add a product/helper layer that converts raw application UDP to WFB
@@ -78,10 +78,6 @@ profile = "current_default"
 [heartbeat]
 enabled = true
 half_period_ms = 500
-
-[authorization]
-transmit = true
-live_register_writes = false
 
 [artifacts]
 ready_file = "/tmp/wfb-radio-run-multi-stream-ready.json"

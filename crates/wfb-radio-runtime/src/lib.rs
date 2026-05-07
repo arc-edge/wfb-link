@@ -2572,13 +2572,6 @@ pub fn validate_production_runtime_flow_config(
             "production radio run requires an RTL8812A firmware image path",
         ));
     }
-    if !config.tx_authorized {
-        return Err(RuntimeRadioError::new(
-            "missing_tx_authorization",
-            "production radio run requires explicit RF transmit authorization",
-        ));
-    }
-
     let calibration = config.calibration_profile.calibration_decision(
         config.captured_tail_applied,
         config.live_register_write_authorized,
@@ -14737,13 +14730,13 @@ mod tests {
     }
 
     #[test]
-    fn production_runtime_flow_config_rejects_missing_authorization_before_usb() {
+    fn production_runtime_flow_config_allows_tx_without_acknowledgement_flag() {
         let mut config = production_runtime_flow_config();
         config.tx_authorized = false;
 
-        let error = config.validate().expect_err("missing tx auth");
-
-        assert_eq!(error.code, "missing_tx_authorization");
+        config
+            .validate()
+            .expect("TX acknowledgement flag should not gate production runtime");
     }
 
     #[test]
@@ -14770,7 +14763,7 @@ mod tests {
     #[test]
     fn production_runtime_flow_execution_rejects_invalid_config_before_inputs() {
         let mut config = production_runtime_flow_config();
-        config.tx_authorized = false;
+        config.tx_burst_limit = 0;
 
         let report =
             run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
@@ -14781,7 +14774,7 @@ mod tests {
         assert!(report.endpoints.is_none());
         assert_eq!(
             report.error.as_ref().map(|error| error.code),
-            Some("missing_tx_authorization")
+            Some("invalid_tx_burst_limit")
         );
     }
 
@@ -14847,7 +14840,7 @@ mod tests {
         ));
         let mut config = production_runtime_flow_config();
         config.health_file = Some(health_path.clone());
-        config.tx_authorized = false;
+        config.tx_burst_limit = 0;
 
         let report =
             run_production_runtime_flow(config, ProductionRuntimeFlowExecutionInputs::default());
@@ -14859,12 +14852,12 @@ mod tests {
         assert_eq!(report.result, ProductionRuntimeFlowResult::Fail);
         assert_eq!(
             report.error.as_ref().map(|error| error.code),
-            Some("missing_tx_authorization")
+            Some("invalid_tx_burst_limit")
         );
         assert_eq!(health["lifecycle"], "exited_fail");
         assert_eq!(health["operator_action"], "restart");
         assert_eq!(health["result"], "fail");
-        assert_eq!(health["error"]["code"], "missing_tx_authorization");
+        assert_eq!(health["error"]["code"], "invalid_tx_burst_limit");
     }
 
     #[test]

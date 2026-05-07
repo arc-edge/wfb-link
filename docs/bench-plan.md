@@ -29,8 +29,8 @@ Use the Mac for the experimental userspace backend and the Linux peer as the ref
 13. Run `wfb-radio-diag init --channel 36 --bandwidth 20 --firmware <rtl8812aefw.bin> --i-understand-this-writes-registers` to verify the integrated power, firmware, LLT, queue/DMA, MAC, BB, RF, and 20 MHz channel path over one USB claim.
 14. On Linux, confirm the same adapter model works with the chosen WFB-ng driver and channel.
 15. Run `wfb-radio-diag rx-scan --channel 36 --duration-ms 1000 --pcap <path> --frame-jsonl <path>` after `init` to prove bounded bulk-IN reads, descriptor parsing, PCAP output, and raw-frame metadata emission on the selected channel.
-16. Run `wfb-radio-diag tx-once --channel 36 --frame-hex <hex> --tx-status --i-understand-this-transmits` after `init` to prove one guarded descriptor-prefixed bulk-OUT submission and capture read-only TX status register deltas.
-17. Run `wfb-radio-diag tx-repeat --channel 36 --count <n> --interval-ms <ms> --frame-hex <hex> --tx-status --i-understand-this-transmits` only after `tx-once` passes, starting with small counts.
+16. Run `wfb-radio-diag tx-once --channel 36 --frame-hex <hex> --tx-status` after `init` to prove one guarded descriptor-prefixed bulk-OUT submission and capture read-only TX status register deltas.
+17. Run `wfb-radio-diag tx-repeat --channel 36 --count <n> --interval-ms <ms> --frame-hex <hex> --tx-status` only after `tx-once` passes, starting with small counts.
 18. Keep the first link one-way and low-rate: Linux transmits test WFB payloads, Mac receives and forwards to an aggregator.
 19. After RX forwarding is stable, reverse the path: stock WFB-ng distributor traffic feeds the Mac bridge, and Linux verifies received payloads.
 20. Only attempt sustained video after low-rate bidirectional payload counters line up.
@@ -55,7 +55,7 @@ Default operation should stay conservative until captures prove otherwise.
 - Bandwidth: 20 MHz.
 - TX rate: OFDM 6 Mbps by default. `tx-once` and `tx-repeat` can use `--tx-rate` for explicit descriptor diagnostics with legacy, HT MCS, or VHT NSS/MCS rates; WFB bridge TX still follows radiotap metadata with conservative fallbacks.
 - TX power: no override until the captured EFUSE power-table bytes are mapped to the Linux driver's final per-rate RF power indexes.
-- Repeated TX: require explicit count, interval, channel, and authorization flag.
+- Repeated TX: require explicit count, interval, and channel.
 - SGI, LDPC, and STBC: available only behind visible `--short-gi`, `--ldpc`, and `--stbc` TX flags and echoed in JSON counters.
 - LED control: the attached unit's visible blue LED is normal `led0` on `REG_LEDCFG0`; `tx-once` and `tx-repeat` can use `--tx-led` to show software TX submissions, but this is not RF proof.
 - TX status sampling: `tx-once` and `tx-repeat` can use `--tx-status` to read selected RTL8812AU status registers before and after bulk-OUT submissions; this is chip-side telemetry, not RF proof.

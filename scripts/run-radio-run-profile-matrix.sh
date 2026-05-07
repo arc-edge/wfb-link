@@ -14,7 +14,7 @@ Common configuration:
   HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net
   LOCAL_HW=0                 # set to 1 or HW_MAC_HOST=local for local adapter
   HW_DEPLOY=1                # rsync local checkout to HW_DEPLOY_PATH first
-  HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy
+  HW_DEPLOY_PATH=projects/arc/wfb-link-deploy
   LINUX_HOST=pi@drone-2f389.local
   LINUX_LAN_IP=10.42.0.1    # Linux peer LAN IP visible to remote hardware Mac
   MAC_LAN_IP=10.42.0.162     # remote Mac LAN IP visible to Linux peer
@@ -135,9 +135,9 @@ case "$HW_MAC_HOST" in
     ;;
 esac
 HW_DEPLOY=${HW_DEPLOY:-1}
-HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-mac-radio-deploy}
+HW_DEPLOY_PATH=${HW_DEPLOY_PATH:-projects/arc/wfb-link-deploy}
 HW_DEPLOY_DELETE=${HW_DEPLOY_DELETE:-0}
-HW_REPO_PATH=${HW_REPO_PATH:-projects/arc/wfb-mac-radio-agent}
+HW_REPO_PATH=${HW_REPO_PATH:-projects/arc/wfb-link-agent}
 SYNC_REALTEK_REF=${SYNC_REALTEK_REF:-1}
 AUTO_FETCH_REALTEK_REF=${AUTO_FETCH_REALTEK_REF:-1}
 REALTEK_REF_LOCAL_PATH=${REALTEK_REF_LOCAL_PATH:-/tmp/wfb-ref-rtl8812au}

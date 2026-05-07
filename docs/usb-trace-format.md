@@ -52,8 +52,7 @@ cargo run -p wfb-radio-diag -- --json bridge-tx-bench \
   --tx-status-registers-from /tmp/linux-awus036ach-register-final.json \
   --tx-status-delay-ms 100 \
   --frame-kind wfb-data \
-  --payload-marker LINUXMAP1 \
-  --i-understand-this-transmits
+  --payload-marker LINUXMAP1
 ```
 
 `--tx-status-registers-from` accepts the JSON written by `trace-registers --output` and merges those register addresses into the built-in TX status snapshot. It implies `--tx-status`, reads the extra registers before and after TX, and labels them as chip-side telemetry rather than RF confirmation. For each imported final write, the status report also keeps the Linux-final value as an expectation and emits `tx_status.trace_comparison` with pre/post mismatch counts and per-register observed/expected details. Adapter-specific values such as `REG_MACID`, volatile interrupt/state registers, and donor-trace channel or power differences can legitimately remain mismatched.

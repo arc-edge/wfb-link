@@ -1,14 +1,16 @@
 # Cross-Platform WFB Link Interface
 
-The product binary should use one WFB link interface on macOS and Linux. The
-interface owns lifecycle, endpoint discovery, health, and shutdown. Each
-platform backend owns the radio implementation that makes sense on that OS.
+The product binary should use one WFB link interface across macOS, Linux, and
+Android. The interface owns lifecycle, endpoint discovery, health, and
+shutdown. Each platform backend owns the radio implementation that makes sense
+on that OS.
 
 ```text
 Product binary
   -> LinkBackend
      -> macOS: WFB-NG UDP codec + wfb-radio-runtime + AWUS036ACH USB
      -> Linux: WFB-NG native tools + wfb0 monitor interface + rtl88xxau
+     -> Android: wfb-radio-runtime + Android USB host transport
 ```
 
 ## Product Boundary
@@ -72,13 +74,26 @@ may leave `stream` unset because one local UDP ingress can carry multiple WFB
 streams.
 
 Do not treat endpoint metadata as a runtime rewrite mechanism. Runtime sockets
-come from `MacosUserspaceRadioConfig` / `wfb-radio-service` resolution. If a
+come from `UserspaceRadioConfig` / `wfb-radio-service` resolution. If a
 product needs named streams, put them in `[[streams]]` or build the complete
 runtime config and endpoint model together.
 
-## macOS Backend
+## Platform Backends
 
-The macOS backend uses this repository's native radio runtime:
+`UserspaceRadioConfig`, `UserspaceRadioBackend`, and
+`LinkBackendConfig::UserspaceRadio` are the portable direct-radio contract. They
+do not promise a particular USB transport; the runtime config selects the
+platform-specific transport underneath. Existing macOS TOML profiles select the
+macOS IOUSBHost path with `[macos_usbhost]`. A future Android backend should
+reuse the same lifecycle, endpoint, health, and report shapes while providing an
+Android USB host transport.
+
+The deprecated `MacosUserspaceRadio*` names are compatibility aliases. New
+product code should use `UserspaceRadio*`.
+
+## macOS Backends
+
+The macOS direct-radio path uses this repository's native radio runtime:
 
 ```text
 raw app UDP or tunnel
@@ -87,11 +102,11 @@ raw app UDP or tunnel
   <-> AWUS036ACH over userspace USB
 ```
 
-The `wfb-link` macOS layer now has two backend shapes:
+The `wfb-link` macOS layer has two backend shapes:
 
-- `MacosUserspaceRadioConfig::from_service_config_path` resolves an existing
+- `UserspaceRadioConfig::from_service_config_path` resolves an existing
   `wfb-radio-service` TOML profile.
-- `MacosUserspaceRadioBackend` starts `run_production_runtime_flow` on a
+- `UserspaceRadioBackend` starts `run_production_runtime_flow` on a
   thread and exposes WFB distributor datagram endpoints. Use this when the
   caller owns WFB-NG codec/session framing.
 - `MacosWfbTunnelBackend` supervises the production radio runtime, stock
@@ -177,7 +192,7 @@ last successful submit time when the runtime owns the TX bind. RX entries
 expose forwarded frames/bytes and the last RX-forward time. `degraded_streams`
 lists best-effort streams that were skipped or degraded during startup.
 
-For the current macOS userspace radio backend, `BestEffort` is implemented for
+For the current userspace radio backend, `BestEffort` is implemented for
 TX UDP bind preflight: an unavailable best-effort TX socket is removed from the
 runtime bind set and reported as degraded instead of failing the whole link.
 Required bind failures still abort. RX forward sockets are runtime-owned
@@ -265,13 +280,26 @@ raw app UDP or tunnel
 
 It should verify tools, configure `wfb0` channel/bandwidth, supervise stock
 WFB-NG processes, and report normalized health plus Linux-specific evidence.
-It should not use the macOS userspace USB bridge.
+It should not use the userspace USB bridge just to share implementation; Linux
+already has a mature native WFB path.
+
+## Android Backend
+
+Android is expected to use the portable userspace radio contract rather than a
+native Linux monitor-mode path. The missing platform piece is an Android USB
+host transport for RTL8812AU control and bulk transfers. Once that transport can
+produce the same runtime USB session behavior as macOS IOUSBHost, Android
+product code should be able to start a `UserspaceRadioBackend` with Android
+runtime USB config and keep the same `LinkEndpoints`, `LinkHealth`, and
+`LinkReport` model.
 
 ## Why This Boundary
 
-- Product code gets one lifecycle and endpoint contract on both platforms.
+- Product code gets one lifecycle and endpoint contract across platforms.
 - macOS can keep the userspace USB radio path that works today.
 - Linux can keep the native monitor-mode path that already exists.
+- Android can add a platform USB transport without changing the top-level link
+  contract.
 - WFB-NG compatibility remains intact.
 - A future Rust WFB codec can replace helper processes without changing the
   product-facing link control plane.

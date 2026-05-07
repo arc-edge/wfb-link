@@ -40,10 +40,6 @@ profile = "current_default"
 enabled = true
 half_period_ms = 500
 
-[authorization]
-transmit = true
-live_register_writes = false
-
 [artifacts]
 ready_file = "/tmp/wfb-radio-run-service-ready.json"
 health_file = "/tmp/wfb-radio-run-service-health.json"

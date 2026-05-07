@@ -1,6 +1,6 @@
 # TX Once
 
-`tx-once` is the guarded live TX diagnostic. It assumes `init` has already completed on the requested channel, then claims the adapter, validates one operator-supplied IEEE 802.11 frame, builds the RTL8812AU 40-byte TX descriptor, and writes exactly one descriptor-prefixed packet to the bulk-OUT endpoint.
+`tx-once` is the live TX diagnostic. It assumes `init` has already completed on the requested channel, then claims the adapter, validates one operator-supplied IEEE 802.11 frame, builds the RTL8812AU 40-byte TX descriptor, and writes exactly one descriptor-prefixed packet to the bulk-OUT endpoint.
 
 ## Command
 
@@ -10,8 +10,7 @@ FRAME_HEX=$(tr -d '[:space:]' < fixtures/frames/wfb-data-frame.hex)
 cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once.json tx-once \
   --vid 0x0bda --pid 0x8812 \
   --channel 36 --bandwidth 20 \
-  --frame-hex "$FRAME_HEX" \
-  --i-understand-this-transmits
+  --frame-hex "$FRAME_HEX"
 ```
 
 On macOS 26, add `--macos-usbhost --vid 0x0bda --pid 0x8812` to use the retained IOUSBHost interface session instead of libusb.
@@ -23,8 +22,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once-flags.json 
   --vid 0x0bda --pid 0x8812 \
   --channel 36 --bandwidth 20 \
   --frame-hex "$FRAME_HEX" \
-  --short-gi --ldpc --stbc \
-  --i-understand-this-transmits
+  --short-gi --ldpc --stbc
 ```
 
 Explicit TX descriptor rates can be selected for direct HT/VHT diagnostics:
@@ -37,8 +35,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once-vht-rate.js
   --tx-rate vht2ss-mcs9 \
   --short-gi --ldpc --stbc \
   --tx-led --tx-led-hold-ms 700 \
-  --tx-status --tx-status-delay-ms 50 \
-  --i-understand-this-transmits
+  --tx-status --tx-status-delay-ms 50
 ```
 
 Optional software TX activity LED indication uses the confirmed visible LED by default:
@@ -48,8 +45,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once-led.json tx
   --vid 0x0bda --pid 0x8812 \
   --channel 36 --bandwidth 20 \
   --frame-hex "$FRAME_HEX" \
-  --tx-led --tx-led-hold-ms 700 \
-  --i-understand-this-transmits
+  --tx-led --tx-led-hold-ms 700
 ```
 
 Optional read-only TX status sampling records selected chip registers before and after the USB submission:
@@ -60,8 +56,7 @@ cargo run -p wfb-radio-diag -- --json --report /tmp/wfb-live-tx-once-status.json
   --channel 36 --bandwidth 20 \
   --frame-hex "$FRAME_HEX" \
   --tx-led --tx-led-hold-ms 700 \
-  --tx-status --tx-status-delay-ms 50 \
-  --i-understand-this-transmits
+  --tx-status --tx-status-delay-ms 50
 ```
 
 Run live `init` first:
@@ -107,7 +102,7 @@ This proves the Mac can claim the initialized adapter and submit one TX packet t
 
 ## Boundaries
 
-`tx-once` does not run init, retune the channel, start an RX loop, repeat frames, or verify over-the-air reception. Live TX requires both `--frame-hex` and `--i-understand-this-transmits` so the command never invents a frame or transmits by accident. `--tx-rate`, `--short-gi`, `--ldpc`, and `--stbc` only set descriptor options; peer reception still needs independent RF verification. `--tx-led` indicates software bulk-OUT submission activity only; it is not an RF TX confirmation. `--tx-status` is read-only register telemetry around the USB TX submission and is also not RF proof.
+`tx-once` does not run init, retune the channel, start an RX loop, repeat frames, or verify over-the-air reception. Live TX requires `--frame-hex` so the command never invents a frame or transmits by accident. `--tx-rate`, `--short-gi`, `--ldpc`, and `--stbc` only set descriptor options; peer reception still needs independent RF verification. `--tx-led` indicates software bulk-OUT submission activity only; it is not an RF TX confirmation. `--tx-status` is read-only register telemetry around the USB TX submission and is also not RF proof.
 
 Use `--dry-run` to build the descriptor-prefixed packet without touching USB:
 

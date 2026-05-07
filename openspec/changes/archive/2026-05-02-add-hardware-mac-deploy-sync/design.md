@@ -1,6 +1,6 @@
 ## Context
 
-The first live automation run showed that `SYNC_HW_REPO=1` is not reliable on the hardware Mac because that host cannot authenticate to GitHub. The same host also has a dirty checkout with hardware-facing edits, so a blind rsync over `~/projects/arc/wfb-mac-radio-agent` would risk overwriting useful local state.
+The first live automation run showed that `SYNC_HW_REPO=1` is not reliable on the hardware Mac because that host cannot authenticate to GitHub. The same host also has a dirty checkout with hardware-facing edits, so a blind rsync over `~/projects/arc/wfb-link-agent` would risk overwriting useful local state.
 
 ## Goals / Non-Goals
 

@@ -8,7 +8,7 @@ use std::{
 
 use radio_core::Channel;
 use wfb_link::{
-    LinkBackend, LinkConfig, MacosUserspaceRadioConfig, MacosWfbTunnelBackend, MacosWfbTunnelConfig,
+    LinkBackend, LinkConfig, MacosWfbTunnelBackend, MacosWfbTunnelConfig, UserspaceRadioConfig,
 };
 use wfb_radio_runtime::{ProductionRuntimeAirtimeSchedule, ProductionRuntimeTddWindow};
 
@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_dir = env_path("OUT_DIR").unwrap_or_else(|_| default_out_dir());
     let wait_ready_timeout = env_duration_s("WFB_LINK_READY_TIMEOUT_S", 90);
 
-    let mut radio = MacosUserspaceRadioConfig::from_service_config_path(config_path)?;
+    let mut radio = UserspaceRadioConfig::from_service_config_path(config_path)?;
     apply_radio_overrides(&mut radio)?;
 
     let mut tunnel = MacosWfbTunnelConfig::from_radio_config(radio, wfb_key)
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::process::exit(probe_status);
 }
 
-fn apply_radio_overrides(radio: &mut MacosUserspaceRadioConfig) -> Result<(), Box<dyn Error>> {
+fn apply_radio_overrides(radio: &mut UserspaceRadioConfig) -> Result<(), Box<dyn Error>> {
     if let Ok(channel) = std::env::var("CHANNEL") {
         radio.runtime_config.channel = Channel::from_number(channel.parse()?)?;
     }

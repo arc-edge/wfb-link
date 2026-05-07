@@ -129,7 +129,7 @@ Common site-specific overrides:
 
 ```sh
 HW_MAC_HOST=rownd@rownds-macbook-pro.tail5c793f.ts.net \
-HW_REPO_PATH=projects/arc/wfb-mac-radio-agent \
+HW_REPO_PATH=projects/arc/wfb-link-agent \
 LINUX_HOST=drone-2f389.local \
 MAC_LAN_IP=10.42.0.162 \
 scripts/run-rf-quality-close-range.sh
@@ -145,7 +145,7 @@ directory and starts the bridge from there:
 
 ```sh
 HW_DEPLOY=1 \
-HW_DEPLOY_PATH=projects/arc/wfb-mac-radio-deploy \
+HW_DEPLOY_PATH=projects/arc/wfb-link-deploy \
 scripts/run-rf-quality-close-range.sh
 ```
 
@@ -175,8 +175,7 @@ cargo run -p wfb-radio-diag -- --json \
   --channel 36 --bandwidth 20 \
   --bind 127.0.0.1:5611 \
   --max-datagrams 3000 \
-  --idle-timeout-ms 60000 \
-  --i-understand-this-transmits
+  --idle-timeout-ms 60000
 ```
 
 If the Linux peer cannot send UDP directly into the Mac listener, relay hardware
