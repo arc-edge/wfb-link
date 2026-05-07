@@ -648,6 +648,7 @@ dependencies = [
 name = "wfb-link"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "radio-core",
  "serde",
  "serde_json",

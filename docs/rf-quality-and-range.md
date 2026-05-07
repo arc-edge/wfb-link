@@ -64,6 +64,43 @@ hardware Mac and Linux peer are reachable:
 scripts/run-rf-quality-close-range.sh
 ```
 
+## Production RF Gates
+
+The product-facing tunnel cutover does not by itself promote the RF profile to
+long-distance production. Before a release profile is called range-ready, run
+and preserve artifacts for these gates:
+
+1. API tunnel smoke: `scripts/run-wfb-link-tunnel-smoke.sh` must pass with
+   `MacosWfbTunnelBackend`, `TX_MIN_INTERVAL_US=700`, a 256 KiB SSH download,
+   and zero tunnel corrupt/truncated/dropped counters.
+2. Loaded tunnel gate: `PROFILE_SET=loaded
+   scripts/run-mac-wf-tun-profile-matrix.sh` must recover exact `100/100`
+   marked side payloads in both directions while the SSH download completes
+   under the configured duration threshold.
+3. Close-range RF quality: `scripts/run-rf-quality-close-range.sh` must pass
+   the current-default/stop-gap profile with receiver-backed payload recovery,
+   channel-state evidence, and post-session decrypt failures equal to zero.
+4. Calibration regression: `scripts/run-calibration-regression-matrix.sh` must
+   compare `current-default`, EFUSE TX power, and runtime IQK. Runtime IQK
+   remains experimental until path-A RX IQK completes without fallback and the
+   matrix has zero post-session decrypt failures.
+5. Distance or attenuated range: a stepped/attenuated or outdoor profile from
+   `docs/rf-quality-range-profiles.md` must pass with matching antennas,
+   channel, bandwidth, fixed rate, FEC, payload length, and Linux baseline.
+
+Known non-release items:
+
+- Runtime IQK still needs Linux-parity work around path-A RX IQK fallback. Do
+  not use runtime IQK as the release calibration profile until the regression
+  matrix and range evidence both pass.
+- `TX_MIN_INTERVAL_US=700` is a bench-proven contention workaround, not a real
+  cross-peer airtime scheduler. Long term, the Linux peer and macOS sender need
+  shared scheduling or a product-level traffic shaper so side traffic is not
+  protected by conservative fixed pacing alone.
+- Long-distance validation is explicitly pending the next controlled antenna
+  placement. Short-range tunnel and RF-quality passes are release-entry gates,
+  not range acceptance.
+
 The script runs from the local checkout, starts the hardware-Mac UDP relay and
 `bridge-tx-listen`, controls the Linux `wfb0` sender/receiver through the
 hardware Mac jump host, collects artifacts into a timestamped local `/tmp`

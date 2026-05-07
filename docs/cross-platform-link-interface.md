@@ -76,21 +76,85 @@ raw app UDP or tunnel
   <-> AWUS036ACH over userspace USB
 ```
 
-For the 8-hour integration path, the backend can first expose WFB distributor
-datagram endpoints and embed `run_production_runtime_flow` without installing
-process signal handlers. The next step is supervising `wfb_tx`, `wfb_rx`, and
-optional `wf_tun` helpers so the product only sees raw stream/tunnel endpoints.
-
-The current `wfb-link` macOS backend does the first slice:
+The `wfb-link` macOS layer now has two backend shapes:
 
 - `MacosUserspaceRadioConfig::from_service_config_path` resolves an existing
   `wfb-radio-service` TOML profile.
 - `MacosUserspaceRadioBackend` starts `run_production_runtime_flow` on a
-  thread.
-- `request_stop` sets a cooperative in-process stop flag instead of relying on
-  process-wide signal handlers.
-- `wait_ready`, `health`, and `join` normalize runtime artifacts while keeping
-  the full `ProductionRuntimeFlowReport` under backend-specific evidence.
+  thread and exposes WFB distributor datagram endpoints. Use this when the
+  caller owns WFB-NG codec/session framing.
+- `MacosWfbTunnelBackend` supervises the production radio runtime, stock
+  `wfb_tx`/`wfb_rx` helpers, and the Rust `wfb-tun-macos` bridge. Use this when
+  a product wants a raw IP tunnel endpoint and a single Rust lifecycle handle.
+
+Both backends use `request_stop` with cooperative runtime shutdown and managed
+child termination instead of relying on process-wide signal handlers. Both
+return normalized `wait_ready`, `health`, and `join` evidence while keeping
+backend-specific reports attached for diagnostics.
+
+The tunnel backend is a process supervisor by design. That keeps WFB-NG codec
+compatibility intact for the production cutover and lets a later native Rust
+codec/helper replacement fit behind the same `LinkBackend` contract.
+
+Example:
+
+```rust
+use std::time::Duration;
+use wfb_link::{
+    LinkBackend, LinkConfig, MacosWfbTunnelBackend, MacosWfbTunnelConfig,
+};
+
+let config = MacosWfbTunnelConfig::from_service_config_path(
+    "configs/radio-run-robust-short-range.toml",
+    "/path/to/gs.key",
+)?;
+let mut backend = MacosWfbTunnelBackend::default();
+let handle = backend.start(LinkConfig::macos_wfb_tunnel(config))?;
+let ready = handle.wait_ready(Duration::from_secs(90))?;
+let health = handle.health()?;
+handle.request_stop()?;
+let report = handle.join()?;
+```
+
+The checked-in API smoke is:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+SSH_KEY=/path/to/drone_ssh_key \
+PEER_IP=10.5.0.2 \
+scripts/run-wfb-link-tunnel-smoke.sh
+```
+
+It runs the product-facing Rust backend, then probes the tunnel with a 256 KiB
+SSH download through `10.5.0.2`.
+
+## macOS Privilege And Install Notes
+
+The radio runtime can run as the product user once macOS grants USB ownership,
+but `utun` creation and interface/route configuration are privileged. The
+current production cutover uses:
+
+```text
+product process
+  -> sudo -n wfb-tun-macos
+```
+
+Operational requirements:
+
+- Build/install `wfb-tun-macos`, `wfb_tx`, `wfb_rx`, and the product binary in
+  stable absolute paths.
+- Configure passwordless sudo for the exact `wfb-tun-macos` path only, or run
+  the product under a launchd job/account that has the required network
+  extension privileges.
+- Codesign the installed binaries in the release pipeline. Ad-hoc signing is
+  acceptable for bench deploys; production should use the product signing
+  identity and notarization process.
+- Keep the Python tunnel helper out of adopter docs and packages except as a
+  development fallback under `scripts/development/`.
+
+Longer term, a privileged helper or network-extension packaging model is
+cleaner than `sudo -n`; the `MacosWfbTunnelBackend` contract does not depend on
+which privilege mechanism launches the tunnel bridge.
 
 ## Linux Backend
 

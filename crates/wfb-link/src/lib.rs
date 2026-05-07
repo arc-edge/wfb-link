@@ -6,12 +6,13 @@
 //! expected to use the native monitor-mode WFB stack.
 
 use std::{
-    fs,
+    fs::{self, File},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -45,6 +46,17 @@ pub enum LinkError {
     ReadyTimeout(Duration),
     #[error("failed to join backend thread")]
     JoinFailed,
+    #[error("missing {label}: {path}")]
+    MissingPath { label: &'static str, path: PathBuf },
+    #[error("failed to spawn {label}: {source}")]
+    Spawn {
+        label: &'static str,
+        source: std::io::Error,
+    },
+    #[error("{label} exited before ready with status {status}")]
+    ProcessExitedBeforeReady { label: String, status: String },
+    #[error("child process lock poisoned")]
+    ChildLockPoisoned,
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
@@ -90,6 +102,12 @@ impl LinkConfig {
         }
     }
 
+    pub fn macos_wfb_tunnel(config: MacosWfbTunnelConfig) -> Self {
+        Self {
+            backend: LinkBackendConfig::MacosWfbTunnel(config),
+        }
+    }
+
     pub fn linux_native_wfb(config: LinuxNativeWfbConfig) -> Self {
         Self {
             backend: LinkBackendConfig::LinuxNativeWfb(config),
@@ -100,6 +118,7 @@ impl LinkConfig {
 #[derive(Debug, Clone)]
 pub enum LinkBackendConfig {
     MacosUserspaceRadio(MacosUserspaceRadioConfig),
+    MacosWfbTunnel(MacosWfbTunnelConfig),
     LinuxNativeWfb(LinuxNativeWfbConfig),
 }
 
@@ -149,6 +168,183 @@ pub struct LinuxNativeWfbConfig {
     pub bandwidth_mhz: u16,
     pub key_path: Option<PathBuf>,
     pub endpoints: LinkEndpoints,
+}
+
+#[derive(Debug, Clone)]
+pub struct MacosWfbTunnelConfig {
+    pub radio: MacosUserspaceRadioConfig,
+    pub wfb_key: PathBuf,
+    pub wfb_tx_bin: PathBuf,
+    pub wfb_rx_bin: PathBuf,
+    pub tun_bin: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub link_id: u32,
+    pub tunnel_rx_radio_port: u8,
+    pub tunnel_tx_radio_port: u8,
+    pub tunnel_rx_aggregator: SocketAddr,
+    pub tunnel_tx_radio_bind: SocketAddr,
+    pub tunnel_tx_udp: SocketAddr,
+    pub tunnel_rx_udp: SocketAddr,
+    pub local_ip: IpAddr,
+    pub peer_ip: IpAddr,
+    pub prefix_len: u8,
+    pub tun_mtu: usize,
+    pub radio_mtu: usize,
+    pub agg_timeout_ms: f64,
+    pub bandwidth_mhz: u16,
+    pub mcs: u8,
+    pub fec_k: u8,
+    pub fec_n: u8,
+    pub use_sudo_for_tun: bool,
+    pub startup_settle: Duration,
+    pub ready_poll_interval: Duration,
+    pub endpoints: LinkEndpoints,
+}
+
+impl MacosWfbTunnelConfig {
+    pub fn from_radio_config(
+        radio: MacosUserspaceRadioConfig,
+        wfb_key: impl Into<PathBuf>,
+    ) -> Self {
+        let tunnel_rx_aggregator = radio
+            .runtime_config
+            .primary_rx_forward
+            .aggregator
+            .unwrap_or_else(|| "127.0.0.1:5801".parse().expect("default aggregator"));
+        let tunnel_rx_radio_port = radio
+            .runtime_config
+            .primary_rx_forward
+            .radio_port
+            .unwrap_or(3);
+        let tunnel_tx_radio_bind = radio.runtime_config.bind_addr;
+        let link_id = radio.runtime_config.primary_rx_forward.link_id.unwrap_or(0);
+        let bandwidth_mhz = radio.runtime_config.bandwidth.mhz();
+        let artifact_dir = std::env::temp_dir().join(format!(
+            "wfb-link-tunnel-{}",
+            NEXT_ARTIFACT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut config = Self {
+            radio,
+            wfb_key: wfb_key.into(),
+            wfb_tx_bin: PathBuf::from("target/wfb-ng-macos/bin/wfb_tx"),
+            wfb_rx_bin: PathBuf::from("target/wfb-ng-macos/bin/wfb_rx"),
+            tun_bin: PathBuf::from("target/debug/wfb-tun-macos"),
+            artifact_dir,
+            link_id,
+            tunnel_rx_radio_port,
+            tunnel_tx_radio_port: 4,
+            tunnel_rx_aggregator,
+            tunnel_tx_radio_bind,
+            tunnel_tx_udp: "127.0.0.1:56020".parse().expect("default tunnel tx UDP"),
+            tunnel_rx_udp: "127.0.0.1:56021".parse().expect("default tunnel rx UDP"),
+            local_ip: "10.5.0.1".parse().expect("default local tunnel IP"),
+            peer_ip: "10.5.0.2".parse().expect("default peer tunnel IP"),
+            prefix_len: 24,
+            tun_mtu: 1400,
+            radio_mtu: 1445,
+            agg_timeout_ms: 5.0,
+            bandwidth_mhz,
+            mcs: 1,
+            fec_k: 2,
+            fec_n: 4,
+            use_sudo_for_tun: true,
+            startup_settle: Duration::from_millis(500),
+            ready_poll_interval: Duration::from_millis(50),
+            endpoints: LinkEndpoints::empty(),
+        };
+        config.refresh_endpoints();
+        config
+    }
+
+    pub fn from_service_config_path(
+        config: impl AsRef<Path>,
+        wfb_key: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let radio = MacosUserspaceRadioConfig::from_service_config_path(config)?;
+        Ok(Self::from_radio_config(radio, wfb_key))
+    }
+
+    pub fn with_bins(
+        mut self,
+        wfb_tx_bin: impl Into<PathBuf>,
+        wfb_rx_bin: impl Into<PathBuf>,
+        tun_bin: impl Into<PathBuf>,
+    ) -> Self {
+        self.wfb_tx_bin = wfb_tx_bin.into();
+        self.wfb_rx_bin = wfb_rx_bin.into();
+        self.tun_bin = tun_bin.into();
+        self
+    }
+
+    pub fn with_artifact_dir(mut self, artifact_dir: impl Into<PathBuf>) -> Self {
+        self.artifact_dir = artifact_dir.into();
+        self
+    }
+
+    pub fn with_tunnel_streams(
+        mut self,
+        link_id: u32,
+        rx_radio_port: u8,
+        tx_radio_port: u8,
+    ) -> Self {
+        self.link_id = link_id;
+        self.tunnel_rx_radio_port = rx_radio_port;
+        self.tunnel_tx_radio_port = tx_radio_port;
+        self.radio.runtime_config.primary_rx_forward.link_id = Some(link_id);
+        self.radio.runtime_config.primary_rx_forward.radio_port = Some(rx_radio_port);
+        self.refresh_endpoints();
+        self
+    }
+
+    pub fn with_tunnel_ips(mut self, local_ip: IpAddr, peer_ip: IpAddr) -> Self {
+        self.local_ip = local_ip;
+        self.peer_ip = peer_ip;
+        self.refresh_endpoints();
+        self
+    }
+
+    pub fn with_tx_profile(mut self, bandwidth_mhz: u16, mcs: u8, fec_k: u8, fec_n: u8) -> Self {
+        self.bandwidth_mhz = bandwidth_mhz;
+        self.mcs = mcs;
+        self.fec_k = fec_k;
+        self.fec_n = fec_n;
+        self
+    }
+
+    pub fn with_sudo_for_tun(mut self, enabled: bool) -> Self {
+        self.use_sudo_for_tun = enabled;
+        self
+    }
+
+    pub fn refresh_endpoints(&mut self) {
+        let mut endpoints = macos_userspace_radio_endpoints(&self.radio.runtime_config);
+        endpoints.streams.push(LinkStreamEndpoint {
+            name: "tunnel-tx".to_string(),
+            direction: LinkDirection::Tx,
+            local_udp: self.tunnel_tx_udp,
+            payload_kind: PayloadKind::RawApplicationDatagram,
+            stream: Some(WfbStreamId {
+                link_id: Some(self.link_id),
+                radio_port: self.tunnel_tx_radio_port,
+            }),
+        });
+        endpoints.streams.push(LinkStreamEndpoint {
+            name: "tunnel-rx".to_string(),
+            direction: LinkDirection::Rx,
+            local_udp: self.tunnel_rx_udp,
+            payload_kind: PayloadKind::RawApplicationDatagram,
+            stream: Some(WfbStreamId {
+                link_id: Some(self.link_id),
+                radio_port: self.tunnel_rx_radio_port,
+            }),
+        });
+        endpoints.tunnel = Some(LinkTunnelEndpoint {
+            local_ip: self.local_ip,
+            peer_ip: self.peer_ip,
+            interface_name: None,
+        });
+        self.endpoints = endpoints;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,11 +470,34 @@ pub struct LinkReport {
 #[serde(rename_all = "snake_case")]
 pub enum LinkBackendReport {
     MacosUserspaceRadio(ProductionRuntimeFlowReport),
+    MacosWfbTunnel(MacosWfbTunnelReport),
     LinuxNativeWfb(Value),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MacosWfbTunnelReport {
+    pub radio: ProductionRuntimeFlowReport,
+    pub tunnel_summary: Option<Value>,
+    pub artifacts_dir: PathBuf,
+    pub children: Vec<ChildProcessReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChildProcessReport {
+    pub name: String,
+    pub pid: u32,
+    pub status: Option<String>,
+    pub stdout_log: PathBuf,
+    pub stderr_log: PathBuf,
 }
 
 #[derive(Debug, Default)]
 pub struct MacosUserspaceRadioBackend;
+
+#[derive(Debug, Default)]
+pub struct MacosWfbTunnelBackend;
 
 impl LinkBackend for MacosUserspaceRadioBackend {
     fn start(&mut self, config: LinkConfig) -> Result<Box<dyn LinkHandle>> {
@@ -288,6 +507,16 @@ impl LinkBackend for MacosUserspaceRadioBackend {
             ));
         };
         let handle = MacosUserspaceRadioHandle::start(config)?;
+        Ok(Box::new(handle))
+    }
+}
+
+impl LinkBackend for MacosWfbTunnelBackend {
+    fn start(&mut self, config: LinkConfig) -> Result<Box<dyn LinkHandle>> {
+        let LinkBackendConfig::MacosWfbTunnel(config) = config.backend else {
+            return Err(LinkError::UnsupportedBackend("expected macos_wfb_tunnel"));
+        };
+        let handle = MacosWfbTunnelHandle::start(config)?;
         Ok(Box::new(handle))
     }
 }
@@ -450,6 +679,221 @@ impl LinkHandle for MacosUserspaceRadioHandle {
     }
 }
 
+#[derive(Debug)]
+pub struct MacosWfbTunnelHandle {
+    endpoints: LinkEndpoints,
+    radio_handle: MacosUserspaceRadioHandle,
+    children: Mutex<Vec<ManagedChild>>,
+    tun_summary_file: PathBuf,
+    artifact_dir: PathBuf,
+    startup_settle: Duration,
+}
+
+impl MacosWfbTunnelHandle {
+    fn start(mut config: MacosWfbTunnelConfig) -> Result<Self> {
+        config.refresh_endpoints();
+        require_existing_path(&config.wfb_key, "WFB key")?;
+        require_existing_path(&config.wfb_tx_bin, "wfb_tx binary")?;
+        require_existing_path(&config.wfb_rx_bin, "wfb_rx binary")?;
+        require_existing_path(&config.tun_bin, "wfb-tun-macos binary")?;
+        fs::create_dir_all(&config.artifact_dir).map_err(|source| LinkError::Io {
+            path: config.artifact_dir.clone(),
+            source,
+        })?;
+
+        let tun_summary_file = config.artifact_dir.join("wf-tun-summary.json");
+        remove_file_if_exists(&tun_summary_file)?;
+
+        let mut radio = config.radio.clone();
+        radio.runtime_config.primary_rx_forward.aggregator = Some(config.tunnel_rx_aggregator);
+        radio.runtime_config.primary_rx_forward.link_id = Some(config.link_id);
+        radio.runtime_config.primary_rx_forward.radio_port = Some(config.tunnel_rx_radio_port);
+        radio.runtime_config.bind_addr = config.tunnel_tx_radio_bind;
+        let radio_handle = MacosUserspaceRadioHandle::start(radio)?;
+
+        let mut children = Vec::new();
+        children.push(spawn_logged(
+            "wfb-rx",
+            wfb_rx_command(&config),
+            &config.artifact_dir,
+        )?);
+        children.push(spawn_logged(
+            "wfb-tx",
+            wfb_tx_command(&config),
+            &config.artifact_dir,
+        )?);
+        children.push(spawn_logged(
+            "wfb-tun",
+            wfb_tun_command(&config, &tun_summary_file),
+            &config.artifact_dir,
+        )?);
+
+        Ok(Self {
+            endpoints: config.endpoints,
+            radio_handle,
+            children: Mutex::new(children),
+            tun_summary_file,
+            artifact_dir: config.artifact_dir,
+            startup_settle: config.startup_settle,
+        })
+    }
+
+    fn child_reports(&self) -> Result<Vec<ChildProcessReport>> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        children.iter_mut().map(ManagedChild::report).collect()
+    }
+
+    fn check_children_alive(&self) -> Result<()> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        for child in children.iter_mut() {
+            if let Some(status) = child.try_wait()? {
+                return Err(LinkError::ProcessExitedBeforeReady {
+                    label: child.name.clone(),
+                    status: exit_status_label(status),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn terminate_children(&self) -> Result<Vec<ChildProcessReport>> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        terminate_child_processes(&mut children);
+        children.iter_mut().map(ManagedChild::report).collect()
+    }
+}
+
+impl LinkHandle for MacosWfbTunnelHandle {
+    fn endpoints(&self) -> &LinkEndpoints {
+        &self.endpoints
+    }
+
+    fn wait_ready(&self, timeout: Duration) -> Result<LinkReady> {
+        let started = Instant::now();
+        loop {
+            self.check_children_alive()?;
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(LinkError::ReadyTimeout(timeout));
+            }
+            match self.radio_handle.wait_ready(remaining) {
+                Ok(ready) => {
+                    if !self.startup_settle.is_zero() {
+                        thread::sleep(self.startup_settle);
+                    }
+                    self.check_children_alive()?;
+                    return Ok(LinkReady {
+                        endpoints: self.endpoints.clone(),
+                        ready_file: ready.ready_file,
+                        ready_at_unix_ms: ready.ready_at_unix_ms,
+                        backend: serde_json::json!({
+                            "kind": "macos_wfb_tunnel",
+                            "radio": ready.backend,
+                            "artifacts_dir": self.artifact_dir,
+                            "tun_summary_file": self.tun_summary_file,
+                            "children": self.child_reports()?,
+                        }),
+                    });
+                }
+                Err(LinkError::ReadyTimeout(_)) => return Err(LinkError::ReadyTimeout(timeout)),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn health(&self) -> Result<LinkHealth> {
+        let radio_health = self.radio_handle.health()?;
+        let children = self.child_reports()?;
+        let child_failed = children.iter().any(|child| {
+            child
+                .status
+                .as_deref()
+                .is_some_and(|status| !status.starts_with("running"))
+        });
+        let lifecycle = if child_failed {
+            LinkLifecycle::Degraded
+        } else {
+            radio_health.lifecycle
+        };
+        Ok(LinkHealth {
+            lifecycle,
+            ready: radio_health.ready && !child_failed,
+            endpoints: self.endpoints.clone(),
+            tx: radio_health.tx,
+            rx: radio_health.rx,
+            backend: serde_json::json!({
+                "kind": "macos_wfb_tunnel",
+                "radio": radio_health.backend,
+                "artifacts_dir": self.artifact_dir,
+                "tun_summary_file": self.tun_summary_file,
+                "children": children,
+                "tunnel_summary": read_json_file(&self.tun_summary_file).ok(),
+            }),
+        })
+    }
+
+    fn request_stop(&self) -> Result<()> {
+        self.radio_handle.request_stop()?;
+        let _ = self.terminate_children()?;
+        Ok(())
+    }
+
+    fn join(self: Box<Self>) -> Result<LinkReport> {
+        let MacosWfbTunnelHandle {
+            endpoints,
+            radio_handle,
+            children,
+            tun_summary_file,
+            artifact_dir,
+            ..
+        } = *self;
+        radio_handle.request_stop()?;
+        let mut children = children
+            .into_inner()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        terminate_child_processes(&mut children);
+        let child_reports = children
+            .iter_mut()
+            .map(ManagedChild::report)
+            .collect::<Result<Vec<_>>>()?;
+        let radio_report = Box::new(radio_handle).join()?;
+        let LinkBackendReport::MacosUserspaceRadio(radio) = radio_report.backend else {
+            unreachable!("macOS tunnel owns a macOS radio handle");
+        };
+        let tunnel_summary = read_json_file(&tun_summary_file).ok();
+        let child_failed = child_reports.iter().any(|child| {
+            child
+                .status
+                .as_deref()
+                .is_some_and(|status| !status.starts_with("exit:0") && status != "signal")
+        });
+        let lifecycle = if radio_report.lifecycle == LinkLifecycle::Stopped && !child_failed {
+            LinkLifecycle::Stopped
+        } else {
+            LinkLifecycle::Failed
+        };
+        Ok(LinkReport {
+            lifecycle,
+            endpoints,
+            backend: LinkBackendReport::MacosWfbTunnel(MacosWfbTunnelReport {
+                radio,
+                tunnel_summary,
+                artifacts_dir: artifact_dir,
+                children: child_reports,
+            }),
+        })
+    }
+}
+
 pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> LinkEndpoints {
     let mut streams = Vec::with_capacity(2 + config.tx_binds.len() + config.rx_forwards.len());
     for (index, local_udp) in std::iter::once(config.bind_addr)
@@ -500,6 +944,212 @@ pub fn macos_userspace_radio_endpoints(config: &ProductionRuntimeFlowConfig) -> 
     LinkEndpoints {
         streams,
         tunnel: None,
+    }
+}
+
+#[derive(Debug)]
+struct ManagedChild {
+    name: String,
+    child: Child,
+    stdout_log: PathBuf,
+    stderr_log: PathBuf,
+    status: Option<ExitStatus>,
+}
+
+impl ManagedChild {
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        if let Some(status) = self.status {
+            return Ok(Some(status));
+        }
+        let status = self.child.try_wait().map_err(|source| LinkError::Spawn {
+            label: "poll child process",
+            source,
+        })?;
+        if let Some(status) = status {
+            self.status = Some(status);
+        }
+        Ok(status)
+    }
+
+    fn report(&mut self) -> Result<ChildProcessReport> {
+        let status = self.try_wait()?.map(exit_status_label);
+        Ok(ChildProcessReport {
+            name: self.name.clone(),
+            pid: self.child.id(),
+            status: status.or_else(|| Some("running".to_string())),
+            stdout_log: self.stdout_log.clone(),
+            stderr_log: self.stderr_log.clone(),
+        })
+    }
+}
+
+fn require_existing_path(path: &Path, label: &'static str) -> Result<()> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(LinkError::MissingPath {
+            label,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn spawn_logged(
+    label: &'static str,
+    mut command: Command,
+    artifact_dir: &Path,
+) -> Result<ManagedChild> {
+    let stdout_log = artifact_dir.join(format!("{label}.stdout.log"));
+    let stderr_log = artifact_dir.join(format!("{label}.stderr.log"));
+    let stdout = File::create(&stdout_log).map_err(|source| LinkError::Io {
+        path: stdout_log.clone(),
+        source,
+    })?;
+    let stderr = File::create(&stderr_log).map_err(|source| LinkError::Io {
+        path: stderr_log.clone(),
+        source,
+    })?;
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|source| LinkError::Spawn { label, source })?;
+    Ok(ManagedChild {
+        name: label.to_string(),
+        child,
+        stdout_log,
+        stderr_log,
+        status: None,
+    })
+}
+
+fn wfb_rx_command(config: &MacosWfbTunnelConfig) -> Command {
+    let mut command = Command::new(&config.wfb_rx_bin);
+    command
+        .arg("-a")
+        .arg(config.tunnel_rx_aggregator.port().to_string())
+        .arg("-K")
+        .arg(&config.wfb_key)
+        .arg("-i")
+        .arg(config.link_id.to_string())
+        .arg("-p")
+        .arg(config.tunnel_rx_radio_port.to_string())
+        .arg("-c")
+        .arg(config.tunnel_rx_udp.ip().to_string())
+        .arg("-u")
+        .arg(config.tunnel_rx_udp.port().to_string());
+    command
+}
+
+fn wfb_tx_command(config: &MacosWfbTunnelConfig) -> Command {
+    let mut command = Command::new(&config.wfb_tx_bin);
+    command
+        .arg("-d")
+        .arg("-K")
+        .arg(&config.wfb_key)
+        .arg("-i")
+        .arg(config.link_id.to_string())
+        .arg("-p")
+        .arg(config.tunnel_tx_radio_port.to_string())
+        .arg("-B")
+        .arg(config.bandwidth_mhz.to_string())
+        .arg("-M")
+        .arg(config.mcs.to_string())
+        .arg("-k")
+        .arg(config.fec_k.to_string())
+        .arg("-n")
+        .arg(config.fec_n.to_string())
+        .arg("-u")
+        .arg(config.tunnel_tx_udp.port().to_string())
+        .arg(config.tunnel_tx_radio_bind.to_string());
+    command
+}
+
+fn wfb_tun_command(config: &MacosWfbTunnelConfig, summary_file: &Path) -> Command {
+    let mut command = if config.use_sudo_for_tun {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-n").arg(&config.tun_bin);
+        sudo
+    } else {
+        Command::new(&config.tun_bin)
+    };
+    command
+        .arg("--local-ip")
+        .arg(config.local_ip.to_string())
+        .arg("--peer-ip")
+        .arg(config.peer_ip.to_string())
+        .arg("--prefix-len")
+        .arg(config.prefix_len.to_string())
+        .arg("--tun-mtu")
+        .arg(config.tun_mtu.to_string())
+        .arg("--radio-mtu")
+        .arg(config.radio_mtu.to_string())
+        .arg("--agg-timeout-ms")
+        .arg(config.agg_timeout_ms.to_string())
+        .arg("--tx-peer")
+        .arg(config.tunnel_tx_udp.to_string())
+        .arg("--rx-bind")
+        .arg(config.tunnel_rx_udp.to_string())
+        .arg("--summary-file")
+        .arg(summary_file);
+    command
+}
+
+fn terminate_child_processes(children: &mut [ManagedChild]) {
+    for child in children.iter_mut() {
+        if child.status.is_some() {
+            continue;
+        }
+        send_sigterm(child.child.id());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mut all_done = true;
+        for child in children.iter_mut() {
+            if child.status.is_some() {
+                continue;
+            }
+            match child.child.try_wait() {
+                Ok(Some(status)) => child.status = Some(status),
+                Ok(None) => all_done = false,
+                Err(_) => all_done = true,
+            }
+        }
+        if all_done || Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    for child in children.iter_mut() {
+        if child.status.is_some() {
+            continue;
+        }
+        let _ = child.child.kill();
+        if let Ok(status) = child.child.wait() {
+            child.status = Some(status);
+        }
+    }
+}
+
+fn send_sigterm(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+fn exit_status_label(status: ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit:{code}"),
+        None => "signal".to_string(),
     }
 }
 
@@ -672,6 +1322,44 @@ mod tests {
 
         assert!(!config.execution_inputs.process_signal_stop);
         assert!(config.execution_inputs.external_stop_requested.is_none());
+    }
+
+    #[test]
+    fn tunnel_config_exposes_ip_tunnel_and_internal_streams() {
+        let radio = MacosUserspaceRadioConfig::from_runtime_parts(
+            fixture_runtime_config(),
+            Default::default(),
+        );
+        let config = MacosWfbTunnelConfig::from_radio_config(radio, "/tmp/gs.key")
+            .with_tunnel_streams(0, 3, 4);
+
+        let tunnel = config.endpoints.tunnel.expect("tunnel endpoint");
+        assert_eq!(tunnel.local_ip, "10.5.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(tunnel.peer_ip, "10.5.0.2".parse::<IpAddr>().unwrap());
+        assert!(config
+            .endpoints
+            .streams
+            .iter()
+            .any(|stream| stream.name == "tunnel-tx"
+                && stream.direction == LinkDirection::Tx
+                && stream.payload_kind == PayloadKind::RawApplicationDatagram
+                && stream.stream
+                    == Some(WfbStreamId {
+                        link_id: Some(0),
+                        radio_port: 4,
+                    })));
+        assert!(config
+            .endpoints
+            .streams
+            .iter()
+            .any(|stream| stream.name == "tunnel-rx"
+                && stream.direction == LinkDirection::Rx
+                && stream.payload_kind == PayloadKind::RawApplicationDatagram
+                && stream.stream
+                    == Some(WfbStreamId {
+                        link_id: Some(0),
+                        radio_port: 3,
+                    })));
     }
 
     #[test]

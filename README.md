@@ -39,7 +39,8 @@ Main crates:
 - A production service entry point driven by a reviewed TOML config.
 - A product-facing Rust facade that can start the macOS production runtime,
   wait for readiness, read health, request cooperative stop, and join for a
-  final report.
+  final report. The facade also includes a macOS tunnel supervisor that manages
+  the radio runtime, WFB-NG codec helpers, and `wfb-tun-macos`.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
   TX pacing default.
 
@@ -78,6 +79,18 @@ That example demonstrates the lifecycle API: start, wait-ready, print health,
 request stop, and print the final report. It is not a full application data
 plane by itself.
 
+Run the product-facing tunnel smoke on a prepared bench:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+SSH_KEY=/path/to/drone_ssh_key \
+PEER_IP=10.5.0.2 \
+scripts/run-wfb-link-tunnel-smoke.sh
+```
+
+That path uses `MacosWfbTunnelBackend`, not the legacy shell orchestration, and
+probes the resulting `utun` link with a 256 KiB SSH download.
+
 Run the current loaded tunnel gate on a prepared bench:
 
 ```sh
@@ -91,6 +104,16 @@ scripts/run-mac-wf-tun-profile-matrix.sh
 By default, `PROFILE_SET=loaded` uses duplex side traffic, exact 100/100 side
 payload acceptance in both directions, and `TX_MIN_INTERVAL_US=700`.
 
+Run the production readiness wrapper locally:
+
+```sh
+scripts/run-production-readiness-gate.sh
+```
+
+Set `RUN_API_TUNNEL_SMOKE=1`, `RUN_LOADED_TUNNEL_GATE=1`,
+`RUN_RF_CLOSE_RANGE=1`, or `RUN_CALIBRATION_REGRESSION=1` to include hardware
+and RF gates when the bench is set up.
+
 ## Product Integration
 
 For a Rust product binary, depend on `wfb-link` and construct a backend:
@@ -98,16 +121,17 @@ For a Rust product binary, depend on `wfb-link` and construct a backend:
 ```rust
 use std::time::Duration;
 use wfb_link::{
-    LinkBackend, LinkConfig, MacosUserspaceRadioBackend, MacosUserspaceRadioConfig,
+    LinkBackend, LinkConfig, MacosWfbTunnelBackend, MacosWfbTunnelConfig,
 };
 
 fn start_link() -> Result<(), Box<dyn std::error::Error>> {
-    let radio = MacosUserspaceRadioConfig::from_service_config_path(
+    let link = MacosWfbTunnelConfig::from_service_config_path(
         "configs/radio-run-robust-short-range.toml",
+        "/path/to/gs.key",
     )?;
-    let mut backend = MacosUserspaceRadioBackend::default();
-    let handle = backend.start(LinkConfig::macos_userspace_radio(radio))?;
-    let ready = handle.wait_ready(Duration::from_secs(60))?;
+    let mut backend = MacosWfbTunnelBackend::default();
+    let handle = backend.start(LinkConfig::macos_wfb_tunnel(link))?;
+    let ready = handle.wait_ready(Duration::from_secs(90))?;
     let health = handle.health()?;
     handle.request_stop()?;
     let report = handle.join()?;
@@ -115,11 +139,8 @@ fn start_link() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The macOS backend currently exposes WFB distributor datagram endpoints. A
-product can use those directly if it owns WFB-NG codec/session framing, or it
-can supervise stock WFB-NG helper processes around those endpoints. The
-higher-level raw application stream/tunnel supervisor is the next production
-integration layer.
+Use `MacosUserspaceRadioBackend` instead only when the product owns WFB-NG
+codec/session framing and wants direct WFB distributor datagram endpoints.
 
 On Linux, the intended backend is native WFB-NG over `wfb0` monitor mode with
 the aircrack/rtl88xxau driver. Do not port the macOS USB bridge to Linux just
@@ -137,8 +158,9 @@ to share implementation; share the `wfb-link` lifecycle and endpoint contract.
   receiver-backed validation.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
-- The current macOS product-facing data endpoint is still
-  `WfbDistributorDatagram`, not raw application datagrams.
+- The managed macOS tunnel backend is product-facing for IP tunnel use. Generic
+  raw application streams still require either WFB-NG helper supervision or a
+  future native Rust WFB codec.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
 - The old Python `utun` helper is kept only under `scripts/development/` as a
   bring-up fallback; the default tunnel path is the Rust `wfb-tun-macos`
