@@ -122,6 +122,19 @@ raw UDP streams such as video downlink, telemetry downlink, and sparse control
 uplink. Override `VIDEO_DOWN_UDP`, `TELEMETRY_DOWN_UDP`, `CONTROL_UP_UDP`,
 `WFB_TX_BIN`, `WFB_RX_BIN`, and `LINK_ID` as needed for the product.
 
+Run the receiver-backed managed-stream smoke on a prepared Mac plus Linux peer:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+LINUX_HOST=pi@drone-2f389.local \
+scripts/run-wfb-link-managed-streams-smoke.sh
+```
+
+That gate verifies raw UDP recovery on three managed streams: Linux-to-Mac
+video, Linux-to-Mac telemetry, and Mac-to-Linux control. It writes a
+`summary.json` with per-stream payload counters, WFB helper logs, and the final
+`ManagedWfbStreamsBackend` report.
+
 Run the product-facing radio API smoke on a prepared Mac with an attached
 AWUS036ACH:
 
@@ -171,7 +184,7 @@ scripts/run-production-readiness-gate.sh
 ```
 
 Set `RUN_API_RADIO_SMOKE=1`, `RUN_API_TUNNEL_SMOKE=1`,
-`RUN_LOADED_TUNNEL_GATE=1`,
+`RUN_MANAGED_STREAMS_SMOKE=1`, `RUN_LOADED_TUNNEL_GATE=1`,
 `RUN_VIDEO_CONTROL_RADIO_GATE=1`, `RUN_RF_CLOSE_RANGE=1`, or
 `RUN_CALIBRATION_REGRESSION=1` to include hardware and RF gates when the bench
 is set up.

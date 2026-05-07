@@ -266,3 +266,12 @@ Run hardware-backed radio smoke when an AWUS036ACH and peer are available:
 ```sh
 scripts/run-wfb-link-radio-smoke.sh
 ```
+
+Run the managed raw-application stream gate when validating product-facing raw
+UDP streams:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+LINUX_HOST=pi@drone-2f389.local \
+scripts/run-wfb-link-managed-streams-smoke.sh
+```

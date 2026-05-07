@@ -8,6 +8,7 @@ cd "$REPO_ROOT"
 RUN_LOCAL=${RUN_LOCAL:-1}
 RUN_API_RADIO_SMOKE=${RUN_API_RADIO_SMOKE:-0}
 RUN_API_TUNNEL_SMOKE=${RUN_API_TUNNEL_SMOKE:-0}
+RUN_MANAGED_STREAMS_SMOKE=${RUN_MANAGED_STREAMS_SMOKE:-0}
 RUN_LOADED_TUNNEL_GATE=${RUN_LOADED_TUNNEL_GATE:-0}
 RUN_VIDEO_CONTROL_RADIO_GATE=${RUN_VIDEO_CONTROL_RADIO_GATE:-0}
 RUN_RF_CLOSE_RANGE=${RUN_RF_CLOSE_RANGE:-0}
@@ -24,6 +25,7 @@ if [[ "$RUN_LOCAL" == "1" ]]; then
   cargo test -p wfb-link -p wfb-tun
   bash -n scripts/run-wfb-link-radio-smoke.sh
   bash -n scripts/run-wfb-link-tunnel-smoke.sh
+  bash -n scripts/run-wfb-link-managed-streams-smoke.sh
   bash -n scripts/run-mac-wf-tun-profile-matrix.sh
   bash -n scripts/run-mac-wf-tun-recovery.sh
   bash -n scripts/run-radio-run-profile-matrix.sh
@@ -37,6 +39,11 @@ fi
 if [[ "$RUN_API_TUNNEL_SMOKE" == "1" ]]; then
   log "product API tunnel smoke"
   scripts/run-wfb-link-tunnel-smoke.sh
+fi
+
+if [[ "$RUN_MANAGED_STREAMS_SMOKE" == "1" ]]; then
+  log "managed raw application streams smoke"
+  scripts/run-wfb-link-managed-streams-smoke.sh
 fi
 
 if [[ "$RUN_LOADED_TUNNEL_GATE" == "1" ]]; then

@@ -189,6 +189,20 @@ Current managed-stream limitations:
 - Receiver-backed adoption gates should be run before depending on a new
   stream profile in production.
 
+The current receiver-backed adoption gate is:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+LINUX_HOST=pi@drone-2f389.local \
+scripts/run-wfb-link-managed-streams-smoke.sh
+```
+
+It starts `ManagedWfbStreamsBackend` locally, configures the Linux peer on
+`wfb0`, supervises matching Linux WFB-NG helpers, sends marked raw UDP payloads
+on video/telemetry/control streams, and writes `summary.json` under `OUT_DIR`.
+Use `PREPARE_LINUX_PEER=0` only when the Linux peer is already in monitor mode
+on the configured channel.
+
 ## Userspace Distributor Streams
 
 Use this path when the product already owns WFB-NG datagrams or supervises its
@@ -358,4 +372,12 @@ On a tunnel bench, also run:
 WFB_KEY=/path/to/gs.key \
 PEER_IP=10.5.0.2 \
 scripts/run-wfb-link-tunnel-smoke.sh
+```
+
+For raw application multi-stream adoption, also run:
+
+```sh
+WFB_KEY=/path/to/gs.key \
+LINUX_HOST=pi@drone-2f389.local \
+scripts/run-wfb-link-managed-streams-smoke.sh
 ```
