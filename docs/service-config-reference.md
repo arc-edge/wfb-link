@@ -232,11 +232,12 @@ runtime-owned ephemeral send sockets, and UDP forward-target reachability is not
 reliably knowable at startup. For that reason `UserspaceRadioBackend` currently
 rejects best-effort RX streams with
 `userspace_radio_rx_best_effort_unsupported`; model RX streams as `required`
-until managed RX degradation semantics exist.
+unless using a backend that owns a helper process for that stream.
 
-`ManagedWfbStreamsBackend` currently rejects all best-effort streams with
-`managed_wfb_best_effort_unsupported` because helper child-process degradation
-needs explicit stream-level semantics before production use.
+`ManagedWfbStreamsBackend` supports best-effort managed streams by attributing
+helper child-process exits to the named stream. Required helper exits fail
+startup/readiness; best-effort helper exits keep the link handle usable and
+surface the stream in `degraded_streams` with a degradation reason.
 
 ## Artifacts
 

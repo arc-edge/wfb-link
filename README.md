@@ -272,8 +272,9 @@ raw application streams.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
 - `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
-  path. Its required-stream path is implemented; best-effort child-process
-  degradation and receiver-backed adoption gates are still follow-up work.
+  path. Required helper exits fail startup; best-effort helper exits degrade
+  only the named stream. Receiver-backed adoption gates are available for the
+  current macOS plus Linux-peer bench.
 - `UserspaceRadioBackend` accepts WFB distributor/aggregator datagrams only.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
 - The old Python `utun` helper is kept only under `scripts/development/` as a

@@ -197,8 +197,7 @@ peer_ip = "10.5.0.2"
 When this shape is handed to `UserspaceRadioBackend`, every stream must use
 `wfb_distributor_datagram`, and RX streams must be `required`. Raw application
 streams require a backend/helper that owns WFB codec supervision, such as
-`ManagedWfbStreamsBackend`. Best-effort RX and managed-helper degradation need
-explicit stream-level semantics before they are safe to expose.
+`ManagedWfbStreamsBackend`.
 
 `LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
 entries expose submitted frames, failed submissions, dropped datagrams, and
@@ -211,8 +210,9 @@ TX UDP bind preflight: an unavailable best-effort TX socket is removed from the
 runtime bind set and reported as degraded instead of failing the whole link.
 Required bind failures still abort. RX forward sockets are runtime-owned
 ephemeral sockets today, so `UserspaceRadioBackend` rejects best-effort RX
-before startup. `ManagedWfbStreamsBackend` also rejects best-effort streams
-until child-process degradation can be attributed cleanly to named streams.
+before startup. `ManagedWfbStreamsBackend` owns one helper per raw application
+stream, so it can attribute a best-effort helper exit to that named stream and
+report it in `degraded_streams` without failing the required streams.
 
 See [Product integration](product-integration.md) for backend selection and
 [Service config reference](service-config-reference.md) for field-level TOML

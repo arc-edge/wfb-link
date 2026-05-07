@@ -181,8 +181,8 @@ radio endpoint.
 
 Current managed-stream limitations:
 
-- All managed streams must be `Required`; best-effort helper degradation is not
-  implemented yet.
+- Required managed helper exits fail readiness. Best-effort managed helper exits
+  degrade only the named stream and appear in `degraded_streams`.
 - Helper binaries and the `gs.key` are product release artifacts.
 - The API owns stream supervision, not stream semantics. Product code still
   decides which UDP port is video, telemetry, or control.
@@ -334,9 +334,9 @@ Current userspace radio behavior:
   `userspace_radio_rx_best_effort_unsupported`. UDP forward-target reachability
   is not reliably knowable at startup, so pretending RX had TX-like degradation
   semantics is too easy to misuse.
-- `ManagedWfbStreamsBackend` currently rejects all best-effort streams with
-  `managed_wfb_best_effort_unsupported` because helper child-process
-  degradation needs explicit stream-level semantics before production use.
+- `ManagedWfbStreamsBackend` owns per-stream WFB helper processes, so
+  best-effort managed stream failures are attributed to the affected stream and
+  reported as degraded instead of failing the whole link.
 
 ## Platform Selection Shape
 

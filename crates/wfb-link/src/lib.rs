@@ -1050,8 +1050,14 @@ pub struct ManagedWfbStreamReport {
 #[serde(rename_all = "snake_case")]
 pub struct ChildProcessReport {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_name: Option<String>,
+    pub criticality: StreamCriticality,
     pub pid: u32,
     pub status: Option<String>,
+    pub degraded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degradation_reason: Option<String>,
     pub stdout_log: PathBuf,
     pub stderr_log: PathBuf,
 }
@@ -1183,15 +1189,6 @@ fn validate_managed_wfb_streams(streams: &[ManagedWfbStreamConfig]) -> Result<()
             return Err(LinkError::InvalidBackendConfig {
                 code: "managed_wfb_stream_empty_name",
                 message: "managed WFB stream name cannot be empty".to_string(),
-            });
-        }
-        if stream.criticality != StreamCriticality::Required {
-            return Err(LinkError::InvalidBackendConfig {
-                code: "managed_wfb_best_effort_unsupported",
-                message: format!(
-                    "stream '{}' is best-effort; managed WFB stream child-process degradation semantics are not implemented yet",
-                    stream.name
-                ),
             });
         }
     }
@@ -1628,10 +1625,12 @@ impl MacosWfbTunnelHandle {
             .map_err(|_| LinkError::ChildLockPoisoned)?;
         for child in children.iter_mut() {
             if let Some(status) = child.try_wait()? {
-                return Err(LinkError::ProcessExitedBeforeReady {
-                    label: child.name.clone(),
-                    status: exit_status_label(status),
-                });
+                if child.criticality == StreamCriticality::Required {
+                    return Err(LinkError::ProcessExitedBeforeReady {
+                        label: child.name.clone(),
+                        status: exit_status_label(status),
+                    });
+                }
             }
         }
         Ok(())
@@ -1645,6 +1644,11 @@ impl MacosWfbTunnelHandle {
         terminate_child_processes(&mut children);
         children.iter_mut().map(ManagedChild::report).collect()
     }
+
+    fn shutdown_after_startup_error(&self) {
+        self.radio_handle.request_stop().ok();
+        self.terminate_children().ok();
+    }
 }
 
 impl LinkHandle for MacosWfbTunnelHandle {
@@ -1655,7 +1659,10 @@ impl LinkHandle for MacosWfbTunnelHandle {
     fn wait_ready(&self, timeout: Duration) -> Result<LinkReady> {
         let started = Instant::now();
         loop {
-            self.check_children_alive()?;
+            if let Err(error) = self.check_children_alive() {
+                self.shutdown_after_startup_error();
+                return Err(error);
+            }
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return Err(LinkError::ReadyTimeout(timeout));
@@ -1665,7 +1672,10 @@ impl LinkHandle for MacosWfbTunnelHandle {
                     if !self.startup_settle.is_zero() {
                         thread::sleep(self.startup_settle);
                     }
-                    self.check_children_alive()?;
+                    if let Err(error) = self.check_children_alive() {
+                        self.shutdown_after_startup_error();
+                        return Err(error);
+                    }
                     return Ok(LinkReady {
                         endpoints: self.endpoints.clone(),
                         ready_file: ready.ready_file,
@@ -1680,7 +1690,10 @@ impl LinkHandle for MacosWfbTunnelHandle {
                     });
                 }
                 Err(LinkError::ReadyTimeout(_)) => return Err(LinkError::ReadyTimeout(timeout)),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.shutdown_after_startup_error();
+                    return Err(error);
+                }
             }
         }
     }
@@ -1815,12 +1828,14 @@ impl ManagedWfbStreamsHandle {
         let mut children = Vec::new();
         for (stream, mapping) in config.streams.iter().zip(mappings.iter()) {
             match stream.direction {
-                LinkDirection::Tx => children.push(spawn_logged(
+                LinkDirection::Tx => children.push(spawn_logged_stream(
+                    stream,
                     format!("wfb-tx-{}", stream.name),
                     managed_wfb_tx_command(&config, stream, mapping),
                     &config.artifact_dir,
                 )?),
-                LinkDirection::Rx => children.push(spawn_logged(
+                LinkDirection::Rx => children.push(spawn_logged_stream(
+                    stream,
                     format!("wfb-rx-{}", stream.name),
                     managed_wfb_rx_command(&config, stream, mapping),
                     &config.artifact_dir,
@@ -1862,6 +1877,21 @@ impl ManagedWfbStreamsHandle {
         children.iter_mut().map(ManagedChild::report).collect()
     }
 
+    fn child_degradations(&self) -> Result<Vec<LinkStreamDegradation>> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|_| LinkError::ChildLockPoisoned)?;
+        let mut degradations = Vec::new();
+        for child in children.iter_mut() {
+            let _ = child.try_wait()?;
+            if let Some(degradation) = child.degradation() {
+                degradations.push(degradation);
+            }
+        }
+        Ok(degradations)
+    }
+
     fn check_children_alive(&self) -> Result<()> {
         let mut children = self
             .children
@@ -1869,10 +1899,12 @@ impl ManagedWfbStreamsHandle {
             .map_err(|_| LinkError::ChildLockPoisoned)?;
         for child in children.iter_mut() {
             if let Some(status) = child.try_wait()? {
-                return Err(LinkError::ProcessExitedBeforeReady {
-                    label: child.name.clone(),
-                    status: exit_status_label(status),
-                });
+                if child.criticality == StreamCriticality::Required {
+                    return Err(LinkError::ProcessExitedBeforeReady {
+                        label: child.name.clone(),
+                        status: exit_status_label(status),
+                    });
+                }
             }
         }
         Ok(())
@@ -1886,6 +1918,11 @@ impl ManagedWfbStreamsHandle {
         terminate_child_processes(&mut children);
         children.iter_mut().map(ManagedChild::report).collect()
     }
+
+    fn shutdown_after_startup_error(&self) {
+        self.radio_handle.request_stop().ok();
+        self.terminate_children().ok();
+    }
 }
 
 impl LinkHandle for ManagedWfbStreamsHandle {
@@ -1896,7 +1933,10 @@ impl LinkHandle for ManagedWfbStreamsHandle {
     fn wait_ready(&self, timeout: Duration) -> Result<LinkReady> {
         let started = Instant::now();
         loop {
-            self.check_children_alive()?;
+            if let Err(error) = self.check_children_alive() {
+                self.shutdown_after_startup_error();
+                return Err(error);
+            }
             let remaining = timeout.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 return Err(LinkError::ReadyTimeout(timeout));
@@ -1906,7 +1946,10 @@ impl LinkHandle for ManagedWfbStreamsHandle {
                     if !self.startup_settle.is_zero() {
                         thread::sleep(self.startup_settle);
                     }
-                    self.check_children_alive()?;
+                    if let Err(error) = self.check_children_alive() {
+                        self.shutdown_after_startup_error();
+                        return Err(error);
+                    }
                     return Ok(LinkReady {
                         endpoints: self.endpoints.clone(),
                         ready_file: ready.ready_file,
@@ -1921,7 +1964,10 @@ impl LinkHandle for ManagedWfbStreamsHandle {
                     });
                 }
                 Err(LinkError::ReadyTimeout(_)) => return Err(LinkError::ReadyTimeout(timeout)),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.shutdown_after_startup_error();
+                    return Err(error);
+                }
             }
         }
     }
@@ -1929,13 +1975,17 @@ impl LinkHandle for ManagedWfbStreamsHandle {
     fn health(&self) -> Result<LinkHealth> {
         let radio_health = self.radio_handle.health()?;
         let children = self.child_reports()?;
-        let child_failed = children.iter().any(|child| {
+        let child_degradations = self.child_degradations()?;
+        let required_child_failed = children.iter().any(|child| {
             child
                 .status
                 .as_deref()
                 .is_some_and(|status| !status.starts_with("running"))
+                && child.criticality == StreamCriticality::Required
         });
-        let lifecycle = if child_failed {
+        let lifecycle = if required_child_failed {
+            LinkLifecycle::Failed
+        } else if !child_degradations.is_empty() {
             LinkLifecycle::Degraded
         } else {
             radio_health.lifecycle
@@ -1944,11 +1994,12 @@ impl LinkHandle for ManagedWfbStreamsHandle {
             &self.endpoints,
             &self.radio_endpoints,
             &radio_health.backend,
+            &child_degradations,
         );
         let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkHealth {
             lifecycle,
-            ready: radio_health.ready && !child_failed,
+            ready: radio_health.ready && !required_child_failed,
             endpoints: self.endpoints.clone(),
             tx: radio_health.tx,
             rx: radio_health.rx,
@@ -1998,15 +2049,25 @@ impl LinkHandle for ManagedWfbStreamsHandle {
                 .status
                 .as_deref()
                 .is_some_and(|status| !status.starts_with("exit:0") && status != "signal")
+                && child.criticality == StreamCriticality::Required
         });
-        let lifecycle = if radio_report.lifecycle == LinkLifecycle::Stopped && !child_failed {
+        let child_degradations = child_report_degradations(&child_reports);
+        let lifecycle = if child_failed {
+            LinkLifecycle::Failed
+        } else if !child_degradations.is_empty() {
+            LinkLifecycle::Degraded
+        } else if radio_report.lifecycle == LinkLifecycle::Stopped {
             LinkLifecycle::Stopped
         } else {
             LinkLifecycle::Failed
         };
         let backend_json = serde_json::to_value(&radio).unwrap_or(Value::Null);
-        let streams =
-            managed_stream_health_from_backend_json(&endpoints, &radio_endpoints, &backend_json);
+        let streams = managed_stream_health_from_backend_json(
+            &endpoints,
+            &radio_endpoints,
+            &backend_json,
+            &child_degradations,
+        );
         let degraded_streams = degraded_stream_names(&streams);
         Ok(LinkReport {
             lifecycle,
@@ -2174,10 +2235,13 @@ impl From<ServiceStreamCriticality> for StreamCriticality {
 #[derive(Debug)]
 struct ManagedChild {
     name: String,
+    stream_name: Option<String>,
+    criticality: StreamCriticality,
     child: Child,
     stdout_log: PathBuf,
     stderr_log: PathBuf,
     status: Option<ExitStatus>,
+    terminated_by_owner: bool,
 }
 
 impl ManagedChild {
@@ -2195,12 +2259,42 @@ impl ManagedChild {
         Ok(status)
     }
 
+    fn degradation_reason(&self) -> Option<String> {
+        if self.criticality != StreamCriticality::BestEffort
+            || self.status.is_none()
+            || self.terminated_by_owner
+        {
+            return None;
+        }
+        Some(format!(
+            "best-effort helper '{}' exited with status {}",
+            self.name,
+            self.status.map(exit_status_label).unwrap_or_default()
+        ))
+    }
+
+    fn degradation(&self) -> Option<LinkStreamDegradation> {
+        self.degradation_reason()
+            .map(|reason| LinkStreamDegradation {
+                name: self
+                    .stream_name
+                    .clone()
+                    .unwrap_or_else(|| self.name.clone()),
+                reason,
+            })
+    }
+
     fn report(&mut self) -> Result<ChildProcessReport> {
         let status = self.try_wait()?.map(exit_status_label);
+        let degradation_reason = self.degradation_reason();
         Ok(ChildProcessReport {
             name: self.name.clone(),
+            stream_name: self.stream_name.clone(),
+            criticality: self.criticality,
             pid: self.child.id(),
             status: status.or_else(|| Some("running".to_string())),
+            degraded: degradation_reason.is_some(),
+            degradation_reason,
             stdout_log: self.stdout_log.clone(),
             stderr_log: self.stderr_log.clone(),
         })
@@ -2246,11 +2340,26 @@ fn spawn_logged(
         })?;
     Ok(ManagedChild {
         name: label,
+        stream_name: None,
+        criticality: StreamCriticality::Required,
         child,
         stdout_log,
         stderr_log,
         status: None,
+        terminated_by_owner: false,
     })
+}
+
+fn spawn_logged_stream(
+    stream: &ManagedWfbStreamConfig,
+    label: impl Into<String>,
+    command: Command,
+    artifact_dir: &Path,
+) -> Result<ManagedChild> {
+    let mut child = spawn_logged(label, command, artifact_dir)?;
+    child.stream_name = Some(stream.name.clone());
+    child.criticality = stream.criticality;
+    Ok(child)
 }
 
 fn artifact_file_label(label: &str) -> String {
@@ -2393,6 +2502,7 @@ fn terminate_child_processes(children: &mut [ManagedChild]) {
         if child.status.is_some() {
             continue;
         }
+        child.terminated_by_owner = true;
         send_sigterm(child.child.id());
     }
 
@@ -2567,6 +2677,7 @@ fn managed_stream_health_from_backend_json(
     product_endpoints: &LinkEndpoints,
     radio_endpoints: &LinkEndpoints,
     backend: &Value,
+    child_degradations: &[LinkStreamDegradation],
 ) -> Vec<LinkStreamHealth> {
     let radio_streams = link_stream_health_from_backend_json(radio_endpoints, backend, &[]);
     radio_streams
@@ -2579,7 +2690,32 @@ fn managed_stream_health_from_backend_json(
             health.payload_kind = product.payload_kind;
             health.criticality = product.criticality;
             health.stream = product.stream;
+            if let Some(degradation) = child_degradations
+                .iter()
+                .find(|degradation| degradation.name == product.name)
+            {
+                health.degraded = true;
+                health.degradation_reason = Some(degradation.reason.clone());
+            }
             health
+        })
+        .collect()
+}
+
+fn child_report_degradations(reports: &[ChildProcessReport]) -> Vec<LinkStreamDegradation> {
+    reports
+        .iter()
+        .filter_map(|report| {
+            report
+                .degradation_reason
+                .as_ref()
+                .map(|reason| LinkStreamDegradation {
+                    name: report
+                        .stream_name
+                        .clone()
+                        .unwrap_or_else(|| report.name.clone()),
+                    reason: reason.clone(),
+                })
         })
         .collect()
 }
@@ -3162,22 +3298,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_wfb_streams_reject_best_effort_until_child_degradation_exists() {
+    fn managed_wfb_streams_accept_best_effort_child_degradation() {
         let streams =
             vec![
                 ManagedWfbStreamConfig::tx("control-up", 6, "127.0.0.1:5606".parse().unwrap())
                     .with_criticality(StreamCriticality::BestEffort),
             ];
 
-        let error = validate_managed_wfb_streams(&streams).expect_err("best effort rejected");
-
-        assert!(matches!(
-            error,
-            LinkError::InvalidBackendConfig {
-                code: "managed_wfb_best_effort_unsupported",
-                ..
-            }
-        ));
+        validate_managed_wfb_streams(&streams).expect("best-effort stream accepted");
     }
 
     #[test]
@@ -3239,7 +3367,7 @@ mod tests {
             }
         });
 
-        let streams = managed_stream_health_from_backend_json(&product, &radio, &backend);
+        let streams = managed_stream_health_from_backend_json(&product, &radio, &backend, &[]);
 
         assert_eq!(streams[0].local_udp, "127.0.0.1:5606".parse().unwrap());
         assert_eq!(streams[0].payload_kind, PayloadKind::RawApplicationDatagram);
@@ -3252,6 +3380,96 @@ mod tests {
                 last_submit_unix_ms: Some(1234),
             })
         );
+    }
+
+    #[test]
+    fn managed_stream_health_applies_best_effort_child_degradation() {
+        let product = LinkEndpoints {
+            tunnel: None,
+            streams: vec![LinkStreamEndpoint {
+                name: "video-down".to_string(),
+                direction: LinkDirection::Rx,
+                local_udp: "127.0.0.1:5804".parse().unwrap(),
+                payload_kind: PayloadKind::RawApplicationDatagram,
+                criticality: StreamCriticality::BestEffort,
+                stream: Some(WfbStreamId {
+                    link_id: Some(1),
+                    radio_port: 4,
+                }),
+            }],
+        };
+        let radio = LinkEndpoints {
+            tunnel: None,
+            streams: vec![LinkStreamEndpoint {
+                name: "video-down".to_string(),
+                direction: LinkDirection::Rx,
+                local_udp: "127.0.0.1:39000".parse().unwrap(),
+                payload_kind: PayloadKind::WfbDistributorDatagram,
+                criticality: StreamCriticality::BestEffort,
+                stream: Some(WfbStreamId {
+                    link_id: Some(1),
+                    radio_port: 4,
+                }),
+            }],
+        };
+        let backend = serde_json::json!({
+            "rx": {
+                "rx_forwards": [{
+                    "config": {
+                        "channel_id": {
+                            "link_id": 1,
+                            "radio_port": 4
+                        }
+                    },
+                    "forwarded_bytes": 0,
+                    "counters": {
+                        "forwarded": 0
+                    }
+                }]
+            }
+        });
+        let degradations = vec![LinkStreamDegradation {
+            name: "video-down".to_string(),
+            reason: "best-effort helper 'wfb-rx-video-down' exited with status exit:1".to_string(),
+        }];
+
+        let streams =
+            managed_stream_health_from_backend_json(&product, &radio, &backend, &degradations);
+
+        assert!(streams[0].degraded);
+        assert_eq!(
+            streams[0].degradation_reason.as_deref(),
+            Some("best-effort helper 'wfb-rx-video-down' exited with status exit:1")
+        );
+        assert_eq!(degraded_stream_names(&streams), vec!["video-down"]);
+    }
+
+    #[test]
+    fn best_effort_stream_child_exit_reports_degradation() {
+        let artifact_dir = unique_runtime_artifact_path("test-managed-child-artifacts");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let stream = ManagedWfbStreamConfig::rx("video-down", 4, "127.0.0.1:5804".parse().unwrap())
+            .with_criticality(StreamCriticality::BestEffort);
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exit 7");
+        let mut child = spawn_logged_stream(&stream, "wfb-rx-video-down", command, &artifact_dir)
+            .expect("spawn child");
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().expect("poll child").is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let degradation = child.degradation().expect("best-effort degradation");
+        let report = child.report().expect("child report");
+
+        assert_eq!(degradation.name, "video-down");
+        assert_eq!(report.stream_name.as_deref(), Some("video-down"));
+        assert_eq!(report.criticality, StreamCriticality::BestEffort);
+        assert_eq!(report.status.as_deref(), Some("exit:7"));
+        assert!(report.degraded);
+        assert_eq!(report.degradation_reason, Some(degradation.reason));
+        fs::remove_dir_all(artifact_dir).ok();
     }
 
     #[test]
