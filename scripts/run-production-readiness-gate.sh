@@ -6,6 +6,7 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
 RUN_LOCAL=${RUN_LOCAL:-1}
+RUN_API_RADIO_SMOKE=${RUN_API_RADIO_SMOKE:-0}
 RUN_API_TUNNEL_SMOKE=${RUN_API_TUNNEL_SMOKE:-0}
 RUN_LOADED_TUNNEL_GATE=${RUN_LOADED_TUNNEL_GATE:-0}
 RUN_VIDEO_CONTROL_RADIO_GATE=${RUN_VIDEO_CONTROL_RADIO_GATE:-0}
@@ -21,10 +22,16 @@ if [[ "$RUN_LOCAL" == "1" ]]; then
   cargo fmt --check
   cargo check --workspace
   cargo test -p wfb-link -p wfb-tun
+  bash -n scripts/run-wfb-link-radio-smoke.sh
   bash -n scripts/run-wfb-link-tunnel-smoke.sh
   bash -n scripts/run-mac-wf-tun-profile-matrix.sh
   bash -n scripts/run-mac-wf-tun-recovery.sh
   bash -n scripts/run-radio-run-profile-matrix.sh
+fi
+
+if [[ "$RUN_API_RADIO_SMOKE" == "1" ]]; then
+  log "product API radio smoke"
+  scripts/run-wfb-link-radio-smoke.sh
 fi
 
 if [[ "$RUN_API_TUNNEL_SMOKE" == "1" ]]; then

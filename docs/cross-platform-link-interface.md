@@ -105,7 +105,7 @@ use wfb_link::{
 };
 
 let config = MacosWfbTunnelConfig::from_service_config_path(
-    "configs/radio-run-robust-short-range.toml",
+    "configs/radio-run-video-control-tdd.toml",
     "/path/to/gs.key",
 )?;
 let mut backend = MacosWfbTunnelBackend::default();
@@ -120,13 +120,17 @@ The checked-in API smoke is:
 
 ```sh
 WFB_KEY=/path/to/gs.key \
-SSH_KEY=/path/to/drone_ssh_key \
 PEER_IP=10.5.0.2 \
 scripts/run-wfb-link-tunnel-smoke.sh
 ```
 
 It runs the product-facing Rust backend, then probes the tunnel with a 256 KiB
-SSH download through `10.5.0.2`.
+SSH download through `10.5.0.2`. `SSH_KEY` is optional when the drone is
+reachable through the default SSH config or agent. `wfb-tun-macos` normally
+needs `sudo -n` for `utun`; production hosts should pre-authorize that helper or
+run an equivalent privileged service. The checked-in smoke defaults to
+`CHANNEL=161` because that is the current Arc tunnel peer channel; override it
+only when the Linux peer has been moved.
 
 ## macOS Privilege And Install Notes
 

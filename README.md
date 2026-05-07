@@ -59,25 +59,18 @@ Run the production macOS radio service:
 
 ```sh
 cargo run -p wfb-radio-service -- \
-  --config configs/radio-run-robust-short-range.toml \
+  --config configs/radio-run-video-control-tdd.toml \
   --report /tmp/wfb-radio-service.json \
   --ready-file /tmp/wfb-radio-service-ready.json \
   --health-file /tmp/wfb-radio-service-health.json \
   --i-understand-this-transmits
 ```
 
-The checked-in config is a short-range service profile. It expects an
-RTL8812A firmware image at `/tmp/rtl8812aefw.bin`; override `--firmware` or edit
-the config when your firmware lives elsewhere.
+The recommended checked-in config is the short-range video/control TDD profile.
+It expects an RTL8812A firmware image at `/tmp/rtl8812aefw.bin`; override
+`--firmware` or edit the config when your firmware lives elsewhere.
 
 Run the embedded-link example:
-
-```sh
-cargo run -p wfb-link --example embed-radio-service -- \
-  configs/radio-run-robust-short-range.toml
-```
-
-For the accepted short-range video/control TDD profile, use:
 
 ```sh
 cargo run -p wfb-link --example embed-radio-service -- \
@@ -92,17 +85,34 @@ That example demonstrates the lifecycle API: start, wait-ready, print health,
 request stop, and print the final report. It is not a full application data
 plane by itself.
 
+Run the product-facing radio API smoke on a prepared Mac with an attached
+AWUS036ACH:
+
+```sh
+scripts/run-wfb-link-radio-smoke.sh
+```
+
+The smoke uses `MacosUserspaceRadioBackend`, holds the runtime long enough to
+exercise the TDD airtime gate, injects synthetic WFB distributor datagrams into
+the exposed TX endpoint, and checks the final TX/RX counters and cooperative
+stop report.
+
 Run the product-facing tunnel smoke on a prepared bench:
 
 ```sh
 WFB_KEY=/path/to/gs.key \
-SSH_KEY=/path/to/drone_ssh_key \
 PEER_IP=10.5.0.2 \
 scripts/run-wfb-link-tunnel-smoke.sh
 ```
 
 That path uses `MacosWfbTunnelBackend`, not the legacy shell orchestration, and
-probes the resulting `utun` link with a 256 KiB SSH download.
+probes the resulting `utun` link with a 256 KiB SSH download. Set `SSH_KEY` only
+when the drone is not reachable through the default SSH config or agent. The
+tunnel smoke preflights `sudo -n` by default because `wfb-tun-macos` usually
+needs privilege to create `utun`; set `TUN_USE_SUDO=0` only on hosts that can
+open `utun` without sudo. The tunnel smoke defaults to the current Arc tunnel
+peer channel, `CHANNEL=161`; set `CHANNEL=36` only when the Linux tunnel peer is
+also on the video/control bench channel.
 
 Run the current loaded tunnel gate on a prepared bench:
 
@@ -123,7 +133,8 @@ Run the production readiness wrapper locally:
 scripts/run-production-readiness-gate.sh
 ```
 
-Set `RUN_API_TUNNEL_SMOKE=1`, `RUN_LOADED_TUNNEL_GATE=1`,
+Set `RUN_API_RADIO_SMOKE=1`, `RUN_API_TUNNEL_SMOKE=1`,
+`RUN_LOADED_TUNNEL_GATE=1`,
 `RUN_VIDEO_CONTROL_RADIO_GATE=1`, `RUN_RF_CLOSE_RANGE=1`, or
 `RUN_CALIBRATION_REGRESSION=1` to include hardware and RF gates when the bench
 is set up.
@@ -155,7 +166,7 @@ use wfb_link::{
 
 fn start_link() -> Result<(), Box<dyn std::error::Error>> {
     let link = MacosWfbTunnelConfig::from_service_config_path(
-        "configs/radio-run-robust-short-range.toml",
+        "configs/radio-run-video-control-tdd.toml",
         "/path/to/gs.key",
     )?;
     let mut backend = MacosWfbTunnelBackend::default();
