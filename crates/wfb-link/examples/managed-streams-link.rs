@@ -1,8 +1,14 @@
-use std::{error::Error, net::SocketAddr, path::PathBuf, thread, time::Duration};
+use std::{
+    error::Error,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
 
 use wfb_link::{
     LinkBackend, LinkConfig, ManagedWfbStreamConfig, ManagedWfbStreamsBackend,
-    ManagedWfbStreamsConfig, ManagedWfbTxProfile,
+    ManagedWfbStreamsConfig, ManagedWfbTunnelConfig, ManagedWfbTxProfile,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -15,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wait_ready_timeout = env_duration_s("WFB_LINK_READY_TIMEOUT_S", 90);
 
     let radio = wfb_link::UserspaceRadioConfig::from_service_config_path(config_path)?;
-    let config = ManagedWfbStreamsConfig::from_radio_config(radio, wfb_key)
+    let mut config = ManagedWfbStreamsConfig::from_radio_config(radio, wfb_key)
         .with_artifact_dir(out_dir)
         .with_bins(
             env_path("WFB_TX_BIN").unwrap_or_else(|_| "target/wfb-ng-macos/bin/wfb_tx".into()),
@@ -51,6 +57,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                 fec_n: env_u8("CONTROL_FEC_N", 16),
             }),
         );
+    if env_bool("ENABLE_TUNNEL", false) {
+        config = config.with_tunnel(
+            ManagedWfbTunnelConfig::new(
+                env_ip("TUN_LOCAL_IP", "10.5.0.1")?,
+                env_ip("TUN_PEER_IP", "10.5.0.2")?,
+            )
+            .with_link_id(env_u32("LINK_ID", 1))
+            .with_radio_ports(
+                env_u8("TUN_TX_RADIO_PORT", 8),
+                env_u8("TUN_RX_RADIO_PORT", 7),
+            )
+            .with_udp_endpoints(
+                env_socket("TUN_TX_UDP", "127.0.0.1:56020")?,
+                env_socket("TUN_RX_UDP", "127.0.0.1:56021")?,
+            )
+            .with_tun_bin(
+                env_path("TUN_BIN").unwrap_or_else(|_| "target/debug/wfb-tun-macos".into()),
+            )
+            .with_sudo_for_tun(env_bool("TUN_USE_SUDO", true))
+            .with_mtu(env_usize("TUN_MTU", 1400))
+            .with_radio_mtu(env_usize("TUN_RADIO_MTU", 1445))
+            .with_aggregation_timeout_ms(env_f64("TUN_AGG_TIMEOUT_MS", 5.0))
+            .with_tx_profile(ManagedWfbTxProfile {
+                bandwidth_mhz: env_u16("TUN_BANDWIDTH_MHZ", 20),
+                mcs: env_u8("TUN_MCS", 0),
+                fec_k: env_u8("TUN_FEC_K", 2),
+                fec_n: env_u8("TUN_FEC_N", 4),
+            }),
+        );
+    }
 
     let mut backend = ManagedWfbStreamsBackend::default();
     let handle = backend.start(LinkConfig::managed_wfb_streams(config))?;
@@ -76,6 +112,12 @@ fn env_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn env_socket(name: &str, default: &str) -> Result<SocketAddr, Box<dyn Error>> {
+    Ok(std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse()?)
+}
+
+fn env_ip(name: &str, default: &str) -> Result<IpAddr, Box<dyn Error>> {
     Ok(std::env::var(name)
         .unwrap_or_else(|_| default.to_string())
         .parse()?)
@@ -111,6 +153,27 @@ fn env_u8(name: &str, default: u8) -> u8 {
         .ok()
         .flatten()
         .unwrap_or(default.into()) as u8
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    env_optional_u64(name)
+        .ok()
+        .flatten()
+        .unwrap_or(default as u64) as usize
+}
+
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
 }
 
 fn env_optional_u64(name: &str) -> Result<Option<u64>, Box<dyn Error>> {

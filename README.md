@@ -237,7 +237,9 @@ fn start_link() -> Result<(), Box<dyn std::error::Error>> {
 Use `UserspaceRadioBackend` instead only when the product owns WFB-NG
 codec/session framing and wants direct WFB distributor datagram endpoints.
 Use `ManagedWfbStreamsBackend` when the product wants ordinary raw UDP streams
-and wants `wfb-link` to supervise one WFB-NG codec helper pair per stream.
+and wants `wfb-link` to supervise one WFB-NG codec helper per stream. It
+can also supervise one optional IP tunnel in the same radio session with
+`ManagedWfbTunnelConfig`.
 The old `MacosUserspaceRadio*` names are deprecated aliases; new integration
 code should use `UserspaceRadio*` for the portable direct-radio contract.
 
@@ -274,9 +276,11 @@ degradation semantics.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
 - `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
-  path. Required helper exits fail startup; best-effort helper exits degrade
-  only the named stream. Receiver-backed adoption gates are available for the
-  current macOS plus Linux-peer bench.
+  path. It can now include one optional managed tunnel. Required helper exits
+  fail startup; best-effort helper exits degrade only the named stream, or
+  `__tunnel` for a best-effort tunnel. Receiver-backed adoption gates are
+  available for the current macOS plus Linux-peer bench; the combined stream
+  plus tunnel gate still needs to be added.
 - `UserspaceRadioBackend` accepts WFB distributor/aggregator datagrams only.
 - Tunnel helpers may need elevated privileges for macOS `utun` creation.
 - The old Python `utun` helper is kept only under `scripts/development/` as a

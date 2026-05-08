@@ -5,7 +5,7 @@
 tunnel metadata from the same file when using
 `UserspaceRadioConfig::from_service_config_path`. Managed raw application
 streams use this file as the radio/runtime base and define product-facing raw
-UDP streams through `ManagedWfbStreamsConfig`.
+UDP streams, plus any managed tunnel, through `ManagedWfbStreamsConfig`.
 
 The stream, WFB, tunnel, artifact, and calibration sections are platform-neutral
 contracts. `[macos_usbhost]` is intentionally macOS-only transport config; a
@@ -175,11 +175,11 @@ Important backend behavior:
 - `UserspaceRadioBackend` preserves `[tunnel]` as endpoint metadata but
   does not start `wfb_tx`, `wfb_rx`, or `wfb-tun-macos`.
 - `MacosWfbTunnelBackend` is the managed IP tunnel path. It starts the helper
-  processes for the tunnel use case.
-- Combining managed tunnel traffic with extra side streams is possible only
-  when the side streams are represented as distributor datagrams and the tunnel
-  radio port remains the primary tunnel path. Treat that as an advanced profile
-  until it has its own receiver-backed gate.
+  processes for the tunnel-only use case.
+- `ManagedWfbStreamsBackend` can also supervise one tunnel alongside managed
+  raw application streams when product code supplies `ManagedWfbTunnelConfig`.
+  The service `[tunnel]` section is still endpoint metadata; managed tunnel
+  radio ports, UDP sockets, MTU, and helper path are selected in Rust today.
 
 ## Legacy WFB Section
 
@@ -208,7 +208,7 @@ Use this decision table:
 | --- | --- | --- |
 | Raw IP tunnel packets | `raw_application_datagram` endpoint exposed by `MacosWfbTunnelBackend` | Managed tunnel backend |
 | WFB-NG distributor datagrams | `wfb_distributor_datagram` | `UserspaceRadioBackend` |
-| Raw app UDP for arbitrary streams | `raw_application_datagram` endpoints exposed by `ManagedWfbStreamsBackend` | Managed stream backend |
+| Raw app UDP for arbitrary streams, optionally with one IP tunnel | `raw_application_datagram` endpoints exposed by `ManagedWfbStreamsBackend` | Managed stream backend |
 
 If a product sends raw payload bytes to a `WfbDistributorDatagram` endpoint, the
 runtime will treat the bytes as malformed WFB distributor input and drop them.
@@ -237,7 +237,9 @@ unless using a backend that owns a helper process for that stream.
 `ManagedWfbStreamsBackend` supports best-effort managed streams by attributing
 helper child-process exits to the named stream. Required helper exits fail
 startup/readiness; best-effort helper exits keep the link handle usable and
-surface the stream in `degraded_streams` with a degradation reason.
+surface the stream in `degraded_streams` with a degradation reason. If a
+managed tunnel is configured as best-effort, tunnel startup/helper failures use
+the sentinel `__tunnel` in `degraded_streams`.
 
 ## Artifacts
 

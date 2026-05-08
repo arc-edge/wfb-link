@@ -19,8 +19,8 @@ Product code
 
 | Need | Backend | Status |
 | --- | --- | --- |
-| Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
-| Managed raw application multi-streams | `ManagedWfbStreamsBackend` | Product-facing initial implementation. Supervises one WFB-NG helper per configured stream and exposes raw UDP endpoints with named health. |
+| Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested for tunnel-only runs. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
+| Managed raw application multi-streams, optionally with an IP tunnel | `ManagedWfbStreamsBackend` | Product-facing implementation. Supervises one WFB-NG helper per configured stream, can also supervise one `wfb-tun-macos` tunnel on separate radio ports, and exposes named raw UDP endpoints with health. |
 | Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in transport is macOS IOUSBHost; Android should reuse this contract with an Android USB transport. |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
 | Android | `UserspaceRadioBackend` plus Android USB transport | Planned. Keep the same lifecycle, endpoint, health, and report contracts. |
@@ -35,6 +35,8 @@ It rejects `RawApplicationDatagram` endpoints before startup because it does
 not supervise WFB codec processes itself.
 `ManagedWfbStreamsBackend` exposes `RawApplicationDatagram` streams by starting
 WFB-NG `wfb_tx`/`wfb_rx` helpers around the direct radio runtime.
+When configured with `ManagedWfbTunnelConfig`, it also starts a tunnel
+`wfb_tx`/`wfb_rx` pair and `wfb-tun-macos` in the same radio session.
 `MacosWfbTunnelBackend` exposes raw IP tunnel endpoints because it starts the
 WFB-NG helper processes and `wfb-tun-macos` bridge for that specific tunnel use.
 
@@ -175,10 +177,66 @@ forwards raw payload bytes to the stream's `app_udp`. For TX, `wfb-link` starts
 stream's FEC/MCS profile, and sends WFB distributor datagrams into the internal
 radio endpoint.
 
+### Adding an IP tunnel to managed streams
+
+Use `ManagedWfbTunnelConfig` when the same backend should also expose an IP
+tunnel for SSH or control-plane protocols. The tunnel consumes two additional
+WFB radio ports and two local UDP sockets. Port collisions with managed streams
+are rejected before startup.
+
+```rust
+use std::net::SocketAddr;
+use wfb_link::{
+    ManagedWfbStreamConfig, ManagedWfbStreamsConfig, ManagedWfbTunnelConfig,
+    ManagedWfbTxProfile,
+};
+
+let config = ManagedWfbStreamsConfig::from_radio_config(radio, "/path/to/gs.key")
+    .with_stream(
+        ManagedWfbStreamConfig::rx(
+            "video-down",
+            4,
+            "127.0.0.1:5804".parse::<SocketAddr>()?,
+        )
+        .with_link_id(1),
+    )
+    .with_stream(
+        ManagedWfbStreamConfig::tx(
+            "control-up",
+            6,
+            "127.0.0.1:5606".parse::<SocketAddr>()?,
+        )
+        .with_link_id(1)
+        .with_tx_profile(ManagedWfbTxProfile {
+            bandwidth_mhz: 20,
+            mcs: 0,
+            fec_k: 2,
+            fec_n: 16,
+        }),
+    )
+    .with_tunnel(
+        ManagedWfbTunnelConfig::try_new("10.5.0.1", "10.5.0.2")?
+            .with_link_id(1)
+            .with_radio_ports(8, 7) // TX/out, then RX/in
+            .with_mtu(1400)
+            .with_aggregation_timeout_ms(5)
+            .with_tun_bin("/usr/local/bin/wfb-tun-macos"),
+    );
+```
+
+`LinkReady.endpoints.tunnel` is populated when the backend starts. The backend
+report includes a `tunnel` section with the tunnel radio ports, internal UDP
+mapping, `wfb-tun-macos` summary path, and any parsed tunnel summary. Tunnel
+criticality defaults to `Required`; a `BestEffort` tunnel startup/helper
+failure keeps required streams running and adds `__tunnel` to
+`degraded_streams`.
+
 Current managed-stream limitations:
 
 - Required managed helper exits fail readiness. Best-effort managed helper exits
   degrade only the named stream and appear in `degraded_streams`.
+- A combined managed-stream plus tunnel bench gate still needs to be added.
+  Until then, validate each product profile against a receiver before field use.
 - Helper binaries and the `gs.key` are product release artifacts.
 - The API owns stream supervision, not stream semantics. Product code still
   decides which UDP port is video, telemetry, or control.

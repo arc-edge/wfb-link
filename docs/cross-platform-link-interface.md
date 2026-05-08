@@ -115,8 +115,10 @@ The `wfb-link` macOS layer has three backend shapes:
   thread and exposes WFB distributor datagram endpoints. Use this when the
   caller owns WFB-NG codec/session framing.
 - `ManagedWfbStreamsBackend` supervises the production radio runtime plus one
-  stock `wfb_tx` or `wfb_rx` helper per configured stream. Use this when a
-  product wants named raw UDP streams without owning WFB-NG helper processes.
+  stock `wfb_tx` or `wfb_rx` helper per configured stream. It can also supervise
+  one optional tunnel helper set through `ManagedWfbTunnelConfig`. Use this
+  when a product wants named raw UDP streams, with or without an IP tunnel,
+  without owning WFB-NG helper processes.
 - `MacosWfbTunnelBackend` supervises the production radio runtime, stock
   `wfb_tx`/`wfb_rx` helpers, and the Rust `wfb-tun-macos` bridge. Use this when
   a product wants a raw IP tunnel endpoint and a single Rust lifecycle handle.
@@ -197,13 +199,17 @@ peer_ip = "10.5.0.2"
 When this shape is handed to `UserspaceRadioBackend`, every stream must use
 `wfb_distributor_datagram`, and RX streams must be `required`. Raw application
 streams require a backend/helper that owns WFB codec supervision, such as
-`ManagedWfbStreamsBackend`.
+`ManagedWfbStreamsBackend`. When `ManagedWfbStreamsBackend` includes
+`ManagedWfbTunnelConfig`, `LinkReady.endpoints.tunnel` is populated and tunnel
+helper failures are reported through the backend-specific tunnel report; a
+best-effort tunnel failure also adds `__tunnel` to `degraded_streams`.
 
 `LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
 entries expose submitted frames, failed submissions, dropped datagrams, and
 last successful submit time when the runtime owns the TX bind. RX entries
 expose forwarded frames/bytes and the last RX-forward time. `degraded_streams`
-lists best-effort streams that were skipped or degraded during startup.
+lists best-effort streams that were skipped or degraded during startup, plus
+the `__tunnel` sentinel for a best-effort managed tunnel failure.
 
 For the current userspace radio backend, `BestEffort` is implemented for
 TX UDP bind preflight: an unavailable best-effort TX socket is removed from the
