@@ -189,7 +189,9 @@ Set `RUN_API_RADIO_SMOKE=1`, `RUN_API_TUNNEL_SMOKE=1`,
 `RUN_MANAGED_STREAMS_SMOKE=1`, `RUN_LOADED_TUNNEL_GATE=1`,
 `RUN_VIDEO_CONTROL_RADIO_GATE=1`, `RUN_RF_CLOSE_RANGE=1`, or
 `RUN_CALIBRATION_REGRESSION=1` to include hardware and RF gates when the bench
-is set up.
+is set up. For the managed raw-stream adoption gate, set
+`MANAGED_STREAMS_SMOKE_REPEATS=N` to require repeated clean receiver-backed
+runs before accepting a build.
 
 Run the receiver-backed video/control radio gate:
 
@@ -252,12 +254,12 @@ semantics, and health/report shape, read
 For the first alpha integration from another Rust repository:
 
 ```toml
-wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.2" }
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.3" }
 ```
 
-`v0.1.0-alpha.2` does not include `ManagedWfbStreamsBackend`; pin an audited
-`main` commit until the next alpha release is cut if the product needs managed
-raw application streams.
+`v0.1.0-alpha.3` includes the managed raw application multi-stream backend,
+receiver-backed managed-stream smoke gate, and best-effort managed helper
+degradation semantics.
 
 ## Current Limitations
 

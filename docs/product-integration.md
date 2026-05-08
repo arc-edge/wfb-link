@@ -52,17 +52,13 @@ product. For the first alpha integration, pin the Git tag:
 
 ```toml
 [dependencies]
-wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.2" }
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.3" }
 ```
 
 For fully reproducible product releases, Cargo.lock will record the resolved
 commit. A product can also pin the exact release commit explicitly with `rev`
 after the tag has been validated in its own CI. Keep the service TOML and helper
 binaries under product release management; do not depend on `wfb-radio-diag`.
-
-`v0.1.0-alpha.2` predates `ManagedWfbStreamsBackend`. Until the next alpha is
-cut, products that need managed raw streams should pin an audited commit from
-`main`.
 
 ## Managed macOS Tunnel
 
