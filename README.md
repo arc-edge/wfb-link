@@ -256,12 +256,12 @@ semantics, and health/report shape, read
 For the first alpha integration from another Rust repository:
 
 ```toml
-wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.3" }
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.4" }
 ```
 
-`v0.1.0-alpha.3` includes the managed raw application multi-stream backend,
-receiver-backed managed-stream smoke gate, and best-effort managed helper
-degradation semantics.
+`v0.1.0-alpha.4` includes the combined managed raw application stream plus
+optional tunnel backend path, along with the alpha.3 managed-stream smoke gate
+and best-effort helper degradation semantics.
 
 ## Current Limitations
 

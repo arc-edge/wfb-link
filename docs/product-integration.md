@@ -54,7 +54,7 @@ product. For the first alpha integration, pin the Git tag:
 
 ```toml
 [dependencies]
-wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.3" }
+wfb-link = { git = "https://github.com/arc-edge/wfb-link.git", tag = "v0.1.0-alpha.4" }
 ```
 
 For fully reproducible product releases, Cargo.lock will record the resolved
