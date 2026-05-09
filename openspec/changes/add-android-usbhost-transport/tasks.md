@@ -16,8 +16,12 @@
       EFUSE access.
 - [x] 2.3 Implement Android bulk IN and bulk OUT transfers with timeout and
       short-transfer semantics matching the runtime traits.
-- [ ] 2.4 Add Android-specific lifecycle tests for ownership, close, timeout,
+- [x] 2.4 Add Android-specific lifecycle tests for ownership, close, timeout,
       and unsupported-device errors.
+      Unit coverage verifies fd preflight, caller-owned fd survival after a
+      rejected wrap, timeout classification, and unsupported-device open-plan
+      errors. Successful close/drop behavior remains part of the Android
+      hardware smoke.
 
 ## 3. Android Hardware Validation
 

@@ -626,6 +626,13 @@ fn no_match_message(devices: &[UsbDeviceInfo], selector: DeviceSelector) -> Stri
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::{
+        io::{Read, Write},
+        os::fd::AsRawFd,
+        os::unix::net::UnixStream,
+    };
+
     fn sample_device(known_adapter: Option<KnownAdapter>) -> UsbDeviceInfo {
         UsbDeviceInfo {
             vid: 0x0bda,
@@ -786,6 +793,13 @@ mod tests {
         assert_eq!(claim.endpoints.expect("endpoints").bulk_in, Some(0x81));
     }
 
+    #[test]
+    fn usb_error_classifies_timeout_variants() {
+        assert!(UsbError::Rusb(rusb::Error::Timeout).is_timeout());
+        assert!(UsbError::BackendTimeout("timed out".to_string()).is_timeout());
+        assert!(!UsbError::Backend("failed".to_string()).is_timeout());
+    }
+
     #[cfg(unix)]
     #[test]
     fn fd_claim_rejects_invalid_fd_before_libusb_open() {
@@ -813,5 +827,29 @@ mod tests {
             error,
             UsbError::MissingBulkEndpoints { interface: 0 }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_claim_does_not_close_non_usb_fd_when_libusb_rejects_it() {
+        let (mut candidate, mut peer) = UnixStream::pair().expect("unix stream pair");
+        let error = match claim_usb_device_from_fd(
+            candidate.as_raw_fd(),
+            sample_device(None),
+            sample_endpoints(),
+            0,
+        ) {
+            Ok(_) => panic!("non-USB fd opened as USB"),
+            Err(error) => error,
+        };
+        assert!(!error.is_timeout());
+
+        peer.write_all(b"x")
+            .expect("peer write after failed USB wrap");
+        let mut byte = [0u8; 1];
+        candidate
+            .read_exact(&mut byte)
+            .expect("candidate fd still owned by caller");
+        assert_eq!(byte, [b'x']);
     }
 }
