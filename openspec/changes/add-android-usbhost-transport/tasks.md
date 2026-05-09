@@ -30,7 +30,11 @@
       Added an Android harness, `wfb-android-smoke` JNI crate, and direct
       SDK/NDK debug APK packaging script. Product Gradle/instrumentation
       packaging remains follow-up work.
-- [ ] 3.2 Validate power-on/init RX-only descriptor parsing.
+- [x] 3.2 Validate power-on/init RX-only descriptor parsing.
+      Pixel 7 Pro smoke now passes permission, Java control transfer, Rust JNI
+      register read, and full production init (14 phases, 3103 control writes).
+      Latest APK smoke parsed one frame before init and one frame after full
+      init through the runtime RX descriptor parser.
 - [ ] 3.3 Validate single TX and bounded bidirectional WFB distributor datagrams
       against the Linux peer.
 - [ ] 3.4 Run the production managed-stream profile and compare against the

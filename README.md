@@ -56,8 +56,8 @@ remote. Update them before adding Cargo git dependencies or release automation.
   `wfb_tx`/`wfb_rx` helper per stream while exposing product-facing UDP
   endpoints and named per-stream health.
 - Android USBHost runtime and service config selection, endpoint validation,
-  and an fd-backed libusb bridge path for app-owned `UsbDeviceConnection`
-  handoff.
+  plus a JNI smoke transport that drives app-owned `UsbDeviceConnection`
+  control/bulk transfers directly.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
@@ -248,11 +248,11 @@ code should use `UserspaceRadio*` for the portable direct-radio contract.
 
 On Linux, the intended backend is native WFB-NG over `wfb0` monitor mode with
 the aircrack/rtl88xxau driver. Android reuses the userspace radio contract
-with an Android USB host transport section. The Rust bridge wraps an app-owned
-USB file descriptor with libusb; the remaining Android work is app/NDK
-packaging and hardware smoke validation. Do not port the userspace USB bridge
-to Linux just to share implementation; share the `wfb-link` lifecycle and
-endpoint contract.
+with an Android USB host transport section. The first Android hardware path uses
+JNI calls into an app-owned `UsbDeviceConnection`; the libusb fd-wrap approach
+failed on Pixel 7 Pro with `Input/Output Error`. Do not port the userspace USB
+bridge to Linux just to share implementation; share the `wfb-link` lifecycle
+and endpoint contract.
 
 For the full integration contract, backend selection rules, payload-kind
 semantics, and health/report shape, read
@@ -280,9 +280,9 @@ and best-effort helper degradation semantics.
   receiver-backed validation.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
-- The Android USBHost path has an fd-backed Rust bridge, but it is not yet
-  hardware-validated on Android. It still needs an app permission/handoff
-  harness, NDK CI, and receiver-backed smoke runs.
+- The Android USBHost smoke harness can obtain permission, read registers, run
+  production init, and reach bulk-IN timeout cleanly. It still needs
+  receiver-backed RX/TX WFB datagram validation and NDK CI.
 - `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
   path. It can now include one optional managed tunnel. Required helper exits
   fail startup; best-effort helper exits degrade only the named stream, or

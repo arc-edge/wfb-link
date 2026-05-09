@@ -56,24 +56,20 @@ reports and link health have the same shape.
 
 ### Native Bridge Decision
 
-Use native file-descriptor handoff via libusb wrapping instead of per-transfer
-JNI calls into `UsbDeviceConnection`.
+Use app-owned `UsbDeviceConnection` calls through JNI for Android hardware.
 
-The Android app layer owns permission and opens `UsbDeviceConnection`. It then
-passes `getFileDescriptor()` into `AndroidUsbHostConfig.device_fd` and keeps the
-owning `UsbDeviceConnection` alive until the Rust radio session exits.
-`wfb-radio-runtime` wraps that fd with `rusb`/`libusb_wrap_sys_device`, claims
-the configured interface, and reuses the existing `ClaimedUsbDevice`
-implementations of `Rtl8812auUsbTransport` and `UsbBulkTransfer`.
+The Android app layer owns permission, opens `UsbDeviceConnection`, claims the
+RTL8812AU interface, resolves the selected `UsbEndpoint` objects, and keeps all
+of those Java objects alive until Rust returns. Rust implements the existing
+`Rtl8812auUsbTransport` and `UsbBulkTransfer` traits by calling
+`controlTransfer` and `bulkTransfer` on those Java objects.
 
-This keeps the transfer path synchronous and close to the already-verified
-libusb path. It also avoids a broad JNI surface for every control and bulk
-transfer. The tradeoff is that Android packaging must include libusb and the
-app must treat the USB connection as owned by Rust during the radio session.
-
-The fd wrapper does not own the Java-side descriptor. The app must keep the
-connection alive, and it should not issue Java-side control or bulk transfers
-against the same interface while Rust owns the session.
+The original design preferred `getFileDescriptor()` plus
+`libusb_wrap_sys_device` to avoid per-transfer JNI. Live Pixel 7 Pro testing
+showed Java control transfers worked while libusb fd wrapping failed with
+`Input/Output Error`, so the smoke path moved to direct JNI. The runtime config
+still carries fd metadata for validation/report compatibility, but fd wrapping
+is not the active Android hardware path.
 
 ## Validation
 
@@ -83,7 +79,8 @@ against the same interface while Rust owns the session.
 - Android target checking requires an NDK compiler such as
   `aarch64-linux-android-clang`; without that toolchain, the vendored libusb
   build stops before Android Rust code can be checked.
-- Hardware validation waits for the Android app handoff harness. The first
-  hardware gate should be RX-only descriptor parsing, then single TX, then
-  bounded bidirectional WFB distributor datagrams against the existing Linux
-  peer.
+- Hardware validation now has an Android app handoff harness. Pixel 7 Pro live
+  smoke has passed USB permission, Java control transfer, Rust JNI register
+  read, and full production RTL8812AU init. The remaining hardware gates are
+  receiver-backed RX descriptor parsing, single TX, and bounded bidirectional
+  WFB distributor datagrams against the existing Linux peer.

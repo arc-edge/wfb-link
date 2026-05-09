@@ -11,3 +11,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 radio-core.workspace = true
 wfb-radio-runtime.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

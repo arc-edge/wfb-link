@@ -18,6 +18,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "android")]
+use radio_core::FdClaimedUsbDevice;
 use radio_core::{
     build_tx_packet, frame_type, list_usb_devices, parse_rx_packet,
     rtl8812au::{Rtl8812auUsbTransport, TxQueue, TX_DESC_SIZE},
@@ -73,7 +75,7 @@ const PRODUCTION_RX_STARTUP_KICK_FRAME: [u8; 24] = [
 pub enum RuntimeUsbTransport {
     Libusb(Box<ClaimedUsbDevice>),
     #[cfg(target_os = "android")]
-    Android(Box<ClaimedUsbDevice>),
+    Android(Box<FdClaimedUsbDevice>),
     #[cfg(target_os = "macos")]
     Macos(macos_usbhost::MacosUsbHostSession),
 }
@@ -2999,6 +3001,33 @@ where
     }
 }
 
+pub fn run_rtl8812au_production_init<T>(
+    session: &mut RuntimeRadioSession<T>,
+    inputs: ProductionRuntimeRtl8812auInitInputs,
+    channel: Channel,
+    bandwidth: Bandwidth,
+    tx_calibration_profile: TxCalibrationProfile,
+    live_write_authorized: bool,
+    captured_tail_applied: bool,
+) -> Result<RuntimeSameSessionInitResult, RuntimeSameSessionInitFailure>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let init_config = RuntimeSameSessionInitConfig {
+        init_order: inputs.init_order,
+        channel,
+        bandwidth,
+        rfe_type: inputs.rfe_type,
+        tx_calibration_profile,
+        live_write_authorized,
+        captured_tail_applied,
+    };
+    let mut init_state = Rtl8812auProductionInitState::new(inputs, channel, bandwidth);
+    run_rtl8812au_same_session_init(session, init_config, |session, phase| {
+        run_rtl8812au_production_init_phase(session, phase, &mut init_state)
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProductionFirmwareStats {
     bytes_written: u64,
@@ -4685,14 +4714,28 @@ where
         0,
         "usb-burst",
     )?;
-    production_rmw8_preserve(
+    let rsv_ctrl = read8_with_counter(
+        registers,
+        counters,
+        REG_RSV_CTRL,
+        "REG_RSV_CTRL",
+        "usb-burst",
+    )?;
+    write8_with_counter(
+        registers,
+        counters,
+        REG_RSV_CTRL,
+        (rsv_ctrl & !(BIT5 | BIT6)) | BIT5 | BIT6,
+        "REG_RSV_CTRL",
+        "usb-burst",
+    )?;
+    production_verify8_readback(
         registers,
         counters,
         "REG_RSV_CTRL",
         REG_RSV_CTRL,
-        !(BIT5 | BIT6),
-        BIT5 | BIT6,
-        BIT5 | BIT6,
+        BIT5,
+        BIT5,
         "usb-burst",
     )?;
 

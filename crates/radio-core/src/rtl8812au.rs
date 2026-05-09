@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::channel::{Band, Bandwidth, Channel};
 use crate::frame::{frame_type, validate_ieee80211_frame, FrameType, Ieee80211FrameError};
-use crate::usb::{ClaimedUsbDevice, UsbBulkTransfer, UsbError};
+use crate::usb::{ClaimedUsbDevice, FdClaimedUsbDevice, UsbBulkTransfer, UsbError};
 
 const RTL_USB_REQ: u8 = 0x05;
 const RTL_READ_REQUEST_TYPE: u8 = 0xc0;
@@ -699,6 +699,42 @@ pub trait Rtl8812auUsbTransport {
 }
 
 impl Rtl8812auUsbTransport for &ClaimedUsbDevice {
+    fn read_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        self.read_control(
+            RTL_READ_REQUEST_TYPE,
+            RTL_USB_REQ,
+            value,
+            index,
+            data,
+            timeout,
+        )
+    }
+
+    fn write_vendor(
+        &self,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<usize, UsbError> {
+        self.write_control(
+            RTL_WRITE_REQUEST_TYPE,
+            RTL_USB_REQ,
+            value,
+            index,
+            data,
+            timeout,
+        )
+    }
+}
+
+impl Rtl8812auUsbTransport for &FdClaimedUsbDevice {
     fn read_vendor(
         &self,
         value: u16,

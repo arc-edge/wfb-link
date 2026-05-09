@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusb::{
-    ConfigDescriptor, Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext,
+    ConfigDescriptor, Context, Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext,
     TransferType, UsbContext,
 };
 use serde::Serialize;
@@ -198,6 +198,43 @@ impl ClaimedUsbDevice {
     }
 }
 
+pub struct FdClaimedUsbDevice {
+    pub(crate) handle: DeviceHandle<Context>,
+    interface_number: u8,
+    pub info: UsbDeviceInfo,
+    pub endpoints: UsbEndpoints,
+}
+
+impl FdClaimedUsbDevice {
+    pub fn read_control(
+        &self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        data: &mut [u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, UsbError> {
+        self.handle
+            .read_control(request_type, request, value, index, data, timeout)
+            .map_err(UsbError::from)
+    }
+
+    pub fn write_control(
+        &self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        data: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, UsbError> {
+        self.handle
+            .write_control(request_type, request, value, index, data, timeout)
+            .map_err(UsbError::from)
+    }
+}
+
 pub trait UsbBulkTransfer {
     fn read_bulk_transfer(
         &mut self,
@@ -238,7 +275,37 @@ impl UsbBulkTransfer for ClaimedUsbDevice {
     }
 }
 
+impl UsbBulkTransfer for FdClaimedUsbDevice {
+    fn read_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, UsbError> {
+        self.handle
+            .read_bulk(endpoint, data, timeout)
+            .map_err(UsbError::from)
+    }
+
+    fn write_bulk_transfer(
+        &mut self,
+        endpoint: u8,
+        data: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<usize, UsbError> {
+        self.handle
+            .write_bulk(endpoint, data, timeout)
+            .map_err(UsbError::from)
+    }
+}
+
 impl Drop for ClaimedUsbDevice {
+    fn drop(&mut self) {
+        let _ = self.handle.release_interface(self.interface_number);
+    }
+}
+
+impl Drop for FdClaimedUsbDevice {
     fn drop(&mut self) {
         let _ = self.handle.release_interface(self.interface_number);
     }
@@ -421,7 +488,7 @@ pub fn claim_usb_device_from_fd(
     info: UsbDeviceInfo,
     endpoints: UsbEndpoints,
     interface_number: u8,
-) -> Result<ClaimedUsbDevice, UsbError> {
+) -> Result<FdClaimedUsbDevice, UsbError> {
     if fd < 0 {
         return Err(UsbError::Backend(format!(
             "invalid USB device file descriptor {fd}"
@@ -433,10 +500,11 @@ pub fn claim_usb_device_from_fd(
         });
     }
 
-    let handle = unsafe { rusb::GlobalContext::default().open_device_with_fd(fd)? };
+    let context = Context::new()?;
+    let handle = unsafe { context.open_device_with_fd(fd)? };
     handle.claim_interface(interface_number)?;
 
-    Ok(ClaimedUsbDevice {
+    Ok(FdClaimedUsbDevice {
         handle,
         interface_number,
         info,

@@ -37,7 +37,7 @@ pub use trace::{
     UsbTraceEvent, UsbTraceImport, UsbTraceImportError, UsbTraceKind, UsbTraceMismatch,
 };
 pub use usb::{
-    list_usb_devices, probe_usb, ClaimedUsbDevice, DeviceSelector, EndpointInfo, InterfaceInfo,
-    ProbeClaim, ProbeDevice, ProbeResult, UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
-    UsbProbeReport,
+    list_usb_devices, probe_usb, ClaimedUsbDevice, DeviceSelector, EndpointInfo,
+    FdClaimedUsbDevice, InterfaceInfo, ProbeClaim, ProbeDevice, ProbeResult, UsbBulkTransfer,
+    UsbDeviceInfo, UsbEndpoints, UsbError, UsbProbeReport,
 };

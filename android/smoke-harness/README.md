@@ -13,12 +13,23 @@ Packaging flow:
 4. Attach the AWUS036ACH through USBHost/OTG, preferably with a powered hub.
 5. Accept the Android USB permission prompt.
 6. Use `WfbUsbSmokeActivity` to request USB permission, open the matching
-   RTL8812AU device, obtain `UsbDeviceConnection.getFileDescriptor()`, and call
-   the Rust JNI smoke entry point.
+   RTL8812AU device, claim interface 0, and call the Rust JNI smoke entry
+   point with the live `UsbDeviceConnection` plus selected bulk endpoint
+   objects.
 
-The first smoke reads one 8-bit RTL8812AU register through the Android fd-backed
-transport. If that succeeds, the Activity runs one bounded bulk-IN read through
-the runtime RX descriptor parser on channel 36.
+The smoke first reads one 8-bit RTL8812AU register through Java
+`controlTransfer`, then through Rust's JNI-backed transport. It then runs one
+bounded bulk-IN read, followed by full RTL8812AU production init on channel 36
+HT20 and a second bounded RX descriptor read.
+
+`scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
+Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override
+`ANDROID_SMOKE_FIRMWARE`, `ANDROID_SMOKE_MAC_SOURCE`, `ANDROID_SMOKE_BB_SOURCE`,
+or `ANDROID_SMOKE_RF_SOURCE` when testing another checkout.
+
+The earlier libusb `getFileDescriptor()` wrapping path failed on Pixel 7 Pro
+with `libusb_wrap_sys_device` returning `Input/Output Error`; direct JNI
+`UsbDeviceConnection` control/bulk calls are now the active smoke path.
 
 Register return values `0..255` are register values. RX return values `0..N`
 are parsed frame counts for that single read. Negative return values are error
@@ -29,7 +40,8 @@ classes from `wfb-android-smoke`:
 - `-3`: register read error
 - `-4`: RX bulk read timeout
 - `-5`: RX bulk read error
+- `-6`: native panic caught at JNI boundary
 
-The app must keep the `UsbDeviceConnection` alive until the Rust call returns.
-Do not claim the interface or issue Java-side control/bulk transfers while Rust
-owns the smoke call.
+The app must keep the `UsbDeviceConnection` and endpoint objects alive until the
+Rust call returns. Do not issue unrelated Java-side transfers while Rust owns
+the smoke call.
