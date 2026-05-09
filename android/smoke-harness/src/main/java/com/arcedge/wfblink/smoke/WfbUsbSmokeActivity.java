@@ -35,7 +35,8 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int REG_SYS_FUNC_EN = 0x0002;
     private static final int RTL_USB_REQ = 0x05;
     private static final int RTL_READ_REQUEST_TYPE = 0xc0;
-    private static final int CHANNEL_NUMBER = 36;
+    private static final String EXTRA_CHANNEL_NUMBER = "channelNumber";
+    private static final int DEFAULT_CHANNEL_NUMBER = 36;
     private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
     private static final int INIT_RX_TIMEOUT_MS = 5000;
@@ -49,6 +50,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     private TextView status;
     private UsbDeviceConnection activeConnection;
     private UsbInterface activeInterface;
+    private int channelNumber;
 
     private final BroadcastReceiver permissionReceiver =
             new BroadcastReceiver() {
@@ -72,6 +74,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);
+        channelNumber = smokeChannelNumberFromIntent();
         if (getActionBar() != null) {
             getActionBar().hide();
         }
@@ -143,6 +146,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     }
 
     private void runSmoke(UsbDevice device) {
+        log("Smoke channel=" + channelNumber + " HT20");
         activeConnection = usbManager.openDevice(device);
         if (activeConnection == null) {
             log("openDevice returned null");
@@ -216,7 +220,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                         BULK_IN_ENDPOINT,
                         BULK_OUT_ENDPOINT,
                         BULK_OUT_ENDPOINT_COUNT,
-                        CHANNEL_NUMBER,
+                        channelNumber,
                         RX_READ_BUFFER_LEN,
                         INIT_RX_TIMEOUT_MS);
         if (rxResult >= 0) {
@@ -240,7 +244,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                         BULK_IN_ENDPOINT,
                         BULK_OUT_ENDPOINT,
                         BULK_OUT_ENDPOINT_COUNT,
-                        CHANNEL_NUMBER,
+                        channelNumber,
                         RX_READ_BUFFER_LEN,
                         TIMEOUT_MS);
         if (initRxResult >= 0) {
@@ -264,7 +268,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                         BULK_IN_ENDPOINT,
                         BULK_OUT_ENDPOINT,
                         BULK_OUT_ENDPOINT_COUNT,
-                        CHANNEL_NUMBER,
+                        channelNumber,
                         INIT_RX_TIMEOUT_MS);
         if (initTxResult >= 0) {
             log("Init + TX/WFB submit smoke completed: submitted_frames=" + initTxResult);
@@ -281,6 +285,14 @@ public final class WfbUsbSmokeActivity extends Activity {
             }
         }
         return null;
+    }
+
+    private int smokeChannelNumberFromIntent() {
+        int requested = getIntent().getIntExtra(EXTRA_CHANNEL_NUMBER, DEFAULT_CHANNEL_NUMBER);
+        if (requested <= 0 || requested > 196) {
+            return DEFAULT_CHANNEL_NUMBER;
+        }
+        return requested;
     }
 
     private void log(String line) {
