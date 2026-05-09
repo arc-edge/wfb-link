@@ -1,0 +1,13 @@
+[package]
+name = "wfb-android-smoke"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+radio-core.workspace = true
+wfb-radio-runtime.workspace = true

@@ -633,6 +633,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wfb-android-smoke"
+version = "0.1.0"
+dependencies = [
+ "radio-core",
+ "wfb-radio-runtime",
+]
+
+[[package]]
 name = "wfb-bridge"
 version = "0.1.0"
 dependencies = [

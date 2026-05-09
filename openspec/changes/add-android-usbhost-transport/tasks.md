@@ -25,8 +25,11 @@
 
 ## 3. Android Hardware Validation
 
-- [ ] 3.1 Add an Android smoke harness that obtains USB permission, opens the
+- [x] 3.1 Add an Android smoke harness that obtains USB permission, opens the
       AWUS036ACH, and passes the runtime transport handoff into Rust.
+      Added a source-only Android harness plus `wfb-android-smoke` JNI crate.
+      Packaging into a Gradle/NDK app remains pending because this checkout
+      does not currently have Gradle or an Android NDK compiler configured.
 - [ ] 3.2 Validate power-on/init RX-only descriptor parsing.
 - [ ] 3.3 Validate single TX and bounded bidirectional WFB distributor datagrams
       against the Linux peer.
