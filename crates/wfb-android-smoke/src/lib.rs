@@ -17,9 +17,10 @@ use jni::{
 };
 #[cfg(target_os = "android")]
 use radio_core::{
-    parse_realtek_u32_array, plan_realtek_table, rtl8812au::Rtl8812auUsbTransport, Bandwidth,
-    FirmwareImage, RealtekConditionEnv, RealtekTableKind, RealtekTablePlan, UsbBulkTransfer,
-    UsbError,
+    parse_realtek_u32_array, plan_realtek_table,
+    rtl8812au::{Rtl8812auUsbTransport, TxQueue},
+    Bandwidth, FirmwareImage, RealtekConditionEnv, RealtekTableKind, RealtekTablePlan, TxOptions,
+    TxRate, TxSubmitCounters, UsbBulkTransfer, UsbError,
 };
 use radio_core::{
     rtl8812au::Rtl8812auRegisterError, Channel, DeviceSelector, Rtl8812auRegisterAccess,
@@ -42,6 +43,8 @@ pub const JNI_RX_READ_SMOKE_SYMBOL: &str =
     "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runRxReadSmoke";
 pub const JNI_INIT_RX_READ_SMOKE_SYMBOL: &str =
     "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runInitRxReadSmoke";
+pub const JNI_INIT_TX_SMOKE_SYMBOL: &str =
+    "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runInitTxSmoke";
 
 pub const ANDROID_SMOKE_INVALID_ARGUMENT: i32 = -1;
 pub const ANDROID_SMOKE_TRANSPORT_ERROR: i32 = -2;
@@ -102,6 +105,17 @@ const RF_RADIOA_ARRAY: &str = "array_mp_8812a_radioa";
 const RF_RADIOB_ARRAY: &str = "array_mp_8812a_radiob";
 #[cfg(target_os = "android")]
 const DEFAULT_RFE_TYPE: u8 = 0x03;
+#[cfg(target_os = "android")]
+const ANDROID_SMOKE_TX_FRAME_COUNT: usize = 3;
+#[cfg(target_os = "android")]
+const ANDROID_SMOKE_TX_FRAME: [u8; 24] = [
+    0x48, 0x00, // data null, no flags
+    0x00, 0x00, // duration
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // addr1
+    0x02, 0x00, 0x5e, 0x00, 0x00, 0x02, // addr2
+    0x02, 0x00, 0x5e, 0x00, 0x00, 0x02, // addr3
+    0x00, 0x00, // seq control
+];
 
 #[derive(Debug)]
 pub enum AndroidSmokeError {
@@ -166,6 +180,19 @@ pub fn android_rx_read_smoke_return_code(
     }
 }
 
+pub fn android_tx_smoke_return_code(
+    result: Result<AndroidTxSmokeSummary, AndroidSmokeError>,
+) -> i32 {
+    match result {
+        Ok(summary) => i32::try_from(summary.submitted).unwrap_or(i32::MAX),
+        Err(AndroidSmokeError::InvalidArgument(_)) => ANDROID_SMOKE_INVALID_ARGUMENT,
+        Err(AndroidSmokeError::Transport(_)) => ANDROID_SMOKE_TRANSPORT_ERROR,
+        Err(AndroidSmokeError::Register(_)) => ANDROID_SMOKE_REGISTER_ERROR,
+        Err(AndroidSmokeError::Rx(error)) if error.timeout => ANDROID_SMOKE_RX_TIMEOUT,
+        Err(AndroidSmokeError::Rx(_)) => ANDROID_SMOKE_RX_ERROR,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_android_usbhost_register_smoke(
     fd: i32,
@@ -197,6 +224,15 @@ pub struct AndroidRxReadSmokeSummary {
     pub parsed_frames: usize,
     pub dropped_packets: usize,
     pub need_more_data: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AndroidTxSmokeSummary {
+    pub attempted: u64,
+    pub submitted: u64,
+    pub failed: u64,
+    pub short_writes: u64,
+    pub bytes_written: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -834,6 +870,71 @@ fn run_android_usbhost_init_rx_read_smoke_jni<'local>(
 }
 
 #[cfg(target_os = "android")]
+#[allow(clippy::too_many_arguments)]
+fn run_android_usbhost_init_tx_smoke_jni<'local>(
+    env: JNIEnv<'local>,
+    connection: JObject<'local>,
+    bulk_in_endpoint_object: JObject<'local>,
+    bulk_out_endpoint_object: JObject<'local>,
+    args: AndroidRxSmokeJniArgs,
+) -> Result<AndroidTxSmokeSummary, AndroidSmokeError> {
+    let channel = Channel::from_number(args.channel_number)
+        .map_err(|_| AndroidSmokeError::InvalidArgument("channel_number"))?;
+    let mut session = open_android_jni_usbhost_session(
+        env,
+        connection,
+        bulk_in_endpoint_object,
+        bulk_out_endpoint_object,
+        args.fd,
+        args.vid,
+        args.pid,
+        args.interface_number,
+        args.bulk_in_endpoint,
+        args.bulk_out_endpoint,
+        args.bulk_out_endpoint_count,
+    )?;
+    let init_inputs = android_smoke_load_init_inputs(args.timeout)?;
+    let init = run_rtl8812au_production_init(
+        &mut session,
+        init_inputs,
+        channel,
+        Bandwidth::Mhz20,
+        TxCalibrationProfile::CurrentDefault,
+        false,
+        false,
+    )
+    .map_err(|failure| AndroidSmokeError::Rx(failure.error))?;
+    android_log_info(format!(
+        "tx smoke init completed: phases={} control_reads={} control_writes={}",
+        init.phase_summaries.len(),
+        init.counters.usb_control_reads,
+        init.counters.usb_control_writes
+    ));
+
+    let options = TxOptions {
+        rate: TxRate::Ofdm6m,
+        bandwidth: Bandwidth::Mhz20,
+        channel_bandwidth: Some(Bandwidth::Mhz20),
+        queue: TxQueue::Mgnt,
+        retries: 0,
+        no_retry: true,
+        rate_fallback_limit: 0,
+        ..TxOptions::default()
+    };
+    let mut counters = TxSubmitCounters::default();
+    for _ in 0..ANDROID_SMOKE_TX_FRAME_COUNT {
+        session.submit_80211_frame(&ANDROID_SMOKE_TX_FRAME, channel, options, &mut counters)?;
+    }
+    Ok(AndroidTxSmokeSummary {
+        attempted: counters.attempted,
+        submitted: counters.submitted,
+        failed: counters.failed,
+        short_writes: counters.short_writes,
+        bytes_written: counters.bytes_written,
+    })
+}
+
+#[cfg(target_os = "android")]
 #[no_mangle]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runRegisterSmoke(
@@ -1022,6 +1123,80 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runI
     }))
     .unwrap_or_else(|panic| {
         android_log_info(format!("init rx read smoke panic: {panic:?}"));
+        ANDROID_SMOKE_NATIVE_PANIC
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runInitTxSmoke(
+    env: *mut RawJNIEnv,
+    _class: jclass,
+    connection: jobject,
+    bulk_in_endpoint_object: jobject,
+    bulk_out_endpoint_object: jobject,
+    fd: i32,
+    vid: i32,
+    pid: i32,
+    interface_number: i32,
+    bulk_in_endpoint: i32,
+    bulk_out_endpoint: i32,
+    bulk_out_endpoint_count: i32,
+    channel_number: i32,
+    timeout_ms: i32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let args = match android_rx_smoke_jni_args(
+            fd,
+            vid,
+            pid,
+            interface_number,
+            bulk_in_endpoint,
+            bulk_out_endpoint,
+            bulk_out_endpoint_count,
+            channel_number,
+            1,
+            timeout_ms,
+        ) {
+            Ok(args) => args,
+            Err(error) => return android_tx_smoke_return_code(Err(error)),
+        };
+        let env = match unsafe { JNIEnv::from_raw(env) } {
+            Ok(env) => env,
+            Err(error) => {
+                android_log_info(format!("init tx smoke invalid JNIEnv: {error}"));
+                return ANDROID_SMOKE_INVALID_ARGUMENT;
+            }
+        };
+        let connection = unsafe { JObject::from_raw(connection) };
+        let bulk_in_endpoint_object = unsafe { JObject::from_raw(bulk_in_endpoint_object) };
+        let bulk_out_endpoint_object = unsafe { JObject::from_raw(bulk_out_endpoint_object) };
+
+        let result = run_android_usbhost_init_tx_smoke_jni(
+            env,
+            connection,
+            bulk_in_endpoint_object,
+            bulk_out_endpoint_object,
+            args,
+        );
+        if let Ok(summary) = &result {
+            android_log_info(format!(
+                "init tx smoke submitted={}/{} bytes={} failed={} short_writes={}",
+                summary.submitted,
+                summary.attempted,
+                summary.bytes_written,
+                summary.failed,
+                summary.short_writes
+            ));
+        }
+        if let Err(error) = &result {
+            android_log_info(format!("init tx smoke error: {error:?}"));
+        }
+        android_tx_smoke_return_code(result)
+    }))
+    .unwrap_or_else(|panic| {
+        android_log_info(format!("init tx smoke panic: {panic:?}"));
         ANDROID_SMOKE_NATIVE_PANIC
     })
 }

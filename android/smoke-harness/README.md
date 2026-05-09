@@ -20,7 +20,8 @@ Packaging flow:
 The smoke first reads one 8-bit RTL8812AU register through Java
 `controlTransfer`, then through Rust's JNI-backed transport. It then runs one
 bounded bulk-IN read, followed by full RTL8812AU production init on channel 36
-HT20 and a second bounded RX descriptor read.
+HT20 and a second bounded RX descriptor read. The final smoke reruns init and
+submits three descriptor-prefixed null-data frames through bulk OUT.
 
 `scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
 Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override

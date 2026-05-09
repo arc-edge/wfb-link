@@ -37,5 +37,9 @@
       init through the runtime RX descriptor parser.
 - [ ] 3.3 Validate single TX and bounded bidirectional WFB distributor datagrams
       against the Linux peer.
+      Android init+TX smoke now submits 3/3 descriptor-prefixed frames through
+      bulk OUT with 192 USB bytes, 0 failed writes, and 0 short writes. WFB
+      distributor datagram and bidirectional validation still require a
+      reachable Linux peer.
 - [ ] 3.4 Run the production managed-stream profile and compare against the
       macOS bench results before considering Android production-ready.

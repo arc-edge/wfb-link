@@ -214,6 +214,27 @@ public final class WfbUsbSmokeActivity extends Activity {
         } else {
             log("Init + RX descriptor smoke failed with code " + initRxResult);
         }
+
+        log("Running init + TX submit smoke");
+        int initTxResult =
+                WfbNativeSmoke.runInitTxSmoke(
+                        activeConnection,
+                        bulkInEndpointObject,
+                        bulkOutEndpointObject,
+                        fd,
+                        device.getVendorId(),
+                        device.getProductId(),
+                        INTERFACE_NUMBER,
+                        BULK_IN_ENDPOINT,
+                        BULK_OUT_ENDPOINT,
+                        BULK_OUT_ENDPOINT_COUNT,
+                        CHANNEL_NUMBER,
+                        INIT_RX_TIMEOUT_MS);
+        if (initTxResult >= 0) {
+            log("Init + TX submit smoke completed: submitted_frames=" + initTxResult);
+        } else {
+            log("Init + TX submit smoke failed with code " + initTxResult);
+        }
     }
 
     private UsbEndpoint findEndpoint(UsbInterface usbInterface, int address) {

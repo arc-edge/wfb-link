@@ -50,4 +50,18 @@ final class WfbNativeSmoke {
             int channelNumber,
             int readBufferLen,
             int timeoutMs);
+
+    static native int runInitTxSmoke(
+            android.hardware.usb.UsbDeviceConnection connection,
+            android.hardware.usb.UsbEndpoint bulkInEndpointObject,
+            android.hardware.usb.UsbEndpoint bulkOutEndpointObject,
+            int fd,
+            int vid,
+            int pid,
+            int interfaceNumber,
+            int bulkInEndpoint,
+            int bulkOutEndpoint,
+            int bulkOutEndpointCount,
+            int channelNumber,
+            int timeoutMs);
 }
