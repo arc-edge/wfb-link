@@ -10,11 +10,11 @@
 
 ## 2. Native Android Transfer Bridge
 
-- [ ] 2.1 Choose the bridge strategy: JNI calls into `UsbDeviceConnection` or a
+- [x] 2.1 Choose the bridge strategy: JNI calls into `UsbDeviceConnection` or a
       native file-descriptor ownership model.
-- [ ] 2.2 Implement Android control transfers for RTL8812AU vendor register and
+- [x] 2.2 Implement Android control transfers for RTL8812AU vendor register and
       EFUSE access.
-- [ ] 2.3 Implement Android bulk IN and bulk OUT transfers with timeout and
+- [x] 2.3 Implement Android bulk IN and bulk OUT transfers with timeout and
       short-transfer semantics matching the runtime traits.
 - [ ] 2.4 Add Android-specific lifecycle tests for ownership, close, timeout,
       and unsupported-device errors.

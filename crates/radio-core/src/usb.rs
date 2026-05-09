@@ -2,10 +2,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusb::{
     ConfigDescriptor, Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext,
-    TransferType,
+    TransferType, UsbContext,
 };
 use serde::Serialize;
 use thiserror::Error;
+
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
 use crate::registry::{lookup_known_adapter, KnownAdapter};
 
@@ -412,6 +415,35 @@ pub fn claim_usb_device(info: &UsbDeviceInfo) -> Result<ClaimedUsbDevice, UsbErr
     Err(UsbError::DeviceDisappeared)
 }
 
+#[cfg(unix)]
+pub fn claim_usb_device_from_fd(
+    fd: RawFd,
+    info: UsbDeviceInfo,
+    endpoints: UsbEndpoints,
+    interface_number: u8,
+) -> Result<ClaimedUsbDevice, UsbError> {
+    if fd < 0 {
+        return Err(UsbError::Backend(format!(
+            "invalid USB device file descriptor {fd}"
+        )));
+    }
+    if endpoints.bulk_in.is_none() || endpoints.bulk_out.is_none() {
+        return Err(UsbError::MissingBulkEndpoints {
+            interface: interface_number,
+        });
+    }
+
+    let handle = unsafe { rusb::GlobalContext::default().open_device_with_fd(fd)? };
+    handle.claim_interface(interface_number)?;
+
+    Ok(ClaimedUsbDevice {
+        handle,
+        interface_number,
+        info,
+        endpoints,
+    })
+}
+
 fn collect_usb_devices() -> Result<Vec<UsbDeviceInfo>, UsbError> {
     let devices = rusb::devices()?;
     let mut out = Vec::new();
@@ -752,5 +784,34 @@ mod tests {
         assert!(claim.attempted);
         assert!(claim.success);
         assert_eq!(claim.endpoints.expect("endpoints").bulk_in, Some(0x81));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_claim_rejects_invalid_fd_before_libusb_open() {
+        let error = match claim_usb_device_from_fd(-1, sample_device(None), sample_endpoints(), 0) {
+            Ok(_) => panic!("invalid fd opened"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("invalid USB device file descriptor"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_claim_rejects_missing_bulk_endpoint_shape_before_libusb_open() {
+        let mut endpoints = sample_endpoints();
+        endpoints.bulk_out = None;
+        let error = match claim_usb_device_from_fd(42, sample_device(None), endpoints, 0) {
+            Ok(_) => panic!("missing bulk OUT opened"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            UsbError::MissingBulkEndpoints { interface: 0 }
+        ));
     }
 }

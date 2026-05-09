@@ -20,11 +20,11 @@ boundary.
   native device file descriptor field.
 - Reject invalid endpoint layouts and multiple enabled USB backends before any
   hardware open attempt.
-- Return stable fail-closed errors until the Android transfer bridge lands.
+- Use stable validation errors for missing fd, invalid fd, unsupported adapter
+  metadata, unsupported selector shape, and invalid endpoint layout.
 
 ## Non-Goals
 
-- Implement JNI or NDK USB transfer calls in this slice.
 - Add an Android app package, Gradle build, or USB permission UI in this slice.
 - Change RF defaults, WFB packet formats, calibration behavior, or Linux/macOS
   backend behavior.
@@ -54,26 +54,36 @@ device descriptors directly. It still preserves VID/PID, known-adapter lookup,
 interface number, endpoint list, and a platform-specific speed string so JSON
 reports and link health have the same shape.
 
-### Native Bridge Follow-Up
+### Native Bridge Decision
 
-The next slice should implement an Android transport that satisfies
-`Rtl8812auUsbTransport` and `UsbBulkTransfer`. There are two plausible
-approaches:
+Use native file-descriptor handoff via libusb wrapping instead of per-transfer
+JNI calls into `UsbDeviceConnection`.
 
-- JNI calls into an app-owned `UsbDeviceConnection` for control and bulk
-  transfers.
-- Native ownership of a handed-off file descriptor, if Android USB semantics
-  permit reliable descriptor lifetime and endpoint I/O for this adapter.
+The Android app layer owns permission and opens `UsbDeviceConnection`. It then
+passes `getFileDescriptor()` into `AndroidUsbHostConfig.device_fd` and keeps the
+owning `UsbDeviceConnection` alive until the Rust radio session exits.
+`wfb-radio-runtime` wraps that fd with `rusb`/`libusb_wrap_sys_device`, claims
+the configured interface, and reuses the existing `ClaimedUsbDevice`
+implementations of `Rtl8812auUsbTransport` and `UsbBulkTransfer`.
 
-The bridge must define ownership, close behavior, timeout behavior, and thread
-safety before hardware validation. Until then, `open_android_usbhost_transport`
-returns a stable not-implemented error on Android and an unsupported-platform
-error elsewhere.
+This keeps the transfer path synchronous and close to the already-verified
+libusb path. It also avoids a broad JNI surface for every control and bulk
+transfer. The tradeoff is that Android packaging must include libusb and the
+app must treat the USB connection as owned by Rust during the radio session.
+
+The fd wrapper does not own the Java-side descriptor. The app must keep the
+connection alive, and it should not issue Java-side control or bulk transfers
+against the same interface while Rust owns the session.
 
 ## Validation
 
 - Unit tests cover endpoint derivation, invalid endpoint rejection, runtime
-  backend mapping, service config mapping, and multiple-backend rejection.
-- Hardware validation waits for the native Android bridge. The first hardware
-  gate should be RX-only descriptor parsing, then single TX, then bounded
-  bidirectional WFB distributor datagrams against the existing Linux peer.
+  backend mapping, open-plan validation, fd preflight validation, service config
+  mapping, and multiple-backend rejection.
+- Android target checking requires an NDK compiler such as
+  `aarch64-linux-android-clang`; without that toolchain, the vendored libusb
+  build stops before Android Rust code can be checked.
+- Hardware validation waits for the Android app handoff harness. The first
+  hardware gate should be RX-only descriptor parsing, then single TX, then
+  bounded bidirectional WFB distributor datagrams against the existing Linux
+  peer.

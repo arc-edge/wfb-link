@@ -91,8 +91,9 @@ do not promise a particular USB transport; the runtime config selects the
 platform-specific transport underneath. Existing macOS TOML profiles select the
 macOS IOUSBHost path with `[macos_usbhost]`. Android profiles select
 `[android_usbhost]` and reuse the same lifecycle, endpoint, health, and report
-shapes; the current implementation validates that config and fails closed until
-the native Android USB transfer bridge exists.
+shapes. The current Android bridge wraps an app-owned USB file descriptor with
+libusb, so the product app is responsible for USB permission, device open, and
+keeping the `UsbDeviceConnection` alive.
 
 The deprecated `MacosUserspaceRadio*` names are compatibility aliases. New
 product code should use `UserspaceRadio*`.
@@ -308,17 +309,15 @@ already has a mature native WFB path.
 ## Android Backend
 
 Android is expected to use the portable userspace radio contract rather than a
-native Linux monitor-mode path. The Rust-side Android USBHost contract now
-includes transport selection, endpoint validation, synthetic adapter metadata,
-runtime config serialization, service TOML/CLI mapping, and stable fail-closed
-open errors. The remaining platform piece is the native Android bridge that
-turns an app-owned `UsbDeviceConnection` or handed-off file descriptor into the
+native Linux monitor-mode path. The Rust-side Android USBHost contract includes
+transport selection, endpoint validation, synthetic adapter metadata, runtime
+config serialization, service TOML/CLI mapping, and an fd-backed libusb bridge
+that turns an app-owned `UsbDeviceConnection` file descriptor into the
 RTL8812AU control and bulk transfers used by `wfb-radio-runtime`.
 
-Once that transport can produce the same runtime USB session behavior as macOS
-IOUSBHost, Android product code should be able to start a
-`UserspaceRadioBackend` with Android runtime USB config and keep the same
-`LinkEndpoints`, `LinkHealth`, and `LinkReport` model.
+Once the Android app handoff and NDK build are wired, Android product code
+should be able to start a `UserspaceRadioBackend` with Android runtime USB
+config and keep the same `LinkEndpoints`, `LinkHealth`, and `LinkReport` model.
 
 ## Why This Boundary
 

@@ -72,6 +72,8 @@ const PRODUCTION_RX_STARTUP_KICK_FRAME: [u8; 24] = [
 
 pub enum RuntimeUsbTransport {
     Libusb(Box<ClaimedUsbDevice>),
+    #[cfg(target_os = "android")]
+    Android(Box<ClaimedUsbDevice>),
     #[cfg(target_os = "macos")]
     Macos(macos_usbhost::MacosUsbHostSession),
 }
@@ -88,6 +90,10 @@ impl Rtl8812auUsbTransport for RuntimeUsbTransport {
             RuntimeUsbTransport::Libusb(claimed) => {
                 claimed.as_ref().read_vendor(value, index, data, timeout)
             }
+            #[cfg(target_os = "android")]
+            RuntimeUsbTransport::Android(claimed) => {
+                claimed.as_ref().read_vendor(value, index, data, timeout)
+            }
             #[cfg(target_os = "macos")]
             RuntimeUsbTransport::Macos(session) => session.read_vendor(value, index, data, timeout),
         }
@@ -102,6 +108,10 @@ impl Rtl8812auUsbTransport for RuntimeUsbTransport {
     ) -> std::result::Result<usize, UsbError> {
         match self {
             RuntimeUsbTransport::Libusb(claimed) => {
+                claimed.as_ref().write_vendor(value, index, data, timeout)
+            }
+            #[cfg(target_os = "android")]
+            RuntimeUsbTransport::Android(claimed) => {
                 claimed.as_ref().write_vendor(value, index, data, timeout)
             }
             #[cfg(target_os = "macos")]
@@ -149,6 +159,10 @@ impl UsbBulkTransfer for RuntimeUsbTransport {
             RuntimeUsbTransport::Libusb(claimed) => {
                 claimed.as_mut().read_bulk_transfer(endpoint, data, timeout)
             }
+            #[cfg(target_os = "android")]
+            RuntimeUsbTransport::Android(claimed) => {
+                claimed.as_mut().read_bulk_transfer(endpoint, data, timeout)
+            }
             #[cfg(target_os = "macos")]
             RuntimeUsbTransport::Macos(session) => {
                 session.read_bulk_transfer(endpoint, data, timeout)
@@ -164,6 +178,10 @@ impl UsbBulkTransfer for RuntimeUsbTransport {
     ) -> std::result::Result<usize, UsbError> {
         match self {
             RuntimeUsbTransport::Libusb(claimed) => claimed
+                .as_mut()
+                .write_bulk_transfer(endpoint, data, timeout),
+            #[cfg(target_os = "android")]
+            RuntimeUsbTransport::Android(claimed) => claimed
                 .as_mut()
                 .write_bulk_transfer(endpoint, data, timeout),
             #[cfg(target_os = "macos")]
@@ -13048,6 +13066,65 @@ pub fn android_usbhost_adapter_info(vid: u16, pid: u16, endpoints: &UsbEndpoints
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidUsbHostOpenPlan {
+    pub device_fd: i32,
+    pub vid: u16,
+    pub pid: u16,
+    pub endpoints: UsbEndpoints,
+}
+
+pub fn android_usbhost_open_plan(
+    config: &AndroidUsbHostConfig,
+    selector: DeviceSelector,
+) -> Result<AndroidUsbHostOpenPlan, RuntimeTransportError> {
+    if selector.bus.is_some() || selector.address.is_some() {
+        return Err(RuntimeTransportError::new(
+            "unsupported_android_selector_location",
+            "Android USBHost transport is selected by app-owned device file descriptor plus VID/PID metadata, not USB bus/address",
+        ));
+    }
+    let device_fd = config.device_fd.ok_or_else(|| {
+        RuntimeTransportError::new(
+            "missing_android_device_fd",
+            "Android USBHost transport requires a UsbDeviceConnection file descriptor supplied by the app layer",
+        )
+    })?;
+    if device_fd < 0 {
+        return Err(RuntimeTransportError::new(
+            "invalid_android_device_fd",
+            format!("Android USBHost device file descriptor must be non-negative, got {device_fd}"),
+        ));
+    }
+    let vid = selector.vid.ok_or_else(|| {
+        RuntimeTransportError::new(
+            "missing_vid",
+            "Android USBHost transport requires VID metadata for adapter validation and reports",
+        )
+    })?;
+    let pid = selector.pid.ok_or_else(|| {
+        RuntimeTransportError::new(
+            "missing_pid",
+            "Android USBHost transport requires PID metadata for adapter validation and reports",
+        )
+    })?;
+    if radio_core::lookup_known_adapter(vid, pid).is_none() {
+        return Err(RuntimeTransportError::new(
+            "unsupported_adapter",
+            format!(
+                "USB device 0x{vid:04x}:0x{pid:04x} is not registered as a supported RTL8812AU adapter"
+            ),
+        ));
+    }
+
+    Ok(AndroidUsbHostOpenPlan {
+        device_fd,
+        vid,
+        pid,
+        endpoints: android_usbhost_endpoints(config)?,
+    })
+}
+
 pub fn open_android_usbhost_transport(
     config: &AndroidUsbHostConfig,
     selector: DeviceSelector,
@@ -13063,11 +13140,24 @@ pub fn open_android_usbhost_transport(
 
     #[cfg(target_os = "android")]
     {
-        let _ = (config, selector);
-        Err(RuntimeTransportError::new(
-            "android_usbhost_not_implemented",
-            "Android USB host transport is configured, but the UsbDeviceConnection/JNI transfer bridge has not been implemented yet",
-        ))
+        let plan = android_usbhost_open_plan(config, selector)?;
+        let adapter = android_usbhost_adapter_info(plan.vid, plan.pid, &plan.endpoints);
+        let claimed = radio_core::usb::claim_usb_device_from_fd(
+            plan.device_fd,
+            adapter.clone(),
+            plan.endpoints.clone(),
+            plan.endpoints.interface_number,
+        )
+        .map_err(|error| {
+            RuntimeTransportError::new("android_libusb_fd_open_failed", error.to_string())
+        })?;
+
+        Ok(RuntimeUsbTransportOpen {
+            transport: RuntimeUsbTransport::Android(Box::new(claimed)),
+            adapter,
+            endpoints: plan.endpoints,
+            initial_usb_control_writes: 0,
+        })
     }
 }
 
@@ -13268,7 +13358,7 @@ mod tests {
     };
 
     use super::{
-        android_usbhost_adapter_info, android_usbhost_endpoints,
+        android_usbhost_adapter_info, android_usbhost_endpoints, android_usbhost_open_plan,
         bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
         handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
         open_android_usbhost_transport, plan_production_wfb_loop,
@@ -16538,6 +16628,90 @@ mod tests {
             }
             other => panic!("expected Android USBHost backend, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn android_usbhost_open_plan_requires_fd_and_vid_pid() {
+        let selector = DeviceSelector {
+            vid: Some(0x0bda),
+            pid: Some(0x8812),
+            ..DeviceSelector::default()
+        };
+        let error = android_usbhost_open_plan(&AndroidUsbHostConfig::default(), selector)
+            .expect_err("missing fd");
+        assert_eq!(error.code, "missing_android_device_fd");
+
+        let config = AndroidUsbHostConfig {
+            device_fd: Some(42),
+            ..AndroidUsbHostConfig::default()
+        };
+        let error =
+            android_usbhost_open_plan(&config, DeviceSelector::default()).expect_err("missing VID");
+        assert_eq!(error.code, "missing_vid");
+    }
+
+    #[test]
+    fn android_usbhost_open_plan_rejects_invalid_fd_selector_and_adapter() {
+        let selector = DeviceSelector {
+            vid: Some(0x0bda),
+            pid: Some(0x8812),
+            ..DeviceSelector::default()
+        };
+        let config = AndroidUsbHostConfig {
+            device_fd: Some(-1),
+            ..AndroidUsbHostConfig::default()
+        };
+        let error = android_usbhost_open_plan(&config, selector).expect_err("invalid fd");
+        assert_eq!(error.code, "invalid_android_device_fd");
+
+        let config = AndroidUsbHostConfig {
+            device_fd: Some(42),
+            ..AndroidUsbHostConfig::default()
+        };
+        let error = android_usbhost_open_plan(
+            &config,
+            DeviceSelector {
+                vid: Some(0x0bda),
+                pid: Some(0x8812),
+                bus: Some(1),
+                address: None,
+            },
+        )
+        .expect_err("bus/address selector unsupported");
+        assert_eq!(error.code, "unsupported_android_selector_location");
+
+        let error = android_usbhost_open_plan(
+            &config,
+            DeviceSelector {
+                vid: Some(0xffff),
+                pid: Some(0xffff),
+                ..DeviceSelector::default()
+            },
+        )
+        .expect_err("unsupported adapter");
+        assert_eq!(error.code, "unsupported_adapter");
+    }
+
+    #[test]
+    fn android_usbhost_open_plan_accepts_valid_fd_metadata_and_endpoints() {
+        let plan = android_usbhost_open_plan(
+            &AndroidUsbHostConfig {
+                device_fd: Some(42),
+                bulk_out_endpoint_count: 4,
+                ..AndroidUsbHostConfig::default()
+            },
+            DeviceSelector {
+                vid: Some(0x0bda),
+                pid: Some(0x8812),
+                ..DeviceSelector::default()
+            },
+        )
+        .expect("valid Android open plan");
+
+        assert_eq!(plan.device_fd, 42);
+        assert_eq!(plan.vid, 0x0bda);
+        assert_eq!(plan.pid, 0x8812);
+        assert_eq!(plan.endpoints.bulk_out_all, vec![0x02, 0x03, 0x04, 0x05]);
     }
 
     #[cfg(not(target_os = "android"))]

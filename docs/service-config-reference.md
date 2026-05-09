@@ -84,7 +84,7 @@ Fields:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `enabled` | no | Selects the Android USBHost transport when true. Defaults to false. |
-| `device_fd` | no | Native file descriptor handed in by the Android app layer after USB permission and device open. This is normally runtime/app-supplied, not a static product config value. |
+| `device_fd` | no | Native file descriptor handed in by the Android app layer after USB permission and device open. The Java/Kotlin layer must keep the owning `UsbDeviceConnection` alive for the lifetime of the Rust radio session and should let Rust/libusb claim the interface. This is normally runtime/app-supplied, not a static product config value. |
 | `interface_number` | no | USB interface number. Defaults to `0`. |
 | `bulk_in_endpoint` | no | Selected bulk IN endpoint address. Defaults to `129` / `0x81`. |
 | `bulk_out_endpoint` | no | Selected bulk OUT endpoint address. Defaults to `2` / `0x02`. |
@@ -95,9 +95,9 @@ Only one USB backend may be enabled. If `[macos_usbhost]` and
 `multiple_usb_backends_enabled`.
 
 Current implementation boundary: Android config, service CLI flags, endpoint
-validation, runtime config serialization, and platform-specific open errors are
-implemented. Actual Android control and bulk transfers are the next native
-bridge task.
+validation, runtime config serialization, and fd-backed libusb control/bulk
+transfer plumbing are implemented. Android app packaging, USB permission UI,
+NDK build setup, and hardware smoke validation remain pending.
 
 ## Stream Schema
 

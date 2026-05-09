@@ -11,8 +11,8 @@
 - macOS IOUSBHost direct-control and retained-session transport wrappers.
 - macOS USBHost endpoint validation, synthetic adapter metadata, and retained-session open policy.
 - Android USBHost config, endpoint validation, synthetic adapter metadata,
-  production USB selection snapshots, and explicit fail-closed open errors
-  while the native Android transfer bridge is pending.
+  production USB selection snapshots, and fd-backed libusb wrapping for
+  app-owned Android USB device handles.
 - Runtime libusb adapter selection/claim policy for bridge, init, TX, RX, and IQK runtime transport paths.
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 - RTL8812AU same-session init phase identities and default/Linux-order phase sequencing policy.

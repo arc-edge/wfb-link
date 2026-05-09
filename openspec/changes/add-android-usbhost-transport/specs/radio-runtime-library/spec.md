@@ -18,9 +18,18 @@ backend without changing the shared RTL8812AU runtime configuration shape.
 - **THEN** the runtime snapshot records `android_usbhost` config and maps it to
   a live Android runtime open request
 
-#### Scenario: Android native bridge pending
+#### Scenario: Android fd-backed bridge opened
 
-- **WHEN** a caller opens the Android USBHost backend before the native Android
-  transfer bridge is implemented
-- **THEN** the runtime library returns a structured fail-closed error with a
-  stable code and human-readable message
+- **WHEN** a caller opens the Android USBHost backend with a non-negative
+  app-owned device file descriptor, supported VID/PID metadata, and valid
+  endpoint configuration
+- **THEN** the runtime library wraps the fd as a USB transport that supports
+  RTL8812AU vendor control transfers and bulk IN/OUT transfers
+
+#### Scenario: Android fd-backed bridge rejected
+
+- **WHEN** a caller opens the Android USBHost backend with a missing fd,
+  negative fd, missing VID/PID metadata, unsupported adapter metadata,
+  unsupported bus/address selector, or invalid endpoint layout
+- **THEN** the runtime library returns a structured runtime error with a stable
+  code and human-readable message before attempting live USB transfers
