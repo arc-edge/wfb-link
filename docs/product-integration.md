@@ -21,9 +21,9 @@ Product code
 | --- | --- | --- |
 | Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested for tunnel-only runs. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
 | Managed raw application multi-streams, optionally with an IP tunnel | `ManagedWfbStreamsBackend` | Product-facing implementation. Supervises one WFB-NG helper per configured stream, can also supervise one `wfb-tun-macos` tunnel on separate radio ports, and exposes named raw UDP endpoints with health. |
-| Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in transport is macOS IOUSBHost; Android should reuse this contract with an Android USB transport. |
+| Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in live transport is macOS IOUSBHost; Android uses the same contract with an Android USBHost config/open stub while the native transfer bridge is built. |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
-| Android | `UserspaceRadioBackend` plus Android USB transport | Planned. Keep the same lifecycle, endpoint, health, and report contracts. |
+| Android | `UserspaceRadioBackend` plus Android USBHost transport | Config/API contract implemented; native UsbDeviceConnection/JNI control and bulk transfer bridge pending. Keep the same lifecycle, endpoint, health, and report contracts. |
 
 The important distinction is `payload_kind`:
 
@@ -260,9 +260,10 @@ on the configured channel.
 ## Userspace Distributor Streams
 
 Use this path when the product already owns WFB-NG datagrams or supervises its
-own helper processes. On macOS, the service TOML currently selects
-`[macos_usbhost]`; Android should select a future Android USB runtime transport
-without changing this top-level link code.
+own helper processes. On macOS, the service TOML selects `[macos_usbhost]`;
+Android selects `[android_usbhost]` without changing this top-level link code.
+The Android section is currently config-only until the native transfer bridge
+lands.
 
 ```rust
 use std::time::Duration;

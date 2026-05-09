@@ -12,9 +12,10 @@ use radio_core::{
 };
 use serde::Deserialize;
 use wfb_radio_runtime::{
-    plan_rtl8812au_efuse_tx_power, run_production_runtime_flow, LedHeartbeatConfig,
-    MacosUsbHostConfig, ProductionRuntimeAirtimeMode, ProductionRuntimeAirtimeSchedule,
-    ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
+    plan_rtl8812au_efuse_tx_power, run_production_runtime_flow, AndroidUsbHostConfig,
+    LedHeartbeatConfig, MacosUsbHostConfig, ProductionRuntimeAirtimeMode,
+    ProductionRuntimeAirtimeSchedule, ProductionRuntimeFlowConfig,
+    ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRtl8812auInitInputs,
     ProductionRuntimeRxForwardConfig, ProductionRuntimeTddWindow,
     ProductionRuntimeTxPowerControlInput, ProductionRuntimeUsbConfig, Rtl8812auInitOrder,
@@ -94,6 +95,30 @@ pub struct ServiceCli {
     /// IOUSBHost pipe polling delay in milliseconds.
     #[arg(long)]
     pub macos_poll_delay_ms: Option<u64>,
+
+    /// Open through Android USB host transport.
+    #[arg(long)]
+    pub android_usbhost: bool,
+
+    /// Android UsbDeviceConnection file descriptor supplied by the app layer.
+    #[arg(long)]
+    pub android_device_fd: Option<i32>,
+
+    /// Android USB interface number.
+    #[arg(long)]
+    pub android_interface_number: Option<u8>,
+
+    /// Android USB bulk IN endpoint.
+    #[arg(long)]
+    pub android_bulk_in_endpoint: Option<u8>,
+
+    /// Android USB selected bulk OUT endpoint.
+    #[arg(long)]
+    pub android_bulk_out_endpoint: Option<u8>,
+
+    /// Android USB bulk OUT endpoint count.
+    #[arg(long)]
+    pub android_bulk_out_endpoint_count: Option<usize>,
 
     /// Channel to run the WFB radio on.
     #[arg(long)]
@@ -245,6 +270,7 @@ pub struct ServiceCli {
 pub struct ServiceConfigFile {
     pub adapter: Option<ServiceAdapterConfig>,
     pub macos_usbhost: Option<ServiceMacosUsbHostConfig>,
+    pub android_usbhost: Option<ServiceAndroidUsbHostConfig>,
     pub radio: Option<ServiceRadioConfig>,
     pub airtime: Option<ServiceAirtimeConfig>,
     pub wfb: Option<ServiceWfbConfig>,
@@ -277,6 +303,17 @@ pub struct ServiceMacosUsbHostConfig {
     pub bulk_out_endpoint_count: Option<usize>,
     pub poll_attempts: Option<u32>,
     pub poll_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceAndroidUsbHostConfig {
+    pub enabled: Option<bool>,
+    pub device_fd: Option<i32>,
+    pub interface_number: Option<u8>,
+    pub bulk_in_endpoint: Option<u8>,
+    pub bulk_out_endpoint: Option<u8>,
+    pub bulk_out_endpoint_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -447,6 +484,7 @@ pub struct ResolvedServiceRun {
     pub report: Option<PathBuf>,
     pub adapter: ServiceAdapterConfig,
     pub macos_usbhost: ServiceMacosUsbHostConfig,
+    pub android_usbhost: ServiceAndroidUsbHostConfig,
     pub channel: u8,
     pub bandwidth: Bandwidth,
     pub firmware: PathBuf,
@@ -541,6 +579,12 @@ impl ServiceCli {
             macos_bulk_out_endpoint_count: None,
             macos_poll_attempts: None,
             macos_poll_delay_ms: None,
+            android_usbhost: false,
+            android_device_fd: None,
+            android_interface_number: None,
+            android_bulk_in_endpoint: None,
+            android_bulk_out_endpoint: None,
+            android_bulk_out_endpoint_count: None,
             channel: None,
             bandwidth: None,
             firmware: None,
@@ -604,6 +648,7 @@ pub fn resolve_service_run(
     let file = load_service_config_file(&cli.config)?;
     let adapter = file.adapter.as_ref();
     let macos = file.macos_usbhost.as_ref();
+    let android = file.android_usbhost.as_ref();
     let radio = file.radio.as_ref();
     let airtime = file.airtime.as_ref();
     let wfb = file.wfb.as_ref();
@@ -690,6 +735,30 @@ pub fn resolve_service_run(
                 .macos_poll_delay_ms
                 .or_else(|| macos.and_then(|macos| macos.poll_delay_ms))
                 .or(Some(100)),
+        },
+        android_usbhost: ServiceAndroidUsbHostConfig {
+            enabled: Some(
+                cli.android_usbhost || android.and_then(|android| android.enabled).unwrap_or(false),
+            ),
+            device_fd: cli
+                .android_device_fd
+                .or_else(|| android.and_then(|android| android.device_fd)),
+            interface_number: cli
+                .android_interface_number
+                .or_else(|| android.and_then(|android| android.interface_number))
+                .or(Some(0)),
+            bulk_in_endpoint: cli
+                .android_bulk_in_endpoint
+                .or_else(|| android.and_then(|android| android.bulk_in_endpoint))
+                .or(Some(0x81)),
+            bulk_out_endpoint: cli
+                .android_bulk_out_endpoint
+                .or_else(|| android.and_then(|android| android.bulk_out_endpoint))
+                .or(Some(0x02)),
+            bulk_out_endpoint_count: cli
+                .android_bulk_out_endpoint_count
+                .or_else(|| android.and_then(|android| android.bulk_out_endpoint_count))
+                .or(Some(3)),
         },
         channel,
         bandwidth,
@@ -844,13 +913,24 @@ pub fn service_runtime_config_from_resolved(
             format!("invalid production service channel: {error}"),
         )
     })?;
-    let usb = if resolved.macos_usbhost.enabled.unwrap_or(false) {
-        ProductionRuntimeUsbConfig::macos_usbhost(
+    let macos_usbhost_enabled = resolved.macos_usbhost.enabled.unwrap_or(false);
+    let android_usbhost_enabled = resolved.android_usbhost.enabled.unwrap_or(false);
+    let usb = match (macos_usbhost_enabled, android_usbhost_enabled) {
+        (true, true) => {
+            return Err(RuntimeRadioError::new(
+                "multiple_usb_backends_enabled",
+                "enable only one USB backend: libusb, macos_usbhost, or android_usbhost",
+            ))
+        }
+        (true, false) => ProductionRuntimeUsbConfig::macos_usbhost(
             resolved.adapter.selector(),
             service_macos_usbhost_config(&resolved.macos_usbhost),
-        )
-    } else {
-        ProductionRuntimeUsbConfig::libusb(resolved.adapter.selector())
+        ),
+        (false, true) => ProductionRuntimeUsbConfig::android_usbhost(
+            resolved.adapter.selector(),
+            service_android_usbhost_config(&resolved.android_usbhost),
+        ),
+        (false, false) => ProductionRuntimeUsbConfig::libusb(resolved.adapter.selector()),
     };
     let rx_forwards = service_runtime_rx_forwards(resolved)?;
 
@@ -1107,6 +1187,16 @@ fn service_macos_usbhost_config(config: &ServiceMacosUsbHostConfig) -> MacosUsbH
         bulk_out_endpoint_count: config.bulk_out_endpoint_count.unwrap_or(3),
         poll_attempts: config.poll_attempts.unwrap_or(25),
         poll_delay: Duration::from_millis(config.poll_delay_ms.unwrap_or(100)),
+    }
+}
+
+fn service_android_usbhost_config(config: &ServiceAndroidUsbHostConfig) -> AndroidUsbHostConfig {
+    AndroidUsbHostConfig {
+        device_fd: config.device_fd,
+        interface_number: config.interface_number.unwrap_or(0),
+        bulk_in_endpoint: config.bulk_in_endpoint.unwrap_or(0x81),
+        bulk_out_endpoint: config.bulk_out_endpoint.unwrap_or(0x02),
+        bulk_out_endpoint_count: config.bulk_out_endpoint_count.unwrap_or(3),
     }
 }
 
@@ -1528,6 +1618,7 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use wfb_radio_runtime::ProductionRuntimeUsbBackend;
 
     fn write_config(name: &str, contents: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1654,6 +1745,104 @@ health_file = "/tmp/config-health.json"
             resolved.calibration_profile,
             ServiceTxCalibrationProfile::Rtl8812aLck
         );
+    }
+
+    #[test]
+    fn service_android_usbhost_config_resolves_runtime_backend() {
+        let path = write_config(
+            "android-usbhost",
+            r#"
+[adapter]
+vid = 3034
+pid = 34834
+
+[android_usbhost]
+enabled = true
+device_fd = 42
+interface_number = 0
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+bulk_out_endpoint_count = 3
+
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/android-fw.bin"
+
+[wfb]
+bind = "127.0.0.1:5610"
+"#,
+        );
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse service");
+
+        let resolved = resolve_service_run(&cli).expect("resolve");
+        let config = service_runtime_config_from_resolved(&resolved)
+            .expect("runtime config from Android USBHost config");
+        let _ = fs::remove_file(path);
+
+        assert_eq!(resolved.android_usbhost.enabled, Some(true));
+        assert_eq!(resolved.android_usbhost.device_fd, Some(42));
+        assert_eq!(resolved.android_usbhost.interface_number, Some(0));
+        assert_eq!(resolved.android_usbhost.bulk_in_endpoint, Some(0x81));
+        assert_eq!(resolved.android_usbhost.bulk_out_endpoint, Some(0x02));
+        assert_eq!(resolved.android_usbhost.bulk_out_endpoint_count, Some(3));
+        assert_eq!(
+            config.usb.backend,
+            ProductionRuntimeUsbBackend::AndroidUsbHost
+        );
+        assert_eq!(
+            config
+                .usb
+                .android_usbhost
+                .expect("android runtime config")
+                .device_fd,
+            Some(42)
+        );
+        assert!(config.usb.macos_usbhost.is_none());
+    }
+
+    #[test]
+    fn service_rejects_multiple_usb_backends() {
+        let path = write_config(
+            "multiple-usb-backends",
+            r#"
+[adapter]
+vid = 3034
+pid = 34834
+
+[macos_usbhost]
+enabled = true
+
+[android_usbhost]
+enabled = true
+device_fd = 42
+
+[radio]
+channel = 36
+bandwidth_mhz = 20
+firmware = "/tmp/android-fw.bin"
+"#,
+        );
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse service");
+
+        let resolved = resolve_service_run(&cli).expect("resolve");
+        let error = match service_runtime_config_from_resolved(&resolved) {
+            Ok(_) => panic!("multiple USB backends should be rejected"),
+            Err(error) => error,
+        };
+        let _ = fs::remove_file(path);
+
+        assert_eq!(error.code, "multiple_usb_backends_enabled");
     }
 
     #[test]

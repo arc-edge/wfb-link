@@ -8,9 +8,10 @@ streams use this file as the radio/runtime base and define product-facing raw
 UDP streams, plus any managed tunnel, through `ManagedWfbStreamsConfig`.
 
 The stream, WFB, tunnel, artifact, and calibration sections are platform-neutral
-contracts. `[macos_usbhost]` is intentionally macOS-only transport config; a
-future Android transport should add its own transport section while preserving
-the resolved `UserspaceRadioConfig` and `LinkEndpoints` shape.
+contracts. `[macos_usbhost]` is intentionally macOS-only transport config.
+`[android_usbhost]` is the Android transport-selection contract; it currently
+resolves and validates config but intentionally fails closed until the native
+Android USB transfer bridge is implemented.
 
 The checked-in examples are:
 
@@ -58,6 +59,45 @@ stable path or override the field.
 `[authorization].transmit` is no longer required. `[authorization]` is retained
 only for `live_register_writes = true`, which is still required for runtime
 calibration profiles that write BB/RF registers.
+
+## Android Runtime Section
+
+Android uses the same `UserspaceRadioConfig` and link endpoint contract as the
+macOS direct-radio path, but selects the Android USBHost transport:
+
+```toml
+[adapter]
+vid = 3034
+pid = 34834
+
+[android_usbhost]
+enabled = true
+device_fd = 42
+interface_number = 0
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+bulk_out_endpoint_count = 3
+```
+
+Fields:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `enabled` | no | Selects the Android USBHost transport when true. Defaults to false. |
+| `device_fd` | no | Native file descriptor handed in by the Android app layer after USB permission and device open. This is normally runtime/app-supplied, not a static product config value. |
+| `interface_number` | no | USB interface number. Defaults to `0`. |
+| `bulk_in_endpoint` | no | Selected bulk IN endpoint address. Defaults to `129` / `0x81`. |
+| `bulk_out_endpoint` | no | Selected bulk OUT endpoint address. Defaults to `2` / `0x02`. |
+| `bulk_out_endpoint_count` | no | RTL8812AU bulk OUT endpoint layout count. Defaults to `3`; supported values are `2`, `3`, or `4`. |
+
+Only one USB backend may be enabled. If `[macos_usbhost]` and
+`[android_usbhost]` are both enabled, config resolution fails with
+`multiple_usb_backends_enabled`.
+
+Current implementation boundary: Android config, service CLI flags, endpoint
+validation, runtime config serialization, and platform-specific open errors are
+implemented. Actual Android control and bulk transfers are the next native
+bridge task.
 
 ## Stream Schema
 

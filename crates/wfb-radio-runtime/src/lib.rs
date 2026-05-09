@@ -199,6 +199,27 @@ impl Default for MacosUsbHostConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AndroidUsbHostConfig {
+    pub device_fd: Option<i32>,
+    pub interface_number: u8,
+    pub bulk_in_endpoint: u8,
+    pub bulk_out_endpoint: u8,
+    pub bulk_out_endpoint_count: usize,
+}
+
+impl Default for AndroidUsbHostConfig {
+    fn default() -> Self {
+        Self {
+            device_fd: None,
+            interface_number: 0,
+            bulk_in_endpoint: 0x81,
+            bulk_out_endpoint: 0x02,
+            bulk_out_endpoint_count: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTransportError {
     pub code: &'static str,
@@ -233,6 +254,7 @@ pub struct RuntimeUsbTransportOpen {
 pub enum RuntimeUsbBackend {
     Libusb,
     MacosUsbHost(MacosUsbHostConfig),
+    AndroidUsbHost(AndroidUsbHostConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +277,13 @@ impl RuntimeUsbOpenConfig {
             backend: RuntimeUsbBackend::MacosUsbHost(config),
         }
     }
+
+    pub fn android_usbhost(selector: DeviceSelector, config: AndroidUsbHostConfig) -> Self {
+        Self {
+            selector,
+            backend: RuntimeUsbBackend::AndroidUsbHost(config),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -262,6 +291,7 @@ impl RuntimeUsbOpenConfig {
 pub enum ProductionRuntimeUsbBackend {
     Libusb,
     MacosUsbHost,
+    AndroidUsbHost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -306,10 +336,45 @@ impl From<ProductionMacosUsbHostConfig> for MacosUsbHostConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct ProductionAndroidUsbHostConfig {
+    pub device_fd: Option<i32>,
+    pub interface_number: u8,
+    pub bulk_in_endpoint: u8,
+    pub bulk_out_endpoint: u8,
+    pub bulk_out_endpoint_count: usize,
+}
+
+impl From<AndroidUsbHostConfig> for ProductionAndroidUsbHostConfig {
+    fn from(config: AndroidUsbHostConfig) -> Self {
+        Self {
+            device_fd: config.device_fd,
+            interface_number: config.interface_number,
+            bulk_in_endpoint: config.bulk_in_endpoint,
+            bulk_out_endpoint: config.bulk_out_endpoint,
+            bulk_out_endpoint_count: config.bulk_out_endpoint_count,
+        }
+    }
+}
+
+impl From<ProductionAndroidUsbHostConfig> for AndroidUsbHostConfig {
+    fn from(config: ProductionAndroidUsbHostConfig) -> Self {
+        Self {
+            device_fd: config.device_fd,
+            interface_number: config.interface_number,
+            bulk_in_endpoint: config.bulk_in_endpoint,
+            bulk_out_endpoint: config.bulk_out_endpoint,
+            bulk_out_endpoint_count: config.bulk_out_endpoint_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ProductionRuntimeUsbConfig {
     pub selector: DeviceSelector,
     pub backend: ProductionRuntimeUsbBackend,
     pub macos_usbhost: Option<ProductionMacosUsbHostConfig>,
+    pub android_usbhost: Option<ProductionAndroidUsbHostConfig>,
 }
 
 impl ProductionRuntimeUsbConfig {
@@ -318,6 +383,7 @@ impl ProductionRuntimeUsbConfig {
             selector,
             backend: ProductionRuntimeUsbBackend::Libusb,
             macos_usbhost: None,
+            android_usbhost: None,
         }
     }
 
@@ -326,6 +392,16 @@ impl ProductionRuntimeUsbConfig {
             selector,
             backend: ProductionRuntimeUsbBackend::MacosUsbHost,
             macos_usbhost: Some(config.into()),
+            android_usbhost: None,
+        }
+    }
+
+    pub fn android_usbhost(selector: DeviceSelector, config: AndroidUsbHostConfig) -> Self {
+        Self {
+            selector,
+            backend: ProductionRuntimeUsbBackend::AndroidUsbHost,
+            macos_usbhost: None,
+            android_usbhost: Some(config.into()),
         }
     }
 
@@ -336,6 +412,12 @@ impl ProductionRuntimeUsbConfig {
                 self.selector,
                 self.macos_usbhost
                     .map(MacosUsbHostConfig::from)
+                    .unwrap_or_default(),
+            ),
+            ProductionRuntimeUsbBackend::AndroidUsbHost => RuntimeUsbOpenConfig::android_usbhost(
+                self.selector,
+                self.android_usbhost
+                    .map(AndroidUsbHostConfig::from)
                     .unwrap_or_default(),
             ),
         }
@@ -385,6 +467,9 @@ pub fn open_runtime_usb_transport(
         RuntimeUsbBackend::Libusb => open_libusb_transport(config.selector),
         RuntimeUsbBackend::MacosUsbHost(macos_config) => {
             open_macos_usbhost_transport(&macos_config, config.selector)
+        }
+        RuntimeUsbBackend::AndroidUsbHost(android_config) => {
+            open_android_usbhost_transport(&android_config, config.selector)
         }
     }
 }
@@ -12858,6 +12943,134 @@ pub fn macos_usbhost_adapter_info(vid: u16, pid: u16, endpoints: &UsbEndpoints) 
     }
 }
 
+pub fn android_usbhost_bulk_out_endpoints(
+    bulk_out_endpoint_count: usize,
+) -> Result<Vec<u8>, RuntimeTransportError> {
+    match bulk_out_endpoint_count {
+        2 => Ok(vec![0x02, 0x03]),
+        3 => Ok(vec![0x02, 0x03, 0x04]),
+        4 => Ok(vec![0x02, 0x03, 0x04, 0x05]),
+        other => Err(RuntimeTransportError::new(
+            "unsupported_bulk_out_endpoint_count",
+            format!(
+                "queue/DMA setup supports 2, 3, or 4 Android bulk OUT endpoints, configured {other}"
+            ),
+        )),
+    }
+}
+
+pub fn android_usbhost_endpoints(
+    config: &AndroidUsbHostConfig,
+) -> Result<UsbEndpoints, RuntimeTransportError> {
+    if config.bulk_in_endpoint & 0x80 == 0 {
+        return Err(RuntimeTransportError::new(
+            "invalid_android_bulk_in_endpoint",
+            format!(
+                "Android bulk IN endpoint must have the USB IN direction bit set, got 0x{:02x}",
+                config.bulk_in_endpoint
+            ),
+        ));
+    }
+    if config.bulk_out_endpoint & 0x80 != 0 {
+        return Err(RuntimeTransportError::new(
+            "invalid_android_bulk_out_endpoint",
+            format!(
+                "Android bulk OUT endpoint must not have the USB IN direction bit set, got 0x{:02x}",
+                config.bulk_out_endpoint
+            ),
+        ));
+    }
+
+    let bulk_out_all = android_usbhost_bulk_out_endpoints(config.bulk_out_endpoint_count)?;
+    if !bulk_out_all.contains(&config.bulk_out_endpoint) {
+        return Err(RuntimeTransportError::new(
+            "android_bulk_out_endpoint_not_in_layout",
+            format!(
+                "selected Android bulk OUT endpoint 0x{:02x} is not in the derived RTL8812AU endpoint layout {:?}",
+                config.bulk_out_endpoint, bulk_out_all
+            ),
+        ));
+    }
+
+    Ok(UsbEndpoints {
+        interface_number: config.interface_number,
+        bulk_in: Some(config.bulk_in_endpoint),
+        bulk_out: Some(config.bulk_out_endpoint),
+        bulk_in_all: vec![config.bulk_in_endpoint],
+        bulk_out_all,
+    })
+}
+
+pub fn android_usbhost_adapter_info(vid: u16, pid: u16, endpoints: &UsbEndpoints) -> UsbDeviceInfo {
+    let mut endpoint_infos = Vec::with_capacity(1 + endpoints.bulk_out_all.len());
+    if let Some(bulk_in) = endpoints.bulk_in {
+        endpoint_infos.push(EndpointInfo {
+            address: bulk_in,
+            direction: "in".to_string(),
+            transfer_type: "bulk".to_string(),
+            max_packet_size: 512,
+            interval: 0,
+        });
+    }
+    for bulk_out in &endpoints.bulk_out_all {
+        endpoint_infos.push(EndpointInfo {
+            address: *bulk_out,
+            direction: "out".to_string(),
+            transfer_type: "bulk".to_string(),
+            max_packet_size: 512,
+            interval: 0,
+        });
+    }
+
+    UsbDeviceInfo {
+        vid,
+        pid,
+        vid_hex: format!("0x{vid:04x}"),
+        pid_hex: format!("0x{pid:04x}"),
+        bus: 0,
+        address: 0,
+        speed: "high-speed (Android USB host)".to_string(),
+        class_code: 0,
+        sub_class_code: 0,
+        protocol_code: 0,
+        manufacturer: None,
+        product: Some("RTL8812AU via Android USB host".to_string()),
+        serial_number: None,
+        known_adapter: radio_core::lookup_known_adapter(vid, pid),
+        interfaces: vec![InterfaceInfo {
+            number: endpoints.interface_number,
+            setting_number: 0,
+            class_code: 0xff,
+            sub_class_code: 0xff,
+            protocol_code: 0xff,
+            endpoints: endpoint_infos,
+        }],
+    }
+}
+
+pub fn open_android_usbhost_transport(
+    config: &AndroidUsbHostConfig,
+    selector: DeviceSelector,
+) -> Result<RuntimeUsbTransportOpen, RuntimeTransportError> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (config, selector);
+        Err(RuntimeTransportError::new(
+            "unsupported_platform",
+            "Android USB host transport requires Android",
+        ))
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = (config, selector);
+        Err(RuntimeTransportError::new(
+            "android_usbhost_not_implemented",
+            "Android USB host transport is configured, but the UsbDeviceConnection/JNI transfer bridge has not been implemented yet",
+        ))
+    }
+}
+
 pub fn open_macos_usbhost_transport(
     config: &MacosUsbHostConfig,
     selector: DeviceSelector,
@@ -13055,34 +13268,37 @@ mod tests {
     };
 
     use super::{
+        android_usbhost_adapter_info, android_usbhost_endpoints,
         bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
         handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
-        plan_production_wfb_loop, process_production_rx_packet_outcomes,
-        production_rx_forward_snapshots, run_production_bridge_loop, run_production_runtime_flow,
+        open_android_usbhost_transport, plan_production_wfb_loop,
+        process_production_rx_packet_outcomes, production_rx_forward_snapshots,
+        run_production_bridge_loop, run_production_runtime_flow,
         run_production_runtime_flow_with_session, runtime_unix_ms,
         spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
-        write_production_runtime_service_health, MacosUsbHostConfig, ProductionRuntimeAirtimeMode,
-        ProductionRuntimeAirtimeReport, ProductionRuntimeAirtimeSchedule,
-        ProductionRuntimeBridgeLoopRunConfig, ProductionRuntimeBridgeLoopStep,
-        ProductionRuntimeBridgeLoopStepOutcome, ProductionRuntimeBridgeLoopStopReason,
-        ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
-        ProductionRuntimeBridgeTxProfile, ProductionRuntimeFlowConfig,
-        ProductionRuntimeFlowExecutionInputs, ProductionRuntimeFlowReport,
-        ProductionRuntimeFlowResult, ProductionRuntimeHeartbeatLedReport,
-        ProductionRuntimeInitReadiness, ProductionRuntimeInitTelemetry,
-        ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeQueuedDatagram,
-        ProductionRuntimeReadyMarker, ProductionRuntimeRtl8812auInitInputs,
-        ProductionRuntimeRxForwardConfig, ProductionRuntimeRxForwardPlan,
-        ProductionRuntimeRxForwardSnapshot, ProductionRuntimeServiceHealth,
-        ProductionRuntimeServiceLifecycle, ProductionRuntimeServiceOperatorAction,
-        ProductionRuntimeTddWindow, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
+        write_production_runtime_service_health, AndroidUsbHostConfig, MacosUsbHostConfig,
+        ProductionRuntimeAirtimeMode, ProductionRuntimeAirtimeReport,
+        ProductionRuntimeAirtimeSchedule, ProductionRuntimeBridgeLoopRunConfig,
+        ProductionRuntimeBridgeLoopStep, ProductionRuntimeBridgeLoopStepOutcome,
+        ProductionRuntimeBridgeLoopStopReason, ProductionRuntimeBridgeTxConfig,
+        ProductionRuntimeBridgeTxOverrides, ProductionRuntimeBridgeTxProfile,
+        ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
+        ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
+        ProductionRuntimeHeartbeatLedReport, ProductionRuntimeInitReadiness,
+        ProductionRuntimeInitTelemetry, ProductionRuntimePrimaryRxForwardConfig,
+        ProductionRuntimeQueuedDatagram, ProductionRuntimeReadyMarker,
+        ProductionRuntimeRtl8812auInitInputs, ProductionRuntimeRxForwardConfig,
+        ProductionRuntimeRxForwardPlan, ProductionRuntimeRxForwardSnapshot,
+        ProductionRuntimeServiceHealth, ProductionRuntimeServiceLifecycle,
+        ProductionRuntimeServiceOperatorAction, ProductionRuntimeTddWindow,
+        ProductionRuntimeUsbBackend, ProductionRuntimeUsbConfig, ProductionRuntimeWfbLoopConfig,
         Rtl8812auInitOrder, Rtl8812auInitPhase, Rtl8812auTxPowerControlMode,
         RuntimeFlowRxTelemetry, RuntimeFlowTxTelemetry, RuntimeRadioCounters, RuntimeRadioError,
         RuntimeRadioSession, RuntimeSameSessionInitConfig, RuntimeSameSessionInitPhaseFailure,
         RuntimeSameSessionInitPhaseStatus, RuntimeSameSessionInitPhaseSummary,
         RuntimeSameSessionInitReadiness, RuntimeTxCalibrationEvidenceSource,
-        RuntimeTxCalibrationValidationStatus, TxCalibrationClass, TxCalibrationProfile,
-        DEFAULT_HEARTBEAT_HALF_PERIOD_MS, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
+        RuntimeTxCalibrationValidationStatus, RuntimeUsbBackend, TxCalibrationClass,
+        TxCalibrationProfile, DEFAULT_HEARTBEAT_HALF_PERIOD_MS, PRODUCTION_TX_SOCKET_RCVBUF_BYTES,
     };
 
     use wfb_bridge::{
@@ -16235,6 +16451,107 @@ mod tests {
                 .code,
             "macos_bulk_out_endpoint_not_in_layout"
         );
+    }
+
+    #[test]
+    fn android_usbhost_config_derives_endpoint_layout() {
+        let endpoints =
+            android_usbhost_endpoints(&AndroidUsbHostConfig::default()).expect("default endpoints");
+
+        assert_eq!(endpoints.interface_number, 0);
+        assert_eq!(endpoints.bulk_in, Some(0x81));
+        assert_eq!(endpoints.bulk_out, Some(0x02));
+        assert_eq!(endpoints.bulk_in_all, vec![0x81]);
+        assert_eq!(endpoints.bulk_out_all, vec![0x02, 0x03, 0x04]);
+
+        let adapter = android_usbhost_adapter_info(0x0bda, 0x8812, &endpoints);
+        assert_eq!(adapter.vid_hex, "0x0bda");
+        assert_eq!(adapter.pid_hex, "0x8812");
+        assert_eq!(adapter.speed, "high-speed (Android USB host)");
+        assert_eq!(adapter.interfaces[0].endpoints.len(), 4);
+    }
+
+    #[test]
+    fn android_usbhost_config_rejects_invalid_endpoints() {
+        let mut config = AndroidUsbHostConfig {
+            bulk_in_endpoint: 0x01,
+            ..AndroidUsbHostConfig::default()
+        };
+        assert_eq!(
+            android_usbhost_endpoints(&config)
+                .expect_err("invalid bulk IN")
+                .code,
+            "invalid_android_bulk_in_endpoint"
+        );
+
+        config = AndroidUsbHostConfig {
+            bulk_out_endpoint: 0x82,
+            ..AndroidUsbHostConfig::default()
+        };
+        assert_eq!(
+            android_usbhost_endpoints(&config)
+                .expect_err("invalid bulk OUT")
+                .code,
+            "invalid_android_bulk_out_endpoint"
+        );
+
+        config = AndroidUsbHostConfig {
+            bulk_out_endpoint: 0x05,
+            bulk_out_endpoint_count: 3,
+            ..AndroidUsbHostConfig::default()
+        };
+        assert_eq!(
+            android_usbhost_endpoints(&config)
+                .expect_err("OUT not in layout")
+                .code,
+            "android_bulk_out_endpoint_not_in_layout"
+        );
+    }
+
+    #[test]
+    fn android_usbhost_runtime_config_maps_to_android_backend() {
+        let selector = DeviceSelector {
+            vid: Some(0x0bda),
+            pid: Some(0x8812),
+            ..DeviceSelector::default()
+        };
+        let usb = ProductionRuntimeUsbConfig::android_usbhost(
+            selector,
+            AndroidUsbHostConfig {
+                device_fd: Some(42),
+                bulk_out_endpoint_count: 4,
+                ..AndroidUsbHostConfig::default()
+            },
+        );
+
+        assert_eq!(usb.backend, ProductionRuntimeUsbBackend::AndroidUsbHost);
+        assert_eq!(
+            usb.android_usbhost.expect("android config").device_fd,
+            Some(42)
+        );
+
+        let open = usb.to_runtime_open_config();
+        match open.backend {
+            RuntimeUsbBackend::AndroidUsbHost(config) => {
+                assert_eq!(config.device_fd, Some(42));
+                assert_eq!(config.bulk_out_endpoint_count, 4);
+            }
+            other => panic!("expected Android USBHost backend, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn android_usbhost_open_fails_closed_off_android() {
+        let error = match open_android_usbhost_transport(
+            &AndroidUsbHostConfig::default(),
+            DeviceSelector::default(),
+        ) {
+            Ok(_) => panic!("Android USBHost opened on non-Android target"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "unsupported_platform");
     }
 
     #[test]

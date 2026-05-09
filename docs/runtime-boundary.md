@@ -10,6 +10,9 @@
 - Unified runtime USB transport over libusb claims and macOS USBHost retained sessions.
 - macOS IOUSBHost direct-control and retained-session transport wrappers.
 - macOS USBHost endpoint validation, synthetic adapter metadata, and retained-session open policy.
+- Android USBHost config, endpoint validation, synthetic adapter metadata,
+  production USB selection snapshots, and explicit fail-closed open errors
+  while the native Android transfer bridge is pending.
 - Runtime libusb adapter selection/claim policy for bridge, init, TX, RX, and IQK runtime transport paths.
 - macOS RTL8812AU register and bulk-transfer trait implementations.
 - RTL8812AU same-session init phase identities and default/Linux-order phase sequencing policy.
@@ -70,9 +73,9 @@
 `wfb-radio-service` is the standalone production entry point. It is
 config-first (`--config`), accepts bounded operator overrides for adapter
 selection, channel, bandwidth, firmware path, TX UDP bind addresses, optional
-WFB RX forwarding, runtime bounds, calibration profile, macOS USBHost backend
-settings, ready/health/report artifact paths, guarded TX-power controls, and
-the explicit live TX/register write acknowledgements.
+WFB RX forwarding, runtime bounds, calibration profile, macOS or Android USB
+backend settings, ready/health/report artifact paths, guarded TX-power
+controls, and the explicit live TX/register write acknowledgements.
 
 The service always maps into
 `wfb-radio-runtime::ProductionRuntimeFlowConfig`, validates that config before

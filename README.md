@@ -18,7 +18,7 @@ Product binary
   -> wfb-link
      -> macOS: wfb-radio-runtime + AWUS036ACH userspace USB
      -> Linux: native WFB-NG + wfb0 monitor mode + rtl88xxau
-     -> Android: wfb-radio-runtime + Android USB host transport (planned)
+     -> Android: wfb-radio-runtime + Android USB host transport contract
 ```
 
 Main crates:
@@ -55,6 +55,9 @@ remote. Update them before adding Cargo git dependencies or release automation.
 - A managed macOS raw-application multi-stream backend that supervises one
   `wfb_tx`/`wfb_rx` helper per stream while exposing product-facing UDP
   endpoints and named per-stream health.
+- Android USBHost runtime and service config selection, endpoint validation,
+  and fail-closed open behavior while the native Android transfer bridge is
+  implemented.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
@@ -244,10 +247,11 @@ The old `MacosUserspaceRadio*` names are deprecated aliases; new integration
 code should use `UserspaceRadio*` for the portable direct-radio contract.
 
 On Linux, the intended backend is native WFB-NG over `wfb0` monitor mode with
-the aircrack/rtl88xxau driver. Android is expected to reuse the userspace radio
-contract with an Android USB host transport. Do not port the userspace USB
-bridge to Linux just to share implementation; share the `wfb-link` lifecycle
-and endpoint contract.
+the aircrack/rtl88xxau driver. Android reuses the userspace radio contract
+with an Android USB host transport section; the Rust config and endpoint
+contract exists now, while the UsbDeviceConnection/JNI transfer bridge is still
+pending. Do not port the userspace USB bridge to Linux just to share
+implementation; share the `wfb-link` lifecycle and endpoint contract.
 
 For the full integration contract, backend selection rules, payload-kind
 semantics, and health/report shape, read
@@ -275,6 +279,9 @@ and best-effort helper degradation semantics.
   receiver-backed validation.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
+- The Android USBHost path is a config/API stub today. It validates transport
+  selection and endpoint layout, then fails closed until the native Android
+  control/bulk transfer bridge is implemented and hardware-tested.
 - `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
   path. It can now include one optional managed tunnel. Required helper exits
   fail startup; best-effort helper exits degrade only the named stream, or
