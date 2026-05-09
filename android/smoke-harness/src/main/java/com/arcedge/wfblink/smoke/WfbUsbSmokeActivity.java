@@ -11,9 +11,11 @@ import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.widget.TextView;
 
 public final class WfbUsbSmokeActivity extends Activity {
+    private static final String TAG = "WfbUsbSmoke";
     private static final String ACTION_USB_PERMISSION =
             "com.arcedge.wfblink.smoke.USB_PERMISSION";
     private static final int RTL8812AU_VID = 0x0bda;
@@ -138,6 +140,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     }
 
     private void log(String line) {
+        Log.i(TAG, line);
         status.append(line + "\n");
     }
 }
