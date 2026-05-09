@@ -17,12 +17,18 @@ Packaging flow:
    the Rust JNI smoke entry point.
 
 The first smoke reads one 8-bit RTL8812AU register through the Android fd-backed
-transport. Return values `0..255` are register values. Negative return values
-are error classes from `wfb-android-smoke`:
+transport. If that succeeds, the Activity runs one bounded bulk-IN read through
+the runtime RX descriptor parser on channel 36.
+
+Register return values `0..255` are register values. RX return values `0..N`
+are parsed frame counts for that single read. Negative return values are error
+classes from `wfb-android-smoke`:
 
 - `-1`: invalid JNI/app argument
 - `-2`: transport open error
 - `-3`: register read error
+- `-4`: RX bulk read timeout
+- `-5`: RX bulk read error
 
 The app must keep the `UsbDeviceConnection` alive until the Rust call returns.
 Do not claim the interface or issue Java-side control/bulk transfers while Rust

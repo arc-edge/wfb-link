@@ -23,6 +23,8 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int BULK_OUT_ENDPOINT = 0x02;
     private static final int BULK_OUT_ENDPOINT_COUNT = 3;
     private static final int REG_SYS_FUNC_EN = 0x0002;
+    private static final int CHANNEL_NUMBER = 36;
+    private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
 
     private UsbManager usbManager;
@@ -113,6 +115,25 @@ public final class WfbUsbSmokeActivity extends Activity {
             log("Register smoke passed: REG_SYS_FUNC_EN=0x" + Integer.toHexString(result));
         } else {
             log("Register smoke failed with code " + result);
+            return;
+        }
+
+        int rxResult =
+                WfbNativeSmoke.runRxReadSmoke(
+                        fd,
+                        device.getVendorId(),
+                        device.getProductId(),
+                        INTERFACE_NUMBER,
+                        BULK_IN_ENDPOINT,
+                        BULK_OUT_ENDPOINT,
+                        BULK_OUT_ENDPOINT_COUNT,
+                        CHANNEL_NUMBER,
+                        RX_READ_BUFFER_LEN,
+                        TIMEOUT_MS);
+        if (rxResult >= 0) {
+            log("RX read smoke completed: parsed_frames=" + rxResult);
+        } else {
+            log("RX read smoke failed with code " + rxResult);
         }
     }
 

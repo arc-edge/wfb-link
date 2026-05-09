@@ -17,4 +17,16 @@ final class WfbNativeSmoke {
             int bulkOutEndpointCount,
             int registerAddress,
             int timeoutMs);
+
+    static native int runRxReadSmoke(
+            int fd,
+            int vid,
+            int pid,
+            int interfaceNumber,
+            int bulkInEndpoint,
+            int bulkOutEndpoint,
+            int bulkOutEndpointCount,
+            int channelNumber,
+            int readBufferLen,
+            int timeoutMs);
 }

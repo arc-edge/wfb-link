@@ -72,8 +72,10 @@ The first USB permission and fd-handoff smoke is split between:
 
 The harness opens the first attached AWUS036ACH (`0x0bda:0x8812`), passes
 `UsbDeviceConnection.getFileDescriptor()` into Rust, and reads one RTL8812AU
-register through the Android fd-backed transport. Return values `0..255` are
-register values; negative values are smoke error classes documented in
+register through the Android fd-backed transport. It then runs one bounded
+bulk-IN read through the runtime RX descriptor parser. Register return values
+`0..255` are register values; RX return values `0..N` are parsed frame counts;
+negative values are smoke error classes documented in
 `android/smoke-harness/README.md`.
 
 This is intentionally not a complete Gradle project yet. Product Android
