@@ -38,8 +38,11 @@
 - [ ] 3.3 Validate single TX and bounded bidirectional WFB distributor datagrams
       against the Linux peer.
       Android init+TX smoke now submits 3/3 descriptor-prefixed frames through
-      bulk OUT with 192 USB bytes, 0 failed writes, and 0 short writes. WFB
-      distributor datagram and bidirectional validation still require a
-      reachable Linux peer.
+      bulk OUT with 192 USB bytes, 0 failed writes, and 0 short writes. The
+      smoke harness now also sends three synthetic WFB distributor datagrams
+      through the production bridge TX path and host tests verify their packet
+      shape parses through `wfb-bridge`. Live receiver-backed WFB validation is
+      still pending; the latest APK rerun could not see the RTL8812AU because
+      Android reported the USB port disconnected.
 - [ ] 3.4 Run the production managed-stream profile and compare against the
       macOS bench results before considering Android production-ready.

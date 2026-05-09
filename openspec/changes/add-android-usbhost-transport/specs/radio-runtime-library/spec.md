@@ -18,18 +18,20 @@ backend without changing the shared RTL8812AU runtime configuration shape.
 - **THEN** the runtime snapshot records `android_usbhost` config and maps it to
   a live Android runtime open request
 
-#### Scenario: Android fd-backed bridge opened
+#### Scenario: Android direct-JNI bridge opened
 
-- **WHEN** a caller opens the Android USBHost backend with a non-negative
-  app-owned device file descriptor, supported VID/PID metadata, and valid
-  endpoint configuration
-- **THEN** the runtime library wraps the fd as a USB transport that supports
-  RTL8812AU vendor control transfers and bulk IN/OUT transfers
+- **WHEN** an Android app opens and claims a USBHost device, keeps the
+  `UsbDeviceConnection` and selected endpoint objects alive, and passes them
+  through JNI with supported VID/PID metadata and valid endpoint configuration
+- **THEN** the runtime library uses app-owned `UsbDeviceConnection`
+  control/bulk calls as a USB transport that supports RTL8812AU vendor control
+  transfers and bulk IN/OUT transfers
 
-#### Scenario: Android fd-backed bridge rejected
+#### Scenario: Android bridge handoff rejected
 
 - **WHEN** a caller opens the Android USBHost backend with a missing fd,
   negative fd, missing VID/PID metadata, unsupported adapter metadata,
-  unsupported bus/address selector, or invalid endpoint layout
+  unsupported bus/address selector, missing Java connection/endpoint objects,
+  or invalid endpoint layout
 - **THEN** the runtime library returns a structured runtime error with a stable
   code and human-readable message before attempting live USB transfers

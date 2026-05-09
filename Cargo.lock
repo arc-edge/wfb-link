@@ -737,6 +737,7 @@ version = "0.1.0"
 dependencies = [
  "jni",
  "radio-core",
+ "wfb-bridge",
  "wfb-radio-runtime",
 ]
 

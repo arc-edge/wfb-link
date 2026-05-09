@@ -42,6 +42,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int STATUS_HORIZONTAL_PADDING_DP = 16;
     private static final int STATUS_TOP_PADDING_DP = 64;
     private static final int STATUS_BOTTOM_PADDING_DP = 16;
+    private static final int SMOKE_RX_TIMEOUT = -4;
 
     private UsbManager usbManager;
     private ScrollView statusScroller;
@@ -220,6 +221,8 @@ public final class WfbUsbSmokeActivity extends Activity {
                         INIT_RX_TIMEOUT_MS);
         if (rxResult >= 0) {
             log("RX read smoke completed: parsed_frames=" + rxResult);
+        } else if (rxResult == SMOKE_RX_TIMEOUT) {
+            log("RX read smoke idle: no packet before timeout");
         } else {
             log("RX read smoke failed with code " + rxResult);
         }
@@ -242,11 +245,13 @@ public final class WfbUsbSmokeActivity extends Activity {
                         TIMEOUT_MS);
         if (initRxResult >= 0) {
             log("Init + RX descriptor smoke completed: parsed_frames=" + initRxResult);
+        } else if (initRxResult == SMOKE_RX_TIMEOUT) {
+            log("Init + RX descriptor smoke idle: no packet before timeout");
         } else {
             log("Init + RX descriptor smoke failed with code " + initRxResult);
         }
 
-        log("Running init + TX submit smoke");
+        log("Running init + TX/WFB submit smoke");
         int initTxResult =
                 WfbNativeSmoke.runInitTxSmoke(
                         activeConnection,
@@ -262,9 +267,9 @@ public final class WfbUsbSmokeActivity extends Activity {
                         CHANNEL_NUMBER,
                         INIT_RX_TIMEOUT_MS);
         if (initTxResult >= 0) {
-            log("Init + TX submit smoke completed: submitted_frames=" + initTxResult);
+            log("Init + TX/WFB submit smoke completed: submitted_frames=" + initTxResult);
         } else {
-            log("Init + TX submit smoke failed with code " + initTxResult);
+            log("Init + TX/WFB submit smoke failed with code " + initTxResult);
         }
     }
 

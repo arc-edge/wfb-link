@@ -6,6 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{
     ffi::{c_char, c_int, CString},
     fs,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
 };
 
@@ -27,8 +28,14 @@ use radio_core::{
     RxParseOutcome,
 };
 #[cfg(target_os = "android")]
+use wfb_bridge::TxCounters;
+#[cfg(any(test, target_os = "android"))]
+use wfb_bridge::{build_wfb_data_header, WfbChannelId};
+#[cfg(target_os = "android")]
 use wfb_radio_runtime::{
-    android_usbhost_adapter_info, run_rtl8812au_production_init,
+    android_usbhost_adapter_info, handle_production_bridge_tx_datagram,
+    run_rtl8812au_production_init, ProductionRuntimeBridgeTxConfig,
+    ProductionRuntimeBridgeTxOverrides, ProductionRuntimeQueuedDatagram,
     ProductionRuntimeRtl8812auInitInputs, Rtl8812auInitOrder, RuntimeRadioCounters,
     TxCalibrationProfile,
 };
@@ -107,6 +114,18 @@ const RF_RADIOB_ARRAY: &str = "array_mp_8812a_radiob";
 const DEFAULT_RFE_TYPE: u8 = 0x03;
 #[cfg(target_os = "android")]
 const ANDROID_SMOKE_TX_FRAME_COUNT: usize = 3;
+#[cfg(target_os = "android")]
+const ANDROID_SMOKE_WFB_DATAGRAM_COUNT: usize = 3;
+#[cfg(any(test, target_os = "android"))]
+const ANDROID_SMOKE_WFB_PAYLOAD_LEN: usize = 64;
+#[cfg(any(test, target_os = "android"))]
+const ANDROID_SMOKE_WFB_LINK_ID: u32 = 0x000001;
+#[cfg(any(test, target_os = "android"))]
+const ANDROID_SMOKE_WFB_RADIO_PORT: u8 = 0;
+#[cfg(any(test, target_os = "android"))]
+const ANDROID_SMOKE_WFB_RADIOTAP: [u8; 13] = [
+    0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x00, 0x00,
+];
 #[cfg(target_os = "android")]
 const ANDROID_SMOKE_TX_FRAME: [u8; 24] = [
     0x48, 0x00, // data null, no flags
@@ -233,6 +252,9 @@ pub struct AndroidTxSmokeSummary {
     pub failed: u64,
     pub short_writes: u64,
     pub bytes_written: u64,
+    pub wfb_incoming: u64,
+    pub wfb_injected: u64,
+    pub wfb_malformed: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -314,7 +336,7 @@ fn open_android_usbhost_session(
     )?)
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(test, target_os = "android"))]
 fn android_smoke_runtime_error(
     code: &'static str,
     message: impl Into<String>,
@@ -869,6 +891,28 @@ fn run_android_usbhost_init_rx_read_smoke_jni<'local>(
     })
 }
 
+#[cfg(any(test, target_os = "android"))]
+fn android_smoke_wfb_datagram(sequence: u16) -> Result<Vec<u8>, AndroidSmokeError> {
+    let channel_id = WfbChannelId::new(ANDROID_SMOKE_WFB_LINK_ID, ANDROID_SMOKE_WFB_RADIO_PORT)
+        .map_err(|error| {
+            android_smoke_runtime_error(
+                "android_smoke_wfb_channel_invalid",
+                format!("invalid synthetic WFB channel: {error}"),
+            )
+        })?;
+    let mut frame = Vec::with_capacity(24 + ANDROID_SMOKE_WFB_PAYLOAD_LEN);
+    frame.extend_from_slice(&build_wfb_data_header(channel_id, sequence));
+    for index in 0..ANDROID_SMOKE_WFB_PAYLOAD_LEN {
+        frame.push((index % 251) as u8);
+    }
+
+    let mut datagram = Vec::with_capacity(4 + ANDROID_SMOKE_WFB_RADIOTAP.len() + frame.len());
+    datagram.extend_from_slice(&0u32.to_be_bytes());
+    datagram.extend_from_slice(&ANDROID_SMOKE_WFB_RADIOTAP);
+    datagram.extend_from_slice(&frame);
+    Ok(datagram)
+}
+
 #[cfg(target_os = "android")]
 #[allow(clippy::too_many_arguments)]
 fn run_android_usbhost_init_tx_smoke_jni<'local>(
@@ -925,12 +969,48 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
     for _ in 0..ANDROID_SMOKE_TX_FRAME_COUNT {
         session.submit_80211_frame(&ANDROID_SMOKE_TX_FRAME, channel, options, &mut counters)?;
     }
+    let mut bridge_counters = TxCounters::default();
+    let mut wfb_submit_counters = TxSubmitCounters::default();
+    let bridge_config = ProductionRuntimeBridgeTxConfig {
+        channel,
+        channel_bandwidth: Bandwidth::Mhz20,
+        overrides: ProductionRuntimeBridgeTxOverrides::default(),
+    };
+    let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    for sequence in 0..ANDROID_SMOKE_WFB_DATAGRAM_COUNT {
+        let queued = ProductionRuntimeQueuedDatagram {
+            report_index: sequence,
+            peer,
+            data: android_smoke_wfb_datagram(sequence as u16)?,
+        };
+        handle_production_bridge_tx_datagram(
+            &mut session,
+            &queued,
+            bridge_config,
+            &mut bridge_counters,
+            &mut wfb_submit_counters,
+        )
+        .map_err(|error| {
+            AndroidSmokeError::Rx(RuntimeRadioError::new(error.code, error.message))
+        })?;
+    }
     Ok(AndroidTxSmokeSummary {
-        attempted: counters.attempted,
-        submitted: counters.submitted,
-        failed: counters.failed,
-        short_writes: counters.short_writes,
-        bytes_written: counters.bytes_written,
+        attempted: counters
+            .attempted
+            .saturating_add(wfb_submit_counters.attempted),
+        submitted: counters
+            .submitted
+            .saturating_add(wfb_submit_counters.submitted),
+        failed: counters.failed.saturating_add(wfb_submit_counters.failed),
+        short_writes: counters
+            .short_writes
+            .saturating_add(wfb_submit_counters.short_writes),
+        bytes_written: counters
+            .bytes_written
+            .saturating_add(wfb_submit_counters.bytes_written),
+        wfb_incoming: bridge_counters.incoming,
+        wfb_injected: bridge_counters.injected,
+        wfb_malformed: bridge_counters.malformed,
     })
 }
 
@@ -1182,12 +1262,15 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runI
         );
         if let Ok(summary) = &result {
             android_log_info(format!(
-                "init tx smoke submitted={}/{} bytes={} failed={} short_writes={}",
+                "init tx smoke submitted={}/{} bytes={} failed={} short_writes={} wfb_incoming={} wfb_injected={} wfb_malformed={}",
                 summary.submitted,
                 summary.attempted,
                 summary.bytes_written,
                 summary.failed,
-                summary.short_writes
+                summary.short_writes,
+                summary.wfb_incoming,
+                summary.wfb_injected,
+                summary.wfb_malformed
             ));
         }
         if let Err(error) = &result {
@@ -1313,6 +1396,7 @@ fn u64_from_jni(name: &'static str, value: i32) -> Result<u64, AndroidSmokeError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use radio_core::{Bandwidth, TxRate};
 
     #[test]
     fn jni_args_validate_integer_ranges() {
@@ -1376,5 +1460,27 @@ mod tests {
             ANDROID_SMOKE_RX_ERROR
         );
         assert_eq!(ANDROID_SMOKE_NATIVE_PANIC, -6);
+    }
+
+    #[test]
+    fn android_smoke_wfb_datagram_is_parseable() {
+        let datagram = android_smoke_wfb_datagram(0x1234).expect("synthetic WFB datagram");
+        let parsed = wfb_bridge::parse_tx_datagram(&datagram).expect("parse tx datagram");
+        let expected_channel =
+            WfbChannelId::new(ANDROID_SMOKE_WFB_LINK_ID, ANDROID_SMOKE_WFB_RADIO_PORT)
+                .expect("channel id");
+
+        assert_eq!(parsed.fwmark, 0);
+        assert_eq!(parsed.radiotap_len, ANDROID_SMOKE_WFB_RADIOTAP.len());
+        assert_eq!(parsed.tx_options.rate, TxRate::Mcs(0));
+        assert_eq!(parsed.tx_options.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(
+            &parsed.ieee80211_frame[..wfb_bridge::WFB_IEEE80211_HEADER_LEN],
+            &build_wfb_data_header(expected_channel, 0x1234)
+        );
+        assert_eq!(
+            parsed.ieee80211_frame.len(),
+            wfb_bridge::WFB_IEEE80211_HEADER_LEN + ANDROID_SMOKE_WFB_PAYLOAD_LEN
+        );
     }
 }

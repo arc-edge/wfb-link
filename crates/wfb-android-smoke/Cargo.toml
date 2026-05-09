@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 radio-core.workspace = true
+wfb-bridge.workspace = true
 wfb-radio-runtime.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]

@@ -20,8 +20,11 @@ Packaging flow:
 The smoke first reads one 8-bit RTL8812AU register through Java
 `controlTransfer`, then through Rust's JNI-backed transport. It then runs one
 bounded bulk-IN read, followed by full RTL8812AU production init on channel 36
-HT20 and a second bounded RX descriptor read. The final smoke reruns init and
-submits three descriptor-prefixed null-data frames through bulk OUT.
+HT20 and a second bounded RX descriptor read. An RX timeout means the adapter
+was idle and no packet arrived before the bounded read deadline. The final
+smoke reruns init, submits three descriptor-prefixed null-data frames through
+bulk OUT, and submits three synthetic WFB distributor datagrams through the
+production bridge TX path.
 
 `scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
 Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override
