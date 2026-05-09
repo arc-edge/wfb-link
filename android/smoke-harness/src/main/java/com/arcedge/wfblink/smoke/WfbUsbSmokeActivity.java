@@ -11,9 +11,15 @@ import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
+import android.graphics.Color;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 public final class WfbUsbSmokeActivity extends Activity {
@@ -33,8 +39,12 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
     private static final int INIT_RX_TIMEOUT_MS = 5000;
+    private static final int STATUS_HORIZONTAL_PADDING_DP = 16;
+    private static final int STATUS_TOP_PADDING_DP = 64;
+    private static final int STATUS_BOTTOM_PADDING_DP = 16;
 
     private UsbManager usbManager;
+    private ScrollView statusScroller;
     private TextView status;
     private UsbDeviceConnection activeConnection;
     private UsbInterface activeInterface;
@@ -59,10 +69,31 @@ public final class WfbUsbSmokeActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);
+        if (getActionBar() != null) {
+            getActionBar().hide();
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(true);
+        }
+        statusScroller = new ScrollView(this);
+        statusScroller.setFillViewport(true);
+        statusScroller.setClipToPadding(false);
+        statusScroller.setBackgroundColor(Color.WHITE);
         status = new TextView(this);
+        status.setTextColor(Color.rgb(24, 24, 24));
+        status.setTextSize(14);
+        status.setTypeface(Typeface.MONOSPACE);
         status.setTextIsSelectable(true);
-        setContentView(status);
+        installStatusInsetsPadding();
+        statusScroller.addView(
+                status,
+                new ScrollView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+        setContentView(statusScroller);
+        statusScroller.post(() -> statusScroller.requestApplyInsets());
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         IntentFilter permissionFilter = new IntentFilter(ACTION_USB_PERMISSION);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -250,5 +281,43 @@ public final class WfbUsbSmokeActivity extends Activity {
     private void log(String line) {
         Log.i(TAG, line);
         status.append(line + "\n");
+        statusScroller.post(() -> statusScroller.fullScroll(ScrollView.FOCUS_DOWN));
+    }
+
+    private void installStatusInsetsPadding() {
+        statusScroller.setPadding(
+                dp(STATUS_HORIZONTAL_PADDING_DP),
+                dp(STATUS_TOP_PADDING_DP),
+                dp(STATUS_HORIZONTAL_PADDING_DP),
+                dp(STATUS_BOTTOM_PADDING_DP));
+        statusScroller.setOnApplyWindowInsetsListener(
+                (view, insets) -> {
+                    int topInset = systemBarTopInset(insets);
+                    int bottomInset = systemBarBottomInset(insets);
+                    view.setPadding(
+                            dp(STATUS_HORIZONTAL_PADDING_DP),
+                            topInset + dp(STATUS_TOP_PADDING_DP),
+                            dp(STATUS_HORIZONTAL_PADDING_DP),
+                            bottomInset + dp(STATUS_BOTTOM_PADDING_DP));
+                    return insets;
+                });
+    }
+
+    private int systemBarTopInset(WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return insets.getInsets(WindowInsets.Type.systemBars()).top;
+        }
+        return insets.getSystemWindowInsetTop();
+    }
+
+    private int systemBarBottomInset(WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return insets.getInsets(WindowInsets.Type.systemBars()).bottom;
+        }
+        return insets.getSystemWindowInsetBottom();
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }

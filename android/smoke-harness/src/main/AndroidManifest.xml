@@ -3,7 +3,9 @@
     package="com.arcedge.wfblink.smoke">
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
-    <application android:label="WFB Link USB Smoke">
+    <application
+        android:label="WFB Link USB Smoke"
+        android:theme="@style/WfbSmokeTheme">
         <activity
             android:name="com.arcedge.wfblink.smoke.WfbUsbSmokeActivity"
             android:exported="true">
