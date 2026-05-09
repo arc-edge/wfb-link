@@ -85,6 +85,44 @@ bench work, `scripts/build-android-smoke-apk.sh` builds and signs a direct
 debug APK at `target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
 `scripts/install-android-smoke-apk.sh` installs and launches it over `adb`.
 
+### Bench Runbook
+
+1. Enable Developer Options, USB debugging, and Wireless debugging on the phone.
+2. Connect `adb` over Wi-Fi before occupying the phone's USB-C port with the
+   radio adapter:
+
+   ```sh
+   adb mdns services
+   adb connect PHONE_IP:5555
+   ```
+
+   If the phone only advertises `_adb-tls-connect._tcp`, use the pairing code
+   shown by Android's Wireless debugging UI before `adb connect`.
+
+3. Build, install, and launch the smoke APK:
+
+   ```sh
+   scripts/build-android-smoke-apk.sh
+   scripts/install-android-smoke-apk.sh
+   adb logcat -c
+   adb shell am start -n com.arcedge.wfblink.smoke/com.arcedge.wfblink.smoke.WfbUsbSmokeActivity
+   ```
+
+4. Unlock the phone. Attach the AWUS036ACH through USBHost/OTG, preferably via
+   a powered USB-C hub, and accept the Android USB permission prompt.
+5. Read the smoke result:
+
+   ```sh
+   adb logcat -d -s WfbUsbSmoke
+   adb shell dumpsys usb
+   ```
+
+`dumpsys usb` should show `connected=true`, a host connection count above zero,
+and the smoke app's device filter for `vendor_id=3034`, `product_id=34834`.
+If it still reports `connected=false`, Android has not electrically enumerated
+the adapter yet; check OTG direction, hub power, and cable orientation before
+debugging Rust.
+
 ## Current Status
 
 Implemented:
