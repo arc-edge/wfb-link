@@ -1,15 +1,18 @@
 # Android Smoke Harness Source
 
-This directory contains source-only Android harness code for the first
-AWUS036ACH USBHost smoke. It is intentionally not a complete Gradle project yet
-because this checkout does not currently have Gradle or an Android NDK compiler
-configured.
+This directory contains the minimal Android harness source for the first
+AWUS036ACH USBHost smoke. It is intentionally not a complete Gradle project;
+`scripts/build-android-smoke-apk.sh` packages it directly with SDK build tools.
 
-Expected packaging flow:
+Packaging flow:
 
-1. Build `wfb-android-smoke` as an Android `cdylib`.
-2. Package the resulting native library into an Android app.
-3. Use `WfbUsbSmokeActivity` to request USB permission, open the matching
+1. Run `scripts/build-android-smoke-apk.sh`.
+2. Pair wireless `adb` with the phone.
+3. Run `scripts/install-android-smoke-apk.sh` to install and launch the smoke
+   Activity.
+4. Attach the AWUS036ACH through USBHost/OTG, preferably with a powered hub.
+5. Accept the Android USB permission prompt.
+6. Use `WfbUsbSmokeActivity` to request USB permission, open the matching
    RTL8812AU device, obtain `UsbDeviceConnection.getFileDescriptor()`, and call
    the Rust JNI smoke entry point.
 

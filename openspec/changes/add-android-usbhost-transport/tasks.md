@@ -27,9 +27,9 @@
 
 - [x] 3.1 Add an Android smoke harness that obtains USB permission, opens the
       AWUS036ACH, and passes the runtime transport handoff into Rust.
-      Added a source-only Android harness plus `wfb-android-smoke` JNI crate.
-      Packaging into a Gradle/NDK app remains pending because this checkout
-      does not currently have Gradle or an Android NDK compiler configured.
+      Added an Android harness, `wfb-android-smoke` JNI crate, and direct
+      SDK/NDK debug APK packaging script. Product Gradle/instrumentation
+      packaging remains follow-up work.
 - [ ] 3.2 Validate power-on/init RX-only descriptor parsing.
 - [ ] 3.3 Validate single TX and bounded bidirectional WFB distributor datagrams
       against the Linux peer.

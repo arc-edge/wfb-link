@@ -78,7 +78,10 @@ register values; negative values are smoke error classes documented in
 
 This is intentionally not a complete Gradle project yet. Product Android
 packaging should own the app shell, USB permission UX, and native library
-loading policy, then reuse the Rust smoke entry point during bring-up.
+loading policy, then reuse the Rust smoke entry point during bring-up. For
+bench work, `scripts/build-android-smoke-apk.sh` builds and signs a direct
+debug APK at `target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
+`scripts/install-android-smoke-apk.sh` installs and launches it over `adb`.
 
 ## Current Status
 
@@ -90,10 +93,11 @@ Implemented:
   selectors.
 - fd-backed libusb wrapping for Android control and bulk transfers.
 - Source-only Android USB permission and register-read smoke harness.
+- Direct SDK/NDK debug APK build script for the smoke harness.
 
 Pending:
 
-- Packaged Android app or instrumentation target around the smoke harness.
+- Product Gradle app or instrumentation target around the smoke harness.
 - Android target CI with NDK toolchain configured.
 - Hardware smoke: descriptor/register read, RX-only parsing, single TX, then
   bounded bidirectional WFB distributor datagrams against the Linux peer.
