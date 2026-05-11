@@ -2,6 +2,11 @@ package com.arcedge.wfblink.sdk;
 
 import android.content.Context;
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /** Configuration for one blocking Android USBHost managed WFB stream session. */
 public final class WfbManagedStreamsConfig {
@@ -26,6 +31,11 @@ public final class WfbManagedStreamsConfig {
     public final int rxAggregatorPort;
     public final int rawRxPort;
     public final int rawPayloadBytes;
+    public final int txBandwidthMhz;
+    public final int txMcs;
+    public final int txFecK;
+    public final int txFecN;
+    public final List<WfbManagedStream> streams;
 
     private WfbManagedStreamsConfig(Builder builder) {
         this.usb = builder.usb;
@@ -49,6 +59,11 @@ public final class WfbManagedStreamsConfig {
         this.rxAggregatorPort = builder.rxAggregatorPort;
         this.rawRxPort = builder.rawRxPort;
         this.rawPayloadBytes = builder.rawPayloadBytes;
+        this.txBandwidthMhz = builder.txBandwidthMhz;
+        this.txMcs = builder.txMcs;
+        this.txFecK = builder.txFecK;
+        this.txFecN = builder.txFecN;
+        this.streams = Collections.unmodifiableList(new ArrayList<WfbManagedStream>(builder.streams));
     }
 
     public static Builder builder(Context context, WfbUsbHandoff usb) {
@@ -77,6 +92,11 @@ public final class WfbManagedStreamsConfig {
         private int rxAggregatorPort = 15804;
         private int rawRxPort = 15904;
         private int rawPayloadBytes = 512;
+        private int txBandwidthMhz = WfbManagedTxProfile.DEFAULT_BANDWIDTH_MHZ;
+        private int txMcs = WfbManagedTxProfile.DEFAULT_MCS;
+        private int txFecK = WfbManagedTxProfile.DEFAULT_FEC_K;
+        private int txFecN = WfbManagedTxProfile.DEFAULT_FEC_N;
+        private final List<WfbManagedStream> streams = new ArrayList<WfbManagedStream>();
 
         private Builder(Context context, WfbUsbHandoff usb) {
             this.usb = usb;
@@ -157,8 +177,75 @@ public final class WfbManagedStreamsConfig {
             return this;
         }
 
+        public Builder txProfile(WfbManagedTxProfile value) {
+            if (value != null) {
+                this.txBandwidthMhz = value.bandwidthMhz;
+                this.txMcs = value.mcs;
+                this.txFecK = value.fecK;
+                this.txFecN = value.fecN;
+            }
+            return this;
+        }
+
+        public Builder addStream(WfbManagedStream value) {
+            this.streams.add(value);
+            return this;
+        }
+
+        public Builder streams(List<WfbManagedStream> values) {
+            this.streams.clear();
+            if (values != null) {
+                this.streams.addAll(values);
+            }
+            return this;
+        }
+
         public WfbManagedStreamsConfig build() {
+            applySupportedNamedStreamMapping();
             return new WfbManagedStreamsConfig(this);
+        }
+
+        private void applySupportedNamedStreamMapping() {
+            if (streams.isEmpty() || streams.size() != 2) {
+                return;
+            }
+            Set<String> names = new HashSet<String>();
+            Set<Integer> localPorts = new HashSet<Integer>();
+            WfbManagedStream tx = null;
+            WfbManagedStream rx = null;
+            for (WfbManagedStream stream : streams) {
+                if (stream == null
+                        || stream.name == null
+                        || stream.direction == null
+                        || stream.payloadKind != WfbPayloadKind.RAW_APPLICATION_DATAGRAM
+                        || !names.add(stream.name)
+                        || !localPorts.add(Integer.valueOf(stream.localUdpPort))) {
+                    return;
+                }
+                if (stream.direction == WfbStreamDirection.TX) {
+                    if (tx != null) {
+                        return;
+                    }
+                    tx = stream;
+                } else if (stream.direction == WfbStreamDirection.RX) {
+                    if (rx != null) {
+                        return;
+                    }
+                    rx = stream;
+                }
+            }
+            if (tx == null || rx == null || tx.linkId != rx.linkId) {
+                return;
+            }
+
+            this.linkId = tx.linkId;
+            this.uplinkRadioPort = tx.radioPort;
+            this.downlinkRadioPort = rx.radioPort;
+            this.rawTxPort = tx.localUdpPort;
+            this.rawRxPort = rx.localUdpPort;
+            if (tx.txProfile != null) {
+                txProfile(tx.txProfile);
+            }
         }
     }
 

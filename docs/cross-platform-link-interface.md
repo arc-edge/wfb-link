@@ -318,14 +318,17 @@ into the RTL8812AU control and bulk transfers used by `wfb-radio-runtime`.
 The Android product-facing surface is a local SDK AAR. The app owns USB
 permission, foreground-service/lifecycle policy, key and asset provisioning,
 then passes a live `UsbDeviceConnection` plus endpoint objects to
-`WfbLinkManager`. The AAR packages `libwfb_android.so` and can include Android
-arm64 WFB-NG helper executables for managed raw stream bring-up.
+`WfbLinkManager`. The Java surface exposes named managed stream config and a
+`WfbManagedStreamsSession` lifecycle wrapper over the blocking native runtime.
+The AAR packages `libwfb_android.so` and can include Android arm64 WFB-NG
+helper executables for managed raw stream bring-up.
 
 The smoke harness has validated live USB permission, register access,
 production init, RX descriptor parsing, Android-to-Linux TX,
 Linux-to-Android RX frames, and managed raw stream flow when the phone has
-electrically enumerated the adapter. Android product work still needs a real
-Gradle app/instrumentation target and NDK-backed CI.
+electrically enumerated the adapter. The repository includes direct and
+Gradle-style Android consumer compile checks; RF hardware smokes remain manual
+bench gates.
 
 ## Why This Boundary
 

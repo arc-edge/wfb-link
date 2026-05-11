@@ -170,9 +170,9 @@ Implemented:
   and `UsbEndpoint` objects.
 - Source-only Android USB permission, register/RX/init/TX smoke harness.
 - Direct SDK/NDK debug APK build script for the smoke harness.
-- Local Android SDK AAR build with Java USB handoff/config/result classes,
-  product-facing JNI symbol names, native library packaging, and a consumer
-  compile smoke.
+- Local Android SDK AAR build with Java USB handoff/config/session/result
+  classes, named stream config, product-facing JNI symbol names, native library
+  packaging, and direct plus Gradle-style consumer compile smokes.
 - Android arm64 WFB-NG codec helper build and debug APK packaging path for
   managed-stream smoke validation.
 - Pixel 7 Pro short-range RF smoke against `drone-2f389` on channel 161 HT20:

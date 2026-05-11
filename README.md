@@ -58,9 +58,10 @@ remote. Update them before adding Cargo git dependencies or release automation.
 - Android USBHost runtime and service config selection, endpoint validation,
   plus a JNI smoke transport that drives app-owned `UsbDeviceConnection`
   control/bulk transfers directly.
-- A local Android SDK AAR path with Java USB handoff/config/result classes,
-  product-facing JNI symbol names, and optional packaged WFB-NG helper
-  executables for managed stream bring-up.
+- A local Android SDK AAR path with Java USB handoff/config/session/result
+  classes, named stream config, product-facing JNI symbol names, optional
+  packaged WFB-NG helper executables, and direct plus Gradle-style consumer
+  compile checks.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us

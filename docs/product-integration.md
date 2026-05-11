@@ -312,12 +312,12 @@ scripts/build-android-sdk-consumer-smoke.sh
 ```
 
 The app owns USB permission, opens and claims the device, resolves endpoint
-objects, provisions `gs.key` plus firmware/table assets, and runs
-`WfbLinkManager.runManagedStreamsBlocking` on a worker thread or foreground
-service. The SDK returns `WfbManagedStreamsResult` JSON-derived counters and
-typed `WfbLinkException` codes for Java-side validation failures. Native
-runtime failures return structured result codes instead of smoke integer return
-values.
+objects, provisions `gs.key` plus firmware/table assets, and starts
+`WfbLinkManager.startManagedStreams(...)` on an app-owned executor or foreground
+service. The returned `WfbManagedStreamsSession` exposes status snapshots,
+cooperative stop request, and final `WfbManagedStreamsResult` counters. Typed
+`WfbLinkException` codes cover Java-side validation failures; native runtime
+failures return structured result codes instead of smoke integer return values.
 
 See [Android SDK integration](android-sdk.md) for the exact Java API and
 packaging limitations.

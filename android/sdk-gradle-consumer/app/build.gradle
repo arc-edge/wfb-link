@@ -1,0 +1,20 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.arcedge.wfblink.gradlesample"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.arcedge.wfblink.gradlesample"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1"
+    }
+}
+
+dependencies {
+    implementation files("libs/wfb-link-android-sdk-debug.aar")
+}

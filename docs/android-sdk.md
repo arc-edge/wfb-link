@@ -42,12 +42,20 @@ The AAR currently contains:
 
 ## Local Gradle Consumption
 
-For a local app module:
+For a local app module, copy the generated AAR to the app's `libs/` directory
+and depend on it directly:
 
 ```gradle
 dependencies {
     implementation files("libs/wfb-link-android-sdk-debug.aar")
 }
+```
+
+The repository includes a Gradle-style consumer sample at
+`android/sdk-gradle-consumer`. Compile-check it without requiring Gradle:
+
+```sh
+scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
 The app should copy or generate the paired `gs.key` and Realtek init assets into
@@ -60,9 +68,12 @@ permission UX.
 ## API Shape
 
 The host app owns Android USB permission and passes the live USB objects into
-the SDK:
+the SDK. Product code should use named managed streams and the lifecycle
+session helper:
 
 ```java
+ExecutorService executor = Executors.newSingleThreadExecutor();
+
 WfbUsbHandoff usb =
         new WfbUsbHandoff(
                 connection,
@@ -87,17 +98,58 @@ WfbManagedStreamsConfig config =
                 .channelNumber(161)
                 .durationMs(15000)
                 .payloadCount(20)
+                .addStream(
+                        WfbManagedStream.tx("control-up", 6, 15606)
+                                .txProfile(WfbManagedTxProfile.of(20, 0, 2, 4))
+                                .build())
+                .addStream(WfbManagedStream.rx("video-down", 4, 15904).build())
                 .build();
 
-WfbManagedStreamsResult result =
-        new WfbLinkManager().runManagedStreamsBlocking(config);
+WfbManagedStreamsSession session =
+        new WfbLinkManager()
+                .startManagedStreams(
+                        config,
+                        executor,
+                        new WfbManagedStreamsCallback() {
+                            @Override
+                            public void onStatusChanged(WfbManagedStreamsStatus status) {}
+
+                            @Override
+                            public void onCompleted(WfbManagedStreamsResult result) {}
+
+                            @Override
+                            public void onFailed(WfbLinkException error) {}
+                        });
 ```
 
-`runManagedStreamsBlocking` is a long-running native call. Run it from an
-app-owned worker thread or foreground service. Keep the `UsbDeviceConnection`
-and selected `UsbEndpoint` objects alive until it returns, and do not issue
-unrelated Java-side transfers on the same interface while the SDK owns the
-session.
+`startManagedStreams` validates the config, runs the existing blocking native
+runtime on the caller-provided `ExecutorService`, and returns a
+`WfbManagedStreamsSession`. `session.status()` returns immutable snapshots,
+`session.await()` blocks for the final result, and `session.requestStop()`
+records a cooperative stop request. The current native USB runtime cannot be
+force-interrupted from Java; use bounded `durationMs` values and treat stop as
+best-effort until the runtime reaches its next normal exit.
+
+`runManagedStreamsBlocking` remains available for tests and callers that
+already own their worker thread. In either mode, keep the
+`UsbDeviceConnection` and selected `UsbEndpoint` objects alive until the
+session finishes, and do not issue unrelated Java-side transfers on the same
+interface while the SDK owns it.
+
+## Named Streams
+
+The Android managed path currently supports exactly one raw TX stream and one
+raw RX stream. The Java config accepts the product-shaped stream model now and
+maps the supported shape onto the proven native runtime ports:
+
+- TX stream: raw app UDP into Android, then `wfb_tx`, then radio.
+- RX stream: radio, then `wfb_rx`, then raw app UDP out of Android.
+
+Startup rejects duplicate stream names, duplicate local UDP ports, unsupported
+payload kinds, multiple TX/RX streams, missing TX/RX streams, and mismatched
+link IDs with typed `WfbLinkException` codes before live USB execution.
+`WFB_DISTRIBUTOR_DATAGRAM` payloads and N-stream Android multiplexing are
+reserved for a later native-runtime expansion.
 
 ## Validation
 
@@ -105,6 +157,7 @@ Compile an external consumer against the AAR:
 
 ```sh
 scripts/build-android-sdk-consumer-smoke.sh
+scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
 Build the smoke APK, which now exercises the same SDK facade for managed
@@ -135,9 +188,11 @@ and phone unlock state before debugging SDK code.
 - Local AAR only. Maven/registry publishing is intentionally deferred.
 - Android arm64 only.
 - Caller-owned foreground service, lifecycle, assets, keys, and USB permission.
-- Managed stream config currently exposes one uplink raw producer and one
-  downlink raw receiver through the SDK smoke path. Product-specific stream
-  multiplexing should use the generic `wfb-link` stream contract as it is
-  lifted into Android.
+- Managed stream config currently maps one named uplink raw producer and one
+  named downlink raw receiver into the Android native path. Additional named
+  stream pairs are modeled in Java but rejected until native Android
+  multiplexing is added.
+- Stop requests are cooperative. They update Java session state immediately but
+  native USB execution exits at its bounded runtime stop point.
 - RF-quality and long-range Android validation must be rerun whenever the
   antenna/phone/hub setup changes.

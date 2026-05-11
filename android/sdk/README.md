@@ -6,8 +6,9 @@ validation app.
 
 The SDK expects the host app to own Android USB permission and pass an opened
 `UsbDeviceConnection` plus selected `UsbEndpoint` objects into
-`WfbLinkManager`. Long-running sessions are blocking native calls; run them from
-a caller-owned worker thread or foreground service.
+`WfbLinkManager`. Product apps should call `startManagedStreams(...)` with a
+caller-owned `ExecutorService`; the returned `WfbManagedStreamsSession` exposes
+status snapshots, cooperative stop request, and result/error delivery.
 
 Build the local AAR with:
 
@@ -21,8 +22,9 @@ Run the external consumer compile smoke with:
 
 ```bash
 scripts/build-android-sdk-consumer-smoke.sh
+scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
 See `docs/android-sdk.md` for the complete integration contract, manifest
-requirements, USB handoff shape, asset/key provisioning, validation commands,
-and current limitations.
+requirements, USB handoff shape, named stream config, asset/key provisioning,
+validation commands, and current limitations.

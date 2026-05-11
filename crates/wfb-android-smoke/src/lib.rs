@@ -211,6 +211,10 @@ struct AndroidManagedStreamRuntimeConfig {
     rx_aggregator_port: u16,
     raw_rx_port: u16,
     raw_payload_bytes: usize,
+    tx_bandwidth_mhz: u8,
+    tx_mcs: u8,
+    tx_fec_k: u8,
+    tx_fec_n: u8,
 }
 
 #[cfg(target_os = "android")]
@@ -233,6 +237,10 @@ impl AndroidManagedStreamRuntimeConfig {
             rx_aggregator_port: ANDROID_MANAGED_RX_AGGREGATOR_PORT,
             raw_rx_port: ANDROID_MANAGED_RAW_RX_PORT,
             raw_payload_bytes: ANDROID_MANAGED_RAW_PAYLOAD_BYTES,
+            tx_bandwidth_mhz: 20,
+            tx_mcs: 0,
+            tx_fec_k: 2,
+            tx_fec_n: 4,
         }
     }
 }
@@ -1688,6 +1696,12 @@ fn run_android_usbhost_managed_streams_jni<'local>(
     if managed.raw_payload_bytes < 4 {
         return Err(AndroidSmokeError::InvalidArgument("raw_payload_bytes"));
     }
+    if managed.tx_bandwidth_mhz == 0 {
+        return Err(AndroidSmokeError::InvalidArgument("tx_bandwidth_mhz"));
+    }
+    if managed.tx_fec_k == 0 || managed.tx_fec_n == 0 || managed.tx_fec_k > managed.tx_fec_n {
+        return Err(AndroidSmokeError::InvalidArgument("tx_fec"));
+    }
     if !managed.key_path.is_file() {
         return Err(android_smoke_runtime_error(
             "android_managed_key_missing",
@@ -1728,13 +1742,13 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         "-p".to_string(),
         managed.uplink_radio_port.to_string(),
         "-B".to_string(),
-        "20".to_string(),
+        managed.tx_bandwidth_mhz.to_string(),
         "-M".to_string(),
-        "0".to_string(),
+        managed.tx_mcs.to_string(),
         "-k".to_string(),
-        "2".to_string(),
+        managed.tx_fec_k.to_string(),
         "-n".to_string(),
-        "4".to_string(),
+        managed.tx_fec_n.to_string(),
         "-u".to_string(),
         raw_tx_port,
         tx_bind.to_string(),
@@ -2317,6 +2331,10 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
     rx_aggregator_port: i32,
     raw_rx_port: i32,
     raw_payload_bytes: i32,
+    tx_bandwidth_mhz: i32,
+    tx_mcs: i32,
+    tx_fec_k: i32,
+    tx_fec_n: i32,
 ) -> jstring {
     let env_raw = env;
     let json = catch_unwind(AssertUnwindSafe(|| {
@@ -2370,6 +2388,10 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
                 rx_aggregator_port: u16_from_jni("rx_aggregator_port", rx_aggregator_port)?,
                 raw_rx_port: u16_from_jni("raw_rx_port", raw_rx_port)?,
                 raw_payload_bytes: usize_from_jni("raw_payload_bytes", raw_payload_bytes)?,
+                tx_bandwidth_mhz: u8_from_jni("tx_bandwidth_mhz", tx_bandwidth_mhz)?,
+                tx_mcs: u8_from_jni("tx_mcs", tx_mcs)?,
+                tx_fec_k: u8_from_jni("tx_fec_k", tx_fec_k)?,
+                tx_fec_n: u8_from_jni("tx_fec_n", tx_fec_n)?,
             };
             let connection = unsafe { JObject::from_raw(connection) };
             let bulk_in_endpoint_object = unsafe { JObject::from_raw(bulk_in_endpoint_object) };
