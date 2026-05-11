@@ -21,9 +21,9 @@ Product code
 | --- | --- | --- |
 | Managed macOS IP tunnel | `MacosWfbTunnelBackend` | Product-facing and smoke-tested for tunnel-only runs. Supervises radio runtime, WFB-NG helpers, and `wfb-tun-macos`. |
 | Managed raw application multi-streams, optionally with an IP tunnel | `ManagedWfbStreamsBackend` | Product-facing implementation. Supervises one WFB-NG helper per configured stream, can also supervise one `wfb-tun-macos` tunnel on separate radio ports, and exposes named raw UDP endpoints with health. |
-| Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in live transport is macOS IOUSBHost; Android uses the same contract with an Android USBHost fd-backed libusb bridge. |
+| Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in live transport is macOS IOUSBHost; Android uses the same contract with Android USBHost direct JNI control/bulk transfers. |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
-| Android | `UserspaceRadioBackend` plus Android USBHost transport | Rust fd-backed control/bulk bridge implemented; Android app handoff harness and hardware validation pending. Keep the same lifecycle, endpoint, health, and report contracts. |
+| Android | `UserspaceRadioBackend` plus Android USBHost transport | Rust direct-JNI control/bulk bridge implemented; source-only smoke harness has passed register, init, RX descriptor, Android-to-Linux TX, and Linux-to-Android RX frame validation. Managed raw application streams still need Android WFB helper packaging. |
 
 The important distinction is `payload_kind`:
 
@@ -262,8 +262,9 @@ on the configured channel.
 Use this path when the product already owns WFB-NG datagrams or supervises its
 own helper processes. On macOS, the service TOML selects `[macos_usbhost]`;
 Android selects `[android_usbhost]` without changing this top-level link code.
-The Android app layer supplies `device_fd` after USB permission and open, then
-keeps the owning `UsbDeviceConnection` alive while Rust/libusb owns transfers.
+The Android app layer obtains USB permission, opens and claims
+`UsbDeviceConnection`, resolves the selected endpoint objects, and keeps those
+Java objects alive while Rust uses direct JNI control/bulk transfers.
 
 ```rust
 use std::time::Duration;

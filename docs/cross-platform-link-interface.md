@@ -311,13 +311,15 @@ already has a mature native WFB path.
 Android is expected to use the portable userspace radio contract rather than a
 native Linux monitor-mode path. The Rust-side Android USBHost contract includes
 transport selection, endpoint validation, synthetic adapter metadata, runtime
-config serialization, service TOML/CLI mapping, and an fd-backed libusb bridge
-that turns an app-owned `UsbDeviceConnection` file descriptor into the
-RTL8812AU control and bulk transfers used by `wfb-radio-runtime`.
+config serialization, service TOML/CLI mapping, and a direct-JNI bridge that
+turns app-owned `UsbDeviceConnection.controlTransfer` and `bulkTransfer` calls
+into the RTL8812AU control and bulk transfers used by `wfb-radio-runtime`.
 
-Once the Android app handoff and NDK build are wired, Android product code
-should be able to start a `UserspaceRadioBackend` with Android runtime USB
-config and keep the same `LinkEndpoints`, `LinkHealth`, and `LinkReport` model.
+The source-only smoke harness has validated live USB permission, register
+access, production init, RX descriptor parsing, Android-to-Linux TX, and
+Linux-to-Android RX frames. Android product packaging still needs a Gradle/app
+wrapper, NDK CI, and Android-compatible WFB helper packaging before the managed
+raw application stream backend can run the same profile as macOS.
 
 ## Why This Boundary
 

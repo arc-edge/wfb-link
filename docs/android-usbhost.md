@@ -6,25 +6,30 @@ access, bulk RX/TX, calibration, WFB forwarding, health, and reports.
 
 ## Transport Decision
 
-Use file-descriptor handoff rather than per-transfer JNI calls:
+Use app-owned `UsbDeviceConnection` calls through JNI:
 
 ```text
 Android app
   -> UsbManager permission
   -> UsbDeviceConnection open
-  -> getFileDescriptor()
-  -> wfb-radio-runtime AndroidUsbHostConfig { device_fd, endpoints, VID/PID }
-  -> rusb/libusb_wrap_sys_device
-  -> existing RTL8812AU control + bulk traits
+  -> claimInterface()
+  -> resolve selected UsbEndpoint objects
+  -> Rust JNI smoke transport
+  -> UsbDeviceConnection.controlTransfer/bulkTransfer
+  -> shared RTL8812AU init/RX/TX/runtime code
 ```
 
 The app must keep the owning `UsbDeviceConnection` alive until the Rust radio
-session exits. The app should not also run Java-side bulk/control transfers for
-the same interface while Rust owns the session.
+session exits. It must also keep the selected `UsbEndpoint` Java objects alive
+while Rust is using them. The app should not issue unrelated Java-side
+bulk/control transfers for the same interface while Rust owns a smoke/runtime
+call.
 
-Rust/libusb claims the configured interface after wrapping the fd. The initial
-Android harness should therefore open the device and hand off the fd before any
-long-lived Java-side interface ownership.
+The original file-descriptor/libusb wrapping path was tested first, but Pixel 7
+Pro returned `Input/Output Error` from `libusb_wrap_sys_device` while Java
+control transfers against the same open device succeeded. The Android runtime
+config still carries fd metadata for validation/report compatibility, but the
+active hardware path is direct JNI.
 
 ## Runtime Config
 
@@ -70,12 +75,15 @@ The first USB permission and fd-handoff smoke is split between:
 - `android/smoke-harness`: source-only Android Activity, manifest, and USB
   device filter.
 
-The harness opens the first attached AWUS036ACH (`0x0bda:0x8812`), passes
-`UsbDeviceConnection.getFileDescriptor()` into Rust, and reads one RTL8812AU
-register through the Android fd-backed transport. It then runs one bounded
-bulk-IN read through the runtime RX descriptor parser. Register return values
-`0..255` are register values; RX return values `0..N` are parsed frame counts;
-negative values are smoke error classes documented in
+The harness opens the first attached AWUS036ACH (`0x0bda:0x8812`), passes the
+live `UsbDeviceConnection` plus selected bulk endpoint objects into Rust, and
+reads one RTL8812AU register through the Android JNI transport. It then runs
+bounded bulk-IN reads through the runtime RX descriptor parser, full
+RTL8812AU production init on the selected HT20 channel, monitor opmode receive
+filter setup, and descriptor-prefixed TX submission through the production
+bridge TX path. Register return values `0..255` are register values; RX return
+values `0..N` are parsed frame counts; negative values are smoke error classes
+documented in
 `android/smoke-harness/README.md`.
 
 This is intentionally not a complete Gradle project yet. Product Android
@@ -105,8 +113,10 @@ debug APK at `target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
    scripts/build-android-smoke-apk.sh
    scripts/install-android-smoke-apk.sh
    adb logcat -c
-   adb shell am start -n com.arcedge.wfblink.smoke/com.arcedge.wfblink.smoke.WfbUsbSmokeActivity
-   ```
+  adb shell am start -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity
+  ```
+
+   To match a peer on another channel, pass `--ei channelNumber <channel>`.
 
 4. Unlock the phone. Attach the AWUS036ACH through USBHost/OTG, preferably via
    a powered USB-C hub, and accept the Android USB permission prompt.
@@ -131,13 +141,19 @@ Implemented:
 - Endpoint validation for the AWUS036ACH bulk layout.
 - Runtime open-plan validation for fd, VID/PID, endpoint shape, and unsupported
   selectors.
-- fd-backed libusb wrapping for Android control and bulk transfers.
-- Source-only Android USB permission and register-read smoke harness.
+- Direct JNI control and bulk transfers through app-owned `UsbDeviceConnection`
+  and `UsbEndpoint` objects.
+- Source-only Android USB permission, register/RX/init/TX smoke harness.
 - Direct SDK/NDK debug APK build script for the smoke harness.
+- Pixel 7 Pro short-range RF smoke against `drone-2f389` on channel 161 HT20:
+  Linux monitor captures saw Android-origin synthetic WFB headers, and Android
+  post-init RX parsed Linux `wfb_tx` data frames including WFB-like MCS1 frames
+  after applying the production monitor opmode receive filter.
 
 Pending:
 
 - Product Gradle app or instrumentation target around the smoke harness.
 - Android target CI with NDK toolchain configured.
-- Hardware smoke: descriptor/register read, RX-only parsing, single TX, then
-  bounded bidirectional WFB distributor datagrams against the Linux peer.
+- Android-managed raw application stream profile: package or otherwise provide
+  Android-compatible WFB helper processes, then run the same managed-stream
+  validation shape used by the macOS/Linux bench.

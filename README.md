@@ -281,8 +281,11 @@ and best-effort helper degradation semantics.
 - The `wfb-link` Linux backend is a contract/design stub, not an implemented
   native Linux supervisor.
 - The Android USBHost smoke harness can obtain permission, read registers, run
-  production init, and reach bulk-IN timeout cleanly. It still needs
-  receiver-backed RX/TX WFB datagram validation and NDK CI.
+  production init, apply monitor opmode, parse RX frames, and submit TX frames
+  through direct JNI `UsbDeviceConnection` transfers. Short-range
+  receiver-backed RX/TX WFB-like frame validation has passed on Pixel 7 Pro.
+  Android still needs NDK CI and a packaged managed-stream helper path before
+  it can run the full raw-application multi-stream production gate.
 - `ManagedWfbStreamsBackend` is the first managed raw-application multi-stream
   path. It can now include one optional managed tunnel. Required helper exits
   fail startup; best-effort helper exits degrade only the named stream, or

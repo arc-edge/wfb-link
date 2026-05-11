@@ -81,6 +81,7 @@ is not the active Android hardware path.
   build stops before Android Rust code can be checked.
 - Hardware validation now has an Android app handoff harness. Pixel 7 Pro live
   smoke has passed USB permission, Java control transfer, Rust JNI register
-  read, and full production RTL8812AU init. The remaining hardware gates are
-  receiver-backed RX descriptor parsing, single TX, and bounded bidirectional
-  WFB distributor datagrams against the existing Linux peer.
+  read, full production RTL8812AU init, monitor opmode receive filtering,
+  receiver-backed Android TX, and receiver-backed Android RX frame parsing
+  against the existing Linux peer. The remaining hardware gate is a packaged
+  Android managed-stream profile comparable to the macOS managed-stream bench.

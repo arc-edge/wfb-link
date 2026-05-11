@@ -29,9 +29,10 @@ adb shell am start \
 The smoke first reads one 8-bit RTL8812AU register through Java
 `controlTransfer`, then through Rust's JNI-backed transport. It then runs one
 bounded bulk-IN read, followed by full RTL8812AU production init on the selected
-HT20 channel and a second bounded RX descriptor read. An RX timeout means the
-adapter was idle and no packet arrived before the bounded read deadline. The
-final smoke reruns init, submits three descriptor-prefixed null-data frames
+HT20 channel, the same monitor opmode receive filter used by production, and a
+bounded RX descriptor read loop. An RX timeout means the adapter was idle and no
+packet arrived before the bounded read deadline. The final smoke reruns init,
+applies monitor opmode, submits three descriptor-prefixed null-data frames
 through bulk OUT, and submits three synthetic WFB distributor datagrams through
 the production bridge TX path.
 
@@ -45,7 +46,7 @@ with `libusb_wrap_sys_device` returning `Input/Output Error`; direct JNI
 `UsbDeviceConnection` control/bulk calls are now the active smoke path.
 
 Register return values `0..255` are register values. RX return values `0..N`
-are parsed frame counts for that single read. Negative return values are error
+are parsed frame counts. Negative return values are error
 classes from `wfb-android-smoke`:
 
 - `-1`: invalid JNI/app argument

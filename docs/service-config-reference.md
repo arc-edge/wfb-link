@@ -84,7 +84,7 @@ Fields:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `enabled` | no | Selects the Android USBHost transport when true. Defaults to false. |
-| `device_fd` | no | Native file descriptor handed in by the Android app layer after USB permission and device open. The Java/Kotlin layer must keep the owning `UsbDeviceConnection` alive for the lifetime of the Rust radio session and should let Rust/libusb claim the interface. This is normally runtime/app-supplied, not a static product config value. |
+| `device_fd` | no | Native file descriptor metadata handed in by the Android app layer after USB permission and device open. The active hardware path uses app-owned `UsbDeviceConnection` and endpoint objects through direct JNI, so this is normally runtime/app-supplied metadata rather than a static product config value. |
 | `interface_number` | no | USB interface number. Defaults to `0`. |
 | `bulk_in_endpoint` | no | Selected bulk IN endpoint address. Defaults to `129` / `0x81`. |
 | `bulk_out_endpoint` | no | Selected bulk OUT endpoint address. Defaults to `2` / `0x02`. |
@@ -95,9 +95,11 @@ Only one USB backend may be enabled. If `[macos_usbhost]` and
 `multiple_usb_backends_enabled`.
 
 Current implementation boundary: Android config, service CLI flags, endpoint
-validation, runtime config serialization, and fd-backed libusb control/bulk
-transfer plumbing are implemented. Android app packaging, USB permission UI,
-NDK build setup, and hardware smoke validation remain pending.
+validation, runtime config serialization, and direct-JNI control/bulk transfer
+plumbing are implemented. The source-only smoke harness has live Pixel 7 Pro
+coverage for permission, register access, production init, RX descriptor
+parsing, Android-to-Linux TX, and Linux-to-Android RX frames. Android product
+packaging, NDK CI, and managed-stream WFB helper packaging remain pending.
 
 ## Stream Schema
 
