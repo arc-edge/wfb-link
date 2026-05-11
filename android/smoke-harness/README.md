@@ -53,6 +53,7 @@ adb shell am start \
   --ei channelNumber 161 \
   --ez runManagedStreams true \
   --ez managedOnly true \
+  --ez managedValidationTraffic true \
   --ei managedDurationMs 15000 \
   --ei managedPayloadCount 20 \
   --ei managedPayloadIntervalMs 20
@@ -73,9 +74,18 @@ DURATION_MS=1200000 PAYLOAD_INTERVAL_MS=100 \
   scripts/run-android-managed-soak.sh
 ```
 
+The wrapper keeps the phone awake and debug-allowlists the smoke app UID for
+background networking by default. This avoids Android doze/background policy
+blocking loopback UDP with `Operation not permitted` during adb-launched soak
+runs. Set `PREAUTHORIZE_ANDROID_NETWORK=false` to test without that harness
+setup.
+
 `managedPayloadIntervalMs` controls the Android raw TX producer interval. A
 larger value, such as `100`, better represents sparse control uplink while a
 Linux peer sends steadier downlink traffic.
+Set `managedValidationTraffic=false` to test the production-mode SDK contract:
+the SDK leaves raw UDP sockets to the app, and the smoke Activity sends/receives
+the payloads through Java-owned UDP sockets.
 `managedOnly=true` skips the destructive diagnostic pre-smokes and runs the
 production-shaped managed path once, matching SDK/integrator usage.
 

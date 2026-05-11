@@ -19,14 +19,30 @@ import android.util.Log;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import com.arcedge.wfblink.sdk.WfbLinkException;
 import com.arcedge.wfblink.sdk.WfbLinkManager;
 import com.arcedge.wfblink.sdk.WfbManagedStreamsConfig;
 import com.arcedge.wfblink.sdk.WfbManagedStreamsResult;
+import com.arcedge.wfblink.sdk.WfbManagedStreamsSession;
 import com.arcedge.wfblink.sdk.WfbUsbHandoff;
 import java.io.File;
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
+import java.nio.ByteBuffer;
+import java.nio.channels.DatagramChannel;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class WfbUsbSmokeActivity extends Activity {
     private static final String TAG = "WfbUsbSmoke";
@@ -44,6 +60,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final String EXTRA_CHANNEL_NUMBER = "channelNumber";
     private static final String EXTRA_RUN_MANAGED_STREAMS = "runManagedStreams";
     private static final String EXTRA_MANAGED_ONLY = "managedOnly";
+    private static final String EXTRA_MANAGED_VALIDATION_TRAFFIC = "managedValidationTraffic";
     private static final String EXTRA_MANAGED_DURATION_MS = "managedDurationMs";
     private static final String EXTRA_MANAGED_PAYLOAD_COUNT = "managedPayloadCount";
     private static final String EXTRA_MANAGED_PAYLOAD_INTERVAL_MS = "managedPayloadIntervalMs";
@@ -63,6 +80,11 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
     private static final int INIT_RX_TIMEOUT_MS = 5000;
+    private static final int MANAGED_RAW_TX_PORT = 15606;
+    private static final int MANAGED_RAW_RX_PORT = 15904;
+    private static final int MANAGED_RAW_PAYLOAD_BYTES = 512;
+    private static final int PRODUCT_MODE_READY_TIMEOUT_MS = 30000;
+    private static final int PRODUCT_MODE_RX_GRACE_MS = 5000;
     private static final int STATUS_HORIZONTAL_PADDING_DP = 16;
     private static final int STATUS_TOP_PADDING_DP = 64;
     private static final int STATUS_BOTTOM_PADDING_DP = 16;
@@ -98,6 +120,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         channelNumber = smokeChannelNumberFromIntent();
         if (getActionBar() != null) {
             getActionBar().hide();
@@ -327,13 +350,17 @@ public final class WfbUsbSmokeActivity extends Activity {
             int managedDurationMs = managedDurationMsFromIntent();
             int managedPayloadCount = managedPayloadCountFromIntent();
             int managedPayloadIntervalMs = managedPayloadIntervalMsFromIntent();
+            boolean validationTraffic =
+                    getIntent().getBooleanExtra(EXTRA_MANAGED_VALIDATION_TRAFFIC, true);
             log(
                     "Running managed-stream smoke duration_ms="
                             + managedDurationMs
                             + " payloads="
                             + managedPayloadCount
                             + " tx_payload_interval_ms="
-                            + managedPayloadIntervalMs);
+                            + managedPayloadIntervalMs
+                            + " validation_traffic="
+                            + validationTraffic);
             WfbUsbHandoff usb =
                     new WfbUsbHandoff(
                             activeConnection,
@@ -359,45 +386,18 @@ public final class WfbUsbSmokeActivity extends Activity {
                             .durationMs(managedDurationMs)
                             .payloadCount(managedPayloadCount)
                             .txPayloadIntervalMs(managedPayloadIntervalMs)
-                            .validationTrafficEnabled(true)
+                            .validationTrafficEnabled(validationTraffic)
                             .build();
             try {
-                WfbManagedStreamsResult managedResult =
-                        new WfbLinkManager().runManagedStreamsBlocking(config);
-                if (managedResult.ok) {
-                    log(
-                            "Managed-stream smoke completed: submitted_frames="
-                                    + managedResult.submittedFrames
-                                    + " tx_datagrams="
-                                    + managedResult.txDatagrams
-                                    + " raw_tx="
-                                    + managedResult.rawTxPackets
-                                    + " raw_rx="
-                                    + managedResult.rawRxPackets
-                                    + " rx_forwarded="
-                                    + managedResult.rxForwardedPayloads
-                                    + " stop="
-                                    + managedResult.stopReason);
+                if (validationTraffic) {
+                    logManagedResult(
+                            "Managed-stream smoke",
+                            new WfbLinkManager().runManagedStreamsBlocking(config),
+                            null,
+                            null);
                 } else {
-                    log(
-                            "Managed-stream smoke failed code="
-                                    + managedResult.code
-                                    + " message="
-                                    + managedResult.message
-                                    + " submitted_frames="
-                                    + managedResult.submittedFrames
-                                    + " tx_datagrams="
-                                    + managedResult.txDatagrams
-                                    + " raw_tx="
-                                    + managedResult.rawTxPackets
-                                    + " raw_rx="
-                                    + managedResult.rawRxPackets
-                                    + " rx_forwarded="
-                                    + managedResult.rxForwardedPayloads
-                                    + " result="
-                                    + managedResult.runtimeResult
-                                    + " stop="
-                                    + managedResult.stopReason);
+                    runManagedProductModeSmoke(
+                            config, managedDurationMs, managedPayloadCount, managedPayloadIntervalMs);
                 }
             } catch (WfbLinkException error) {
                 log(
@@ -406,6 +406,429 @@ public final class WfbUsbSmokeActivity extends Activity {
                                 + " message="
                                 + error.getMessage());
             }
+        }
+    }
+
+    private void runManagedProductModeSmoke(
+            WfbManagedStreamsConfig config, int durationMs, int payloadCount, int payloadIntervalMs)
+            throws WfbLinkException {
+        File readyFile = new File(getFilesDir(), "android-managed-ready.json");
+        if (readyFile.exists() && !readyFile.delete()) {
+            log("Product-mode smoke warning: failed to delete stale ready file");
+        }
+        runProductModeUdpPreflight();
+        AtomicBoolean stop = new AtomicBoolean(false);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        Future<AppTrafficSummary> receiver =
+                executor.submit(
+                        new AppRawReceiver(
+                                stop, durationMs + PRODUCT_MODE_RX_GRACE_MS, MANAGED_RAW_RX_PORT));
+        WfbManagedStreamsSession session =
+                new WfbLinkManager().startManagedStreams(config, executor);
+        Future<AppTrafficSummary> sender =
+                executor.submit(
+                        new AppRawSender(
+                                stop,
+                                readyFile,
+                                payloadCount,
+                                payloadIntervalMs,
+                                MANAGED_RAW_TX_PORT,
+                                MANAGED_RAW_PAYLOAD_BYTES));
+        try {
+            WfbManagedStreamsResult result = session.await();
+            stop.set(true);
+            AppTrafficSummary appTx = getAppTrafficSummary(sender, "app_tx");
+            AppTrafficSummary appRx = getAppTrafficSummary(receiver, "app_rx");
+            if (result.ok
+                    && (appTx.hasFailures() || appRx.hasFailures() || appTx.packets != payloadCount)) {
+                logManagedResult(
+                        "Managed-stream product-mode",
+                        result,
+                        appTx,
+                        appRx,
+                        "failed",
+                        " code=android_smoke_app_traffic_failed message="
+                                + productModeTrafficFailure(payloadCount, appTx, appRx));
+            } else {
+                logManagedResult("Managed-stream product-mode", result, appTx, appRx);
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new WfbLinkException(
+                    "android_smoke_product_mode_interrupted",
+                    "product-mode managed smoke interrupted",
+                    error);
+        } finally {
+            stop.set(true);
+            executor.shutdownNow();
+        }
+    }
+
+    private AppTrafficSummary getAppTrafficSummary(
+            Future<AppTrafficSummary> future, String direction) throws WfbLinkException {
+        try {
+            return future.get();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return AppTrafficSummary.failed(
+                    0,
+                    0,
+                    "InterruptedException: product-mode " + direction + " traffic interrupted");
+        } catch (ExecutionException error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            return AppTrafficSummary.failed(
+                    0,
+                    0,
+                    cause.getClass().getSimpleName() + ": " + cause.getMessage());
+        }
+    }
+
+    private void logManagedResult(
+            String label,
+            WfbManagedStreamsResult result,
+            AppTrafficSummary appTx,
+            AppTrafficSummary appRx) {
+        logManagedResult(label, result, appTx, appRx, result.ok ? "completed" : "failed", "");
+    }
+
+    private void logManagedResult(
+            String label,
+            WfbManagedStreamsResult result,
+            AppTrafficSummary appTx,
+            AppTrafficSummary appRx,
+            String statusLabel,
+            String statusSuffix) {
+        String appTraffic =
+                appTx == null || appRx == null
+                        ? ""
+                        : " app_tx="
+                                + appTx.format()
+                                + " app_rx="
+                                + appRx.format();
+        if (result.ok && "completed".equals(statusLabel)) {
+            log(
+                    label
+                            + " "
+                            + statusLabel
+                            + ": submitted_frames="
+                            + result.submittedFrames
+                            + " tx_datagrams="
+                            + result.txDatagrams
+                            + " raw_tx="
+                            + result.rawTxPackets
+                            + " raw_rx="
+                            + result.rawRxPackets
+                            + " rx_forwarded="
+                            + result.rxForwardedPayloads
+                            + appTraffic
+                            + " health_ok="
+                            + result.health.ok
+                            + " tx_drops="
+                            + result.health.hasTxDrops()
+                            + " stop="
+                            + result.stopReason
+                            + statusSuffix);
+        } else {
+            log(
+                    label
+                            + " "
+                            + statusLabel
+                            + (statusSuffix.isEmpty()
+                                    ? " code=" + result.code + " message=" + result.message
+                                    : statusSuffix)
+                            + " submitted_frames="
+                            + result.submittedFrames
+                            + " tx_datagrams="
+                            + result.txDatagrams
+                            + " raw_tx="
+                            + result.rawTxPackets
+                            + " raw_rx="
+                            + result.rawRxPackets
+                            + " rx_forwarded="
+                            + result.rxForwardedPayloads
+                            + appTraffic
+                            + " result="
+                            + result.runtimeResult
+                            + " stop="
+                            + result.stopReason);
+        }
+    }
+
+    private String productModeTrafficFailure(
+            int expectedPayloadCount, AppTrafficSummary appTx, AppTrafficSummary appRx) {
+        StringBuilder message = new StringBuilder();
+        if (appTx.packets != expectedPayloadCount) {
+            message.append("app_tx_packets=");
+            message.append(appTx.packets);
+            message.append(" expected=");
+            message.append(expectedPayloadCount);
+        }
+        if (appTx.hasFailures()) {
+            appendFailure(message, "app_tx_error", appTx.firstError);
+        }
+        if (appRx.hasFailures()) {
+            appendFailure(message, "app_rx_error", appRx.firstError);
+        }
+        if (message.length() == 0) {
+            message.append("unknown app traffic failure");
+        }
+        return message.toString();
+    }
+
+    private static void appendFailure(StringBuilder message, String label, String value) {
+        if (message.length() > 0) {
+            message.append("; ");
+        }
+        message.append(label);
+        message.append("=");
+        message.append(value == null ? "unknown" : value);
+    }
+
+    private void runProductModeUdpPreflight() throws WfbLinkException {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            executor.submit(
+                            new Callable<Void>() {
+                                @Override
+                                public Void call() throws IOException {
+                                    runProductModeUdpPreflightBlocking();
+                                    return null;
+                                }
+                            })
+                    .get();
+            log("Product-mode UDP loopback preflight passed");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new WfbLinkException(
+                    "android_smoke_udp_preflight_failed",
+                    "product-mode UDP loopback preflight interrupted",
+                    error);
+        } catch (ExecutionException error) {
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            throw new WfbLinkException(
+                    "android_smoke_udp_preflight_failed",
+                    "product-mode UDP loopback preflight failed: "
+                            + cause.getClass().getSimpleName()
+                            + ": "
+                            + cause.getMessage(),
+                    error);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static void runProductModeUdpPreflightBlocking() throws IOException {
+        InetAddress loopback = InetAddress.getByName("127.0.0.1");
+        byte[] payload = managedPayload(0, 64);
+        DatagramSocket receiver = new DatagramSocket(0, loopback);
+        receiver.setSoTimeout(1000);
+        try {
+            LoopbackDatagramSender sender = LoopbackDatagramSender.open(receiver.getLocalPort());
+            try {
+                sender.send(payload);
+            } finally {
+                sender.close();
+            }
+            byte[] buffer = new byte[payload.length];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            receiver.receive(packet);
+            if (packet.getLength() != payload.length) {
+                throw new IOException(
+                        "preflight packet length "
+                                + packet.getLength()
+                                + " != "
+                                + payload.length);
+            }
+        } finally {
+            receiver.close();
+        }
+    }
+
+    private static byte[] managedPayload(int sequence, int payloadBytes) {
+        byte[] payload = new byte[payloadBytes];
+        payload[0] = (byte) ((sequence >>> 24) & 0xff);
+        payload[1] = (byte) ((sequence >>> 16) & 0xff);
+        payload[2] = (byte) ((sequence >>> 8) & 0xff);
+        payload[3] = (byte) (sequence & 0xff);
+        for (int index = 4; index < payload.length; index++) {
+            payload[index] = (byte) ((sequence + index - 4) & 0xff);
+        }
+        return payload;
+    }
+
+    private static final class AppTrafficSummary {
+        final long packets;
+        final long bytes;
+        final long failures;
+        final String firstError;
+
+        AppTrafficSummary(long packets, long bytes) {
+            this(packets, bytes, 0, null);
+        }
+
+        AppTrafficSummary(long packets, long bytes, long failures, String firstError) {
+            this.packets = packets;
+            this.bytes = bytes;
+            this.failures = failures;
+            this.firstError = firstError;
+        }
+
+        static AppTrafficSummary failed(long packets, long bytes, String firstError) {
+            return new AppTrafficSummary(packets, bytes, 1, firstError);
+        }
+
+        boolean hasFailures() {
+            return failures > 0;
+        }
+
+        String format() {
+            String formatted = packets + "/" + bytes;
+            if (failures > 0) {
+                formatted += " failures=" + failures + " first_error=" + firstError;
+            }
+            return formatted;
+        }
+    }
+
+    private static final class LoopbackDatagramSender {
+        private final DatagramChannel channel;
+        private final InetSocketAddress target;
+
+        private LoopbackDatagramSender(DatagramChannel channel, InetSocketAddress target) {
+            this.channel = channel;
+            this.target = target;
+        }
+
+        static LoopbackDatagramSender open(int targetPort) throws IOException {
+            InetAddress loopback = InetAddress.getByName("127.0.0.1");
+            DatagramChannel channel = DatagramChannel.open();
+            boolean success = false;
+            try {
+                channel.bind(new InetSocketAddress(loopback, 0));
+                LoopbackDatagramSender sender =
+                        new LoopbackDatagramSender(channel, new InetSocketAddress(loopback, targetPort));
+                success = true;
+                return sender;
+            } finally {
+                if (!success) {
+                    channel.close();
+                }
+            }
+        }
+
+        void send(byte[] payload) throws IOException {
+            int written = channel.send(ByteBuffer.wrap(payload), target);
+            if (written != payload.length) {
+                throw new IOException("short UDP send " + written + " != " + payload.length);
+            }
+        }
+
+        void close() throws IOException {
+            channel.close();
+        }
+    }
+
+    private static final class AppRawSender implements Callable<AppTrafficSummary> {
+        private final AtomicBoolean stop;
+        private final File readyFile;
+        private final int payloadCount;
+        private final int payloadIntervalMs;
+        private final int targetPort;
+        private final int payloadBytes;
+
+        AppRawSender(
+                AtomicBoolean stop,
+                File readyFile,
+                int payloadCount,
+                int payloadIntervalMs,
+                int targetPort,
+                int payloadBytes) {
+            this.stop = stop;
+            this.readyFile = readyFile;
+            this.payloadCount = payloadCount;
+            this.payloadIntervalMs = payloadIntervalMs;
+            this.targetPort = targetPort;
+            this.payloadBytes = payloadBytes;
+        }
+
+        @Override
+        public AppTrafficSummary call() throws Exception {
+            long deadline = System.currentTimeMillis() + PRODUCT_MODE_READY_TIMEOUT_MS;
+            while (!stop.get() && System.currentTimeMillis() < deadline && !readyFile.exists()) {
+                Thread.sleep(50);
+            }
+            if (stop.get()) {
+                return new AppTrafficSummary(0, 0);
+            }
+            if (!readyFile.exists()) {
+                return AppTrafficSummary.failed(
+                        0,
+                        0,
+                        "ready file did not appear within "
+                                + PRODUCT_MODE_READY_TIMEOUT_MS
+                                + "ms");
+            }
+            Thread.sleep(250);
+            long packets = 0;
+            long bytes = 0;
+            LoopbackDatagramSender sender = LoopbackDatagramSender.open(targetPort);
+            try {
+                for (int sequence = 0; sequence < payloadCount && !stop.get(); sequence++) {
+                    byte[] payload = managedPayload(sequence, payloadBytes);
+                    try {
+                        sender.send(payload);
+                    } catch (IOException error) {
+                        return AppTrafficSummary.failed(
+                                packets,
+                                bytes,
+                                error.getClass().getSimpleName() + ": " + error.getMessage());
+                    }
+                    packets++;
+                    bytes += payload.length;
+                    Thread.sleep(payloadIntervalMs);
+                }
+            } finally {
+                sender.close();
+            }
+            return new AppTrafficSummary(packets, bytes);
+        }
+    }
+
+    private static final class AppRawReceiver implements Callable<AppTrafficSummary> {
+        private final AtomicBoolean stop;
+        private final int durationMs;
+        private final int listenPort;
+
+        AppRawReceiver(AtomicBoolean stop, int durationMs, int listenPort) {
+            this.stop = stop;
+            this.durationMs = durationMs;
+            this.listenPort = listenPort;
+        }
+
+        @Override
+        public AppTrafficSummary call() throws IOException {
+            long deadline = System.currentTimeMillis() + durationMs;
+            long packets = 0;
+            long bytes = 0;
+            byte[] buffer = new byte[4096];
+            DatagramSocket socket =
+                    new DatagramSocket(listenPort, InetAddress.getByName("127.0.0.1"));
+            socket.setSoTimeout(200);
+            try {
+                while (!stop.get() && System.currentTimeMillis() < deadline) {
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    try {
+                        socket.receive(packet);
+                    } catch (SocketTimeoutException timeout) {
+                        continue;
+                    }
+                    packets++;
+                    bytes += packet.getLength();
+                }
+            } finally {
+                socket.close();
+            }
+            return new AppTrafficSummary(packets, bytes);
         }
     }
 

@@ -12,6 +12,8 @@ if [[ "${payload_interval_ms}" -le 0 ]]; then
 fi
 payload_count="${PAYLOAD_COUNT:-$(((duration_ms + payload_interval_ms - 1) / payload_interval_ms))}"
 managed_only="${MANAGED_ONLY:-true}"
+validation_traffic="${VALIDATION_TRAFFIC:-true}"
+preauthorize_android_network="${PREAUTHORIZE_ANDROID_NETWORK:-true}"
 log_dir="${LOG_DIR:-/tmp/wfb-link-android-managed-soak-$(date +%Y%m%d-%H%M%S)}"
 package_name="com.arcedge.wfblink.smoke"
 activity_name="${package_name}/.WfbUsbSmokeActivity"
@@ -24,9 +26,28 @@ cat >"${log_dir}/request.json" <<EOF
   "duration_ms": ${duration_ms},
   "payload_count": ${payload_count},
   "payload_interval_ms": ${payload_interval_ms},
-  "managed_only": "${managed_only}"
+  "managed_only": "${managed_only}",
+  "validation_traffic": "${validation_traffic}",
+  "preauthorize_android_network": "${preauthorize_android_network}"
 }
 EOF
+
+if [[ "${preauthorize_android_network}" == "true" ]]; then
+  package_uid="$(
+    adb shell dumpsys package "${package_name}" \
+      | sed -n 's/.*appId=\([0-9][0-9]*\).*/\1/p' \
+      | head -n 1 \
+      | tr -d '\r'
+  )"
+  if [[ -n "${package_uid}" ]]; then
+    adb shell cmd connectivity set-background-networking-enabled-for-uid "${package_uid}" true \
+      >/dev/null 2>&1 || true
+  fi
+  adb shell cmd deviceidle whitelist +"${package_name}" >/dev/null 2>&1 || true
+  adb shell svc power stayon true >/dev/null 2>&1 || true
+  adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
+fi
 
 adb logcat -c
 adb shell am force-stop "${package_name}" >/dev/null 2>&1 || true
@@ -35,6 +56,7 @@ adb shell am start \
   --ei channelNumber "${channel_number}" \
   --ez runManagedStreams true \
   --ez managedOnly "${managed_only}" \
+  --ez managedValidationTraffic "${validation_traffic}" \
   --ei managedDurationMs "${duration_ms}" \
   --ei managedPayloadCount "${payload_count}" \
   --ei managedPayloadIntervalMs "${payload_interval_ms}" \
@@ -47,7 +69,7 @@ logcat_pid=$!
 sleep_seconds=$(((duration_ms + 999) / 1000 + 90))
 deadline=$((SECONDS + sleep_seconds))
 while (( SECONDS < deadline )); do
-  if grep -Eq 'Managed-stream smoke (completed|failed)|F/DEBUG|FATAL EXCEPTION|OutOfMemoryError|JNI DETECTED ERROR|SIGABRT' \
+  if grep -Eq 'Managed-stream (smoke|product-mode) (completed|failed)|Managed-stream smoke SDK error|F/DEBUG|FATAL EXCEPTION|OutOfMemoryError|JNI DETECTED ERROR|SIGABRT' \
     "${log_dir}/logcat.txt" 2>/dev/null; then
     break
   fi
@@ -63,9 +85,11 @@ adb shell am force-stop "${package_name}" >/dev/null 2>&1 || true
 
 grep -E 'F/DEBUG|AndroidRuntime|OutOfMemoryError|JNI DETECTED ERROR|SIGABRT' \
   "${log_dir}/logcat.txt" >"${log_dir}/crash-lines.txt" || true
-grep 'Managed-stream smoke completed' "${log_dir}/logcat.txt" \
+grep -E 'Managed-stream (smoke|product-mode) completed' "${log_dir}/logcat.txt" \
   >"${log_dir}/managed-completed.txt" || true
-grep 'Managed-stream smoke failed' "${log_dir}/logcat.txt" \
+grep -E 'Managed-stream (smoke|product-mode) failed' "${log_dir}/logcat.txt" \
   >"${log_dir}/managed-failed.txt" || true
+grep -E 'Managed-stream smoke SDK error' "${log_dir}/logcat.txt" \
+  >"${log_dir}/managed-sdk-error.txt" || true
 
 echo "${log_dir}"

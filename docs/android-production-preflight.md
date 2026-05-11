@@ -51,12 +51,22 @@ The AAR should include `libwfb_android.so` and, for managed raw streams,
 - Claim the RTL8812AU data interface and pass the live `UsbDeviceConnection`,
   bulk IN endpoint, and bulk OUT endpoint to `WfbUsbHandoff`.
 - Start `WfbLinkManager.startManagedStreams(...)` on a caller-owned executor.
+- Run the session from a foreground execution context. On modern Android,
+  loopback UDP can fail with `Operation not permitted` when the app UID is in a
+  doze/background-blocked state, even with `INTERNET` granted. Product apps
+  should use a foreground service or another app-approved keepalive policy for
+  the radio session.
 - Leave `validationTrafficEnabled(false)` for product use.
 - Send raw uplink UDP to the configured TX stream local port.
 - Bind the configured RX stream local port and read raw downlink UDP there.
 
-Smoke tests may set `validationTrafficEnabled(true)` or use
-`scripts/run-android-managed-soak.sh` to generate payloads and collect evidence.
+Smoke tests may set `validationTrafficEnabled(true)` for SDK-internal payload
+generation. To validate the product contract, run
+`VALIDATION_TRAFFIC=false scripts/run-android-managed-soak.sh`; the smoke
+Activity will use Java-owned UDP sockets while the SDK leaves the raw app ports
+unbound. The script debug-allowlists the smoke app UID for background
+networking by default; set `PREAUTHORIZE_ANDROID_NETWORK=false` to test the
+device's unmodified policy.
 
 ## Acceptance Gates
 
@@ -75,3 +85,11 @@ Reference direct-OTG result from May 11, 2026:
 - Android uplink: Linux recovered `2963/3000`
 - Linux downlink: Android recovered `1390/1400`
 - No Android crash or managed failure lines
+
+Reference product-mode result from May 11, 2026:
+
+- Android app-owned uplink UDP: `300/300` packets sent to the SDK helper
+- SDK validation traffic disabled: `raw_tx=0 raw_rx=0`
+- Linux peer recovered `300/300` uplink payloads
+- Linux peer sent `300/300` downlink payloads
+- Android app-owned downlink UDP received `297/300` payloads

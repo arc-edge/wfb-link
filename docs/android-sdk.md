@@ -64,6 +64,10 @@ peer's current `drone.key`; a stale phone-side key presents as symmetric
 `Unable to decrypt session key` errors even when RF TX/RX counters look healthy.
 The SDK does not manage app storage, foreground service policy, or USB
 permission UX.
+Run live sessions from a foreground service or equivalent app-owned foreground
+execution context. Android can block even loopback UDP for an app UID that has
+fallen into doze/background policy, which presents as `SocketException:
+Operation not permitted` on the product app's raw UDP sockets.
 
 ## API Shape
 
@@ -215,7 +219,12 @@ adb shell am start \
 For longer hardware validation, `scripts/run-android-managed-soak.sh` runs the
 same managed path with configurable `DURATION_MS`, `PAYLOAD_COUNT`, and
 `PAYLOAD_INTERVAL_MS`, then captures filtered logcat and completion/crash
-evidence into a timestamped directory.
+evidence into a timestamped directory. Set `VALIDATION_TRAFFIC=false` to run
+the smoke harness in production mode, where Java-owned UDP sockets generate and
+receive payloads outside the SDK native runtime. The script preauthorizes the
+debug smoke app for background networking by default; set
+`PREAUTHORIZE_ANDROID_NETWORK=false` when intentionally testing the device's
+raw policy behavior.
 
 If `dumpsys usb` reports `connected=false`, Android has not electrically
 enumerated the adapter yet; check OTG direction, hub power, cable orientation,
