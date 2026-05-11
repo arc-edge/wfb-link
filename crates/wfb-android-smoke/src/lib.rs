@@ -736,7 +736,7 @@ impl<'local> Rtl8812auUsbTransport for &AndroidJniUsbConnection<'local> {
         let array = env
             .new_byte_array(length)
             .map_err(|error| android_jni_usb_error("controlTransfer read buffer", error))?;
-        let actual = env
+        let actual_result = env
             .call_method(
                 &self.connection,
                 "controlTransfer",
@@ -751,17 +751,24 @@ impl<'local> Rtl8812auUsbTransport for &AndroidJniUsbConnection<'local> {
                     JValue::Int(timeout_ms),
                 ],
             )
-            .and_then(|value| value.i())
-            .map_err(|error| android_jni_usb_error("controlTransfer read", error))?;
+            .and_then(|value| value.i());
+        if let Err(error) = actual_result {
+            let _ = env.delete_local_ref(array);
+            return Err(android_jni_usb_error("controlTransfer read", error));
+        }
+        let actual = actual_result.expect("checked above");
         if actual < 0 {
+            let _ = env.delete_local_ref(array);
             return Err(UsbError::Backend(format!(
                 "Android UsbDeviceConnection.controlTransfer read addr=0x{value:04x} returned {actual}"
             )));
         }
 
         let actual = actual as usize;
-        let bytes = env
-            .convert_byte_array(&array)
+        let bytes_result = env.convert_byte_array(&array);
+        env.delete_local_ref(array)
+            .map_err(|error| android_jni_usb_error("controlTransfer read cleanup", error))?;
+        let bytes = bytes_result
             .map_err(|error| android_jni_usb_error("controlTransfer read copy", error))?;
         let copy_len = actual.min(data.len()).min(bytes.len());
         data[..copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -781,7 +788,7 @@ impl<'local> Rtl8812auUsbTransport for &AndroidJniUsbConnection<'local> {
         let array = env
             .byte_array_from_slice(data)
             .map_err(|error| android_jni_usb_error("controlTransfer write buffer", error))?;
-        let actual = env
+        let actual_result = env
             .call_method(
                 &self.connection,
                 "controlTransfer",
@@ -796,8 +803,11 @@ impl<'local> Rtl8812auUsbTransport for &AndroidJniUsbConnection<'local> {
                     JValue::Int(timeout_ms),
                 ],
             )
-            .and_then(|value| value.i())
-            .map_err(|error| android_jni_usb_error("controlTransfer write", error))?;
+            .and_then(|value| value.i());
+        env.delete_local_ref(array)
+            .map_err(|error| android_jni_usb_error("controlTransfer write cleanup", error))?;
+        let actual =
+            actual_result.map_err(|error| android_jni_usb_error("controlTransfer write", error))?;
         if actual < 0 {
             return Err(UsbError::Backend(format!(
                 "Android UsbDeviceConnection.controlTransfer write addr=0x{value:04x} returned {actual}"
@@ -822,7 +832,7 @@ impl<'local> UsbBulkTransfer for AndroidJniUsbConnection<'local> {
         let array = env
             .new_byte_array(length)
             .map_err(|error| android_jni_usb_error("bulkTransfer read buffer", error))?;
-        let actual = env
+        let actual_result = env
             .call_method(
                 &self.connection,
                 "bulkTransfer",
@@ -834,18 +844,25 @@ impl<'local> UsbBulkTransfer for AndroidJniUsbConnection<'local> {
                     JValue::Int(timeout_ms),
                 ],
             )
-            .and_then(|value| value.i())
-            .map_err(|error| android_jni_usb_error("bulkTransfer read", error))?;
+            .and_then(|value| value.i());
+        if let Err(error) = actual_result {
+            let _ = env.delete_local_ref(array);
+            return Err(android_jni_usb_error("bulkTransfer read", error));
+        }
+        let actual = actual_result.expect("checked above");
         if actual < 0 {
+            let _ = env.delete_local_ref(array);
             return Err(UsbError::BackendTimeout(format!(
                 "Android UsbDeviceConnection.bulkTransfer read endpoint=0x{endpoint:02x} returned {actual}"
             )));
         }
 
         let actual = actual as usize;
-        let bytes = env
-            .convert_byte_array(&array)
-            .map_err(|error| android_jni_usb_error("bulkTransfer read copy", error))?;
+        let bytes_result = env.convert_byte_array(&array);
+        env.delete_local_ref(array)
+            .map_err(|error| android_jni_usb_error("bulkTransfer read cleanup", error))?;
+        let bytes =
+            bytes_result.map_err(|error| android_jni_usb_error("bulkTransfer read copy", error))?;
         let copy_len = actual.min(data.len()).min(bytes.len());
         data[..copy_len].copy_from_slice(&bytes[..copy_len]);
         Ok(actual)
@@ -864,7 +881,7 @@ impl<'local> UsbBulkTransfer for AndroidJniUsbConnection<'local> {
         let array = env
             .byte_array_from_slice(data)
             .map_err(|error| android_jni_usb_error("bulkTransfer write buffer", error))?;
-        let actual = env
+        let actual_result = env
             .call_method(
                 &self.connection,
                 "bulkTransfer",
@@ -876,8 +893,11 @@ impl<'local> UsbBulkTransfer for AndroidJniUsbConnection<'local> {
                     JValue::Int(timeout_ms),
                 ],
             )
-            .and_then(|value| value.i())
-            .map_err(|error| android_jni_usb_error("bulkTransfer write", error))?;
+            .and_then(|value| value.i());
+        env.delete_local_ref(array)
+            .map_err(|error| android_jni_usb_error("bulkTransfer write cleanup", error))?;
+        let actual =
+            actual_result.map_err(|error| android_jni_usb_error("bulkTransfer write", error))?;
         if actual < 0 {
             return Err(UsbError::Backend(format!(
                 "Android UsbDeviceConnection.bulkTransfer write endpoint=0x{endpoint:02x} returned {actual}"

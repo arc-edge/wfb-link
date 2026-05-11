@@ -68,6 +68,7 @@ public final class WfbUsbSmokeActivity extends Activity {
     private UsbDeviceConnection activeConnection;
     private UsbInterface activeInterface;
     private int channelNumber;
+    private boolean smokeStarted;
 
     private final BroadcastReceiver permissionReceiver =
             new BroadcastReceiver() {
@@ -126,6 +127,18 @@ public final class WfbUsbSmokeActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (smokeStarted) {
+            log("Ignoring USB attach intent after smoke start");
+            return;
+        }
+        channelNumber = smokeChannelNumberFromIntent();
+        requestFirstMatchingDevice();
+    }
+
+    @Override
     protected void onDestroy() {
         unregisterReceiver(permissionReceiver);
         if (activeConnection != null) {
@@ -163,6 +176,11 @@ public final class WfbUsbSmokeActivity extends Activity {
     }
 
     private void runSmoke(UsbDevice device) {
+        if (smokeStarted) {
+            log("Ignoring duplicate smoke start");
+            return;
+        }
+        smokeStarted = true;
         log("Smoke channel=" + channelNumber + " HT20");
         logPackagedHelpers();
         activeConnection = usbManager.openDevice(device);
