@@ -122,6 +122,33 @@ WfbManagedStreamsSession session =
                         });
 ```
 
+By default, SDK-managed sessions do **not** generate or consume test payloads.
+The product app owns raw application UDP:
+
+- Send uplink datagrams to `127.0.0.1:<TX stream localUdpPort>`.
+- Bind and read downlink datagrams from `127.0.0.1:<RX stream localUdpPort>`.
+
+The SDK supervises `wfb_tx`, `wfb_rx`, and the USB radio bridge in between.
+The smoke harness sets `validationTrafficEnabled(true)` so it can generate
+payloads and count recovered packets; product apps should leave that disabled.
+
+Completed results expose both the legacy flat fields and a typed health view:
+
+```java
+WfbManagedStreamsResult result = session.await();
+boolean healthy =
+        result.health.ok
+                && !result.health.hasTxDrops()
+                && result.health.reachedRuntimeStop();
+long uplinkSubmitted = result.uplink.submittedFrames;
+long downlinkForwardedToHelper = result.downlink.forwardedPayloads;
+Long avgRssi = result.rxSignal.rssiDbm.average;
+```
+
+In production mode the product app should count its own raw downlink payloads
+from the UDP socket. `downlink.rawPackets` is populated only when SDK
+validation traffic is enabled.
+
 `startManagedStreams` validates the config, runs the existing blocking native
 runtime on the caller-provided `ExecutorService`, and returns a
 `WfbManagedStreamsSession`. `session.status()` returns immutable snapshots,
@@ -135,6 +162,10 @@ already own their worker thread. In either mode, keep the
 `UsbDeviceConnection` and selected `UsbEndpoint` objects alive until the
 session finishes, and do not issue unrelated Java-side transfers on the same
 interface while the SDK owns it.
+
+The Gradle sample in `android/sdk-gradle-consumer` demonstrates endpoint
+selection, session startup, control uplink UDP send, video downlink UDP receive,
+and typed result handling without importing the smoke harness package.
 
 ## Named Streams
 
@@ -190,13 +221,19 @@ If `dumpsys usb` reports `connected=false`, Android has not electrically
 enumerated the adapter yet; check OTG direction, hub power, cable orientation,
 and phone unlock state before debugging SDK code.
 
+See [android-production-preflight.md](android-production-preflight.md) for the
+hardware setup and run checklist we use before product integration tests.
+
 ## Current Limitations
 
 - Local AAR only. Maven/registry publishing is intentionally deferred.
 - Android arm64 only.
 - Caller-owned foreground service, lifecycle, assets, keys, and USB permission.
-- Managed stream config currently maps one named uplink raw producer and one
-  named downlink raw receiver into the Android native path. Additional named
+- Caller-owned raw application UDP. The SDK owns WFB helper processes and the
+  radio bridge, but the app owns its control/video sockets unless
+  `validationTrafficEnabled(true)` is set for smoke testing.
+- Managed stream config currently maps one named uplink raw app stream and one
+  named downlink raw app stream into the Android native path. Additional named
   stream pairs are modeled in Java but rejected until native Android
   multiplexing is added.
 - Stop requests are cooperative. They update Java session state immediately but

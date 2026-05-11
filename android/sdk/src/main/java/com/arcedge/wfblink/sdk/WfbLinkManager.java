@@ -46,6 +46,7 @@ public final class WfbLinkManager {
                         config.rawRxPort,
                         config.rawPayloadBytes,
                         config.txPayloadIntervalMs,
+                        config.validationTrafficEnabled,
                         config.txBandwidthMhz,
                         config.txMcs,
                         config.txFecK,

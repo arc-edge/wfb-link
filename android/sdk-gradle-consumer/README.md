@@ -14,7 +14,8 @@ cp target/android-sdk-aar/wfb-link-android-sdk-debug.aar android/sdk-gradle-cons
 The source intentionally imports only `com.arcedge.wfblink.sdk`, not the smoke
 harness package. It demonstrates USB permission handoff, endpoint selection,
 named managed stream config, worker-thread startup, cooperative stop request,
-and result/error callback handling.
+raw control uplink UDP send, raw video downlink UDP receive, and typed
+result/error callback handling.
 
 Local compile validation without invoking Gradle:
 

@@ -4,6 +4,7 @@ import android.content.Context;
 import com.arcedge.wfblink.sdk.WfbLinkManager;
 import com.arcedge.wfblink.sdk.WfbManagedStream;
 import com.arcedge.wfblink.sdk.WfbManagedStreamsConfig;
+import com.arcedge.wfblink.sdk.WfbManagedStreamsResult;
 import com.arcedge.wfblink.sdk.WfbManagedStreamsSession;
 import com.arcedge.wfblink.sdk.WfbManagedTxProfile;
 import com.arcedge.wfblink.sdk.WfbUsbHandoff;
@@ -39,5 +40,12 @@ public final class WfbLinkSdkConsumerSmoke {
     public static WfbManagedStreamsSession startSession(
             Context context, WfbUsbHandoff usb, ExecutorService executor) throws WfbLinkException {
         return createManager().startManagedStreams(createConfig(context, usb), executor);
+    }
+
+    public static boolean isProductionHealthy(WfbManagedStreamsResult result) {
+        return result != null
+                && result.health.ok
+                && !result.health.hasTxDrops()
+                && "duration_elapsed".equals(result.health.stopReason);
     }
 }

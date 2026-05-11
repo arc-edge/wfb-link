@@ -359,6 +359,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                             .durationMs(managedDurationMs)
                             .payloadCount(managedPayloadCount)
                             .txPayloadIntervalMs(managedPayloadIntervalMs)
+                            .validationTrafficEnabled(true)
                             .build();
             try {
                 WfbManagedStreamsResult managedResult =

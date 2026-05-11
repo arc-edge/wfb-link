@@ -19,6 +19,10 @@ import com.arcedge.wfblink.sdk.WfbManagedStreamsSession;
 import com.arcedge.wfblink.sdk.WfbManagedStreamsStatus;
 import com.arcedge.wfblink.sdk.WfbManagedTxProfile;
 import com.arcedge.wfblink.sdk.WfbUsbHandoff;
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,6 +30,8 @@ import java.util.concurrent.Executors;
 public final class WfbLinkGradleSampleController {
     public static final String ACTION_USB_PERMISSION =
             "com.arcedge.wfblink.gradlesample.USB_PERMISSION";
+    public static final int CONTROL_UP_LOCAL_PORT = 15606;
+    public static final int VIDEO_DOWN_LOCAL_PORT = 15904;
 
     private final Context context;
     private final UsbManager usbManager;
@@ -87,13 +93,45 @@ public final class WfbLinkGradleSampleController {
                         .durationMs(15000)
                         .payloadCount(20)
                         .addStream(
-                                WfbManagedStream.tx("control-up", 6, 15606)
+                                WfbManagedStream.tx("control-up", 6, CONTROL_UP_LOCAL_PORT)
                                         .txProfile(WfbManagedTxProfile.of(20, 0, 2, 4))
                                         .build())
-                        .addStream(WfbManagedStream.rx("video-down", 4, 15904).build())
+                        .addStream(
+                                WfbManagedStream.rx("video-down", 4, VIDEO_DOWN_LOCAL_PORT)
+                                        .build())
                         .build();
         session = manager.startManagedStreams(config, executor, new LoggingCallback());
         return session;
+    }
+
+    public void sendControlPayload(byte[] payload) throws IOException {
+        DatagramSocket socket = new DatagramSocket();
+        try {
+            DatagramPacket packet =
+                    new DatagramPacket(
+                            payload,
+                            payload.length,
+                            InetAddress.getByName("127.0.0.1"),
+                            CONTROL_UP_LOCAL_PORT);
+            socket.send(packet);
+        } finally {
+            socket.close();
+        }
+    }
+
+    public DatagramSocket openVideoDownlinkSocket() throws IOException {
+        return new DatagramSocket(VIDEO_DOWN_LOCAL_PORT, InetAddress.getByName("127.0.0.1"));
+    }
+
+    public byte[] receiveVideoDownlinkPayload(
+            DatagramSocket socket, int maxBytes, int timeoutMs) throws IOException {
+        socket.setSoTimeout(timeoutMs);
+        byte[] buffer = new byte[maxBytes];
+        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+        socket.receive(packet);
+        byte[] payload = new byte[packet.getLength()];
+        System.arraycopy(packet.getData(), packet.getOffset(), payload, 0, packet.getLength());
+        return payload;
     }
 
     public boolean requestStop() {

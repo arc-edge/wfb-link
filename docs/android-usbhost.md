@@ -146,9 +146,17 @@ integration, use the local SDK AAR documented in
    then writes request metadata, filtered logcat, completion lines, and crash
    scans into `/tmp/wfb-link-android-managed-soak-*`.
 
+   The smoke harness enables SDK validation traffic. Product apps should leave
+   validation traffic disabled and own their raw UDP sockets directly: send
+   uplink payloads to the configured TX local UDP port and bind the configured
+   RX local UDP port for downlink payloads.
+
    The managed smoke expects a GS key at `/data/local/tmp/wfb-link/gs.key` and
    a Linux peer using the matching `drone.key`. The smoke APK declares
    `INTERNET` permission because Android requires it for localhost UDP sockets.
+
+   See `docs/android-production-preflight.md` for the direct-OTG hardware
+   checklist, peer setup, app asset list, and result gates.
 
 4. Unlock the phone. Attach the AWUS036ACH through USBHost/OTG, preferably via
    a powered USB-C hub, and accept the Android USB permission prompt.

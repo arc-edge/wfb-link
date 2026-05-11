@@ -19,7 +19,7 @@ use std::{
 #[cfg(target_os = "android")]
 use jni::{
     objects::{JObject, JString, JValue},
-    sys::{jclass, jobject, jstring, JNIEnv as RawJNIEnv},
+    sys::{jboolean, jclass, jobject, jstring, JNIEnv as RawJNIEnv},
     JNIEnv,
 };
 #[cfg(target_os = "android")]
@@ -214,6 +214,7 @@ struct AndroidManagedStreamRuntimeConfig {
     raw_rx_port: u16,
     raw_payload_bytes: usize,
     raw_payload_interval: Duration,
+    validation_traffic_enabled: bool,
     tx_bandwidth_mhz: u8,
     tx_mcs: u8,
     tx_fec_k: u8,
@@ -241,6 +242,7 @@ impl AndroidManagedStreamRuntimeConfig {
             raw_rx_port: ANDROID_MANAGED_RAW_RX_PORT,
             raw_payload_bytes: ANDROID_MANAGED_RAW_PAYLOAD_BYTES,
             raw_payload_interval: Duration::from_millis(20),
+            validation_traffic_enabled: true,
             tx_bandwidth_mhz: 20,
             tx_mcs: 0,
             tx_fec_k: 2,
@@ -1825,30 +1827,40 @@ fn run_android_usbhost_managed_streams_jni<'local>(
     tx_child.ensure_running()?;
     rx_child.ensure_running()?;
 
-    let raw_rx_socket = UdpSocket::bind(raw_rx_addr).map_err(|error| {
-        android_smoke_runtime_error(
-            "android_managed_raw_rx_bind_failed",
-            format!("failed to bind raw managed RX socket {raw_rx_addr}: {error}"),
-        )
-    })?;
-    raw_rx_socket
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .map_err(|error| {
+    let raw_rx_socket = if managed.validation_traffic_enabled {
+        let socket = UdpSocket::bind(raw_rx_addr).map_err(|error| {
             android_smoke_runtime_error(
-                "android_managed_raw_rx_timeout_failed",
-                format!("failed to configure raw managed RX socket: {error}"),
+                "android_managed_raw_rx_bind_failed",
+                format!("failed to bind raw managed RX socket {raw_rx_addr}: {error}"),
             )
         })?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .map_err(|error| {
+                android_smoke_runtime_error(
+                    "android_managed_raw_rx_timeout_failed",
+                    format!("failed to configure raw managed RX socket: {error}"),
+                )
+            })?;
+        Some(socket)
+    } else {
+        None
+    };
     let stop = Arc::new(AtomicBool::new(false));
-    let receiver = spawn_android_managed_raw_receiver(raw_rx_socket, duration, Arc::clone(&stop));
-    let producer = spawn_android_managed_raw_producer(
-        ready_file.clone(),
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, managed.raw_tx_port)),
-        payload_count,
-        managed.raw_payload_bytes,
-        managed.raw_payload_interval,
-        Arc::clone(&stop),
-    );
+    let receiver = raw_rx_socket
+        .map(|socket| spawn_android_managed_raw_receiver(socket, duration, Arc::clone(&stop)));
+    let producer = if managed.validation_traffic_enabled {
+        Some(spawn_android_managed_raw_producer(
+            ready_file.clone(),
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, managed.raw_tx_port)),
+            payload_count,
+            managed.raw_payload_bytes,
+            managed.raw_payload_interval,
+            Arc::clone(&stop),
+        ))
+    } else {
+        None
+    };
 
     let mut session = open_android_jni_usbhost_session(
         env,
@@ -1920,8 +1932,14 @@ fn run_android_usbhost_managed_streams_jni<'local>(
 
     let report = run_production_runtime_flow_on_session(config, inputs, &mut session);
     stop.store(true, Ordering::SeqCst);
-    let (raw_tx_sent, raw_tx_bytes) = android_join_managed_thread("raw_tx", producer)?;
-    let (raw_rx_received, raw_rx_bytes) = android_join_managed_thread("raw_rx", receiver)?;
+    let (raw_tx_sent, raw_tx_bytes) = match producer {
+        Some(handle) => android_join_managed_thread("raw_tx", handle)?,
+        None => (0, 0),
+    };
+    let (raw_rx_received, raw_rx_bytes) = match receiver {
+        Some(handle) => android_join_managed_thread("raw_rx", handle)?,
+        None => (0, 0),
+    };
     let tx_helper_status = tx_child.status_label();
     let rx_helper_status = rx_child.status_label();
     let runtime_report_json = serde_json::to_string(&report).unwrap_or_else(|error| {
@@ -2382,6 +2400,7 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
     raw_rx_port: i32,
     raw_payload_bytes: i32,
     raw_payload_interval_ms: i32,
+    validation_traffic_enabled: jboolean,
     tx_bandwidth_mhz: i32,
     tx_mcs: i32,
     tx_fec_k: i32,
@@ -2443,6 +2462,7 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
                     "raw_payload_interval_ms",
                     raw_payload_interval_ms,
                 )?),
+                validation_traffic_enabled: validation_traffic_enabled != 0,
                 tx_bandwidth_mhz: u8_from_jni("tx_bandwidth_mhz", tx_bandwidth_mhz)?,
                 tx_mcs: u8_from_jni("tx_mcs", tx_mcs)?,
                 tx_fec_k: u8_from_jni("tx_fec_k", tx_fec_k)?,

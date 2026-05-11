@@ -38,6 +38,7 @@ final class WfbLinkNative {
             int rawRxPort,
             int rawPayloadBytes,
             int txPayloadIntervalMs,
+            boolean validationTrafficEnabled,
             int txBandwidthMhz,
             int txMcs,
             int txFecK,

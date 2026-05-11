@@ -61,7 +61,9 @@ adb shell am start \
 The managed smoke uses the reusable `com.arcedge.wfblink.sdk` Java facade. It
 starts packaged `wfb_tx`/`wfb_rx` helpers inside the app, runs the production
 bridge loop over Android USBHost, sends raw UDP into the TX helper, forwards RF
-RX frames into the RX helper, and logs raw payload counters.
+RX frames into the RX helper, and logs raw payload counters. It explicitly
+enables SDK validation traffic; product SDK sessions leave that disabled so the
+app can own the raw UDP sockets.
 
 For soak runs, use the wrapper so the request, filtered logcat, completion
 line, and crash scan land in one evidence directory:

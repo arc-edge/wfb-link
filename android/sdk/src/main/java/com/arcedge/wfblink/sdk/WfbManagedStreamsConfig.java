@@ -32,6 +32,7 @@ public final class WfbManagedStreamsConfig {
     public final int rawRxPort;
     public final int rawPayloadBytes;
     public final int txPayloadIntervalMs;
+    public final boolean validationTrafficEnabled;
     public final int txBandwidthMhz;
     public final int txMcs;
     public final int txFecK;
@@ -61,6 +62,7 @@ public final class WfbManagedStreamsConfig {
         this.rawRxPort = builder.rawRxPort;
         this.rawPayloadBytes = builder.rawPayloadBytes;
         this.txPayloadIntervalMs = builder.txPayloadIntervalMs;
+        this.validationTrafficEnabled = builder.validationTrafficEnabled;
         this.txBandwidthMhz = builder.txBandwidthMhz;
         this.txMcs = builder.txMcs;
         this.txFecK = builder.txFecK;
@@ -95,6 +97,7 @@ public final class WfbManagedStreamsConfig {
         private int rawRxPort = 15904;
         private int rawPayloadBytes = 512;
         private int txPayloadIntervalMs = 20;
+        private boolean validationTrafficEnabled = false;
         private int txBandwidthMhz = WfbManagedTxProfile.DEFAULT_BANDWIDTH_MHZ;
         private int txMcs = WfbManagedTxProfile.DEFAULT_MCS;
         private int txFecK = WfbManagedTxProfile.DEFAULT_FEC_K;
@@ -182,6 +185,11 @@ public final class WfbManagedStreamsConfig {
 
         public Builder txPayloadIntervalMs(int value) {
             this.txPayloadIntervalMs = value;
+            return this;
+        }
+
+        public Builder validationTrafficEnabled(boolean value) {
+            this.validationTrafficEnabled = value;
             return this;
         }
 

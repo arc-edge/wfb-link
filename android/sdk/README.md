@@ -8,7 +8,13 @@ The SDK expects the host app to own Android USB permission and pass an opened
 `UsbDeviceConnection` plus selected `UsbEndpoint` objects into
 `WfbLinkManager`. Product apps should call `startManagedStreams(...)` with a
 caller-owned `ExecutorService`; the returned `WfbManagedStreamsSession` exposes
-status snapshots, cooperative stop request, and result/error delivery.
+status snapshots, cooperative stop request, typed health counters, RX signal
+summary, and result/error delivery.
+
+SDK sessions default to product mode: the app owns raw application UDP sockets.
+Send uplink payloads to the configured TX stream local UDP port and bind the
+configured RX stream local UDP port for downlink payloads. The smoke harness
+explicitly enables validation traffic when it wants generated packet counts.
 
 Build the local AAR with:
 
@@ -25,6 +31,5 @@ scripts/build-android-sdk-consumer-smoke.sh
 scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
-See `docs/android-sdk.md` for the complete integration contract, manifest
-requirements, USB handoff shape, named stream config, asset/key provisioning,
-validation commands, and current limitations.
+See `docs/android-sdk.md` for the complete integration contract and
+`docs/android-production-preflight.md` for the hardware and run checklist.
