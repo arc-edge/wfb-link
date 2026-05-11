@@ -1426,17 +1426,32 @@ fn spawn_android_managed_raw_producer(
             .map_err(|error| format!("raw producer bind failed: {error}"))?;
         let mut sent = 0u64;
         let mut bytes = 0u64;
+        let mut failed = 0u64;
         for sequence in 0..payload_count {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
             let payload = android_managed_payload(sequence as u32);
-            let written = socket
-                .send_to(&payload, target)
-                .map_err(|error| format!("raw producer send failed: {error}"))?;
-            sent = sent.saturating_add(1);
-            bytes = bytes.saturating_add(written as u64);
+            match socket.send_to(&payload, target) {
+                Ok(written) => {
+                    sent = sent.saturating_add(1);
+                    bytes = bytes.saturating_add(written as u64);
+                }
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    if failed <= 3 {
+                        android_log_info(format!(
+                            "managed raw producer send failed target={target} sequence={sequence}: {error}"
+                        ));
+                    }
+                }
+            }
             thread::sleep(Duration::from_millis(20));
+        }
+        if failed > 0 {
+            android_log_info(format!(
+                "managed raw producer send failures={failed} sent={sent} target={target}"
+            ));
         }
         Ok((sent, bytes))
     })

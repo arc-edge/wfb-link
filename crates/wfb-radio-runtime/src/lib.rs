@@ -1304,13 +1304,13 @@ fn process_production_wfb_rx_forward(
         return Ok(());
     };
     if let (Some(socket), Some(aggregator)) = (runtime.socket.as_ref(), runtime.aggregator) {
-        let bytes = socket.send_to(&packet, aggregator).map_err(|error| {
-            runtime.counters.send_failed = runtime.counters.send_failed.saturating_add(1);
-            RuntimeRadioError::new(
-                "rx_forward_send_failed",
-                format!("failed to send WFB RX datagram to {aggregator}: {error}"),
-            )
-        })?;
+        let bytes = match socket.send_to(&packet, aggregator) {
+            Ok(bytes) => bytes,
+            Err(_error) => {
+                runtime.counters.send_failed = runtime.counters.send_failed.saturating_add(1);
+                return Ok(());
+            }
+        };
         runtime.counters.forwarded = runtime.counters.forwarded.saturating_add(1);
         runtime.forwarded_bytes = runtime.forwarded_bytes.saturating_add(bytes as u64);
         runtime.last_rx_unix_ms = Some(runtime_unix_ms());
@@ -13430,9 +13430,8 @@ mod tests {
         bind_production_tx_ingress_sockets, create_production_rx_forward_runtimes,
         handle_production_bridge_tx_datagram, macos_usbhost_adapter_info, macos_usbhost_endpoints,
         open_android_usbhost_transport, plan_production_wfb_loop,
-        process_production_rx_packet_outcomes, production_rx_forward_snapshots,
-        run_production_bridge_loop, run_production_runtime_flow,
-        run_production_runtime_flow_with_session, runtime_unix_ms,
+        process_production_rx_packet_outcomes, run_production_bridge_loop,
+        run_production_runtime_flow, run_production_runtime_flow_with_session, runtime_unix_ms,
         spawn_production_tx_ingress_receivers, write_production_runtime_ready_marker,
         write_production_runtime_service_health, AndroidUsbHostConfig, MacosUsbHostConfig,
         ProductionRuntimeAirtimeMode, ProductionRuntimeAirtimeReport,
@@ -16055,7 +16054,7 @@ mod tests {
     }
 
     #[test]
-    fn production_rx_handler_reports_forward_send_failure() {
+    fn production_rx_handler_records_forward_send_failure_without_failing() {
         let channel_id = WfbChannelId::new(0x000001, 0x23).expect("channel ID");
         let plans = vec![rx_forward_plan(
             channel_id,
@@ -16069,14 +16068,13 @@ mod tests {
             frame: Some(frame),
         }];
 
-        let error = process_production_rx_packet_outcomes(&packets, &mut forwards)
-            .expect_err("port zero send should fail");
+        let outcome = process_production_rx_packet_outcomes(&packets, &mut forwards)
+            .expect("forward send failure should be recorded");
 
-        assert_eq!(error.code, "rx_forward_send_failed");
-        let snapshot = production_rx_forward_snapshots(&forwards);
-        assert_eq!(snapshot[0].counters.received, 1);
-        assert_eq!(snapshot[0].counters.matched, 1);
-        assert_eq!(snapshot[0].counters.send_failed, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.received, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.matched, 1);
+        assert_eq!(outcome.rx_forwards[0].counters.forwarded, 0);
+        assert_eq!(outcome.rx_forwards[0].counters.send_failed, 1);
     }
 
     #[test]
