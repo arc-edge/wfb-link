@@ -178,6 +178,8 @@ const ANDROID_MANAGED_RAW_RX_PORT: u16 = 15_904;
 const ANDROID_MANAGED_HELPER_STARTUP_DELAY: Duration = Duration::from_millis(750);
 #[cfg(target_os = "android")]
 const ANDROID_MANAGED_RAW_PAYLOAD_BYTES: usize = 512;
+#[cfg(target_os = "android")]
+const ANDROID_BULK_WRITE_RETRIES: usize = 3;
 #[cfg(any(test, target_os = "android"))]
 const ANDROID_SMOKE_WFB_RADIOTAP: [u8; 13] = [
     0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x00, 0x00,
@@ -211,6 +213,7 @@ struct AndroidManagedStreamRuntimeConfig {
     rx_aggregator_port: u16,
     raw_rx_port: u16,
     raw_payload_bytes: usize,
+    raw_payload_interval: Duration,
     tx_bandwidth_mhz: u8,
     tx_mcs: u8,
     tx_fec_k: u8,
@@ -237,6 +240,7 @@ impl AndroidManagedStreamRuntimeConfig {
             rx_aggregator_port: ANDROID_MANAGED_RX_AGGREGATOR_PORT,
             raw_rx_port: ANDROID_MANAGED_RAW_RX_PORT,
             raw_payload_bytes: ANDROID_MANAGED_RAW_PAYLOAD_BYTES,
+            raw_payload_interval: Duration::from_millis(20),
             tx_bandwidth_mhz: 20,
             tx_mcs: 0,
             tx_fec_k: 2,
@@ -881,29 +885,47 @@ impl<'local> UsbBulkTransfer for AndroidJniUsbConnection<'local> {
         let array = env
             .byte_array_from_slice(data)
             .map_err(|error| android_jni_usb_error("bulkTransfer write buffer", error))?;
-        let actual_result = env
-            .call_method(
-                &self.connection,
-                "bulkTransfer",
-                "(Landroid/hardware/usb/UsbEndpoint;[BII)I",
-                &[
-                    JValue::Object(endpoint_object),
-                    JValue::Object(array.as_ref()),
-                    JValue::Int(length),
-                    JValue::Int(timeout_ms),
-                ],
-            )
-            .and_then(|value| value.i());
+        let mut last_negative = None;
+        for attempt in 0..=ANDROID_BULK_WRITE_RETRIES {
+            let actual_result = env
+                .call_method(
+                    &self.connection,
+                    "bulkTransfer",
+                    "(Landroid/hardware/usb/UsbEndpoint;[BII)I",
+                    &[
+                        JValue::Object(endpoint_object),
+                        JValue::Object(array.as_ref()),
+                        JValue::Int(length),
+                        JValue::Int(timeout_ms),
+                    ],
+                )
+                .and_then(|value| value.i());
+            match actual_result {
+                Ok(actual) if actual >= 0 => {
+                    env.delete_local_ref(array).map_err(|error| {
+                        android_jni_usb_error("bulkTransfer write cleanup", error)
+                    })?;
+                    return Ok(actual as usize);
+                }
+                Ok(actual) => {
+                    last_negative = Some(actual);
+                    if attempt < ANDROID_BULK_WRITE_RETRIES {
+                        thread::sleep(Duration::from_millis(10 * (attempt as u64 + 1)));
+                    }
+                }
+                Err(error) => {
+                    let _ = env.delete_local_ref(array);
+                    return Err(android_jni_usb_error("bulkTransfer write", error));
+                }
+            }
+        }
         env.delete_local_ref(array)
             .map_err(|error| android_jni_usb_error("bulkTransfer write cleanup", error))?;
-        let actual =
-            actual_result.map_err(|error| android_jni_usb_error("bulkTransfer write", error))?;
-        if actual < 0 {
-            return Err(UsbError::Backend(format!(
-                "Android UsbDeviceConnection.bulkTransfer write endpoint=0x{endpoint:02x} returned {actual}"
-            )));
-        }
-        Ok(actual as usize)
+        let actual = last_negative.unwrap_or(-1);
+        Err(UsbError::Backend(format!(
+            "Android UsbDeviceConnection.bulkTransfer write endpoint=0x{endpoint:02x} returned {actual} after {} retries",
+            ANDROID_BULK_WRITE_RETRIES
+        )))
     }
 }
 
@@ -1525,7 +1547,8 @@ fn android_spawn_managed_child(
     let log_path = working_dir.join(format!("android-managed-{name}.log"));
     let log = fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .map_err(|error| {
             android_smoke_runtime_error(
@@ -1577,6 +1600,7 @@ fn spawn_android_managed_raw_producer(
     target: SocketAddr,
     payload_count: usize,
     payload_bytes: usize,
+    payload_interval: Duration,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<Result<(u64, u64), String>> {
     thread::spawn(move || {
@@ -1615,7 +1639,7 @@ fn spawn_android_managed_raw_producer(
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(payload_interval);
         }
         if failed > 0 {
             android_log_info(format!(
@@ -1715,6 +1739,11 @@ fn run_android_usbhost_managed_streams_jni<'local>(
     }
     if managed.raw_payload_bytes < 4 {
         return Err(AndroidSmokeError::InvalidArgument("raw_payload_bytes"));
+    }
+    if managed.raw_payload_interval.is_zero() {
+        return Err(AndroidSmokeError::InvalidArgument(
+            "raw_payload_interval_ms",
+        ));
     }
     if managed.tx_bandwidth_mhz == 0 {
         return Err(AndroidSmokeError::InvalidArgument("tx_bandwidth_mhz"));
@@ -1817,6 +1846,7 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, managed.raw_tx_port)),
         payload_count,
         managed.raw_payload_bytes,
+        managed.raw_payload_interval,
         Arc::clone(&stop),
     );
 
@@ -2351,6 +2381,7 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
     rx_aggregator_port: i32,
     raw_rx_port: i32,
     raw_payload_bytes: i32,
+    raw_payload_interval_ms: i32,
     tx_bandwidth_mhz: i32,
     tx_mcs: i32,
     tx_fec_k: i32,
@@ -2408,6 +2439,10 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
                 rx_aggregator_port: u16_from_jni("rx_aggregator_port", rx_aggregator_port)?,
                 raw_rx_port: u16_from_jni("raw_rx_port", raw_rx_port)?,
                 raw_payload_bytes: usize_from_jni("raw_payload_bytes", raw_payload_bytes)?,
+                raw_payload_interval: Duration::from_millis(u64_from_jni(
+                    "raw_payload_interval_ms",
+                    raw_payload_interval_ms,
+                )?),
                 tx_bandwidth_mhz: u8_from_jni("tx_bandwidth_mhz", tx_bandwidth_mhz)?,
                 tx_mcs: u8_from_jni("tx_mcs", tx_mcs)?,
                 tx_fec_k: u8_from_jni("tx_fec_k", tx_fec_k)?,

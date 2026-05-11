@@ -52,14 +52,30 @@ adb shell am start \
   -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity \
   --ei channelNumber 161 \
   --ez runManagedStreams true \
+  --ez managedOnly true \
   --ei managedDurationMs 15000 \
-  --ei managedPayloadCount 20
+  --ei managedPayloadCount 20 \
+  --ei managedPayloadIntervalMs 20
 ```
 
 The managed smoke uses the reusable `com.arcedge.wfblink.sdk` Java facade. It
 starts packaged `wfb_tx`/`wfb_rx` helpers inside the app, runs the production
 bridge loop over Android USBHost, sends raw UDP into the TX helper, forwards RF
 RX frames into the RX helper, and logs raw payload counters.
+
+For soak runs, use the wrapper so the request, filtered logcat, completion
+line, and crash scan land in one evidence directory:
+
+```bash
+DURATION_MS=1200000 PAYLOAD_INTERVAL_MS=100 \
+  scripts/run-android-managed-soak.sh
+```
+
+`managedPayloadIntervalMs` controls the Android raw TX producer interval. A
+larger value, such as `100`, better represents sparse control uplink while a
+Linux peer sends steadier downlink traffic.
+`managedOnly=true` skips the destructive diagnostic pre-smokes and runs the
+production-shaped managed path once, matching SDK/integrator usage.
 
 `scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
 Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override

@@ -6674,10 +6674,7 @@ where
                                     &bridge_counters,
                                     &submit_counters,
                                 );
-                                Err(RuntimeRadioError::new(
-                                    "bridge_tx_submit_failed",
-                                    error.message,
-                                ))
+                                Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
                             }
                         }
                     }
@@ -13470,6 +13467,7 @@ mod tests {
         bulk_reads: Vec<Vec<u8>>,
         bulk_writes: Vec<(u8, Vec<u8>)>,
         bulk_write_len: Option<usize>,
+        bulk_write_lens: Vec<Option<usize>>,
     }
 
     impl MockTransport {
@@ -13622,7 +13620,12 @@ mod tests {
             data: &[u8],
             _timeout: Duration,
         ) -> std::result::Result<usize, UsbError> {
-            let written = self.bulk_write_len.unwrap_or(data.len()).min(data.len());
+            let write_len = if self.bulk_write_lens.is_empty() {
+                self.bulk_write_len
+            } else {
+                self.bulk_write_lens.remove(0)
+            };
+            let written = write_len.unwrap_or(data.len()).min(data.len());
             self.bulk_writes.push((endpoint, data[..written].to_vec()));
             Ok(written)
         }
@@ -15587,7 +15590,11 @@ mod tests {
                 .unwrap_or(false),
             "heartbeat should be turned off once on flow exit"
         );
-        assert_eq!(report.result, ProductionRuntimeFlowResult::Pass);
+        assert_eq!(
+            report.result,
+            ProductionRuntimeFlowResult::Pass,
+            "{report:#?}"
+        );
         assert!(report.error.is_none());
         assert_eq!(marker["source"], "bridge-run");
         assert_eq!(marker["same_session_init_result"], "pass");
@@ -15612,6 +15619,59 @@ mod tests {
                 .unwrap_or(0)
                 >= 1
         );
+    }
+
+    #[test]
+    fn production_runtime_flow_session_records_tx_submit_failure_without_aborting() {
+        let reserved = UdpSocket::bind("127.0.0.1:0").expect("reserve TX port");
+        let tx_addr = reserved.local_addr().expect("reserved addr");
+        drop(reserved);
+        let mut config = production_runtime_short_flow_config();
+        config.tx_binds = vec![tx_addr];
+        config.bandwidth = Bandwidth::Mhz40;
+        config.duration_ms = 200;
+        config.rx_timeout_ms = 1;
+        config.ready_file = None;
+        config.health_file = None;
+        config.primary_rx_forward.aggregator = None;
+        config.rx_forwards.clear();
+        let payload = valid_wfb_tx_datagram();
+        let sender = std::thread::spawn(move || {
+            let socket = UdpSocket::bind("127.0.0.1:0").expect("sender");
+            for _ in 0..40 {
+                let _ = socket.send_to(&payload, tx_addr);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let inputs = production_runtime_execution_inputs();
+        let mut session = runtime_tx_session(MockTransport {
+            bulk_write_len: Some(1),
+            bulk_write_lens: vec![None],
+            ..MockTransport::default()
+        });
+
+        let report = run_production_runtime_flow_with_session(
+            config,
+            inputs,
+            &mut session,
+            complete_runtime_init_phase,
+        );
+        sender.join().expect("sender thread");
+
+        assert_eq!(
+            report.result,
+            ProductionRuntimeFlowResult::Pass,
+            "{report:#?}"
+        );
+        assert_eq!(report.stop_reason, "duration_elapsed");
+        assert!(report.error.is_none());
+        assert!(
+            report.tx.datagrams_received > 0,
+            "expected at least one queued TX datagram"
+        );
+        assert_eq!(report.tx.submitted_frames, 0);
+        assert!(report.tx.failed_submissions > 0);
+        assert!(report.tx.dropped_datagrams > 0);
     }
 
     #[test]

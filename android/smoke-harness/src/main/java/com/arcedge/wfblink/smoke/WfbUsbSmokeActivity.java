@@ -43,11 +43,17 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int RTL_READ_REQUEST_TYPE = 0xc0;
     private static final String EXTRA_CHANNEL_NUMBER = "channelNumber";
     private static final String EXTRA_RUN_MANAGED_STREAMS = "runManagedStreams";
+    private static final String EXTRA_MANAGED_ONLY = "managedOnly";
     private static final String EXTRA_MANAGED_DURATION_MS = "managedDurationMs";
     private static final String EXTRA_MANAGED_PAYLOAD_COUNT = "managedPayloadCount";
+    private static final String EXTRA_MANAGED_PAYLOAD_INTERVAL_MS = "managedPayloadIntervalMs";
     private static final int DEFAULT_CHANNEL_NUMBER = 36;
     private static final int DEFAULT_MANAGED_DURATION_MS = 12000;
     private static final int DEFAULT_MANAGED_PAYLOAD_COUNT = 20;
+    private static final int DEFAULT_MANAGED_PAYLOAD_INTERVAL_MS = 20;
+    private static final int MAX_MANAGED_DURATION_MS = 3600000;
+    private static final int MAX_MANAGED_PAYLOAD_COUNT = 1000000;
+    private static final int MAX_MANAGED_PAYLOAD_INTERVAL_MS = 60000;
     private static final String SMOKE_ASSET_DIR = "/data/local/tmp/wfb-link";
     private static final String SMOKE_KEY_PATH = SMOKE_ASSET_DIR + "/gs.key";
     private static final String SMOKE_FIRMWARE_PATH = SMOKE_ASSET_DIR + "/rtl8812aefw.bin";
@@ -222,104 +228,112 @@ public final class WfbUsbSmokeActivity extends Activity {
         } else {
             log("Java controlTransfer failed: result=" + javaRegisterRead);
         }
-        log("Opened device fd=" + fd + "; running register smoke");
-        int result =
-                WfbNativeSmoke.runRegisterSmoke(
-                        activeConnection,
-                        bulkInEndpointObject,
-                        bulkOutEndpointObject,
-                        fd,
-                        device.getVendorId(),
-                        device.getProductId(),
-                        INTERFACE_NUMBER,
-                        BULK_IN_ENDPOINT,
-                        BULK_OUT_ENDPOINT,
-                        BULK_OUT_ENDPOINT_COUNT,
-                        REG_SYS_FUNC_EN,
-                        TIMEOUT_MS);
-        if (result >= 0) {
-            log("Register smoke passed: REG_SYS_FUNC_EN=0x" + Integer.toHexString(result));
+        boolean managedOnly = getIntent().getBooleanExtra(EXTRA_MANAGED_ONLY, false);
+        if (managedOnly) {
+            log("Opened device fd=" + fd + "; skipping diagnostic smokes for managed-only run");
         } else {
-            log("Register smoke failed with code " + result);
-            return;
-        }
+            log("Opened device fd=" + fd + "; running register smoke");
+            int result =
+                    WfbNativeSmoke.runRegisterSmoke(
+                            activeConnection,
+                            bulkInEndpointObject,
+                            bulkOutEndpointObject,
+                            fd,
+                            device.getVendorId(),
+                            device.getProductId(),
+                            INTERFACE_NUMBER,
+                            BULK_IN_ENDPOINT,
+                            BULK_OUT_ENDPOINT,
+                            BULK_OUT_ENDPOINT_COUNT,
+                            REG_SYS_FUNC_EN,
+                            TIMEOUT_MS);
+            if (result >= 0) {
+                log("Register smoke passed: REG_SYS_FUNC_EN=0x" + Integer.toHexString(result));
+            } else {
+                log("Register smoke failed with code " + result);
+                return;
+            }
 
-        int rxResult =
-                WfbNativeSmoke.runRxReadSmoke(
-                        activeConnection,
-                        bulkInEndpointObject,
-                        bulkOutEndpointObject,
-                        fd,
-                        device.getVendorId(),
-                        device.getProductId(),
-                        INTERFACE_NUMBER,
-                        BULK_IN_ENDPOINT,
-                        BULK_OUT_ENDPOINT,
-                        BULK_OUT_ENDPOINT_COUNT,
-                        channelNumber,
-                        RX_READ_BUFFER_LEN,
-                        INIT_RX_TIMEOUT_MS);
-        if (rxResult >= 0) {
-            log("RX read smoke completed: parsed_frames=" + rxResult);
-        } else if (rxResult == SMOKE_RX_TIMEOUT) {
-            log("RX read smoke idle: no packet before timeout");
-        } else {
-            log("RX read smoke failed with code " + rxResult);
-        }
+            int rxResult =
+                    WfbNativeSmoke.runRxReadSmoke(
+                            activeConnection,
+                            bulkInEndpointObject,
+                            bulkOutEndpointObject,
+                            fd,
+                            device.getVendorId(),
+                            device.getProductId(),
+                            INTERFACE_NUMBER,
+                            BULK_IN_ENDPOINT,
+                            BULK_OUT_ENDPOINT,
+                            BULK_OUT_ENDPOINT_COUNT,
+                            channelNumber,
+                            RX_READ_BUFFER_LEN,
+                            INIT_RX_TIMEOUT_MS);
+            if (rxResult >= 0) {
+                log("RX read smoke completed: parsed_frames=" + rxResult);
+            } else if (rxResult == SMOKE_RX_TIMEOUT) {
+                log("RX read smoke idle: no packet before timeout");
+            } else {
+                log("RX read smoke failed with code " + rxResult);
+            }
 
-        log("Running init + RX descriptor smoke");
-        int initRxResult =
-                WfbNativeSmoke.runInitRxReadSmoke(
-                        activeConnection,
-                        bulkInEndpointObject,
-                        bulkOutEndpointObject,
-                        fd,
-                        device.getVendorId(),
-                        device.getProductId(),
-                        INTERFACE_NUMBER,
-                        BULK_IN_ENDPOINT,
-                        BULK_OUT_ENDPOINT,
-                        BULK_OUT_ENDPOINT_COUNT,
-                        channelNumber,
-                        RX_READ_BUFFER_LEN,
-                        INIT_RX_TIMEOUT_MS);
-        if (initRxResult >= 0) {
-            log("Init + RX descriptor smoke completed: parsed_frames=" + initRxResult);
-        } else if (initRxResult == SMOKE_RX_TIMEOUT) {
-            log("Init + RX descriptor smoke idle: no packet before timeout");
-        } else {
-            log("Init + RX descriptor smoke failed with code " + initRxResult);
-        }
+            log("Running init + RX descriptor smoke");
+            int initRxResult =
+                    WfbNativeSmoke.runInitRxReadSmoke(
+                            activeConnection,
+                            bulkInEndpointObject,
+                            bulkOutEndpointObject,
+                            fd,
+                            device.getVendorId(),
+                            device.getProductId(),
+                            INTERFACE_NUMBER,
+                            BULK_IN_ENDPOINT,
+                            BULK_OUT_ENDPOINT,
+                            BULK_OUT_ENDPOINT_COUNT,
+                            channelNumber,
+                            RX_READ_BUFFER_LEN,
+                            INIT_RX_TIMEOUT_MS);
+            if (initRxResult >= 0) {
+                log("Init + RX descriptor smoke completed: parsed_frames=" + initRxResult);
+            } else if (initRxResult == SMOKE_RX_TIMEOUT) {
+                log("Init + RX descriptor smoke idle: no packet before timeout");
+            } else {
+                log("Init + RX descriptor smoke failed with code " + initRxResult);
+            }
 
-        log("Running init + TX/WFB submit smoke");
-        int initTxResult =
-                WfbNativeSmoke.runInitTxSmoke(
-                        activeConnection,
-                        bulkInEndpointObject,
-                        bulkOutEndpointObject,
-                        fd,
-                        device.getVendorId(),
-                        device.getProductId(),
-                        INTERFACE_NUMBER,
-                        BULK_IN_ENDPOINT,
-                        BULK_OUT_ENDPOINT,
-                        BULK_OUT_ENDPOINT_COUNT,
-                        channelNumber,
-                        INIT_RX_TIMEOUT_MS);
-        if (initTxResult >= 0) {
-            log("Init + TX/WFB submit smoke completed: submitted_frames=" + initTxResult);
-        } else {
-            log("Init + TX/WFB submit smoke failed with code " + initTxResult);
+            log("Running init + TX/WFB submit smoke");
+            int initTxResult =
+                    WfbNativeSmoke.runInitTxSmoke(
+                            activeConnection,
+                            bulkInEndpointObject,
+                            bulkOutEndpointObject,
+                            fd,
+                            device.getVendorId(),
+                            device.getProductId(),
+                            INTERFACE_NUMBER,
+                            BULK_IN_ENDPOINT,
+                            BULK_OUT_ENDPOINT,
+                            BULK_OUT_ENDPOINT_COUNT,
+                            channelNumber,
+                            INIT_RX_TIMEOUT_MS);
+            if (initTxResult >= 0) {
+                log("Init + TX/WFB submit smoke completed: submitted_frames=" + initTxResult);
+            } else {
+                log("Init + TX/WFB submit smoke failed with code " + initTxResult);
+            }
         }
 
         if (getIntent().getBooleanExtra(EXTRA_RUN_MANAGED_STREAMS, false)) {
             int managedDurationMs = managedDurationMsFromIntent();
             int managedPayloadCount = managedPayloadCountFromIntent();
+            int managedPayloadIntervalMs = managedPayloadIntervalMsFromIntent();
             log(
                     "Running managed-stream smoke duration_ms="
                             + managedDurationMs
                             + " payloads="
-                            + managedPayloadCount);
+                            + managedPayloadCount
+                            + " tx_payload_interval_ms="
+                            + managedPayloadIntervalMs);
             WfbUsbHandoff usb =
                     new WfbUsbHandoff(
                             activeConnection,
@@ -344,6 +358,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                             .timeoutMs(INIT_RX_TIMEOUT_MS)
                             .durationMs(managedDurationMs)
                             .payloadCount(managedPayloadCount)
+                            .txPayloadIntervalMs(managedPayloadIntervalMs)
                             .build();
             try {
                 WfbManagedStreamsResult managedResult =
@@ -352,6 +367,10 @@ public final class WfbUsbSmokeActivity extends Activity {
                     log(
                             "Managed-stream smoke completed: submitted_frames="
                                     + managedResult.submittedFrames
+                                    + " tx_datagrams="
+                                    + managedResult.txDatagrams
+                                    + " raw_tx="
+                                    + managedResult.rawTxPackets
                                     + " raw_rx="
                                     + managedResult.rawRxPackets
                                     + " rx_forwarded="
@@ -364,6 +383,16 @@ public final class WfbUsbSmokeActivity extends Activity {
                                     + managedResult.code
                                     + " message="
                                     + managedResult.message
+                                    + " submitted_frames="
+                                    + managedResult.submittedFrames
+                                    + " tx_datagrams="
+                                    + managedResult.txDatagrams
+                                    + " raw_tx="
+                                    + managedResult.rawTxPackets
+                                    + " raw_rx="
+                                    + managedResult.rawRxPackets
+                                    + " rx_forwarded="
+                                    + managedResult.rxForwardedPayloads
                                     + " result="
                                     + managedResult.runtimeResult
                                     + " stop="
@@ -399,7 +428,7 @@ public final class WfbUsbSmokeActivity extends Activity {
 
     private int managedDurationMsFromIntent() {
         int requested = getIntent().getIntExtra(EXTRA_MANAGED_DURATION_MS, DEFAULT_MANAGED_DURATION_MS);
-        if (requested <= 0 || requested > 60000) {
+        if (requested <= 0 || requested > MAX_MANAGED_DURATION_MS) {
             return DEFAULT_MANAGED_DURATION_MS;
         }
         return requested;
@@ -408,8 +437,20 @@ public final class WfbUsbSmokeActivity extends Activity {
     private int managedPayloadCountFromIntent() {
         int requested =
                 getIntent().getIntExtra(EXTRA_MANAGED_PAYLOAD_COUNT, DEFAULT_MANAGED_PAYLOAD_COUNT);
-        if (requested < 0 || requested > 1000) {
+        if (requested < 0 || requested > MAX_MANAGED_PAYLOAD_COUNT) {
             return DEFAULT_MANAGED_PAYLOAD_COUNT;
+        }
+        return requested;
+    }
+
+    private int managedPayloadIntervalMsFromIntent() {
+        int requested =
+                getIntent()
+                        .getIntExtra(
+                                EXTRA_MANAGED_PAYLOAD_INTERVAL_MS,
+                                DEFAULT_MANAGED_PAYLOAD_INTERVAL_MS);
+        if (requested <= 0 || requested > MAX_MANAGED_PAYLOAD_INTERVAL_MS) {
+            return DEFAULT_MANAGED_PAYLOAD_INTERVAL_MS;
         }
         return requested;
     }

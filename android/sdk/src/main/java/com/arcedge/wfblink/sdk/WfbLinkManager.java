@@ -45,6 +45,7 @@ public final class WfbLinkManager {
                         config.rxAggregatorPort,
                         config.rawRxPort,
                         config.rawPayloadBytes,
+                        config.txPayloadIntervalMs,
                         config.txBandwidthMhz,
                         config.txMcs,
                         config.txFecK,
@@ -106,6 +107,7 @@ public final class WfbLinkManager {
         requireUdpPort("raw_rx_port", config.rawRxPort);
         requireDistinctUdpPorts(config);
         requirePositive("raw_payload_bytes", config.rawPayloadBytes);
+        requirePositive("tx_payload_interval_ms", config.txPayloadIntervalMs);
         requirePositive("tx_bandwidth_mhz", config.txBandwidthMhz);
         requireNonNegative("tx_mcs", config.txMcs);
         requirePositive("tx_fec_k", config.txFecK);

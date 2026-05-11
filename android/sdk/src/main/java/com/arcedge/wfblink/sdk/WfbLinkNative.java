@@ -37,6 +37,7 @@ final class WfbLinkNative {
             int rxAggregatorPort,
             int rawRxPort,
             int rawPayloadBytes,
+            int txPayloadIntervalMs,
             int txBandwidthMhz,
             int txMcs,
             int txFecK,

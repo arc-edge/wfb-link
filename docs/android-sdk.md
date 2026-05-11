@@ -175,9 +175,16 @@ adb shell am start \
   -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity \
   --ei channelNumber 161 \
   --ez runManagedStreams true \
+  --ez managedOnly true \
   --ei managedDurationMs 15000 \
-  --ei managedPayloadCount 20
+  --ei managedPayloadCount 20 \
+  --ei managedPayloadIntervalMs 20
 ```
+
+For longer hardware validation, `scripts/run-android-managed-soak.sh` runs the
+same managed path with configurable `DURATION_MS`, `PAYLOAD_COUNT`, and
+`PAYLOAD_INTERVAL_MS`, then captures filtered logcat and completion/crash
+evidence into a timestamped directory.
 
 If `dumpsys usb` reports `connected=false`, Android has not electrically
 enumerated the adapter yet; check OTG direction, hub power, cable orientation,

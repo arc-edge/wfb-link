@@ -31,6 +31,7 @@ public final class WfbManagedStreamsConfig {
     public final int rxAggregatorPort;
     public final int rawRxPort;
     public final int rawPayloadBytes;
+    public final int txPayloadIntervalMs;
     public final int txBandwidthMhz;
     public final int txMcs;
     public final int txFecK;
@@ -59,6 +60,7 @@ public final class WfbManagedStreamsConfig {
         this.rxAggregatorPort = builder.rxAggregatorPort;
         this.rawRxPort = builder.rawRxPort;
         this.rawPayloadBytes = builder.rawPayloadBytes;
+        this.txPayloadIntervalMs = builder.txPayloadIntervalMs;
         this.txBandwidthMhz = builder.txBandwidthMhz;
         this.txMcs = builder.txMcs;
         this.txFecK = builder.txFecK;
@@ -92,6 +94,7 @@ public final class WfbManagedStreamsConfig {
         private int rxAggregatorPort = 15804;
         private int rawRxPort = 15904;
         private int rawPayloadBytes = 512;
+        private int txPayloadIntervalMs = 20;
         private int txBandwidthMhz = WfbManagedTxProfile.DEFAULT_BANDWIDTH_MHZ;
         private int txMcs = WfbManagedTxProfile.DEFAULT_MCS;
         private int txFecK = WfbManagedTxProfile.DEFAULT_FEC_K;
@@ -174,6 +177,11 @@ public final class WfbManagedStreamsConfig {
 
         public Builder rawPayloadBytes(int value) {
             this.rawPayloadBytes = value;
+            return this;
+        }
+
+        public Builder txPayloadIntervalMs(int value) {
+            this.txPayloadIntervalMs = value;
             return this;
         }
 

@@ -135,9 +135,16 @@ integration, use the local SDK AAR documented in
      -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity \
      --ei channelNumber 161 \
      --ez runManagedStreams true \
+     --ez managedOnly true \
      --ei managedDurationMs 15000 \
-     --ei managedPayloadCount 20
+     --ei managedPayloadCount 20 \
+     --ei managedPayloadIntervalMs 20
    ```
+
+   For longer validation, `scripts/run-android-managed-soak.sh` launches the
+   same Activity with a configurable duration and Android TX payload interval,
+   then writes request metadata, filtered logcat, completion lines, and crash
+   scans into `/tmp/wfb-link-android-managed-soak-*`.
 
    The managed smoke expects a GS key at `/data/local/tmp/wfb-link/gs.key` and
    a Linux peer using the matching `drone.key`. The smoke APK declares
