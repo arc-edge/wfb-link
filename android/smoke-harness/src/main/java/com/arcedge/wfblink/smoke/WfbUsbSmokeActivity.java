@@ -246,7 +246,7 @@ public final class WfbUsbSmokeActivity extends Activity {
                         BULK_OUT_ENDPOINT_COUNT,
                         channelNumber,
                         RX_READ_BUFFER_LEN,
-                        TIMEOUT_MS);
+                        INIT_RX_TIMEOUT_MS);
         if (initRxResult >= 0) {
             log("Init + RX descriptor smoke completed: parsed_frames=" + initRxResult);
         } else if (initRxResult == SMOKE_RX_TIMEOUT) {

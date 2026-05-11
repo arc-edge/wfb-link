@@ -19,7 +19,7 @@ use jni::{
 #[cfg(target_os = "android")]
 use radio_core::{
     parse_realtek_u32_array, plan_realtek_table,
-    rtl8812au::{Rtl8812auUsbTransport, TxQueue},
+    rtl8812au::{build_tx_packet, Rtl8812auUsbTransport, TxQueue},
     Bandwidth, FirmwareImage, RealtekConditionEnv, RealtekTableKind, RealtekTablePlan, TxOptions,
     TxRate, TxSubmitCounters, UsbBulkTransfer, UsbError,
 };
@@ -34,9 +34,9 @@ use wfb_bridge::{build_wfb_data_header, WfbChannelId};
 #[cfg(target_os = "android")]
 use wfb_radio_runtime::{
     android_usbhost_adapter_info, handle_production_bridge_tx_datagram,
-    run_rtl8812au_production_init, ProductionRuntimeBridgeTxConfig,
+    run_rtl8812au_monitor_opmode, run_rtl8812au_production_init, ProductionRuntimeBridgeTxConfig,
     ProductionRuntimeBridgeTxOverrides, ProductionRuntimeQueuedDatagram,
-    ProductionRuntimeRtl8812auInitInputs, Rtl8812auInitOrder, RuntimeRadioCounters,
+    ProductionRuntimeRtl8812auInitInputs, Rtl8812auInitOrder, RuntimeRadioCounters, RuntimeRxRead,
     TxCalibrationProfile,
 };
 use wfb_radio_runtime::{
@@ -88,6 +88,16 @@ fn android_log_info(message: impl AsRef<str>) {
             message.as_ptr(),
         );
     }
+}
+
+#[cfg(target_os = "android")]
+fn android_hex_preview(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 #[cfg(target_os = "android")]
@@ -816,24 +826,8 @@ fn run_android_usbhost_rx_read_smoke_jni<'local>(
     )?;
     let mut buffer = vec![0u8; args.read_buffer_len];
     let read = session.read_rx_packets(channel, &mut buffer, args.timeout)?;
-    Ok(AndroidRxReadSmokeSummary {
-        bytes_read: read.bytes_read,
-        parsed_frames: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Frame))
-            .count(),
-        dropped_packets: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Drop))
-            .count(),
-        need_more_data: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::NeedMoreData))
-            .count(),
-    })
+    android_log_rx_read_smoke_summary("pre-init", &read);
+    Ok(android_rx_read_smoke_summary(&read))
 }
 
 #[cfg(target_os = "android")]
@@ -880,27 +874,54 @@ fn run_android_usbhost_init_rx_read_smoke_jni<'local>(
         init.counters.usb_control_reads,
         init.counters.usb_control_writes
     ));
+    android_apply_monitor_opmode(&mut session, args.timeout, "post-init rx")?;
 
     let mut buffer = vec![0u8; args.read_buffer_len];
-    let read = session.read_rx_packets(channel, &mut buffer, args.timeout)?;
-    Ok(AndroidRxReadSmokeSummary {
-        bytes_read: read.bytes_read,
-        parsed_frames: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Frame))
-            .count(),
-        dropped_packets: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Drop))
-            .count(),
-        need_more_data: read
-            .packets
-            .iter()
-            .filter(|packet| matches!(packet.outcome, RxParseOutcome::NeedMoreData))
-            .count(),
-    })
+    let deadline = std::time::Instant::now() + args.timeout;
+    let mut reads = 0usize;
+    let mut aggregate = AndroidRxReadSmokeSummary::default();
+    while std::time::Instant::now() < deadline && reads < 32 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let read_timeout = remaining.min(Duration::from_millis(500));
+        match session.read_rx_packets(channel, &mut buffer, read_timeout) {
+            Ok(read) => {
+                android_log_rx_read_smoke_summary("post-init", &read);
+                let summary = android_rx_read_smoke_summary(&read);
+                aggregate.bytes_read = aggregate.bytes_read.saturating_add(summary.bytes_read);
+                aggregate.parsed_frames = aggregate
+                    .parsed_frames
+                    .saturating_add(summary.parsed_frames);
+                aggregate.dropped_packets = aggregate
+                    .dropped_packets
+                    .saturating_add(summary.dropped_packets);
+                aggregate.need_more_data = aggregate
+                    .need_more_data
+                    .saturating_add(summary.need_more_data);
+                reads = reads.saturating_add(1);
+            }
+            Err(error) if error.timeout => {
+                if aggregate.parsed_frames == 0 && std::time::Instant::now() >= deadline {
+                    return Err(AndroidSmokeError::Rx(error));
+                }
+            }
+            Err(error) => return Err(AndroidSmokeError::Rx(error)),
+        }
+    }
+    if aggregate.parsed_frames == 0 {
+        return Err(AndroidSmokeError::Rx(RuntimeRadioError {
+            code: "android_init_rx_read_timeout",
+            message: "post-init RX read loop saw no parsed frames before timeout".to_string(),
+            timeout: true,
+        }));
+    }
+    android_log_info(format!(
+        "post-init rx aggregate reads={reads} bytes={} frames={} drops={} need_more={}",
+        aggregate.bytes_read,
+        aggregate.parsed_frames,
+        aggregate.dropped_packets,
+        aggregate.need_more_data
+    ));
+    Ok(aggregate)
 }
 
 #[cfg(any(test, target_os = "android"))]
@@ -961,6 +982,105 @@ where
 }
 
 #[cfg(target_os = "android")]
+fn android_rx_read_smoke_summary(read: &RuntimeRxRead) -> AndroidRxReadSmokeSummary {
+    AndroidRxReadSmokeSummary {
+        bytes_read: read.bytes_read,
+        parsed_frames: read
+            .packets
+            .iter()
+            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Frame))
+            .count(),
+        dropped_packets: read
+            .packets
+            .iter()
+            .filter(|packet| matches!(packet.outcome, RxParseOutcome::Drop))
+            .count(),
+        need_more_data: read
+            .packets
+            .iter()
+            .filter(|packet| matches!(packet.outcome, RxParseOutcome::NeedMoreData))
+            .count(),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_log_rx_read_smoke_summary(context: &str, read: &RuntimeRxRead) {
+    let summary = android_rx_read_smoke_summary(read);
+    let mut management_frames = 0usize;
+    let mut control_frames = 0usize;
+    let mut data_frames = 0usize;
+    let mut wfb_like_frames = 0usize;
+    let mut phy_status_frames = 0usize;
+    let mut rssi_valid_frames = 0usize;
+    let mut first_signal = None;
+    for packet in &read.packets {
+        let Some(frame) = packet.frame.as_ref() else {
+            continue;
+        };
+        if frame.phy_status {
+            phy_status_frames += 1;
+        }
+        if frame.rssi_dbm_valid {
+            rssi_valid_frames += 1;
+        }
+        if first_signal.is_none() {
+            first_signal = Some((frame.rssi_dbm, frame.snr_db, frame.rx_rate));
+        }
+        if frame.data.windows(2).any(|window| window == b"WB") {
+            wfb_like_frames += 1;
+        }
+        if let Some(frame_type) = frame.data.first().map(|byte| (byte >> 2) & 0x03) {
+            match frame_type {
+                0 => management_frames += 1,
+                1 => control_frames += 1,
+                2 => data_frames += 1,
+                _ => {}
+            }
+        }
+    }
+    let first_signal = first_signal
+        .map(|(rssi, snr, rate)| format!(" rssi_dbm={rssi} snr_db={snr:?} rate={rate:?}"))
+        .unwrap_or_default();
+    android_log_info(format!(
+        "{context} rx read endpoint=0x{:02x} bytes={} frames={} drops={} need_more={} mgmt={} ctrl={} data={} wfb_like={} phy_status={} rssi_valid={}{}",
+        read.endpoint,
+        summary.bytes_read,
+        summary.parsed_frames,
+        summary.dropped_packets,
+        summary.need_more_data,
+        management_frames,
+        control_frames,
+        data_frames,
+        wfb_like_frames,
+        phy_status_frames,
+        rssi_valid_frames,
+        first_signal
+    ));
+}
+
+#[cfg(target_os = "android")]
+fn android_apply_monitor_opmode<T>(
+    session: &mut RuntimeRadioSession<T>,
+    timeout: Duration,
+    context: &str,
+) -> Result<(), AndroidSmokeError>
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(&session.transport).with_timeout(timeout);
+    let monitor = run_rtl8812au_monitor_opmode(&registers, &mut session.counters)
+        .map_err(AndroidSmokeError::Rx)?;
+    android_log_info(format!(
+        "{context} monitor opmode msr_before=0x{:02x} msr_after=0x{:02x} rcr=0x{:08x} rxfltmap2=0x{:04x}",
+        monitor.msr_before,
+        monitor.msr_after,
+        monitor.rcr_after,
+        monitor.rxfltmap2_after
+    ));
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
 #[allow(clippy::too_many_arguments)]
 fn run_android_usbhost_init_tx_smoke_jni<'local>(
     env: JNIEnv<'local>,
@@ -1001,6 +1121,11 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
         init.counters.usb_control_reads,
         init.counters.usb_control_writes
     ));
+    android_apply_monitor_opmode(&mut session, args.timeout, "pre-tx")?;
+    android_log_info(format!(
+        "tx smoke endpoints bulk_in=0x{:02x} bulk_out=0x{:02x} bulk_out_count={} channel={} HT20",
+        args.bulk_in_endpoint, args.bulk_out_endpoint, args.bulk_out_endpoint_count, channel.number
+    ));
 
     let options = TxOptions {
         rate: TxRate::Ofdm6m,
@@ -1012,6 +1137,19 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
         rate_fallback_limit: 0,
         ..TxOptions::default()
     };
+    let null_packet =
+        build_tx_packet(&ANDROID_SMOKE_TX_FRAME, channel, options).map_err(|error| {
+            AndroidSmokeError::Rx(RuntimeRadioError::new(
+                "android_smoke_tx_descriptor_build_failed",
+                error.to_string(),
+            ))
+        })?;
+    android_log_info(format!(
+        "null-tx descriptor len={} preview={} options={:?}",
+        null_packet.len(),
+        android_hex_preview(&null_packet[..40.min(null_packet.len())]),
+        options
+    ));
     let mut counters = TxSubmitCounters::default();
     for _ in 0..ANDROID_SMOKE_TX_FRAME_COUNT {
         session.submit_80211_frame(&ANDROID_SMOKE_TX_FRAME, channel, options, &mut counters)?;
@@ -1030,7 +1168,7 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
             peer,
             data: android_smoke_wfb_datagram(sequence as u16)?,
         };
-        handle_production_bridge_tx_datagram(
+        let outcome = handle_production_bridge_tx_datagram(
             &mut session,
             &queued,
             bridge_config,
@@ -1040,6 +1178,20 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
         .map_err(|error| {
             AndroidSmokeError::Rx(RuntimeRadioError::new(error.code, error.message))
         })?;
+        if sequence == 0 {
+            if let Some(metadata) = outcome.metadata {
+                android_log_info(format!(
+                    "wfb-tx descriptor len={} datagram_len={} frame_len={} radiotap_len={} preview={} options={:?} channel_observation={:?}",
+                    metadata.packet_len,
+                    metadata.datagram_len,
+                    metadata.frame_len,
+                    metadata.radiotap_len,
+                    metadata.tx_descriptor_preview_hex,
+                    metadata.tx_options,
+                    metadata.wfb_channel_observation
+                ));
+            }
+        }
     }
     android_log_tx_scheduler_snapshot(&session, args.timeout);
     Ok(AndroidTxSmokeSummary {
