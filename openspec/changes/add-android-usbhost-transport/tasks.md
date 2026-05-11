@@ -45,7 +45,11 @@
       saw the RTL8812AU over Android USBHost, completed production init, and
       reported `submitted=6/6`, `wfb_incoming=3`, `wfb_injected=3`,
       `wfb_malformed=0`. Live receiver-backed WFB validation is still pending;
-      the reachable `10.42.0.1` peer is `drone-60ee4` and currently lacks
-      `tcpdump`, `wfb_rx`, and `wfb_tx`.
+      a 2026-05-11 channel-161 capture on `drone-2f389` recorded monitor
+      traffic with zero dropped packets but no synthetic Android WFB header.
+      The same Android run reported post-submit scheduler state
+      `txpause=0x00`, `txpkt_empty=0x0fff`, and empty-looking Q0/MGQ/HGQ
+      snapshots, so USB submit and MAC queue drain are proven while RF decode
+      visibility remains unresolved.
 - [ ] 3.4 Run the production managed-stream profile and compare against the
       macOS bench results before considering Android production-ready.

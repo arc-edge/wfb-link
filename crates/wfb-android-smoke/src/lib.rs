@@ -115,6 +115,18 @@ const DEFAULT_RFE_TYPE: u8 = 0x03;
 #[cfg(target_os = "android")]
 const ANDROID_SMOKE_TX_FRAME_COUNT: usize = 3;
 #[cfg(target_os = "android")]
+const REG_Q0_INFO: u16 = 0x0400;
+#[cfg(target_os = "android")]
+const REG_MGQ_INFO: u16 = 0x0410;
+#[cfg(target_os = "android")]
+const REG_HGQ_INFO: u16 = 0x0414;
+#[cfg(target_os = "android")]
+const REG_TXPKT_EMPTY: u16 = 0x041a;
+#[cfg(target_os = "android")]
+const REG_FWHW_TXQ_CTRL: u16 = 0x0420;
+#[cfg(target_os = "android")]
+const REG_TXPAUSE: u16 = 0x0522;
+#[cfg(target_os = "android")]
 const ANDROID_SMOKE_WFB_DATAGRAM_COUNT: usize = 3;
 #[cfg(any(test, target_os = "android"))]
 const ANDROID_SMOKE_WFB_PAYLOAD_LEN: usize = 64;
@@ -914,6 +926,41 @@ fn android_smoke_wfb_datagram(sequence: u16) -> Result<Vec<u8>, AndroidSmokeErro
 }
 
 #[cfg(target_os = "android")]
+fn android_log_tx_scheduler_snapshot<T>(session: &RuntimeRadioSession<T>, timeout: Duration)
+where
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let registers = Rtl8812auRegisterAccess::new(&session.transport).with_timeout(timeout);
+    let q0 = registers
+        .read32(REG_Q0_INFO)
+        .map(|value| format!("0x{value:08x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let mgq = registers
+        .read32(REG_MGQ_INFO)
+        .map(|value| format!("0x{value:08x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let hgq = registers
+        .read32(REG_HGQ_INFO)
+        .map(|value| format!("0x{value:08x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let txpkt_empty = registers
+        .read16(REG_TXPKT_EMPTY)
+        .map(|value| format!("0x{value:04x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let fwhw_txq_ctrl = registers
+        .read32(REG_FWHW_TXQ_CTRL)
+        .map(|value| format!("0x{value:08x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    let txpause = registers
+        .read8(REG_TXPAUSE)
+        .map(|value| format!("0x{value:02x}"))
+        .unwrap_or_else(|error| format!("error:{error}"));
+    android_log_info(format!(
+        "post-tx scheduler q0={q0} mgq={mgq} hgq={hgq} txpkt_empty={txpkt_empty} fwhw_txq_ctrl={fwhw_txq_ctrl} txpause={txpause}"
+    ));
+}
+
+#[cfg(target_os = "android")]
 #[allow(clippy::too_many_arguments)]
 fn run_android_usbhost_init_tx_smoke_jni<'local>(
     env: JNIEnv<'local>,
@@ -994,6 +1041,7 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
             AndroidSmokeError::Rx(RuntimeRadioError::new(error.code, error.message))
         })?;
     }
+    android_log_tx_scheduler_snapshot(&session, args.timeout);
     Ok(AndroidTxSmokeSummary {
         attempted: counters
             .attempted
