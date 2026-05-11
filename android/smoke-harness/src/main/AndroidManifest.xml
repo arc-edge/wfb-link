@@ -2,9 +2,12 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.arcedge.wfblink.smoke">
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:label="WFB Link USB Smoke"
+        android:extractNativeLibs="true"
+        android:debuggable="true"
         android:theme="@style/WfbSmokeTheme">
         <activity
             android:name="com.arcedge.wfblink.smoke.WfbUsbSmokeActivity"

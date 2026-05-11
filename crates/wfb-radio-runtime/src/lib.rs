@@ -2769,6 +2769,31 @@ pub fn run_production_runtime_flow(
     })
 }
 
+pub fn run_production_runtime_flow_on_session<T>(
+    config: ProductionRuntimeFlowConfig,
+    inputs: ProductionRuntimeFlowExecutionInputs,
+    session: &mut RuntimeRadioSession<T>,
+) -> ProductionRuntimeFlowReport
+where
+    T: UsbBulkTransfer,
+    for<'a> &'a T: Rtl8812auUsbTransport,
+{
+    let Some(init_inputs) = inputs.rtl8812au_init.clone() else {
+        return ProductionRuntimeFlowReport::not_started(
+            &config,
+            RuntimeRadioError::new(
+                "missing_runtime_init_assets",
+                "production radio run requires parsed firmware and RTL8812AU table plans",
+            ),
+        );
+    };
+    let mut init_state =
+        Rtl8812auProductionInitState::new(init_inputs, config.channel, config.bandwidth);
+    run_production_runtime_flow_with_session(config, inputs, session, |session, phase| {
+        run_rtl8812au_production_init_phase(session, phase, &mut init_state)
+    })
+}
+
 struct Rtl8812auProductionInitState {
     inputs: ProductionRuntimeRtl8812auInitInputs,
     channel: Channel,

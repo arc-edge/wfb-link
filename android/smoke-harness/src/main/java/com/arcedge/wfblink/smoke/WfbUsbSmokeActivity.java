@@ -21,6 +21,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.File;
 
 public final class WfbUsbSmokeActivity extends Activity {
     private static final String TAG = "WfbUsbSmoke";
@@ -36,7 +37,12 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int RTL_USB_REQ = 0x05;
     private static final int RTL_READ_REQUEST_TYPE = 0xc0;
     private static final String EXTRA_CHANNEL_NUMBER = "channelNumber";
+    private static final String EXTRA_RUN_MANAGED_STREAMS = "runManagedStreams";
+    private static final String EXTRA_MANAGED_DURATION_MS = "managedDurationMs";
+    private static final String EXTRA_MANAGED_PAYLOAD_COUNT = "managedPayloadCount";
     private static final int DEFAULT_CHANNEL_NUMBER = 36;
+    private static final int DEFAULT_MANAGED_DURATION_MS = 12000;
+    private static final int DEFAULT_MANAGED_PAYLOAD_COUNT = 20;
     private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
     private static final int INIT_RX_TIMEOUT_MS = 5000;
@@ -147,6 +153,7 @@ public final class WfbUsbSmokeActivity extends Activity {
 
     private void runSmoke(UsbDevice device) {
         log("Smoke channel=" + channelNumber + " HT20");
+        logPackagedHelpers();
         activeConnection = usbManager.openDevice(device);
         if (activeConnection == null) {
             log("openDevice returned null");
@@ -275,6 +282,41 @@ public final class WfbUsbSmokeActivity extends Activity {
         } else {
             log("Init + TX/WFB submit smoke failed with code " + initTxResult);
         }
+
+        if (getIntent().getBooleanExtra(EXTRA_RUN_MANAGED_STREAMS, false)) {
+            int managedDurationMs = managedDurationMsFromIntent();
+            int managedPayloadCount = managedPayloadCountFromIntent();
+            log(
+                    "Running managed-stream smoke duration_ms="
+                            + managedDurationMs
+                            + " payloads="
+                            + managedPayloadCount);
+            int managedResult =
+                    WfbNativeSmoke.runManagedStreamsSmoke(
+                            activeConnection,
+                            bulkInEndpointObject,
+                            bulkOutEndpointObject,
+                            fd,
+                            device.getVendorId(),
+                            device.getProductId(),
+                            INTERFACE_NUMBER,
+                            BULK_IN_ENDPOINT,
+                            BULK_OUT_ENDPOINT,
+                            BULK_OUT_ENDPOINT_COUNT,
+                            channelNumber,
+                            INIT_RX_TIMEOUT_MS,
+                            getApplicationInfo().nativeLibraryDir,
+                            getFilesDir().getAbsolutePath(),
+                            managedDurationMs,
+                            managedPayloadCount);
+            if (managedResult >= 0) {
+                log(
+                        "Managed-stream smoke completed: submitted_frames="
+                                + managedResult);
+            } else {
+                log("Managed-stream smoke failed with code " + managedResult);
+            }
+        }
     }
 
     private UsbEndpoint findEndpoint(UsbInterface usbInterface, int address) {
@@ -293,6 +335,42 @@ public final class WfbUsbSmokeActivity extends Activity {
             return DEFAULT_CHANNEL_NUMBER;
         }
         return requested;
+    }
+
+    private int managedDurationMsFromIntent() {
+        int requested = getIntent().getIntExtra(EXTRA_MANAGED_DURATION_MS, DEFAULT_MANAGED_DURATION_MS);
+        if (requested <= 0 || requested > 60000) {
+            return DEFAULT_MANAGED_DURATION_MS;
+        }
+        return requested;
+    }
+
+    private int managedPayloadCountFromIntent() {
+        int requested =
+                getIntent().getIntExtra(EXTRA_MANAGED_PAYLOAD_COUNT, DEFAULT_MANAGED_PAYLOAD_COUNT);
+        if (requested < 0 || requested > 1000) {
+            return DEFAULT_MANAGED_PAYLOAD_COUNT;
+        }
+        return requested;
+    }
+
+    private void logPackagedHelpers() {
+        File nativeDir = new File(getApplicationInfo().nativeLibraryDir);
+        log("Native library dir=" + nativeDir.getAbsolutePath());
+        logPackagedHelper(nativeDir, "libwfb_tx_exec.so");
+        logPackagedHelper(nativeDir, "libwfb_rx_exec.so");
+        logPackagedHelper(nativeDir, "libwfb_keygen_exec.so");
+    }
+
+    private void logPackagedHelper(File nativeDir, String name) {
+        File helper = new File(nativeDir, name);
+        log(
+                "Packaged helper "
+                        + name
+                        + ": exists="
+                        + helper.exists()
+                        + " executable="
+                        + helper.canExecute());
     }
 
     private void log(String line) {

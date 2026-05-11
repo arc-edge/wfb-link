@@ -53,11 +53,15 @@
       post-init RX read loop; Android parsed data frames including WFB-like
       MCS1 frames with valid RSSI/SNR. This validates RF descriptor/frame
       movement, not full managed-stream codec/decrypt flow; that remains 3.4.
-- [ ] 3.4 Run the production managed-stream profile and compare against the
+- [x] 3.4 Run the production managed-stream profile and compare against the
       macOS bench results before considering Android production-ready.
-      Current blocker: the macOS managed-stream smoke depends on local WFB-NG
-      helper binaries that convert raw application UDP to WFB distributor
-      datagrams. Android now has the direct USBHost radio transport and
-      receiver-backed RF frame validation, but it does not yet package or
-      supervise Android-compatible WFB helpers, so the managed raw-application
-      stream gate is not runnable on-device yet.
+      Added Android arm64 WFB-NG codec helper builds, packaged the helpers in
+      the smoke APK, and added an intent-gated managed-stream smoke that
+      supervises `wfb_tx`/`wfb_rx` beside the production bridge loop. Pixel 7
+      Pro live smoke on 2026-05-11 ran the Android managed profile against
+      `drone-2f389` on channel 161 HT20: Android submitted 41 WFB datagrams
+      from 20 raw uplink payloads, parsed 193 downlink frames, forwarded 98 WFB
+      payloads into the local helper, and decoded 46 raw downlink payloads.
+      The Linux peer decoded 16/20 Android raw uplink payloads. This validates
+      full helper-supervised raw-application UDP flow at short range; long-range
+      Android profile comparison remains a release-readiness follow-up.

@@ -9,7 +9,7 @@ The following projects are reference material for behavior, protocol shape, and 
 - Project: `svpcom/wfb-ng`
 - License: GPL-3.0
 - Use here: protocol behavior, distributor/aggregator boundary, packet forwarding formats, operational expectations.
-- Constraint: do not copy WFB-ng source code into this repository without making a deliberate license decision.
+- Constraint: do not copy WFB-ng source code into this repository without making a deliberate license decision. The Android smoke build can clone and compile WFB-ng helper binaries into local `target/` artifacts and package them into the debug APK when `INCLUDE_ANDROID_WFB_HELPERS=1`; those helper binaries remain GPL-3.0 artifacts and should be treated separately from the Apache-2.0 Rust source.
 
 ## Linux RTL8812AU Drivers
 

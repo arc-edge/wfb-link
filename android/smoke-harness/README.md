@@ -36,6 +36,30 @@ applies monitor opmode, submits three descriptor-prefixed null-data frames
 through bulk OUT, and submits three synthetic WFB distributor datagrams through
 the production bridge TX path.
 
+To include Android WFB-NG codec helpers in the debug APK, build with:
+
+```bash
+INCLUDE_ANDROID_WFB_HELPERS=1 scripts/build-android-smoke-apk.sh
+```
+
+This cross-compiles Android arm64 `wfb_tx`, `wfb_rx`, and `wfb_keygen` into
+`target/wfb-ng-android/bin` and packages them as extracted native executables.
+With a paired GS key at `/data/local/tmp/wfb-link/gs.key`, the Activity can run
+the managed raw-application stream smoke:
+
+```bash
+adb shell am start \
+  -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity \
+  --ei channelNumber 161 \
+  --ez runManagedStreams true \
+  --ei managedDurationMs 15000 \
+  --ei managedPayloadCount 20
+```
+
+The managed smoke starts packaged `wfb_tx`/`wfb_rx` helpers inside the app,
+runs the production bridge loop over Android USBHost, sends raw UDP into the TX
+helper, forwards RF RX frames into the RX helper, and logs raw payload counters.
+
 `scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
 Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override
 `ANDROID_SMOKE_FIRMWARE`, `ANDROID_SMOKE_MAC_SOURCE`, `ANDROID_SMOKE_BB_SOURCE`,

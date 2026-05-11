@@ -98,8 +98,9 @@ Current implementation boundary: Android config, service CLI flags, endpoint
 validation, runtime config serialization, and direct-JNI control/bulk transfer
 plumbing are implemented. The source-only smoke harness has live Pixel 7 Pro
 coverage for permission, register access, production init, RX descriptor
-parsing, Android-to-Linux TX, and Linux-to-Android RX frames. Android product
-packaging, NDK CI, and managed-stream WFB helper packaging remain pending.
+parsing, Android-to-Linux TX, Linux-to-Android RX frames, and an
+intent-gated managed raw-application stream smoke using packaged Android
+`wfb_tx`/`wfb_rx` helpers. Android product packaging and NDK CI remain pending.
 
 ## Stream Schema
 

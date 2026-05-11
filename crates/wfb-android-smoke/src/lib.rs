@@ -6,14 +6,20 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{
     ffi::{c_char, c_int, CString},
     fs,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
 };
 
 #[cfg(target_os = "android")]
 use jni::{
-    objects::{JObject, JValue},
-    sys::{jclass, jobject, JNIEnv as RawJNIEnv},
+    objects::{JObject, JString, JValue},
+    sys::{jclass, jobject, jstring, JNIEnv as RawJNIEnv},
     JNIEnv,
 };
 #[cfg(target_os = "android")]
@@ -34,9 +40,13 @@ use wfb_bridge::{build_wfb_data_header, WfbChannelId};
 #[cfg(target_os = "android")]
 use wfb_radio_runtime::{
     android_usbhost_adapter_info, handle_production_bridge_tx_datagram,
-    run_rtl8812au_monitor_opmode, run_rtl8812au_production_init, ProductionRuntimeBridgeTxConfig,
-    ProductionRuntimeBridgeTxOverrides, ProductionRuntimeQueuedDatagram,
-    ProductionRuntimeRtl8812auInitInputs, Rtl8812auInitOrder, RuntimeRadioCounters, RuntimeRxRead,
+    run_production_runtime_flow_on_session, run_rtl8812au_monitor_opmode,
+    run_rtl8812au_production_init, ProductionRuntimeAirtimeSchedule,
+    ProductionRuntimeBridgeTxConfig, ProductionRuntimeBridgeTxOverrides,
+    ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
+    ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeQueuedDatagram,
+    ProductionRuntimeRtl8812auInitInputs, ProductionRuntimeRxForwardConfig,
+    ProductionRuntimeUsbConfig, Rtl8812auInitOrder, RuntimeRadioCounters, RuntimeRxRead,
     TxCalibrationProfile,
 };
 use wfb_radio_runtime::{
@@ -52,6 +62,8 @@ pub const JNI_INIT_RX_READ_SMOKE_SYMBOL: &str =
     "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runInitRxReadSmoke";
 pub const JNI_INIT_TX_SMOKE_SYMBOL: &str =
     "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runInitTxSmoke";
+pub const JNI_MANAGED_STREAMS_SMOKE_SYMBOL: &str =
+    "Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runManagedStreamsSmoke";
 
 pub const ANDROID_SMOKE_INVALID_ARGUMENT: i32 = -1;
 pub const ANDROID_SMOKE_TRANSPORT_ERROR: i32 = -2;
@@ -111,6 +123,8 @@ const ANDROID_SMOKE_BB_SOURCE_PATH: &str = "/data/local/tmp/wfb-link/halhwimg881
 #[cfg(target_os = "android")]
 const ANDROID_SMOKE_RF_SOURCE_PATH: &str = "/data/local/tmp/wfb-link/halhwimg8812a_rf.c";
 #[cfg(target_os = "android")]
+const ANDROID_SMOKE_GS_KEY_PATH: &str = "/data/local/tmp/wfb-link/gs.key";
+#[cfg(target_os = "android")]
 const BB_PHY_ARRAY: &str = "array_mp_8812a_phy_reg";
 #[cfg(target_os = "android")]
 const BB_AGC_ARRAY: &str = "array_mp_8812a_agc_tab";
@@ -144,6 +158,24 @@ const ANDROID_SMOKE_WFB_PAYLOAD_LEN: usize = 64;
 const ANDROID_SMOKE_WFB_LINK_ID: u32 = 0x000001;
 #[cfg(any(test, target_os = "android"))]
 const ANDROID_SMOKE_WFB_RADIO_PORT: u8 = 0;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_UPLINK_RADIO_PORT: u8 = 6;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_DOWNLINK_RADIO_PORT: u8 = 4;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_RUNTIME_BIND_PORT: u16 = 15_700;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_TX_BIND_PORT: u16 = 15_706;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_RAW_TX_PORT: u16 = 15_606;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_RX_AGGREGATOR_PORT: u16 = 15_804;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_RAW_RX_PORT: u16 = 15_904;
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_HELPER_STARTUP_DELAY: Duration = Duration::from_millis(750);
+#[cfg(target_os = "android")]
+const ANDROID_MANAGED_RAW_PAYLOAD_BYTES: usize = 512;
 #[cfg(any(test, target_os = "android"))]
 const ANDROID_SMOKE_WFB_RADIOTAP: [u8; 13] = [
     0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x00, 0x00,
@@ -234,6 +266,19 @@ pub fn android_tx_smoke_return_code(
     }
 }
 
+pub fn android_managed_stream_smoke_return_code(
+    result: Result<AndroidManagedStreamSmokeSummary, AndroidSmokeError>,
+) -> i32 {
+    match result {
+        Ok(summary) => i32::try_from(summary.runtime_submitted_frames).unwrap_or(i32::MAX),
+        Err(AndroidSmokeError::InvalidArgument(_)) => ANDROID_SMOKE_INVALID_ARGUMENT,
+        Err(AndroidSmokeError::Transport(_)) => ANDROID_SMOKE_TRANSPORT_ERROR,
+        Err(AndroidSmokeError::Register(_)) => ANDROID_SMOKE_REGISTER_ERROR,
+        Err(AndroidSmokeError::Rx(error)) if error.timeout => ANDROID_SMOKE_RX_TIMEOUT,
+        Err(AndroidSmokeError::Rx(_)) => ANDROID_SMOKE_RX_ERROR,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_android_usbhost_register_smoke(
     fd: i32,
@@ -277,6 +322,18 @@ pub struct AndroidTxSmokeSummary {
     pub wfb_incoming: u64,
     pub wfb_injected: u64,
     pub wfb_malformed: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AndroidManagedStreamSmokeSummary {
+    pub raw_tx_sent: u64,
+    pub raw_tx_bytes: u64,
+    pub raw_rx_received: u64,
+    pub raw_rx_bytes: u64,
+    pub runtime_tx_datagrams: u64,
+    pub runtime_submitted_frames: u64,
+    pub runtime_rx_parsed_frames: u64,
+    pub runtime_rx_forwarded_payloads: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1215,6 +1272,443 @@ fn run_android_usbhost_init_tx_smoke_jni<'local>(
 }
 
 #[cfg(target_os = "android")]
+struct AndroidManagedChildGuard {
+    name: &'static str,
+    child: Child,
+    log_path: PathBuf,
+}
+
+#[cfg(target_os = "android")]
+impl AndroidManagedChildGuard {
+    fn new(name: &'static str, child: Child, log_path: PathBuf) -> Self {
+        Self {
+            name,
+            child,
+            log_path,
+        }
+    }
+
+    fn ensure_running(&mut self) -> Result<(), AndroidSmokeError> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                let log_tail = fs::read_to_string(&self.log_path)
+                    .unwrap_or_else(|error| format!("<failed to read helper log: {error}>"));
+                Err(android_smoke_runtime_error(
+                    "android_managed_helper_exited",
+                    format!(
+                        "managed helper {} exited before runtime start: {status}; log: {}",
+                        self.name, log_tail
+                    ),
+                ))
+            }
+            Ok(None) => Ok(()),
+            Err(error) => Err(android_smoke_runtime_error(
+                "android_managed_helper_status_failed",
+                format!(
+                    "failed to check managed helper {} status: {error}",
+                    self.name
+                ),
+            )),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl Drop for AndroidManagedChildGuard {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_managed_helper_path(
+    native_library_dir: &Path,
+    helper_name: &'static str,
+) -> Result<PathBuf, AndroidSmokeError> {
+    let path = native_library_dir.join(helper_name);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(_) => Err(android_smoke_runtime_error(
+            "android_managed_helper_not_file",
+            format!("managed helper {} is not a file", path.display()),
+        )),
+        Err(error) => Err(android_smoke_runtime_error(
+            "android_managed_helper_missing",
+            format!("managed helper {} is unavailable: {error}", path.display()),
+        )),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_spawn_managed_child(
+    name: &'static str,
+    command: &Path,
+    args: &[String],
+    working_dir: &Path,
+) -> Result<AndroidManagedChildGuard, AndroidSmokeError> {
+    android_log_info(format!(
+        "starting managed helper {name}: {} {}",
+        command.display(),
+        args.join(" ")
+    ));
+    let log_path = working_dir.join(format!("android-managed-{name}.log"));
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| {
+            android_smoke_runtime_error(
+                "android_managed_helper_log_open_failed",
+                format!(
+                    "failed to open managed helper log {}: {error}",
+                    log_path.display()
+                ),
+            )
+        })?;
+    let log_stderr = log.try_clone().map_err(|error| {
+        android_smoke_runtime_error(
+            "android_managed_helper_log_clone_failed",
+            format!(
+                "failed to clone managed helper log {}: {error}",
+                log_path.display()
+            ),
+        )
+    })?;
+    let child = Command::new(command)
+        .args(args)
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_stderr))
+        .spawn()
+        .map_err(|error| {
+            android_smoke_runtime_error(
+                "android_managed_helper_spawn_failed",
+                format!("failed to start managed helper {name}: {error}"),
+            )
+        })?;
+    Ok(AndroidManagedChildGuard::new(name, child, log_path))
+}
+
+#[cfg(target_os = "android")]
+fn android_managed_payload(sequence: u32) -> [u8; ANDROID_MANAGED_RAW_PAYLOAD_BYTES] {
+    let mut payload = [0u8; ANDROID_MANAGED_RAW_PAYLOAD_BYTES];
+    payload[..4].copy_from_slice(&sequence.to_be_bytes());
+    for (index, byte) in payload[4..].iter_mut().enumerate() {
+        *byte = (sequence as u8).wrapping_add(index as u8);
+    }
+    payload
+}
+
+#[cfg(target_os = "android")]
+fn spawn_android_managed_raw_producer(
+    ready_file: PathBuf,
+    target: SocketAddr,
+    payload_count: usize,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<Result<(u64, u64), String>> {
+    thread::spawn(move || {
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < ready_deadline {
+            if ready_file.exists() {
+                thread::sleep(Duration::from_millis(250));
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if stop.load(Ordering::SeqCst) {
+            return Ok((0, 0));
+        }
+        let socket = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
+            .map_err(|error| format!("raw producer bind failed: {error}"))?;
+        let mut sent = 0u64;
+        let mut bytes = 0u64;
+        for sequence in 0..payload_count {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let payload = android_managed_payload(sequence as u32);
+            let written = socket
+                .send_to(&payload, target)
+                .map_err(|error| format!("raw producer send failed: {error}"))?;
+            sent = sent.saturating_add(1);
+            bytes = bytes.saturating_add(written as u64);
+            thread::sleep(Duration::from_millis(20));
+        }
+        Ok((sent, bytes))
+    })
+}
+
+#[cfg(target_os = "android")]
+fn spawn_android_managed_raw_receiver(
+    socket: UdpSocket,
+    duration: Duration,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<Result<(u64, u64), String>> {
+    thread::spawn(move || {
+        let deadline = std::time::Instant::now() + duration + Duration::from_secs(2);
+        let mut buffer = [0u8; 2048];
+        let mut received = 0u64;
+        let mut bytes = 0u64;
+        while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, _peer)) => {
+                    received = received.saturating_add(1);
+                    bytes = bytes.saturating_add(len as u64);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(format!("raw receiver read failed: {error}")),
+            }
+        }
+        Ok((received, bytes))
+    })
+}
+
+#[cfg(target_os = "android")]
+fn android_join_managed_thread(
+    name: &'static str,
+    handle: thread::JoinHandle<Result<(u64, u64), String>>,
+) -> Result<(u64, u64), AndroidSmokeError> {
+    handle
+        .join()
+        .map_err(|_| {
+            android_smoke_runtime_error(
+                "android_managed_thread_panicked",
+                format!("managed smoke thread {name} panicked"),
+            )
+        })?
+        .map_err(|message| android_smoke_runtime_error("android_managed_thread_failed", message))
+}
+
+#[cfg(target_os = "android")]
+#[allow(clippy::too_many_arguments)]
+fn run_android_usbhost_managed_stream_smoke_jni<'local>(
+    env: JNIEnv<'local>,
+    connection: JObject<'local>,
+    bulk_in_endpoint_object: JObject<'local>,
+    bulk_out_endpoint_object: JObject<'local>,
+    args: AndroidRxSmokeJniArgs,
+    native_library_dir: PathBuf,
+    working_dir: PathBuf,
+    duration: Duration,
+    payload_count: usize,
+) -> Result<AndroidManagedStreamSmokeSummary, AndroidSmokeError> {
+    let channel = Channel::from_number(args.channel_number)
+        .map_err(|_| AndroidSmokeError::InvalidArgument("channel_number"))?;
+    if duration.is_zero() {
+        return Err(AndroidSmokeError::InvalidArgument("duration_ms"));
+    }
+    let key_path = PathBuf::from(ANDROID_SMOKE_GS_KEY_PATH);
+    if !key_path.is_file() {
+        return Err(android_smoke_runtime_error(
+            "android_managed_key_missing",
+            format!(
+                "managed stream smoke requires GS key at {}; generate/copy paired keys first",
+                key_path.display()
+            ),
+        ));
+    }
+
+    let tx_helper = android_managed_helper_path(&native_library_dir, "libwfb_tx_exec.so")?;
+    let rx_helper = android_managed_helper_path(&native_library_dir, "libwfb_rx_exec.so")?;
+    let raw_tx_port = ANDROID_MANAGED_RAW_TX_PORT.to_string();
+    let tx_bind = SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        ANDROID_MANAGED_TX_BIND_PORT,
+    ));
+    let rx_aggregator = SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        ANDROID_MANAGED_RX_AGGREGATOR_PORT,
+    ));
+    let raw_rx_addr = SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        ANDROID_MANAGED_RAW_RX_PORT,
+    ));
+    fs::create_dir_all(&working_dir).map_err(|error| {
+        android_smoke_runtime_error(
+            "android_managed_working_dir_failed",
+            format!(
+                "failed to create managed smoke working directory {}: {error}",
+                working_dir.display()
+            ),
+        )
+    })?;
+    let ready_file = working_dir.join("android-managed-ready.json");
+    let _ = fs::remove_file(&ready_file);
+
+    let tx_args = vec![
+        "-d".to_string(),
+        "-K".to_string(),
+        key_path.display().to_string(),
+        "-i".to_string(),
+        ANDROID_SMOKE_WFB_LINK_ID.to_string(),
+        "-p".to_string(),
+        ANDROID_MANAGED_UPLINK_RADIO_PORT.to_string(),
+        "-B".to_string(),
+        "20".to_string(),
+        "-M".to_string(),
+        "0".to_string(),
+        "-k".to_string(),
+        "2".to_string(),
+        "-n".to_string(),
+        "4".to_string(),
+        "-u".to_string(),
+        raw_tx_port,
+        tx_bind.to_string(),
+    ];
+    let rx_args = vec![
+        "-a".to_string(),
+        ANDROID_MANAGED_RX_AGGREGATOR_PORT.to_string(),
+        "-K".to_string(),
+        key_path.display().to_string(),
+        "-i".to_string(),
+        ANDROID_SMOKE_WFB_LINK_ID.to_string(),
+        "-p".to_string(),
+        ANDROID_MANAGED_DOWNLINK_RADIO_PORT.to_string(),
+        "-c".to_string(),
+        Ipv4Addr::LOCALHOST.to_string(),
+        "-u".to_string(),
+        ANDROID_MANAGED_RAW_RX_PORT.to_string(),
+    ];
+
+    let mut tx_child = android_spawn_managed_child("wfb_tx", &tx_helper, &tx_args, &working_dir)?;
+    let mut rx_child = android_spawn_managed_child("wfb_rx", &rx_helper, &rx_args, &working_dir)?;
+    thread::sleep(ANDROID_MANAGED_HELPER_STARTUP_DELAY);
+    tx_child.ensure_running()?;
+    rx_child.ensure_running()?;
+
+    let raw_rx_socket = UdpSocket::bind(raw_rx_addr).map_err(|error| {
+        android_smoke_runtime_error(
+            "android_managed_raw_rx_bind_failed",
+            format!("failed to bind raw managed RX socket {raw_rx_addr}: {error}"),
+        )
+    })?;
+    raw_rx_socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|error| {
+            android_smoke_runtime_error(
+                "android_managed_raw_rx_timeout_failed",
+                format!("failed to configure raw managed RX socket: {error}"),
+            )
+        })?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let receiver = spawn_android_managed_raw_receiver(raw_rx_socket, duration, Arc::clone(&stop));
+    let producer = spawn_android_managed_raw_producer(
+        ready_file.clone(),
+        SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            ANDROID_MANAGED_RAW_TX_PORT,
+        )),
+        payload_count,
+        Arc::clone(&stop),
+    );
+
+    let mut session = open_android_jni_usbhost_session(
+        env,
+        connection,
+        bulk_in_endpoint_object,
+        bulk_out_endpoint_object,
+        args.fd,
+        args.vid,
+        args.pid,
+        args.interface_number,
+        args.bulk_in_endpoint,
+        args.bulk_out_endpoint,
+        args.bulk_out_endpoint_count,
+    )?;
+    let init_inputs = android_smoke_load_init_inputs(args.timeout)?;
+    let selector = DeviceSelector {
+        vid: Some(args.vid),
+        pid: Some(args.pid),
+        bus: None,
+        address: None,
+    };
+    let usb_config = AndroidUsbHostConfig {
+        device_fd: Some(args.fd),
+        interface_number: args.interface_number,
+        bulk_in_endpoint: args.bulk_in_endpoint,
+        bulk_out_endpoint: args.bulk_out_endpoint,
+        bulk_out_endpoint_count: args.bulk_out_endpoint_count,
+    };
+    let config = ProductionRuntimeFlowConfig {
+        usb: ProductionRuntimeUsbConfig::android_usbhost(selector, usb_config),
+        channel,
+        bandwidth: Bandwidth::Mhz20,
+        firmware: Some(PathBuf::from(ANDROID_SMOKE_FIRMWARE_PATH)),
+        bind_addr: SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            ANDROID_MANAGED_RUNTIME_BIND_PORT,
+        )),
+        tx_binds: vec![tx_bind],
+        duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+        rx_timeout_ms: 20,
+        tx_burst_limit: 8,
+        tx_min_interval_us: 0,
+        max_datagrams: 0,
+        airtime_schedule: ProductionRuntimeAirtimeSchedule::continuous(),
+        ready_file: Some(ready_file),
+        health_file: None,
+        tx_authorized: true,
+        live_register_write_authorized: false,
+        calibration_profile: TxCalibrationProfile::CurrentDefault,
+        captured_tail_applied: false,
+        primary_rx_forward: ProductionRuntimePrimaryRxForwardConfig {
+            link_id: Some(ANDROID_SMOKE_WFB_LINK_ID),
+            radio_port: Some(ANDROID_MANAGED_DOWNLINK_RADIO_PORT),
+            aggregator: Some(rx_aggregator),
+        },
+        rx_forwards: Vec::<ProductionRuntimeRxForwardConfig>::new(),
+        rx_wlan_idx: 0,
+        rx_mcs_index: 0,
+    };
+    let inputs = ProductionRuntimeFlowExecutionInputs {
+        rtl8812au_init: Some(init_inputs),
+        ..ProductionRuntimeFlowExecutionInputs::default()
+    };
+
+    let report = run_production_runtime_flow_on_session(config, inputs, &mut session);
+    stop.store(true, Ordering::SeqCst);
+    let (raw_tx_sent, raw_tx_bytes) = android_join_managed_thread("raw_tx", producer)?;
+    let (raw_rx_received, raw_rx_bytes) = android_join_managed_thread("raw_rx", receiver)?;
+    android_log_info(format!(
+        "managed stream runtime result={:?} stop={} tx_datagrams={} tx_submitted={} rx_frames={} rx_forwarded={} raw_tx={}/{} raw_rx={}/{}",
+        report.result,
+        report.stop_reason,
+        report.tx.datagrams_received,
+        report.tx.submitted_frames,
+        report.rx.parsed_frames,
+        report.rx.forwarded_payloads,
+        raw_tx_sent,
+        raw_tx_bytes,
+        raw_rx_received,
+        raw_rx_bytes
+    ));
+    if let Some(error) = report.error {
+        return Err(android_smoke_runtime_error(
+            "android_managed_runtime_failed",
+            format!("managed runtime failed: {} {}", error.code, error.message),
+        ));
+    }
+    Ok(AndroidManagedStreamSmokeSummary {
+        raw_tx_sent,
+        raw_tx_bytes,
+        raw_rx_received,
+        raw_rx_bytes,
+        runtime_tx_datagrams: report.tx.datagrams_received,
+        runtime_submitted_frames: report.tx.submitted_frames,
+        runtime_rx_parsed_frames: report.rx.parsed_frames,
+        runtime_rx_forwarded_payloads: report.rx.forwarded_payloads,
+    })
+}
+
+#[cfg(target_os = "android")]
 #[no_mangle]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runRegisterSmoke(
@@ -1480,6 +1974,116 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runI
     }))
     .unwrap_or_else(|panic| {
         android_log_info(format!("init tx smoke panic: {panic:?}"));
+        ANDROID_SMOKE_NATIVE_PANIC
+    })
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+#[allow(non_snake_case, clippy::too_many_arguments)]
+pub unsafe extern "system" fn Java_com_arcedge_wfblink_smoke_WfbNativeSmoke_runManagedStreamsSmoke(
+    env: *mut RawJNIEnv,
+    _class: jclass,
+    connection: jobject,
+    bulk_in_endpoint_object: jobject,
+    bulk_out_endpoint_object: jobject,
+    fd: i32,
+    vid: i32,
+    pid: i32,
+    interface_number: i32,
+    bulk_in_endpoint: i32,
+    bulk_out_endpoint: i32,
+    bulk_out_endpoint_count: i32,
+    channel_number: i32,
+    timeout_ms: i32,
+    native_library_dir: jstring,
+    working_dir: jstring,
+    duration_ms: i32,
+    payload_count: i32,
+) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let args = match android_rx_smoke_jni_args(
+            fd,
+            vid,
+            pid,
+            interface_number,
+            bulk_in_endpoint,
+            bulk_out_endpoint,
+            bulk_out_endpoint_count,
+            channel_number,
+            1,
+            timeout_ms,
+        ) {
+            Ok(args) => args,
+            Err(error) => return android_managed_stream_smoke_return_code(Err(error)),
+        };
+        let duration = match u64_from_jni("duration_ms", duration_ms) {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(error) => return android_managed_stream_smoke_return_code(Err(error)),
+        };
+        let payload_count = match usize_from_jni("payload_count", payload_count) {
+            Ok(count) => count,
+            Err(error) => return android_managed_stream_smoke_return_code(Err(error)),
+        };
+        let mut env = match unsafe { JNIEnv::from_raw(env) } {
+            Ok(env) => env,
+            Err(error) => {
+                android_log_info(format!("managed stream smoke invalid JNIEnv: {error}"));
+                return ANDROID_SMOKE_INVALID_ARGUMENT;
+            }
+        };
+        let native_library_dir = unsafe { JString::from_raw(native_library_dir) };
+        let native_library_dir = match env.get_string(&native_library_dir) {
+            Ok(value) => PathBuf::from(value.to_string_lossy().into_owned()),
+            Err(error) => {
+                android_log_info(format!(
+                    "managed stream smoke invalid native library dir string: {error}"
+                ));
+                return ANDROID_SMOKE_INVALID_ARGUMENT;
+            }
+        };
+        let working_dir = unsafe { JString::from_raw(working_dir) };
+        let working_dir = match env.get_string(&working_dir) {
+            Ok(value) => PathBuf::from(value.to_string_lossy().into_owned()),
+            Err(error) => {
+                android_log_info(format!(
+                    "managed stream smoke invalid working dir string: {error}"
+                ));
+                return ANDROID_SMOKE_INVALID_ARGUMENT;
+            }
+        };
+        let connection = unsafe { JObject::from_raw(connection) };
+        let bulk_in_endpoint_object = unsafe { JObject::from_raw(bulk_in_endpoint_object) };
+        let bulk_out_endpoint_object = unsafe { JObject::from_raw(bulk_out_endpoint_object) };
+
+        let result = run_android_usbhost_managed_stream_smoke_jni(
+            env,
+            connection,
+            bulk_in_endpoint_object,
+            bulk_out_endpoint_object,
+            args,
+            native_library_dir,
+            working_dir,
+            duration,
+            payload_count,
+        );
+        if let Ok(summary) = &result {
+            android_log_info(format!(
+                "managed stream smoke submitted={} tx_datagrams={} raw_tx={} raw_rx={} rx_forwarded={}",
+                summary.runtime_submitted_frames,
+                summary.runtime_tx_datagrams,
+                summary.raw_tx_sent,
+                summary.raw_rx_received,
+                summary.runtime_rx_forwarded_payloads
+            ));
+        }
+        if let Err(error) = &result {
+            android_log_info(format!("managed stream smoke error: {error:?}"));
+        }
+        android_managed_stream_smoke_return_code(result)
+    }))
+    .unwrap_or_else(|panic| {
+        android_log_info(format!("managed stream smoke panic: {panic:?}"));
         ANDROID_SMOKE_NATIVE_PANIC
     })
 }

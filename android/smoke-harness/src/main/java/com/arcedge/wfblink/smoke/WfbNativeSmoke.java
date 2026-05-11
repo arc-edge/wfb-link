@@ -64,4 +64,22 @@ final class WfbNativeSmoke {
             int bulkOutEndpointCount,
             int channelNumber,
             int timeoutMs);
+
+    static native int runManagedStreamsSmoke(
+            android.hardware.usb.UsbDeviceConnection connection,
+            android.hardware.usb.UsbEndpoint bulkInEndpointObject,
+            android.hardware.usb.UsbEndpoint bulkOutEndpointObject,
+            int fd,
+            int vid,
+            int pid,
+            int interfaceNumber,
+            int bulkInEndpoint,
+            int bulkOutEndpoint,
+            int bulkOutEndpointCount,
+            int channelNumber,
+            int timeoutMs,
+            String nativeLibraryDir,
+            String workingDir,
+            int durationMs,
+            int payloadCount);
 }

@@ -16,6 +16,8 @@ aligned_apk="${work_dir}/smoke-aligned.apk"
 signed_apk="${work_dir}/${apk_name}"
 keystore="${work_dir}/debug.keystore"
 native_so="${repo_root}/target/aarch64-linux-android/release/libwfb_android_smoke.so"
+helper_dir="${ANDROID_WFB_HELPER_DIR:-${repo_root}/target/wfb-ng-android/bin}"
+include_helpers="${INCLUDE_ANDROID_WFB_HELPERS:-auto}"
 
 require_file() {
   local path="$1"
@@ -32,8 +34,14 @@ require_file "${build_tools}/d8" "d8"
 require_file "${build_tools}/zipalign" "zipalign"
 require_file "${build_tools}/apksigner" "apksigner"
 
+chmod +x "${repo_root}/scripts/build-wfb-ng-android-codec.sh"
+
 "${repo_root}/scripts/build-android-smoke.sh" build
 require_file "${native_so}" "Android smoke native library"
+
+if [[ "${include_helpers}" == "1" ]]; then
+  "${repo_root}/scripts/build-wfb-ng-android-codec.sh"
+fi
 
 rm -rf "${work_dir}/compiled-res" "${work_dir}/gen" "${work_dir}/classes" "${work_dir}/dex" "${work_dir}/apkroot"
 mkdir -p "${work_dir}/compiled-res" "${work_dir}/gen" "${work_dir}/classes" "${work_dir}/dex" "${work_dir}/apkroot/lib/arm64-v8a"
@@ -64,6 +72,19 @@ javac \
   $(find "${work_dir}/classes" -name '*.class' | sort)
 
 cp "${native_so}" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_android_smoke.so"
+if [[ -x "${helper_dir}/wfb_tx" && -x "${helper_dir}/wfb_rx" ]]; then
+  cp "${helper_dir}/wfb_tx" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_tx_exec.so"
+  cp "${helper_dir}/wfb_rx" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_rx_exec.so"
+  if [[ -x "${helper_dir}/wfb_keygen" ]]; then
+    cp "${helper_dir}/wfb_keygen" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_keygen_exec.so"
+  fi
+else
+  if [[ "${include_helpers}" == "1" ]]; then
+    echo "error: Android WFB helper binaries were requested but not found in ${helper_dir}" >&2
+    exit 2
+  fi
+  echo "warning: Android WFB helper binaries not packaged; run INCLUDE_ANDROID_WFB_HELPERS=1 $0 to include them" >&2
+fi
 cp "${unsigned_apk}" "${work_dir}/smoke-with-code.apk"
 (
   cd "${work_dir}/dex"

@@ -86,6 +86,14 @@ values `0..N` are parsed frame counts; negative values are smoke error classes
 documented in
 `android/smoke-harness/README.md`.
 
+When built with `INCLUDE_ANDROID_WFB_HELPERS=1`, the debug APK also packages
+Android arm64 `wfb_tx`, `wfb_rx`, and `wfb_keygen` helper executables. Launching
+the Activity with `--ez runManagedStreams true` runs an intent-gated managed
+raw-application stream smoke: Rust starts the packaged WFB helpers, runs the
+production bridge loop on the live Android USBHost session, sends raw UDP into
+the local helper, forwards RF RX frames into the local aggregator helper, and
+logs raw payload recovery counts.
+
 This is intentionally not a complete Gradle project yet. Product Android
 packaging should own the app shell, USB permission UX, and native library
 loading policy, then reuse the Rust smoke entry point during bring-up. For
@@ -117,6 +125,22 @@ debug APK at `target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
   ```
 
    To match a peer on another channel, pass `--ei channelNumber <channel>`.
+   To run the managed helper-supervised smoke after the basic TX/RX smoke, use:
+
+   ```sh
+   INCLUDE_ANDROID_WFB_HELPERS=1 scripts/build-android-smoke-apk.sh
+   adb install -r target/android-smoke-apk/wfb-link-android-smoke-debug.apk
+   adb shell am start \
+     -n com.arcedge.wfblink.smoke/.WfbUsbSmokeActivity \
+     --ei channelNumber 161 \
+     --ez runManagedStreams true \
+     --ei managedDurationMs 15000 \
+     --ei managedPayloadCount 20
+   ```
+
+   The managed smoke expects a GS key at `/data/local/tmp/wfb-link/gs.key` and
+   a Linux peer using the matching `drone.key`. The smoke APK declares
+   `INTERNET` permission because Android requires it for localhost UDP sockets.
 
 4. Unlock the phone. Attach the AWUS036ACH through USBHost/OTG, preferably via
    a powered USB-C hub, and accept the Android USB permission prompt.
@@ -145,15 +169,20 @@ Implemented:
   and `UsbEndpoint` objects.
 - Source-only Android USB permission, register/RX/init/TX smoke harness.
 - Direct SDK/NDK debug APK build script for the smoke harness.
+- Android arm64 WFB-NG codec helper build and debug APK packaging path for
+  managed-stream smoke validation.
 - Pixel 7 Pro short-range RF smoke against `drone-2f389` on channel 161 HT20:
   Linux monitor captures saw Android-origin synthetic WFB headers, and Android
   post-init RX parsed Linux `wfb_tx` data frames including WFB-like MCS1 frames
   after applying the production monitor opmode receive filter.
+- Pixel 7 Pro managed-stream smoke against `drone-2f389` on channel 161 HT20:
+  Android submitted 41 WFB datagrams from 20 raw uplink payloads, decoded 46
+  raw downlink payloads through packaged `wfb_rx`, and the Linux peer decoded
+  16 Android raw uplink payloads.
 
 Pending:
 
 - Product Gradle app or instrumentation target around the smoke harness.
 - Android target CI with NDK toolchain configured.
-- Android-managed raw application stream profile: package or otherwise provide
-  Android-compatible WFB helper processes, then run the same managed-stream
-  validation shape used by the macOS/Linux bench.
+- Long-range Android managed-stream profile comparison against the macOS/Linux
+  bench.
