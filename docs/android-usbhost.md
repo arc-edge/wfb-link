@@ -179,10 +179,13 @@ Implemented:
   Linux monitor captures saw Android-origin synthetic WFB headers, and Android
   post-init RX parsed Linux `wfb_tx` data frames including WFB-like MCS1 frames
   after applying the production monitor opmode receive filter.
-- Pixel 7 Pro managed-stream smoke against `drone-2f389` on channel 161 HT20:
-  Android submitted 41 WFB datagrams from 20 raw uplink payloads, decoded 46
-  raw downlink payloads through packaged `wfb_rx`, and the Linux peer decoded
-  16 Android raw uplink payloads.
+- Pixel 7 Pro managed-stream smoke against `drone-2f389` on channel 161 HT20
+  after the SDK facade cutover: Android submitted 41 WFB datagrams from 20 raw
+  uplink payloads, forwarded 42 matching downlink WFB frames into packaged
+  `wfb_rx`, decoded 20 raw downlink payloads, and the Linux peer decoded 19/20
+  Android raw uplink payloads. A stale phone-side `gs.key` caused symmetric
+  decrypt failures before refreshing `/data/local/tmp/wfb-link/gs.key` from the
+  current paired key.
 
 Pending:
 

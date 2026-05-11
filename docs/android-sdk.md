@@ -51,8 +51,11 @@ dependencies {
 ```
 
 The app should copy or generate the paired `gs.key` and Realtek init assets into
-app-readable paths before starting a session. The SDK does not manage app
-storage, foreground service policy, or USB permission UX.
+app-readable paths before starting a session. The `gs.key` must match the
+peer's current `drone.key`; a stale phone-side key presents as symmetric
+`Unable to decrypt session key` errors even when RF TX/RX counters look healthy.
+The SDK does not manage app storage, foreground service policy, or USB
+permission UX.
 
 ## API Shape
 

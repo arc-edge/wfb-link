@@ -49,8 +49,8 @@
 - [x] 5.3 Build the SDK AAR and verify its contents include classes, manifest,
       native library, and helper executables when requested.
 - [x] 5.4 Build and install the smoke APK after the SDK cutover.
-- [ ] 5.5 Run an Android managed-stream hardware smoke against the Linux peer
+- [x] 5.5 Run an Android managed-stream hardware smoke against the Linux peer
       when hardware is reachable.
-      - Current ADB validation reaches the phone, installs/launches the APK,
-        but `dumpsys usb` reports `connected=false` and the app logs
-        `No RTL8812AU USB device found`.
+      - 2026-05-11: phone key refreshed from current paired `gs.key`; managed
+        smoke on channel 161 submitted 41 frames, Android decoded 20 raw
+        downlink payloads, and Linux decoded 19/20 Android uplink payloads.
