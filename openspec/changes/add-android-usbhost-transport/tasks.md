@@ -55,3 +55,9 @@
       movement, not full managed-stream codec/decrypt flow; that remains 3.4.
 - [ ] 3.4 Run the production managed-stream profile and compare against the
       macOS bench results before considering Android production-ready.
+      Current blocker: the macOS managed-stream smoke depends on local WFB-NG
+      helper binaries that convert raw application UDP to WFB distributor
+      datagrams. Android now has the direct USBHost radio transport and
+      receiver-backed RF frame validation, but it does not yet package or
+      supervise Android-compatible WFB helpers, so the managed raw-application
+      stream gate is not runnable on-device yet.
