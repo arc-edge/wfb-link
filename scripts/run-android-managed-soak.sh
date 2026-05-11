@@ -14,9 +14,33 @@ payload_count="${PAYLOAD_COUNT:-$(((duration_ms + payload_interval_ms - 1) / pay
 managed_only="${MANAGED_ONLY:-true}"
 validation_traffic="${VALIDATION_TRAFFIC:-true}"
 preauthorize_android_network="${PREAUTHORIZE_ANDROID_NETWORK:-true}"
+android_network_policy_mode="${ANDROID_NETWORK_POLICY_MODE:-}"
+if [[ -z "${android_network_policy_mode}" ]]; then
+  if [[ "${preauthorize_android_network}" == "true" ]]; then
+    android_network_policy_mode="preauthorize"
+  else
+    android_network_policy_mode="strict"
+  fi
+fi
+android_keep_awake="${ANDROID_KEEP_AWAKE:-}"
+if [[ -z "${android_keep_awake}" ]]; then
+  if [[ "${android_network_policy_mode}" == "preauthorize" ]]; then
+    android_keep_awake="true"
+  else
+    android_keep_awake="false"
+  fi
+fi
 log_dir="${LOG_DIR:-/tmp/wfb-link-android-managed-soak-$(date +%Y%m%d-%H%M%S)}"
 package_name="com.arcedge.wfblink.smoke"
 activity_name="${package_name}/.WfbUsbSmokeActivity"
+
+case "${android_network_policy_mode}" in
+  preauthorize|strict|unchanged) ;;
+  *)
+    echo "ANDROID_NETWORK_POLICY_MODE must be preauthorize, strict, or unchanged" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "${log_dir}"
 
@@ -28,25 +52,46 @@ cat >"${log_dir}/request.json" <<EOF
   "payload_interval_ms": ${payload_interval_ms},
   "managed_only": "${managed_only}",
   "validation_traffic": "${validation_traffic}",
-  "preauthorize_android_network": "${preauthorize_android_network}"
+  "preauthorize_android_network": "${preauthorize_android_network}",
+  "android_network_policy_mode": "${android_network_policy_mode}",
+  "android_keep_awake": "${android_keep_awake}"
 }
 EOF
 
-if [[ "${preauthorize_android_network}" == "true" ]]; then
-  package_uid="$(
-    adb shell dumpsys package "${package_name}" \
-      | sed -n 's/.*appId=\([0-9][0-9]*\).*/\1/p' \
-      | head -n 1 \
-      | tr -d '\r'
-  )"
+package_uid="$(
+  adb shell dumpsys package "${package_name}" \
+    | sed -n 's/.*appId=\([0-9][0-9]*\).*/\1/p' \
+    | head -n 1 \
+    | tr -d '\r'
+)"
+
+{
+  echo "package=${package_name}"
+  echo "uid=${package_uid:-unknown}"
+  echo "mode=${android_network_policy_mode}"
+  echo "keep_awake=${android_keep_awake}"
+} >"${log_dir}/android-network-policy.txt"
+
+if [[ "${android_network_policy_mode}" == "preauthorize" ]]; then
   if [[ -n "${package_uid}" ]]; then
     adb shell cmd connectivity set-background-networking-enabled-for-uid "${package_uid}" true \
       >/dev/null 2>&1 || true
   fi
   adb shell cmd deviceidle whitelist +"${package_name}" >/dev/null 2>&1 || true
+elif [[ "${android_network_policy_mode}" == "strict" ]]; then
+  if [[ -n "${package_uid}" ]]; then
+    adb shell cmd connectivity set-background-networking-enabled-for-uid "${package_uid}" false \
+      >/dev/null 2>&1 || true
+  fi
+  adb shell cmd deviceidle whitelist -"${package_name}" >/dev/null 2>&1 || true
+fi
+
+if [[ "${android_keep_awake}" == "true" ]]; then
   adb shell svc power stayon true >/dev/null 2>&1 || true
   adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
   adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
+elif [[ "${android_keep_awake}" == "false" ]]; then
+  adb shell svc power stayon false >/dev/null 2>&1 || true
 fi
 
 adb logcat -c

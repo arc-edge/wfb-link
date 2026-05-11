@@ -70,4 +70,43 @@ public final class WfbManagedStreamsStatus {
     public boolean isTerminal() {
         return state == WfbManagedStreamsState.SUCCEEDED || state == WfbManagedStreamsState.FAILED;
     }
+
+    public boolean hasStarted() {
+        return startedAtMillis > 0;
+    }
+
+    public boolean isRunning() {
+        return state == WfbManagedStreamsState.RUNNING
+                || state == WfbManagedStreamsState.STOP_REQUESTED;
+    }
+
+    public boolean hasResult() {
+        return result != null;
+    }
+
+    public boolean hasError() {
+        return error != null;
+    }
+
+    public boolean isProductionHealthy() {
+        return result != null && result.isProductionHealthy();
+    }
+
+    public long elapsedMillis(long nowMillis) {
+        if (startedAtMillis <= 0) {
+            return 0;
+        }
+        long end = finishedAtMillis > 0 ? finishedAtMillis : nowMillis;
+        return Math.max(0, end - startedAtMillis);
+    }
+
+    public String summaryLabel() {
+        if (result != null) {
+            return result.health.summaryLabel();
+        }
+        if (error != null) {
+            return error.code;
+        }
+        return state.name().toLowerCase();
+    }
 }

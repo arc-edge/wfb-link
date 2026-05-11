@@ -44,4 +44,22 @@ public final class WfbManagedStreamsHealth {
     public boolean hasRxSignal() {
         return rxSignal.hasRssi() || rxSignal.hasSnr();
     }
+
+    public boolean isProductionHealthy() {
+        return ok
+                && reachedRuntimeStop()
+                && !hasTxDrops()
+                && helperStatus.helpersExitedCleanly();
+    }
+
+    public boolean isDegraded() {
+        return ok && !isProductionHealthy();
+    }
+
+    public String summaryLabel() {
+        if (!ok) {
+            return code == null || code.length() == 0 ? "failed" : code;
+        }
+        return isProductionHealthy() ? "healthy" : "degraded";
+    }
 }

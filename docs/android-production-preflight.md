@@ -55,18 +55,23 @@ The AAR should include `libwfb_android.so` and, for managed raw streams,
   loopback UDP can fail with `Operation not permitted` when the app UID is in a
   doze/background-blocked state, even with `INTERNET` granted. Product apps
   should use a foreground service or another app-approved keepalive policy for
-  the radio session.
+  the radio session. The compile-checked reference shape is
+  `android/sdk-gradle-consumer/.../WfbLinkForegroundService.java`.
 - Leave `validationTrafficEnabled(false)` for product use.
 - Send raw uplink UDP to the configured TX stream local port.
 - Bind the configured RX stream local port and read raw downlink UDP there.
+- Drive UI from `WfbManagedStreamsStatus.summaryLabel()` while running and
+  `WfbManagedStreamsResult.isProductionHealthy()` at completion.
 
 Smoke tests may set `validationTrafficEnabled(true)` for SDK-internal payload
 generation. To validate the product contract, run
 `VALIDATION_TRAFFIC=false scripts/run-android-managed-soak.sh`; the smoke
 Activity will use Java-owned UDP sockets while the SDK leaves the raw app ports
 unbound. The script debug-allowlists the smoke app UID for background
-networking by default; set `PREAUTHORIZE_ANDROID_NETWORK=false` to test the
-device's unmodified policy.
+networking by default. Set `ANDROID_NETWORK_POLICY_MODE=strict` or
+`PREAUTHORIZE_ANDROID_NETWORK=false` to remove that debug allowlist before the
+run; set `ANDROID_NETWORK_POLICY_MODE=unchanged` to leave the device policy as
+found.
 
 ## Acceptance Gates
 

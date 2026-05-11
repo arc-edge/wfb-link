@@ -43,9 +43,6 @@ public final class WfbLinkSdkConsumerSmoke {
     }
 
     public static boolean isProductionHealthy(WfbManagedStreamsResult result) {
-        return result != null
-                && result.health.ok
-                && !result.health.hasTxDrops()
-                && "duration_elapsed".equals(result.health.stopReason);
+        return result != null && result.isProductionHealthy();
     }
 }

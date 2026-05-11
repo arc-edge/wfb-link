@@ -150,4 +150,8 @@ public final class WfbManagedStreamsResult {
     private static long optLong(JSONObject value, String name, long fallback) {
         return value == null ? fallback : value.optLong(name, fallback);
     }
+
+    public boolean isProductionHealthy() {
+        return health.isProductionHealthy();
+    }
 }

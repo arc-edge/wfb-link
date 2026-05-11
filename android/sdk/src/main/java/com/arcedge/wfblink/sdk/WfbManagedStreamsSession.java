@@ -64,6 +64,14 @@ public final class WfbManagedStreamsSession {
         return status.get();
     }
 
+    public boolean isRunning() {
+        return status.get().isRunning();
+    }
+
+    public boolean isTerminal() {
+        return status.get().isTerminal();
+    }
+
     public boolean requestStop() {
         while (true) {
             WfbManagedStreamsStatus previous = status.get();

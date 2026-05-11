@@ -27,7 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /** Minimal product-style controller for consuming the local WFB Link SDK AAR. */
-public final class WfbLinkGradleSampleController {
+public class WfbLinkGradleSampleController {
     public static final String ACTION_USB_PERMISSION =
             "com.arcedge.wfblink.gradlesample.USB_PERMISSION";
     public static final int CONTROL_UP_LOCAL_PORT = 15606;
@@ -92,6 +92,7 @@ public final class WfbLinkGradleSampleController {
                         .channelNumber(161)
                         .durationMs(15000)
                         .payloadCount(20)
+                        .validationTrafficEnabled(false)
                         .addStream(
                                 WfbManagedStream.tx("control-up", 6, CONTROL_UP_LOCAL_PORT)
                                         .txProfile(WfbManagedTxProfile.of(20, 0, 2, 4))
@@ -105,18 +106,26 @@ public final class WfbLinkGradleSampleController {
     }
 
     public void sendControlPayload(byte[] payload) throws IOException {
-        DatagramSocket socket = new DatagramSocket();
+        DatagramSocket socket = openControlUplinkSocket();
         try {
-            DatagramPacket packet =
-                    new DatagramPacket(
-                            payload,
-                            payload.length,
-                            InetAddress.getByName("127.0.0.1"),
-                            CONTROL_UP_LOCAL_PORT);
-            socket.send(packet);
+            sendControlPayload(socket, payload);
         } finally {
             socket.close();
         }
+    }
+
+    public DatagramSocket openControlUplinkSocket() throws IOException {
+        return new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
+    }
+
+    public void sendControlPayload(DatagramSocket socket, byte[] payload) throws IOException {
+        DatagramPacket packet =
+                new DatagramPacket(
+                        payload,
+                        payload.length,
+                        InetAddress.getByName("127.0.0.1"),
+                        CONTROL_UP_LOCAL_PORT);
+        socket.send(packet);
     }
 
     public DatagramSocket openVideoDownlinkSocket() throws IOException {

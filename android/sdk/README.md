@@ -10,6 +10,9 @@ The SDK expects the host app to own Android USB permission and pass an opened
 caller-owned `ExecutorService`; the returned `WfbManagedStreamsSession` exposes
 status snapshots, cooperative stop request, typed health counters, RX signal
 summary, and result/error delivery.
+On Android, run the session from a foreground service or equivalent foreground
+execution context so app-owned loopback UDP is not blocked by doze/background
+network policy.
 
 SDK sessions default to product mode: the app owns raw application UDP sockets.
 Send uplink payloads to the configured TX stream local UDP port and bind the
@@ -33,3 +36,5 @@ scripts/build-android-sdk-gradle-consumer-smoke.sh
 
 See `docs/android-sdk.md` for the complete integration contract and
 `docs/android-production-preflight.md` for the hardware and run checklist.
+The Gradle consumer sample includes a compile-checked foreground service that
+owns the SDK session and product raw UDP sockets.

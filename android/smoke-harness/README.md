@@ -77,8 +77,10 @@ DURATION_MS=1200000 PAYLOAD_INTERVAL_MS=100 \
 The wrapper keeps the phone awake and debug-allowlists the smoke app UID for
 background networking by default. This avoids Android doze/background policy
 blocking loopback UDP with `Operation not permitted` during adb-launched soak
-runs. Set `PREAUTHORIZE_ANDROID_NETWORK=false` to test without that harness
-setup.
+runs. Set `ANDROID_NETWORK_POLICY_MODE=strict` or
+`PREAUTHORIZE_ANDROID_NETWORK=false` to remove that debug allowlist before the
+run. Set `ANDROID_NETWORK_POLICY_MODE=unchanged` to leave the device policy as
+found.
 
 `managedPayloadIntervalMs` controls the Android raw TX producer interval. A
 larger value, such as `100`, better represents sparse control uplink while a

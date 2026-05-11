@@ -58,6 +58,11 @@ The repository includes a Gradle-style consumer sample at
 scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
+That sample includes `WfbLinkForegroundService`, a production-shaped foreground
+service that opens the USB device, starts the managed SDK session, owns the raw
+control/video UDP sockets, and exposes a local binder for product control
+payloads and status.
+
 The app should copy or generate the paired `gs.key` and Realtek init assets into
 app-readable paths before starting a session. The `gs.key` must match the
 peer's current `drone.key`; a stale phone-side key presents as symmetric
@@ -102,6 +107,7 @@ WfbManagedStreamsConfig config =
                 .channelNumber(161)
                 .durationMs(15000)
                 .payloadCount(20)
+                .validationTrafficEnabled(false)
                 .addStream(
                         WfbManagedStream.tx("control-up", 6, 15606)
                                 .txProfile(WfbManagedTxProfile.of(20, 0, 2, 4))
@@ -116,13 +122,19 @@ WfbManagedStreamsSession session =
                         executor,
                         new WfbManagedStreamsCallback() {
                             @Override
-                            public void onStatusChanged(WfbManagedStreamsStatus status) {}
+                            public void onStatusChanged(WfbManagedStreamsStatus status) {
+                                renderRadioState(status.summaryLabel());
+                            }
 
                             @Override
-                            public void onCompleted(WfbManagedStreamsResult result) {}
+                            public void onCompleted(WfbManagedStreamsResult result) {
+                                renderRadioState(result.health.summaryLabel());
+                            }
 
                             @Override
-                            public void onFailed(WfbLinkException error) {}
+                            public void onFailed(WfbLinkException error) {
+                                renderRadioState(error.code);
+                            }
                         });
 ```
 
@@ -140,10 +152,7 @@ Completed results expose both the legacy flat fields and a typed health view:
 
 ```java
 WfbManagedStreamsResult result = session.await();
-boolean healthy =
-        result.health.ok
-                && !result.health.hasTxDrops()
-                && result.health.reachedRuntimeStop();
+boolean healthy = result.isProductionHealthy();
 long uplinkSubmitted = result.uplink.submittedFrames;
 long downlinkForwardedToHelper = result.downlink.forwardedPayloads;
 Long avgRssi = result.rxSignal.rssiDbm.average;
@@ -156,10 +165,13 @@ validation traffic is enabled.
 `startManagedStreams` validates the config, runs the existing blocking native
 runtime on the caller-provided `ExecutorService`, and returns a
 `WfbManagedStreamsSession`. `session.status()` returns immutable snapshots,
-`session.await()` blocks for the final result, and `session.requestStop()`
-records a cooperative stop request. The current native USB runtime cannot be
-force-interrupted from Java; use bounded `durationMs` values and treat stop as
-best-effort until the runtime reaches its next normal exit.
+`session.isRunning()` and `session.isTerminal()` are convenience lifecycle
+checks, `session.await()` blocks for the final result, and
+`session.requestStop()` records a cooperative stop request. Status snapshots
+include `summaryLabel()`, `elapsedMillis(now)`, `isProductionHealthy()`,
+`hasResult()`, and `hasError()` helpers for UI state. The current native USB
+runtime cannot be force-interrupted from Java; use bounded `durationMs` values
+and treat stop as best-effort until the runtime reaches its next normal exit.
 
 `runManagedStreamsBlocking` remains available for tests and callers that
 already own their worker thread. In either mode, keep the
@@ -222,9 +234,10 @@ same managed path with configurable `DURATION_MS`, `PAYLOAD_COUNT`, and
 evidence into a timestamped directory. Set `VALIDATION_TRAFFIC=false` to run
 the smoke harness in production mode, where Java-owned UDP sockets generate and
 receive payloads outside the SDK native runtime. The script preauthorizes the
-debug smoke app for background networking by default; set
-`PREAUTHORIZE_ANDROID_NETWORK=false` when intentionally testing the device's
-raw policy behavior.
+debug smoke app for background networking by default. Set
+`ANDROID_NETWORK_POLICY_MODE=strict` or `PREAUTHORIZE_ANDROID_NETWORK=false`
+to remove the debug allowlist before the run; use
+`ANDROID_NETWORK_POLICY_MODE=unchanged` to leave the device policy untouched.
 
 If `dumpsys usb` reports `connected=false`, Android has not electrically
 enumerated the adapter yet; check OTG direction, hub power, cable orientation,

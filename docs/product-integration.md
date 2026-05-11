@@ -318,6 +318,10 @@ service. The returned `WfbManagedStreamsSession` exposes status snapshots,
 cooperative stop request, and final `WfbManagedStreamsResult` counters. Typed
 `WfbLinkException` codes cover Java-side validation failures; native runtime
 failures return structured result codes instead of smoke integer return values.
+The Gradle consumer sample includes a foreground service that owns the SDK
+session plus raw application UDP sockets. Product UI can render
+`WfbManagedStreamsStatus.summaryLabel()` while running and use
+`WfbManagedStreamsResult.isProductionHealthy()` as the completion gate.
 
 See [Android SDK integration](android-sdk.md) for the exact Java API and
 packaging limitations.
