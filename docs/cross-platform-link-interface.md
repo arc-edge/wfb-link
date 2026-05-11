@@ -315,11 +315,17 @@ config serialization, service TOML/CLI mapping, and a direct-JNI bridge that
 turns app-owned `UsbDeviceConnection.controlTransfer` and `bulkTransfer` calls
 into the RTL8812AU control and bulk transfers used by `wfb-radio-runtime`.
 
-The source-only smoke harness has validated live USB permission, register
-access, production init, RX descriptor parsing, Android-to-Linux TX, and
-Linux-to-Android RX frames. Android product packaging still needs a Gradle/app
-wrapper, NDK CI, and Android-compatible WFB helper packaging before the managed
-raw application stream backend can run the same profile as macOS.
+The Android product-facing surface is a local SDK AAR. The app owns USB
+permission, foreground-service/lifecycle policy, key and asset provisioning,
+then passes a live `UsbDeviceConnection` plus endpoint objects to
+`WfbLinkManager`. The AAR packages `libwfb_android.so` and can include Android
+arm64 WFB-NG helper executables for managed raw stream bring-up.
+
+The smoke harness has validated live USB permission, register access,
+production init, RX descriptor parsing, Android-to-Linux TX,
+Linux-to-Android RX frames, and managed raw stream flow when the phone has
+electrically enumerated the adapter. Android product work still needs a real
+Gradle app/instrumentation target and NDK-backed CI.
 
 ## Why This Boundary
 

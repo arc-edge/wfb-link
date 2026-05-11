@@ -63,7 +63,11 @@ javac \
   --release 8 \
   -classpath "${android_jar}" \
   -d "${work_dir}/classes" \
-  $(find "${work_dir}/gen" "${repo_root}/android/smoke-harness/src/main/java" -name '*.java' | sort)
+  $(find \
+    "${work_dir}/gen" \
+    "${repo_root}/android/sdk/src/main/java" \
+    "${repo_root}/android/smoke-harness/src/main/java" \
+    -name '*.java' | sort)
 
 "${build_tools}/d8" \
   --min-api "${min_api}" \
@@ -72,6 +76,7 @@ javac \
   $(find "${work_dir}/classes" -name '*.class' | sort)
 
 cp "${native_so}" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_android_smoke.so"
+cp "${native_so}" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_android.so"
 if [[ -x "${helper_dir}/wfb_tx" && -x "${helper_dir}/wfb_rx" ]]; then
   cp "${helper_dir}/wfb_tx" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_tx_exec.so"
   cp "${helper_dir}/wfb_rx" "${work_dir}/apkroot/lib/arm64-v8a/libwfb_rx_exec.so"

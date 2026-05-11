@@ -58,6 +58,9 @@ remote. Update them before adding Cargo git dependencies or release automation.
 - Android USBHost runtime and service config selection, endpoint validation,
   plus a JNI smoke transport that drives app-owned `UsbDeviceConnection`
   control/bulk transfers directly.
+- A local Android SDK AAR path with Java USB handoff/config/result classes,
+  product-facing JNI symbol names, and optional packaged WFB-NG helper
+  executables for managed stream bring-up.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us
@@ -257,6 +260,16 @@ and endpoint contract.
 For the full integration contract, backend selection rules, payload-kind
 semantics, and health/report shape, read
 [Product integration](docs/product-integration.md).
+
+For Android app integration, build the local AAR with:
+
+```sh
+INCLUDE_ANDROID_WFB_HELPERS=1 scripts/build-android-sdk-aar.sh
+scripts/build-android-sdk-consumer-smoke.sh
+```
+
+See [Android SDK integration](docs/android-sdk.md) for manifest, USB handoff,
+asset/key provisioning, threading, and current Android limitations.
 
 For the first alpha integration from another Rust repository:
 

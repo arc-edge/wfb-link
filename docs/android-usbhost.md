@@ -94,11 +94,12 @@ production bridge loop on the live Android USBHost session, sends raw UDP into
 the local helper, forwards RF RX frames into the local aggregator helper, and
 logs raw payload recovery counts.
 
-This is intentionally not a complete Gradle project yet. Product Android
-packaging should own the app shell, USB permission UX, and native library
-loading policy, then reuse the Rust smoke entry point during bring-up. For
-bench work, `scripts/build-android-smoke-apk.sh` builds and signs a direct
-debug APK at `target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
+Product Android packaging should own the app shell, foreground-service policy,
+USB permission UX, key/asset provisioning, and session threading. For app
+integration, use the local SDK AAR documented in
+[Android SDK integration](android-sdk.md). For bench work,
+`scripts/build-android-smoke-apk.sh` builds and signs a direct debug APK at
+`target/android-smoke-apk/wfb-link-android-smoke-debug.apk`, and
 `scripts/install-android-smoke-apk.sh` installs and launches it over `adb`.
 
 ### Bench Runbook
@@ -169,6 +170,9 @@ Implemented:
   and `UsbEndpoint` objects.
 - Source-only Android USB permission, register/RX/init/TX smoke harness.
 - Direct SDK/NDK debug APK build script for the smoke harness.
+- Local Android SDK AAR build with Java USB handoff/config/result classes,
+  product-facing JNI symbol names, native library packaging, and a consumer
+  compile smoke.
 - Android arm64 WFB-NG codec helper build and debug APK packaging path for
   managed-stream smoke validation.
 - Pixel 7 Pro short-range RF smoke against `drone-2f389` on channel 161 HT20:
@@ -182,7 +186,7 @@ Implemented:
 
 Pending:
 
-- Product Gradle app or instrumentation target around the smoke harness.
+- Product Gradle app or instrumentation target around the SDK AAR.
 - Android target CI with NDK toolchain configured.
 - Long-range Android managed-stream profile comparison against the macOS/Linux
   bench.

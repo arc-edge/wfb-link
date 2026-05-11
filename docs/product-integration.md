@@ -23,7 +23,7 @@ Product code
 | Managed raw application multi-streams, optionally with an IP tunnel | `ManagedWfbStreamsBackend` | Product-facing implementation. Supervises one WFB-NG helper per configured stream, can also supervise one `wfb-tun-macos` tunnel on separate radio ports, and exposes named raw UDP endpoints with health. |
 | Userspace WFB distributor datagram streams | `UserspaceRadioBackend` | Product-facing for callers that already speak WFB-NG distributor/aggregator UDP. Current checked-in live transport is macOS IOUSBHost; Android uses the same contract with Android USBHost direct JNI control/bulk transfers. |
 | Linux | Native WFB-NG backend implementing the same trait | Design contract only in this repo today. Do not port the userspace USB bridge to Linux. |
-| Android | `UserspaceRadioBackend` plus Android USBHost transport | Rust direct-JNI control/bulk bridge implemented; source-only smoke harness has passed register, init, RX descriptor, Android-to-Linux TX, and Linux-to-Android RX frame validation. Managed raw application streams still need Android WFB helper packaging. |
+| Android | Android SDK AAR over Android USBHost transport | Rust direct-JNI control/bulk bridge implemented; local AAR packages Java USB handoff/config/result classes, `libwfb_android.so`, and optional WFB-NG helper executables. The smoke harness has passed register, init, RX descriptor, Android-to-Linux TX, Linux-to-Android RX frame validation, and managed-stream short-range validation when the adapter is enumerated. |
 
 The important distinction is `payload_kind`:
 
@@ -300,6 +300,27 @@ For TX, the datagram sent to `stream.local_udp` must already be a WFB-NG
 distributor datagram. For RX, the datagram received from `stream.local_udp` is a
 WFB-NG aggregator datagram. Raw application bytes will not work on this backend
 unless your product adds the WFB codec/helper layer.
+
+## Android App Integration
+
+Android apps should consume the local SDK AAR rather than depend directly on the
+smoke harness package. Build and compile-smoke the artifact with:
+
+```sh
+INCLUDE_ANDROID_WFB_HELPERS=1 scripts/build-android-sdk-aar.sh
+scripts/build-android-sdk-consumer-smoke.sh
+```
+
+The app owns USB permission, opens and claims the device, resolves endpoint
+objects, provisions `gs.key` plus firmware/table assets, and runs
+`WfbLinkManager.runManagedStreamsBlocking` on a worker thread or foreground
+service. The SDK returns `WfbManagedStreamsResult` JSON-derived counters and
+typed `WfbLinkException` codes for Java-side validation failures. Native
+runtime failures return structured result codes instead of smoke integer return
+values.
+
+See [Android SDK integration](android-sdk.md) for the exact Java API and
+packaging limitations.
 
 ## Endpoints
 

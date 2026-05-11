@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 radio-core.workspace = true
+serde_json.workspace = true
 wfb-bridge.workspace = true
 wfb-radio-runtime.workspace = true
 

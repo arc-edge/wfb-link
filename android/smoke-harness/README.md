@@ -56,9 +56,10 @@ adb shell am start \
   --ei managedPayloadCount 20
 ```
 
-The managed smoke starts packaged `wfb_tx`/`wfb_rx` helpers inside the app,
-runs the production bridge loop over Android USBHost, sends raw UDP into the TX
-helper, forwards RF RX frames into the RX helper, and logs raw payload counters.
+The managed smoke uses the reusable `com.arcedge.wfblink.sdk` Java facade. It
+starts packaged `wfb_tx`/`wfb_rx` helpers inside the app, runs the production
+bridge loop over Android USBHost, sends raw UDP into the TX helper, forwards RF
+RX frames into the RX helper, and logs raw payload counters.
 
 `scripts/install-android-smoke-apk.sh` pushes the current bench firmware and
 Realtek table sources to `/data/local/tmp/wfb-link` before launch. Override

@@ -21,6 +21,11 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import com.arcedge.wfblink.sdk.WfbLinkException;
+import com.arcedge.wfblink.sdk.WfbLinkManager;
+import com.arcedge.wfblink.sdk.WfbManagedStreamsConfig;
+import com.arcedge.wfblink.sdk.WfbManagedStreamsResult;
+import com.arcedge.wfblink.sdk.WfbUsbHandoff;
 import java.io.File;
 
 public final class WfbUsbSmokeActivity extends Activity {
@@ -43,6 +48,12 @@ public final class WfbUsbSmokeActivity extends Activity {
     private static final int DEFAULT_CHANNEL_NUMBER = 36;
     private static final int DEFAULT_MANAGED_DURATION_MS = 12000;
     private static final int DEFAULT_MANAGED_PAYLOAD_COUNT = 20;
+    private static final String SMOKE_ASSET_DIR = "/data/local/tmp/wfb-link";
+    private static final String SMOKE_KEY_PATH = SMOKE_ASSET_DIR + "/gs.key";
+    private static final String SMOKE_FIRMWARE_PATH = SMOKE_ASSET_DIR + "/rtl8812aefw.bin";
+    private static final String SMOKE_MAC_TABLE_PATH = SMOKE_ASSET_DIR + "/halhwimg8812a_mac.c";
+    private static final String SMOKE_BB_TABLE_PATH = SMOKE_ASSET_DIR + "/halhwimg8812a_bb.c";
+    private static final String SMOKE_RF_TABLE_PATH = SMOKE_ASSET_DIR + "/halhwimg8812a_rf.c";
     private static final int RX_READ_BUFFER_LEN = 16 * 1024;
     private static final int TIMEOUT_MS = 500;
     private static final int INIT_RX_TIMEOUT_MS = 5000;
@@ -291,8 +302,8 @@ public final class WfbUsbSmokeActivity extends Activity {
                             + managedDurationMs
                             + " payloads="
                             + managedPayloadCount);
-            int managedResult =
-                    WfbNativeSmoke.runManagedStreamsSmoke(
+            WfbUsbHandoff usb =
+                    new WfbUsbHandoff(
                             activeConnection,
                             bulkInEndpointObject,
                             bulkOutEndpointObject,
@@ -302,19 +313,50 @@ public final class WfbUsbSmokeActivity extends Activity {
                             INTERFACE_NUMBER,
                             BULK_IN_ENDPOINT,
                             BULK_OUT_ENDPOINT,
-                            BULK_OUT_ENDPOINT_COUNT,
-                            channelNumber,
-                            INIT_RX_TIMEOUT_MS,
-                            getApplicationInfo().nativeLibraryDir,
-                            getFilesDir().getAbsolutePath(),
-                            managedDurationMs,
-                            managedPayloadCount);
-            if (managedResult >= 0) {
+                            BULK_OUT_ENDPOINT_COUNT);
+            WfbManagedStreamsConfig config =
+                    WfbManagedStreamsConfig.builder(this, usb)
+                            .keyPath(SMOKE_KEY_PATH)
+                            .initAssets(
+                                    SMOKE_FIRMWARE_PATH,
+                                    SMOKE_MAC_TABLE_PATH,
+                                    SMOKE_BB_TABLE_PATH,
+                                    SMOKE_RF_TABLE_PATH)
+                            .channelNumber(channelNumber)
+                            .timeoutMs(INIT_RX_TIMEOUT_MS)
+                            .durationMs(managedDurationMs)
+                            .payloadCount(managedPayloadCount)
+                            .build();
+            try {
+                WfbManagedStreamsResult managedResult =
+                        new WfbLinkManager().runManagedStreamsBlocking(config);
+                if (managedResult.ok) {
+                    log(
+                            "Managed-stream smoke completed: submitted_frames="
+                                    + managedResult.submittedFrames
+                                    + " raw_rx="
+                                    + managedResult.rawRxPackets
+                                    + " rx_forwarded="
+                                    + managedResult.rxForwardedPayloads
+                                    + " stop="
+                                    + managedResult.stopReason);
+                } else {
+                    log(
+                            "Managed-stream smoke failed code="
+                                    + managedResult.code
+                                    + " message="
+                                    + managedResult.message
+                                    + " result="
+                                    + managedResult.runtimeResult
+                                    + " stop="
+                                    + managedResult.stopReason);
+                }
+            } catch (WfbLinkException error) {
                 log(
-                        "Managed-stream smoke completed: submitted_frames="
-                                + managedResult);
-            } else {
-                log("Managed-stream smoke failed with code " + managedResult);
+                        "Managed-stream smoke SDK error code="
+                                + error.code
+                                + " message="
+                                + error.getMessage());
             }
         }
     }
