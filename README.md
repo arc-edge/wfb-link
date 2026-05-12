@@ -61,7 +61,9 @@ remote. Update them before adding Cargo git dependencies or release automation.
 - A local Android SDK AAR path with Java USB handoff/config/session/result
   classes, named stream config, product-facing JNI symbol names, optional
   packaged WFB-NG helper executables, and direct plus Gradle-style consumer
-  compile checks.
+  compile checks. See
+  [Android Consumer Quickstart](docs/android-consumer-quickstart.md) for the
+  handoff guide used by downstream Android apps.
 - A checked-in short-range TDD radio profile for video downlink plus sparse
   control uplink.
 - Short-range loaded tunnel validation using `PROFILE_SET=loaded` with a 700 us

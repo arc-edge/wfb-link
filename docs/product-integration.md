@@ -323,8 +323,9 @@ session plus raw application UDP sockets. Product UI can render
 `WfbManagedStreamsStatus.summaryLabel()` while running and use
 `WfbManagedStreamsResult.isProductionHealthy()` as the completion gate.
 
-See [Android SDK integration](android-sdk.md) for the exact Java API and
-packaging limitations.
+See [Android Consumer Quickstart](android-consumer-quickstart.md) for the
+downstream app handoff and [Android SDK integration](android-sdk.md) for the
+exact Java API and packaging limitations.
 
 ## Endpoints
 

@@ -34,7 +34,8 @@ scripts/build-android-sdk-consumer-smoke.sh
 scripts/build-android-sdk-gradle-consumer-smoke.sh
 ```
 
-See `docs/android-sdk.md` for the complete integration contract and
+See `docs/android-consumer-quickstart.md` for the downstream app handoff,
+`docs/android-sdk.md` for the complete integration contract, and
 `docs/android-production-preflight.md` for the hardware and run checklist.
 The Gradle consumer sample includes a compile-checked foreground service that
 owns the SDK session and product raw UDP sockets.

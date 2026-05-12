@@ -4,6 +4,10 @@ The Android SDK is the product-facing wrapper around the Android USBHost radio
 path. It packages Java API classes, the Rust JNI library, and optionally the
 Android arm64 WFB-NG helper executables into a local AAR.
 
+For downstream app integration, start with
+[Android Consumer Quickstart](android-consumer-quickstart.md). This page keeps
+the fuller API and validation reference.
+
 ## Build
 
 Install the Android SDK/NDK and Rust target:
