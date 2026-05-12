@@ -212,6 +212,9 @@ struct AndroidManagedStreamRuntimeConfig {
     raw_tx_port: u16,
     rx_aggregator_port: u16,
     raw_rx_port: u16,
+    secondary_downlink_radio_port: Option<u8>,
+    secondary_rx_aggregator_port: Option<u16>,
+    secondary_raw_rx_port: Option<u16>,
     raw_payload_bytes: usize,
     raw_payload_interval: Duration,
     validation_traffic_enabled: bool,
@@ -240,6 +243,9 @@ impl AndroidManagedStreamRuntimeConfig {
             raw_tx_port: ANDROID_MANAGED_RAW_TX_PORT,
             rx_aggregator_port: ANDROID_MANAGED_RX_AGGREGATOR_PORT,
             raw_rx_port: ANDROID_MANAGED_RAW_RX_PORT,
+            secondary_downlink_radio_port: None,
+            secondary_rx_aggregator_port: None,
+            secondary_raw_rx_port: None,
             raw_payload_bytes: ANDROID_MANAGED_RAW_PAYLOAD_BYTES,
             raw_payload_interval: Duration::from_millis(20),
             validation_traffic_enabled: true,
@@ -416,6 +422,7 @@ pub struct AndroidManagedStreamSmokeSummary {
     pub runtime_error_message: Option<String>,
     pub tx_helper_status: String,
     pub rx_helper_status: String,
+    pub secondary_rx_helper_status: Option<String>,
     pub runtime_report_json: String,
 }
 
@@ -447,6 +454,7 @@ pub fn android_managed_stream_result_json(
             "stop_reason": summary.runtime_stop_reason,
             "tx_helper_status": summary.tx_helper_status,
             "rx_helper_status": summary.rx_helper_status,
+            "secondary_rx_helper_status": summary.secondary_rx_helper_status,
             "runtime_report_json": summary.runtime_report_json,
         })
         .to_string(),
@@ -466,6 +474,7 @@ pub fn android_managed_stream_result_json(
             "stop_reason": "not_started",
             "tx_helper_status": "not_started",
             "rx_helper_status": "not_started",
+            "secondary_rx_helper_status": null,
             "runtime_report_json": null,
         })
         .to_string(),
@@ -1772,6 +1781,24 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         managed.rx_aggregator_port,
     ));
     let raw_rx_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, managed.raw_rx_port));
+    let secondary_rx = match (
+        managed.secondary_downlink_radio_port,
+        managed.secondary_rx_aggregator_port,
+        managed.secondary_raw_rx_port,
+    ) {
+        (Some(radio_port), Some(aggregator_port), Some(raw_rx_port)) => Some((
+            radio_port,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, aggregator_port)),
+            aggregator_port,
+            raw_rx_port,
+        )),
+        (None, _, None) => None,
+        _ => {
+            return Err(AndroidSmokeError::InvalidArgument(
+                "secondary_rx_stream_config",
+            ));
+        }
+    };
     fs::create_dir_all(&managed.working_dir).map_err(|error| {
         android_smoke_runtime_error(
             "android_managed_working_dir_failed",
@@ -1818,14 +1845,45 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         "-u".to_string(),
         managed.raw_rx_port.to_string(),
     ];
+    let secondary_rx_args =
+        secondary_rx
+            .as_ref()
+            .map(|(radio_port, _aggregator, aggregator_port, raw_rx_port)| {
+                vec![
+                    "-a".to_string(),
+                    aggregator_port.to_string(),
+                    "-K".to_string(),
+                    managed.key_path.display().to_string(),
+                    "-i".to_string(),
+                    managed.link_id.to_string(),
+                    "-p".to_string(),
+                    radio_port.to_string(),
+                    "-c".to_string(),
+                    Ipv4Addr::LOCALHOST.to_string(),
+                    "-u".to_string(),
+                    raw_rx_port.to_string(),
+                ]
+            });
 
     let mut tx_child =
         android_spawn_managed_child("wfb_tx", &tx_helper, &tx_args, &managed.working_dir)?;
     let mut rx_child =
         android_spawn_managed_child("wfb_rx", &rx_helper, &rx_args, &managed.working_dir)?;
+    let mut secondary_rx_child = match &secondary_rx_args {
+        Some(args) => Some(android_spawn_managed_child(
+            "wfb_rx_secondary",
+            &rx_helper,
+            args,
+            &managed.working_dir,
+        )?),
+        None => None,
+    };
     thread::sleep(ANDROID_MANAGED_HELPER_STARTUP_DELAY);
     tx_child.ensure_running()?;
     rx_child.ensure_running()?;
+    if let Some(child) = secondary_rx_child.as_mut() {
+        child.ensure_running()?;
+    }
 
     let raw_rx_socket = if managed.validation_traffic_enabled {
         let socket = UdpSocket::bind(raw_rx_addr).map_err(|error| {
@@ -1888,6 +1946,16 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         bulk_out_endpoint: args.bulk_out_endpoint,
         bulk_out_endpoint_count: args.bulk_out_endpoint_count,
     };
+    let rx_forwards = secondary_rx
+        .as_ref()
+        .map(|(radio_port, aggregator, _aggregator_port, _raw_rx_port)| {
+            vec![ProductionRuntimeRxForwardConfig {
+                link_id: Some(managed.link_id),
+                radio_port: *radio_port,
+                aggregator: Some(*aggregator),
+            }]
+        })
+        .unwrap_or_default();
     let config = ProductionRuntimeFlowConfig {
         usb: ProductionRuntimeUsbConfig::android_usbhost(selector, usb_config),
         channel,
@@ -1915,7 +1983,7 @@ fn run_android_usbhost_managed_streams_jni<'local>(
             radio_port: Some(managed.downlink_radio_port),
             aggregator: Some(rx_aggregator),
         },
-        rx_forwards: Vec::<ProductionRuntimeRxForwardConfig>::new(),
+        rx_forwards,
         rx_wlan_idx: 0,
         rx_mcs_index: 0,
     };
@@ -1942,6 +2010,9 @@ fn run_android_usbhost_managed_streams_jni<'local>(
     };
     let tx_helper_status = tx_child.status_label();
     let rx_helper_status = rx_child.status_label();
+    let secondary_rx_helper_status = secondary_rx_child
+        .as_mut()
+        .map(AndroidManagedChildGuard::status_label);
     let runtime_report_json = serde_json::to_string(&report).unwrap_or_else(|error| {
         serde_json::json!({
             "serialize_error": error.to_string()
@@ -1979,6 +2050,7 @@ fn run_android_usbhost_managed_streams_jni<'local>(
         runtime_error_message,
         tx_helper_status,
         rx_helper_status,
+        secondary_rx_helper_status,
         runtime_report_json,
     })
 }
@@ -2398,6 +2470,9 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
     raw_tx_port: i32,
     rx_aggregator_port: i32,
     raw_rx_port: i32,
+    secondary_downlink_radio_port: i32,
+    secondary_rx_aggregator_port: i32,
+    secondary_raw_rx_port: i32,
     raw_payload_bytes: i32,
     raw_payload_interval_ms: i32,
     validation_traffic_enabled: jboolean,
@@ -2457,6 +2532,18 @@ pub unsafe extern "system" fn Java_com_arcedge_wfblink_sdk_WfbLinkNative_runMana
                 raw_tx_port: u16_from_jni("raw_tx_port", raw_tx_port)?,
                 rx_aggregator_port: u16_from_jni("rx_aggregator_port", rx_aggregator_port)?,
                 raw_rx_port: u16_from_jni("raw_rx_port", raw_rx_port)?,
+                secondary_downlink_radio_port: optional_u8_from_jni(
+                    "secondary_downlink_radio_port",
+                    secondary_downlink_radio_port,
+                )?,
+                secondary_rx_aggregator_port: optional_u16_from_jni(
+                    "secondary_rx_aggregator_port",
+                    secondary_rx_aggregator_port,
+                )?,
+                secondary_raw_rx_port: optional_u16_from_jni(
+                    "secondary_raw_rx_port",
+                    secondary_raw_rx_port,
+                )?,
                 raw_payload_bytes: usize_from_jni("raw_payload_bytes", raw_payload_bytes)?,
                 raw_payload_interval: Duration::from_millis(u64_from_jni(
                     "raw_payload_interval_ms",
@@ -2600,6 +2687,24 @@ fn u8_from_jni(name: &'static str, value: i32) -> Result<u8, AndroidSmokeError> 
 #[cfg(any(test, target_os = "android"))]
 fn u16_from_jni(name: &'static str, value: i32) -> Result<u16, AndroidSmokeError> {
     u16::try_from(value).map_err(|_| AndroidSmokeError::InvalidArgument(name))
+}
+
+#[cfg(target_os = "android")]
+fn optional_u8_from_jni(name: &'static str, value: i32) -> Result<Option<u8>, AndroidSmokeError> {
+    if value < 0 {
+        Ok(None)
+    } else {
+        u8_from_jni(name, value).map(Some)
+    }
+}
+
+#[cfg(target_os = "android")]
+fn optional_u16_from_jni(name: &'static str, value: i32) -> Result<Option<u16>, AndroidSmokeError> {
+    if value < 0 {
+        Ok(None)
+    } else {
+        u16_from_jni(name, value).map(Some)
+    }
 }
 
 #[cfg(target_os = "android")]

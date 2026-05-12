@@ -44,6 +44,9 @@ public final class WfbLinkManager {
                         config.rawTxPort,
                         config.rxAggregatorPort,
                         config.rawRxPort,
+                        config.secondaryDownlinkRadioPort,
+                        config.secondaryRxAggregatorPort,
+                        config.secondaryRawRxPort,
                         config.rawPayloadBytes,
                         config.txPayloadIntervalMs,
                         config.validationTrafficEnabled,
@@ -107,6 +110,11 @@ public final class WfbLinkManager {
         requireUdpPort("raw_tx_port", config.rawTxPort);
         requireUdpPort("rx_aggregator_port", config.rxAggregatorPort);
         requireUdpPort("raw_rx_port", config.rawRxPort);
+        if (config.secondaryDownlinkRadioPort >= 0 || config.secondaryRawRxPort >= 0) {
+            requireRadioPort("secondary_downlink_radio_port", config.secondaryDownlinkRadioPort);
+            requireUdpPort("secondary_rx_aggregator_port", config.secondaryRxAggregatorPort);
+            requireUdpPort("secondary_raw_rx_port", config.secondaryRawRxPort);
+        }
         requireDistinctUdpPorts(config);
         requirePositive("raw_payload_bytes", config.rawPayloadBytes);
         requirePositive("tx_payload_interval_ms", config.txPayloadIntervalMs);
@@ -169,6 +177,11 @@ public final class WfbLinkManager {
         requireDistinctUdpPort(ports, "raw_tx_port", config.rawTxPort);
         requireDistinctUdpPort(ports, "rx_aggregator_port", config.rxAggregatorPort);
         requireDistinctUdpPort(ports, "raw_rx_port", config.rawRxPort);
+        if (config.secondaryDownlinkRadioPort >= 0 || config.secondaryRawRxPort >= 0) {
+            requireDistinctUdpPort(
+                    ports, "secondary_rx_aggregator_port", config.secondaryRxAggregatorPort);
+            requireDistinctUdpPort(ports, "secondary_raw_rx_port", config.secondaryRawRxPort);
+        }
     }
 
     private static void requireDistinctUdpPort(Set<Integer> ports, String field, int value)
@@ -189,6 +202,7 @@ public final class WfbLinkManager {
         Set<Integer> localUdpPorts = new HashSet<Integer>();
         WfbManagedStream tx = null;
         WfbManagedStream rx = null;
+        WfbManagedStream secondaryRx = null;
         for (WfbManagedStream stream : config.streams) {
             if (stream == null) {
                 throw new WfbLinkException(
@@ -231,20 +245,23 @@ public final class WfbLinkManager {
                 }
                 tx = stream;
             } else if (stream.direction == WfbStreamDirection.RX) {
-                if (rx != null) {
+                if (rx == null) {
+                    rx = stream;
+                } else if (secondaryRx == null) {
+                    secondaryRx = stream;
+                } else {
                     throw new WfbLinkException(
                             "android_sdk_unsupported_stream_shape",
-                            "Android managed streams currently support exactly one RX stream");
+                            "Android managed streams currently support at most two RX streams");
                 }
-                rx = stream;
             }
         }
         if (tx == null || rx == null) {
             throw new WfbLinkException(
                     "android_sdk_unsupported_stream_shape",
-                    "Android managed streams currently require one TX and one RX stream");
+                    "Android managed streams currently require one TX and at least one RX stream");
         }
-        if (tx.linkId != rx.linkId) {
+        if (tx.linkId != rx.linkId || (secondaryRx != null && tx.linkId != secondaryRx.linkId)) {
             throw new WfbLinkException(
                     "android_sdk_unsupported_stream_shape",
                     "Android managed streams currently require one shared link ID");

@@ -30,6 +30,9 @@ public final class WfbManagedStreamsConfig {
     public final int rawTxPort;
     public final int rxAggregatorPort;
     public final int rawRxPort;
+    public final int secondaryDownlinkRadioPort;
+    public final int secondaryRxAggregatorPort;
+    public final int secondaryRawRxPort;
     public final int rawPayloadBytes;
     public final int txPayloadIntervalMs;
     public final boolean validationTrafficEnabled;
@@ -60,6 +63,9 @@ public final class WfbManagedStreamsConfig {
         this.rawTxPort = builder.rawTxPort;
         this.rxAggregatorPort = builder.rxAggregatorPort;
         this.rawRxPort = builder.rawRxPort;
+        this.secondaryDownlinkRadioPort = builder.secondaryDownlinkRadioPort;
+        this.secondaryRxAggregatorPort = builder.secondaryRxAggregatorPort;
+        this.secondaryRawRxPort = builder.secondaryRawRxPort;
         this.rawPayloadBytes = builder.rawPayloadBytes;
         this.txPayloadIntervalMs = builder.txPayloadIntervalMs;
         this.validationTrafficEnabled = builder.validationTrafficEnabled;
@@ -95,6 +101,9 @@ public final class WfbManagedStreamsConfig {
         private int rawTxPort = 15606;
         private int rxAggregatorPort = 15804;
         private int rawRxPort = 15904;
+        private int secondaryDownlinkRadioPort = -1;
+        private int secondaryRxAggregatorPort = 15805;
+        private int secondaryRawRxPort = -1;
         private int rawPayloadBytes = 512;
         private int txPayloadIntervalMs = 20;
         private boolean validationTrafficEnabled = false;
@@ -178,6 +187,13 @@ public final class WfbManagedStreamsConfig {
             return this;
         }
 
+        public Builder secondaryRx(int radioPort, int rxAggregator, int rawRx) {
+            this.secondaryDownlinkRadioPort = radioPort;
+            this.secondaryRxAggregatorPort = rxAggregator;
+            this.secondaryRawRxPort = rawRx;
+            return this;
+        }
+
         public Builder rawPayloadBytes(int value) {
             this.rawPayloadBytes = value;
             return this;
@@ -222,13 +238,14 @@ public final class WfbManagedStreamsConfig {
         }
 
         private void applySupportedNamedStreamMapping() {
-            if (streams.isEmpty() || streams.size() != 2) {
+            if (streams.isEmpty() || (streams.size() != 2 && streams.size() != 3)) {
                 return;
             }
             Set<String> names = new HashSet<String>();
             Set<Integer> localPorts = new HashSet<Integer>();
             WfbManagedStream tx = null;
             WfbManagedStream rx = null;
+            WfbManagedStream secondaryRx = null;
             for (WfbManagedStream stream : streams) {
                 if (stream == null
                         || stream.name == null
@@ -244,13 +261,19 @@ public final class WfbManagedStreamsConfig {
                     }
                     tx = stream;
                 } else if (stream.direction == WfbStreamDirection.RX) {
-                    if (rx != null) {
+                    if (rx == null) {
+                        rx = stream;
+                    } else if (secondaryRx == null) {
+                        secondaryRx = stream;
+                    } else {
                         return;
                     }
-                    rx = stream;
                 }
             }
-            if (tx == null || rx == null || tx.linkId != rx.linkId) {
+            if (tx == null
+                    || rx == null
+                    || tx.linkId != rx.linkId
+                    || (secondaryRx != null && tx.linkId != secondaryRx.linkId)) {
                 return;
             }
 
@@ -259,6 +282,10 @@ public final class WfbManagedStreamsConfig {
             this.downlinkRadioPort = rx.radioPort;
             this.rawTxPort = tx.localUdpPort;
             this.rawRxPort = rx.localUdpPort;
+            if (secondaryRx != null) {
+                this.secondaryDownlinkRadioPort = secondaryRx.radioPort;
+                this.secondaryRawRxPort = secondaryRx.localUdpPort;
+            }
             if (tx.txProfile != null) {
                 txProfile(tx.txProfile);
             }
