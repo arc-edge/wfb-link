@@ -99,6 +99,7 @@ public final class WfbLinkManager {
         if (config.payloadCount < 0) {
             throw new WfbLinkException("android_sdk_invalid_payload_count", "payload_count < 0");
         }
+        requireLinkId("link_id", config.linkId);
         requireRadioPort("uplink_radio_port", config.uplinkRadioPort);
         requireRadioPort("downlink_radio_port", config.downlinkRadioPort);
         requireUdpPort("runtime_bind_port", config.runtimeBindPort);
@@ -139,10 +140,17 @@ public final class WfbLinkManager {
         }
     }
 
-    private static void requireRadioPort(String field, int value) throws WfbLinkException {
-        if (value <= 0 || value > 255) {
+    private static void requireLinkId(String field, int value) throws WfbLinkException {
+        if (value < 0 || value > 0x00ffffff) {
             throw new WfbLinkException(
-                    "android_sdk_invalid_" + field, field + " must be in 1..255");
+                    "android_sdk_invalid_" + field, field + " must be in 0..16777215");
+        }
+    }
+
+    private static void requireRadioPort(String field, int value) throws WfbLinkException {
+        if (value < 0 || value > 255) {
+            throw new WfbLinkException(
+                    "android_sdk_invalid_" + field, field + " must be in 0..255");
         }
     }
 
@@ -209,7 +217,7 @@ public final class WfbLinkManager {
             }
             requireRadioPort("stream_radio_port", stream.radioPort);
             requireUdpPort("stream_local_udp_port", stream.localUdpPort);
-            requirePositive("stream_link_id", stream.linkId);
+            requireLinkId("stream_link_id", stream.linkId);
             if (!localUdpPorts.add(Integer.valueOf(stream.localUdpPort))) {
                 throw new WfbLinkException(
                         "android_sdk_duplicate_stream_udp_port",

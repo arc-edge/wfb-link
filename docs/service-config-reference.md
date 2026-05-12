@@ -123,9 +123,9 @@ Fields:
 | --- | --- | --- |
 | `name` | yes | Operator label surfaced in `LinkEndpoints`, `LinkHealth`, and `LinkReport`. Must be unique. |
 | `direction` | yes | `"rx"` or `"tx"`. |
-| `radio_port` | yes | WFB radio port used for RX filtering and health attribution. |
+| `radio_port` | yes | WFB radio port used for RX filtering and health attribution. Valid range is `0..255`; `0` is a real WFB port value. |
 | `local_udp` | yes | Local UDP socket. TX streams bind this address. RX streams forward matching WFB payloads to this address. |
-| `link_id` | no | WFB link ID for this stream. Defaults to `[wfb].link_id` when present. |
+| `link_id` | no | WFB link ID for this stream. Valid range is `0..0x00ff_ffff`; `0` is a real WFB link ID value. Defaults to `[wfb].link_id` when present. |
 | `payload_kind` | no | `"raw_application_datagram"` or `"wfb_distributor_datagram"`. Service `[[streams]]` default to `"wfb_distributor_datagram"` because `UserspaceRadioBackend` is the direct-radio stream backend. Use `"raw_application_datagram"` only with a managed backend/helper layer that supervises WFB codec processes. |
 | `criticality` | no | `"required"` or `"best_effort"`. Defaults to `"required"`. |
 

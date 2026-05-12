@@ -135,6 +135,11 @@ owns raw UDP:
 - Send control/uplink payload bytes to `127.0.0.1:15606`.
 - Bind/read video/downlink payload bytes from `127.0.0.1:15904`.
 
+`linkId(0)` and radio port `0` are valid WFB tuple values. They are distinct
+from leaving a field unset, and are required by some dev-bridge and tunnel
+profiles. Local application UDP ports are still normal socket ports and must be
+in `1..65535`.
+
 ## Status And Health
 
 Use these product-facing helpers:

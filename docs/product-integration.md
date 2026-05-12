@@ -352,6 +352,8 @@ configuration, not inside `wfb-link`. The `stream` field is WFB metadata:
 `link_id` plus `radio_port`. For distributor datagram TX sockets, the actual
 radio port is still encoded by the WFB datagram itself; `stream` is used for
 health/report attribution.
+`link_id=0` and `radio_port=0` are valid WFB tuple values and must not be
+treated as missing by product integrations.
 
 ## Health And Reports
 

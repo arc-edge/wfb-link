@@ -199,6 +199,9 @@ maps the supported shape onto the proven native runtime ports:
 Startup rejects duplicate stream names, duplicate local UDP ports, unsupported
 payload kinds, multiple TX/RX streams, missing TX/RX streams, and mismatched
 link IDs with typed `WfbLinkException` codes before live USB execution.
+WFB link IDs use the 24-bit range `0..0x00ff_ffff`, and WFB radio ports use
+the byte range `0..255`; zero is valid for both. Local UDP socket ports remain
+`1..65535`.
 `WFB_DISTRIBUTOR_DATAGRAM` payloads and N-stream Android multiplexing are
 reserved for a later native-runtime expansion.
 

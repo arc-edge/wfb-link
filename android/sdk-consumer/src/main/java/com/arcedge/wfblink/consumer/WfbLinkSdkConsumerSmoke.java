@@ -33,6 +33,26 @@ public final class WfbLinkSdkConsumerSmoke {
                 .build();
     }
 
+    public static WfbManagedStreamsConfig createDevBridgeConfig(Context context, WfbUsbHandoff usb) {
+        return WfbManagedStreamsConfig.builder(context, usb)
+                .keyPath(context.getFilesDir().getAbsolutePath() + "/gs.key")
+                .initAssets(
+                        context.getFilesDir().getAbsolutePath() + "/rtl8812aefw.bin",
+                        context.getFilesDir().getAbsolutePath() + "/halhwimg8812a_mac.c",
+                        context.getFilesDir().getAbsolutePath() + "/halhwimg8812a_bb.c",
+                        context.getFilesDir().getAbsolutePath() + "/halhwimg8812a_rf.c")
+                .channelNumber(161)
+                .durationMs(15000)
+                .payloadCount(20)
+                .addStream(
+                        WfbManagedStream.tx("control-up", 0, 15606)
+                                .linkId(0)
+                                .txProfile(WfbManagedTxProfile.of(20, 0, 2, 4))
+                                .build())
+                .addStream(WfbManagedStream.rx("video-down", 0, 15904).linkId(0).build())
+                .build();
+    }
+
     public static WfbLinkManager createManager() {
         return new WfbLinkManager();
     }
