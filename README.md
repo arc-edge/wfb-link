@@ -325,6 +325,7 @@ and best-effort helper degradation semantics.
 - [Runtime boundary](docs/runtime-boundary.md)
 - [Tunnel recovery and loaded profile](docs/wfb-ng-tunnel-recovery.md)
 - [RF quality and range work](docs/rf-quality-and-range.md)
+- [Long-range tailnet field test](docs/long-range-tailnet-field-test.md)
 - [Development and bring-up notes](docs/development/README.md)
 
 ## Development

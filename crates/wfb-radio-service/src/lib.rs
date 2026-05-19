@@ -2196,6 +2196,46 @@ profile = "does_not_exist"
     }
 
     #[test]
+    fn service_checked_in_long_range_field_config_is_valid() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("configs/radio-run-long-range-field.toml");
+        let cli = ServiceCli::try_parse_from([
+            "wfb-radio-service",
+            "--config",
+            config_path.to_string_lossy().as_ref(),
+        ])
+        .expect("parse checked-in long-range field config");
+
+        let resolved = resolve_service_run(&cli).expect("resolve checked-in config");
+        let config = service_runtime_config_from_resolved(&resolved)
+            .expect("runtime config from checked-in config");
+
+        assert_eq!(resolved.channel, 165);
+        assert_eq!(resolved.bandwidth, Bandwidth::Mhz20);
+        assert_eq!(
+            resolved.airtime_schedule.mode,
+            ProductionRuntimeAirtimeMode::Tdd
+        );
+        assert_eq!(resolved.airtime_schedule.tdd_rx_window_ms, 1000);
+        assert_eq!(resolved.airtime_schedule.tdd_tx_window_ms, 1000);
+        assert_eq!(resolved.airtime_schedule.tdd_guard_ms, 100);
+        assert_eq!(resolved.rx_mcs_index, 0);
+        assert_eq!(resolved.wfb_link_id, Some(0));
+        assert_eq!(resolved.wfb_radio_port, Some(3));
+        assert_eq!(
+            resolved.tx_power.mode,
+            Some(ServiceTxPowerControlMode::ManualIndex)
+        );
+        assert_eq!(resolved.tx_power.index, Some(0x20));
+        assert_eq!(resolved.tx_power.path, ServiceTxPowerPath::Both);
+        assert!(resolved.tx_authorized);
+        config
+            .validate()
+            .expect("valid checked-in long-range field config");
+    }
+
+    #[test]
     fn service_checked_in_multistream_config_is_valid() {
         let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")

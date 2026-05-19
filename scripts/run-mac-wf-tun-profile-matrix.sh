@@ -125,6 +125,9 @@ MCS=${MCS:-1}
 FEC_K=${FEC_K:-2}
 FEC_N=${FEC_N:-4}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
+TX_POWER_MODE=${TX_POWER_MODE:-current-default}
+TX_POWER_INDEX=${TX_POWER_INDEX:-}
+TX_POWER_PATH=${TX_POWER_PATH:-both}
 if (( LOADED_PROFILE_DEFAULTS == 1 )); then
   TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-700}
   DATA_LOAD_MODE=${DATA_LOAD_MODE:-duplex}
@@ -297,8 +300,8 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
 
     log "profile=$name repeat=$repeat probe=$probe_kind rx=${rx_ms}ms tx=${tx_ms}ms guard=${guard_ms}ms"
     if (( DRY_RUN == 1 )); then
-      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q DATA_LOAD_MODE=%q DATA_LOAD_PRE_PROBE_SECONDS=%q TX_MIN_INTERVAL_US=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
-        "$run_dir" "$WFB_KEY" "$PEER_IP" "$DATA_LOAD_MODE" "$DATA_LOAD_PRE_PROBE_SECONDS" "$TX_MIN_INTERVAL_US" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
+      printf 'OUT_DIR=%q WFB_KEY=%q PEER_IP=%q DATA_LOAD_MODE=%q DATA_LOAD_PRE_PROBE_SECONDS=%q TX_MIN_INTERVAL_US=%q TX_POWER_MODE=%q TX_POWER_INDEX=%q TX_POWER_PATH=%q AIRTIME_TDD_RX_WINDOW_MS=%q AIRTIME_TDD_TX_WINDOW_MS=%q AIRTIME_TDD_GUARD_MS=%q TUN_SETTLE_SECONDS=%q TUN_PROBE_COMMAND=%q %q\n' \
+        "$run_dir" "$WFB_KEY" "$PEER_IP" "$DATA_LOAD_MODE" "$DATA_LOAD_PRE_PROBE_SECONDS" "$TX_MIN_INTERVAL_US" "$TX_POWER_MODE" "$TX_POWER_INDEX" "$TX_POWER_PATH" "$rx_ms" "$tx_ms" "$guard_ms" "$settle_seconds" "$probe_command" "$RECOVERY_SCRIPT"
       status=0
     else
       if OUT_DIR="$run_dir" \
@@ -312,6 +315,9 @@ while IFS='|' read -r name description rx_ms tx_ms guard_ms probe_kind settle_se
         FEC_N="$FEC_N" \
         TX_CALIBRATION_PROFILE="$TX_CALIBRATION_PROFILE" \
         TX_MIN_INTERVAL_US="$TX_MIN_INTERVAL_US" \
+        TX_POWER_MODE="$TX_POWER_MODE" \
+        TX_POWER_INDEX="$TX_POWER_INDEX" \
+        TX_POWER_PATH="$TX_POWER_PATH" \
         DATA_LOAD_MODE="$DATA_LOAD_MODE" \
         DATA_LOAD_EXPECTED_PAYLOADS="$DATA_LOAD_EXPECTED_PAYLOADS" \
         DATA_LOAD_MIN_M2L_UNIQUE="$DATA_LOAD_MIN_M2L_UNIQUE" \

@@ -17,6 +17,12 @@ The checked-in examples are:
 
 - `configs/radio-run-video-control-tdd.toml`: current short-range video/control
   TDD profile using the legacy single-stream `[wfb]` shape.
+- `configs/radio-run-long-range-field.toml`: conservative first-contact field
+  profile for tailnet-orchestrated packet/authentication checks before raising
+  video bitrate or MCS. It currently encodes the 2026-05-18 channel 165,
+  MCS0, FEC 2/8, manual TX index `0x20` field gate: it passed around 300 m
+  after geometry adjustment and failed around 350 m, so it is not a 1 km/3 km
+  production profile.
 - `configs/radio-run-multi-stream-example.toml`: named multi-stream profile for
   products that own WFB-NG distributor datagrams.
 

@@ -1,0 +1,65 @@
+# Conservative field-tested profile for outdoor/tailnet WFB checks.
+#
+# This is not an accepted 1 km / 3 km profile. On 2026-05-18 it passed packet
+# recovery at roughly 300 m after antenna/geometry adjustment, then failed at
+# roughly 350 m with the same geometry. Treat it as a conservative field gate:
+# channel 165 avoids the drone Wi-Fi channel 157/80 MHz overlap seen with
+# channel 161, while MCS0, paced TX, and one-second TDD windows keep
+# packet/authentication evidence easy to inspect before turning up video
+# bitrate or higher MCS settings.
+
+[adapter]
+vid = 3034
+pid = 34834
+
+[macos_usbhost]
+enabled = true
+configuration_value = 1
+interface_number = 0
+bulk_in_endpoint = 129
+bulk_out_endpoint = 2
+bulk_out_endpoint_count = 3
+poll_attempts = 25
+poll_delay_ms = 100
+
+[radio]
+channel = 165
+bandwidth_mhz = 20
+firmware = "/tmp/rtl8812aefw.bin"
+duration_ms = 0
+rx_timeout_ms = 20
+tx_burst_limit = 8
+tx_min_interval_us = 700
+max_datagrams = 0
+
+[airtime]
+mode = "tdd"
+tdd_first_window = "rx"
+tdd_rx_window_ms = 1000
+tdd_tx_window_ms = 1000
+tdd_guard_ms = 100
+tdd_start_delay_ms = 0
+
+[wfb]
+bind = "127.0.0.1:5611"
+link_id = 0
+radio_port = 3
+rx_aggregator = "127.0.0.1:5801"
+rx_wlan_idx = 0
+rx_mcs_index = 0
+
+[calibration]
+profile = "current_default"
+
+[tx_power]
+mode = "manual_index"
+index = 0x20
+path = "both"
+
+[heartbeat]
+enabled = true
+half_period_ms = 500
+
+[artifacts]
+ready_file = "/tmp/wfb-radio-run-long-range-ready.json"
+health_file = "/tmp/wfb-radio-run-long-range-health.json"

@@ -39,6 +39,7 @@ Configuration is via environment variables. Common overrides:
   MAX_M2L_DECRYPT_FAILURES=0 MAX_L2M_DECRYPT_FAILURES=0
   DECRYPT_FAILURE_GATE=post-session
   TX_POWER_MODE=current-default
+  TX_POWER_INDEX=0x20 TX_POWER_PATH=both
   TX_CALIBRATION_PROFILE=rtl8812a-runtime-iqk
   REQUIRE_CALIBRATION_SUCCESS=auto
   AUTO_EFUSE_DUMP=1
@@ -158,6 +159,8 @@ FIRMWARE=${FIRMWARE:-/tmp/rtl8812aefw.bin}
 EFUSE_REPORT=${EFUSE_REPORT:-/tmp/wfb-remote-macos-efuse-dump.json}
 AUTO_EFUSE_DUMP=${AUTO_EFUSE_DUMP:-1}
 TX_POWER_MODE=${TX_POWER_MODE:-current-default}
+TX_POWER_INDEX=${TX_POWER_INDEX:-}
+TX_POWER_PATH=${TX_POWER_PATH:-both}
 TX_POWER_SAFETY_PROFILE=${TX_POWER_SAFETY_PROFILE:-linux-ch36-ht20}
 TX_CALIBRATION_PROFILE=${TX_CALIBRATION_PROFILE:-current-default}
 RADIO_RUN_CONFIG=${RADIO_RUN_CONFIG:-configs/radio-run-robust-short-range.toml}
@@ -434,12 +437,24 @@ start_radio() {
   local write_auth_arg=()
   if [[ "$TX_POWER_MODE" != "current-default" ]]; then
     tx_power_args+=(--tx-power-mode "$TX_POWER_MODE")
-    if [[ "$TX_POWER_MODE" == "efuse-derived" ]]; then
-      tx_power_args+=(
-        --tx-power-efuse-report "$EFUSE_REPORT"
-        --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE"
-      )
-    fi
+    case "$TX_POWER_MODE" in
+      manual-index)
+        [[ -n "$TX_POWER_INDEX" ]] || die "TX_POWER_MODE=manual-index requires TX_POWER_INDEX"
+        tx_power_args+=(
+          --tx-power-index "$TX_POWER_INDEX"
+          --tx-power-path "$TX_POWER_PATH"
+        )
+        ;;
+      efuse-derived)
+        tx_power_args+=(
+          --tx-power-efuse-report "$EFUSE_REPORT"
+          --tx-power-safety-profile "$TX_POWER_SAFETY_PROFILE"
+        )
+        ;;
+      *)
+        die "invalid TX_POWER_MODE=$TX_POWER_MODE (expected current-default, manual-index, or efuse-derived)"
+        ;;
+    esac
   fi
   case "$TX_CALIBRATION_PROFILE" in
     linux-parity-ch36-ht20|rtl8812a-lck|rtl8812a-runtime-iqk)
@@ -574,6 +589,8 @@ summary = {
     "radio_exit_status": int(radio_exit_status) if radio_exit_status is not None else None,
     "radio_command": os.environ.get("RADIO_COMMAND"),
     "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_index": os.environ.get("TX_POWER_INDEX"),
+    "tx_power_path": os.environ.get("TX_POWER_PATH"),
     "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
     "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
     "radio_result": report.get("result"),
@@ -1431,6 +1448,8 @@ summary = {
     "radio_result": report.get("result"),
     "radio_command": os.environ.get("RADIO_COMMAND"),
     "tx_power_mode": os.environ.get("TX_POWER_MODE"),
+    "tx_power_index": os.environ.get("TX_POWER_INDEX"),
+    "tx_power_path": os.environ.get("TX_POWER_PATH"),
     "tx_power_safety_profile": os.environ.get("TX_POWER_SAFETY_PROFILE"),
     "tx_calibration_profile": os.environ.get("TX_CALIBRATION_PROFILE"),
     "service_health": health,

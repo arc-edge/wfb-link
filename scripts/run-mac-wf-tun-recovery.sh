@@ -33,6 +33,9 @@ AIRTIME_TDD_TX_WINDOW_MS=${AIRTIME_TDD_TX_WINDOW_MS:-20000}
 AIRTIME_TDD_GUARD_MS=${AIRTIME_TDD_GUARD_MS:-500}
 AIRTIME_TDD_START_DELAY_MS=${AIRTIME_TDD_START_DELAY_MS:-0}
 TX_MIN_INTERVAL_US=${TX_MIN_INTERVAL_US:-0}
+TX_POWER_MODE=${TX_POWER_MODE:-current-default}
+TX_POWER_INDEX=${TX_POWER_INDEX:-}
+TX_POWER_PATH=${TX_POWER_PATH:-both}
 
 # Arc tunnel direction: RX stream 3 from drone, TX stream 4 to drone.
 TUN_RX_RADIO_PORT=${TUN_RX_RADIO_PORT:-3}
@@ -186,6 +189,9 @@ summary = {
         "airtime_tdd_guard_ms": getenv_int("AIRTIME_TDD_GUARD_MS"),
         "airtime_tdd_start_delay_ms": getenv_int("AIRTIME_TDD_START_DELAY_MS"),
         "tx_min_interval_us": getenv_int("TX_MIN_INTERVAL_US"),
+        "tx_power_mode": os.environ["TX_POWER_MODE"],
+        "tx_power_index": os.environ.get("TX_POWER_INDEX") or None,
+        "tx_power_path": os.environ["TX_POWER_PATH"],
         "local_ip": os.environ["LOCAL_IP"],
         "peer_ip": os.environ["PEER_IP"],
         "tun_mtu": getenv_int("TUN_MTU"),
@@ -288,6 +294,30 @@ REMOTE_CLEANUP
 trap cleanup EXIT INT TERM
 
 echo "Starting radio service..." >&2
+tx_power_args=()
+if [[ "$TX_POWER_MODE" != "current-default" ]]; then
+  tx_power_args+=(--tx-power-mode "$TX_POWER_MODE")
+  case "$TX_POWER_MODE" in
+    manual-index)
+      [[ -n "$TX_POWER_INDEX" ]] || {
+        echo "TX_POWER_MODE=manual-index requires TX_POWER_INDEX" >&2
+        exit 1
+      }
+      tx_power_args+=(
+        --tx-power-index "$TX_POWER_INDEX"
+        --tx-power-path "$TX_POWER_PATH"
+      )
+      ;;
+    efuse-derived)
+      echo "TX_POWER_MODE=efuse-derived is not wired for wf-tun recovery; use the radio-run duplex runner for EFUSE tests." >&2
+      exit 1
+      ;;
+    *)
+      echo "Invalid TX_POWER_MODE=$TX_POWER_MODE (expected current-default, manual-index, or efuse-derived)." >&2
+      exit 1
+      ;;
+  esac
+fi
 service_cmd=(
   "$RADIO_SERVICE_BIN"
   --config "$RADIO_CONFIG"
@@ -307,6 +337,7 @@ service_cmd=(
   --wfb-radio-port "$TUN_RX_RADIO_PORT_DEC"
   --rx-aggregator "127.0.0.1:$AGG_PORT"
   --tx-calibration-profile "$TX_CALIBRATION_PROFILE"
+  "${tx_power_args[@]}"
   --ready-file "$OUT_DIR/radio-ready.json"
   --health-file "$OUT_DIR/radio-health.json"
   --report "$OUT_DIR/radio-service-report.json"
