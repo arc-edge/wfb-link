@@ -29,7 +29,7 @@ use radio_core::{
     Rtl8812auTxSubmitError, RxFrame, RxParseOutcome, TxOptions, TxRate, TxSubmitCounters,
     UsbBulkTransfer, UsbDeviceInfo, UsbEndpoints, UsbError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wfb_bridge::{
     build_rx_forward_datagram, parse_tx_datagram, RadiotapError, RxCounters, RxForwardConfig,
     TxCounters, TxDatagramError, WfbChannelId,
@@ -56,6 +56,8 @@ pub use tx_power::{
 
 pub const PRODUCTION_TX_SOCKET_RCVBUF_BYTES: usize = 4 * 1024 * 1024;
 pub const PRODUCTION_TX_RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
+pub const RUNTIME_RX_SIGNAL_STALE_AFTER_MS: u64 = 3_000;
+pub const PRODUCTION_RUNTIME_HEALTH_SNAPSHOT_INTERVAL_MS: u64 = 1_000;
 const WFB_OBSERVED_HEADER_LEN: usize = 24;
 const WFB_OBSERVED_MAC_PREFIX: [u8; 2] = [0x57, 0x42];
 const WFB_OBSERVED_SRC_MAC_PREFIX_OFFSET: usize = 10;
@@ -632,6 +634,15 @@ pub struct RuntimeFlowRxTelemetry {
     pub last_rx_unix_ms: Option<u64>,
 }
 
+impl RuntimeFlowRxTelemetry {
+    pub fn refresh_signal_state(&mut self, now_unix_ms: u64) {
+        self.signal.refresh_state(now_unix_ms);
+        for forward in &mut self.rx_forwards {
+            forward.signal.refresh_state(now_unix_ms);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeWfbChannelObservation {
@@ -730,10 +741,12 @@ fn merge_runtime_wfb_channel_observations(
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeRxSignalMetric {
     pub sample_count: u64,
+    #[serde(default)]
+    pub last: Option<i8>,
     pub min: Option<i8>,
     pub max: Option<i8>,
     pub average: Option<i64>,
@@ -745,6 +758,7 @@ impl RuntimeRxSignalMetric {
     pub fn observe(&mut self, value: i8) {
         self.sample_count = self.sample_count.saturating_add(1);
         self.sum = self.sum.saturating_add(i64::from(value));
+        self.last = Some(value);
         self.min = Some(self.min.map_or(value, |current| current.min(value)));
         self.max = Some(self.max.map_or(value, |current| current.max(value)));
         self.average = Some(rounded_average_i64(self.sum, self.sample_count));
@@ -756,6 +770,9 @@ impl RuntimeRxSignalMetric {
         }
         self.sample_count = self.sample_count.saturating_add(other.sample_count);
         self.sum = self.sum.saturating_add(other.sum);
+        if let Some(last) = other.last {
+            self.last = Some(last);
+        }
         self.min = match (self.min, other.min) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (None, Some(right)) => Some(right),
@@ -770,31 +787,286 @@ impl RuntimeRxSignalMetric {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRxSignalState {
+    Unsupported,
+    Unknown,
+    Fresh,
+    Stale,
+    Disconnected,
+}
+
+impl Default for RuntimeRxSignalState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRxSignalQualityLabel {
+    Unknown,
+    Poor,
+    Weak,
+    Fair,
+    Good,
+    Excellent,
+}
+
+impl Default for RuntimeRxSignalQualityLabel {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRxSignalQualityBasis {
+    Unsupported,
+    NoValidSamples,
+    RssiDbmAverage,
+    RssiDbmLast,
+}
+
+impl Default for RuntimeRxSignalQualityBasis {
+    fn default() -> Self {
+        Self::NoValidSamples
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeRxSignalMetadata {
+    #[serde(default)]
+    pub rssi_source: Option<radio_core::RxRssiSource>,
+    #[serde(default)]
+    pub snr_source: Option<radio_core::RxSnrSource>,
+    #[serde(default)]
+    pub phy_status_frames: u64,
+    #[serde(default)]
+    pub rssi_valid_frames: u64,
+    #[serde(default)]
+    pub snr_frames: u64,
+    #[serde(default)]
+    pub noise_frames: u64,
+    #[serde(default)]
+    pub last_channel: Option<u8>,
+    #[serde(default)]
+    pub last_frequency_mhz: Option<u16>,
+    #[serde(default)]
+    pub last_band: Option<Band>,
+    #[serde(default)]
+    pub last_bandwidth_mhz: Option<u16>,
+    #[serde(default)]
+    pub last_mcs_index: Option<u8>,
+    #[serde(default)]
+    pub last_rx_rate: Option<TxRate>,
+}
+
+impl RuntimeRxSignalMetadata {
+    fn observe_frame(&mut self, frame: &RxFrame) {
+        if frame.phy_status {
+            self.phy_status_frames = self.phy_status_frames.saturating_add(1);
+        }
+        if frame.rssi_dbm_valid {
+            self.rssi_valid_frames = self.rssi_valid_frames.saturating_add(1);
+        }
+        if frame.snr_db.is_some() {
+            self.snr_frames = self.snr_frames.saturating_add(1);
+        }
+        if frame.noise_dbm.is_some() {
+            self.noise_frames = self.noise_frames.saturating_add(1);
+        }
+        self.rssi_source = Some(frame.rssi_dbm_source);
+        self.snr_source = frame.snr_db_source;
+        self.last_channel = Some(frame.channel.number);
+        self.last_frequency_mhz = Some(frame.channel.frequency_mhz);
+        self.last_band = Some(frame.channel.band);
+        self.last_bandwidth_mhz = frame.rx_bandwidth.map(Bandwidth::mhz);
+        self.last_rx_rate = frame.rx_rate;
+        self.last_mcs_index = match frame.rx_rate {
+            Some(TxRate::Mcs(mcs)) => Some(mcs),
+            Some(TxRate::Vht { mcs, .. }) => Some(mcs),
+            _ => None,
+        };
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.phy_status_frames = self
+            .phy_status_frames
+            .saturating_add(other.phy_status_frames);
+        self.rssi_valid_frames = self
+            .rssi_valid_frames
+            .saturating_add(other.rssi_valid_frames);
+        self.snr_frames = self.snr_frames.saturating_add(other.snr_frames);
+        self.noise_frames = self.noise_frames.saturating_add(other.noise_frames);
+        if other.rssi_source.is_some() {
+            self.rssi_source = other.rssi_source;
+        }
+        if other.snr_source.is_some() {
+            self.snr_source = other.snr_source;
+        }
+        if other.last_channel.is_some() {
+            self.last_channel = other.last_channel;
+            self.last_frequency_mhz = other.last_frequency_mhz;
+            self.last_band = other.last_band;
+            self.last_bandwidth_mhz = other.last_bandwidth_mhz;
+            self.last_mcs_index = other.last_mcs_index;
+            self.last_rx_rate = other.last_rx_rate;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RuntimeRxSignalSummary {
     pub rssi_dbm: RuntimeRxSignalMetric,
     pub snr_db: RuntimeRxSignalMetric,
     pub noise_dbm: RuntimeRxSignalMetric,
+    #[serde(default)]
+    pub state: RuntimeRxSignalState,
+    #[serde(default)]
+    pub quality_level: Option<u8>,
+    #[serde(default)]
+    pub quality_label: RuntimeRxSignalQualityLabel,
+    #[serde(default)]
+    pub quality_basis: RuntimeRxSignalQualityBasis,
+    #[serde(default)]
+    pub last_sample_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub stale_after_ms: u64,
+    #[serde(default)]
+    pub metadata: RuntimeRxSignalMetadata,
+}
+
+impl Default for RuntimeRxSignalSummary {
+    fn default() -> Self {
+        Self {
+            rssi_dbm: RuntimeRxSignalMetric::default(),
+            snr_db: RuntimeRxSignalMetric::default(),
+            noise_dbm: RuntimeRxSignalMetric::default(),
+            state: RuntimeRxSignalState::Unknown,
+            quality_level: None,
+            quality_label: RuntimeRxSignalQualityLabel::Unknown,
+            quality_basis: RuntimeRxSignalQualityBasis::NoValidSamples,
+            last_sample_unix_ms: None,
+            stale_after_ms: RUNTIME_RX_SIGNAL_STALE_AFTER_MS,
+            metadata: RuntimeRxSignalMetadata::default(),
+        }
+    }
 }
 
 impl RuntimeRxSignalSummary {
     pub fn observe_frame(&mut self, frame: &RxFrame) {
+        self.observe_frame_at(frame, runtime_unix_ms());
+    }
+
+    pub fn observe_frame_at(&mut self, frame: &RxFrame, unix_ms: u64) {
+        if self.stale_after_ms == 0 {
+            self.stale_after_ms = RUNTIME_RX_SIGNAL_STALE_AFTER_MS;
+        }
+        self.metadata.observe_frame(frame);
+        let mut observed_valid_metric = false;
         if frame.rssi_dbm_valid {
             self.rssi_dbm.observe(frame.rssi_dbm);
+            observed_valid_metric = true;
         }
         if let Some(snr_db) = frame.snr_db {
             self.snr_db.observe(snr_db);
+            observed_valid_metric = true;
         }
         if let Some(noise_dbm) = frame.noise_dbm {
             self.noise_dbm.observe(noise_dbm);
+            observed_valid_metric = true;
         }
+        if observed_valid_metric {
+            self.last_sample_unix_ms = Some(unix_ms);
+        }
+        self.refresh_state(unix_ms);
     }
 
     pub fn merge(&mut self, other: &Self) {
         self.rssi_dbm.merge(&other.rssi_dbm);
         self.snr_db.merge(&other.snr_db);
         self.noise_dbm.merge(&other.noise_dbm);
+        self.metadata.merge(&other.metadata);
+        if let Some(other_last) = other.last_sample_unix_ms {
+            if self
+                .last_sample_unix_ms
+                .map_or(true, |current| other_last >= current)
+            {
+                self.last_sample_unix_ms = Some(other_last);
+            }
+        }
+        if other.stale_after_ms != 0 {
+            self.stale_after_ms = other.stale_after_ms;
+        } else if self.stale_after_ms == 0 {
+            self.stale_after_ms = RUNTIME_RX_SIGNAL_STALE_AFTER_MS;
+        }
+        self.refresh_state(runtime_unix_ms());
+    }
+
+    pub fn refresh_state(&mut self, now_unix_ms: u64) {
+        if self.stale_after_ms == 0 {
+            self.stale_after_ms = RUNTIME_RX_SIGNAL_STALE_AFTER_MS;
+        }
+        self.refresh_quality();
+        let stale_after_ms = if self.stale_after_ms == 0 {
+            RUNTIME_RX_SIGNAL_STALE_AFTER_MS
+        } else {
+            self.stale_after_ms
+        };
+        self.state = match self.last_sample_unix_ms {
+            Some(last) if now_unix_ms.saturating_sub(last) <= stale_after_ms => {
+                RuntimeRxSignalState::Fresh
+            }
+            Some(_) => RuntimeRxSignalState::Stale,
+            None => RuntimeRxSignalState::Unknown,
+        };
+    }
+
+    pub fn mark_disconnected(&mut self) {
+        self.state = RuntimeRxSignalState::Disconnected;
+    }
+
+    fn refresh_quality(&mut self) {
+        let (basis, value) = if let Some(average) = self.rssi_dbm.average {
+            (
+                RuntimeRxSignalQualityBasis::RssiDbmAverage,
+                Some(average.clamp(i64::from(i8::MIN), i64::from(i8::MAX)) as i8),
+            )
+        } else if let Some(last) = self.rssi_dbm.last {
+            (RuntimeRxSignalQualityBasis::RssiDbmLast, Some(last))
+        } else {
+            (RuntimeRxSignalQualityBasis::NoValidSamples, None)
+        };
+        self.quality_basis = basis;
+        self.quality_level = value.map(runtime_rx_quality_level);
+        self.quality_label = self
+            .quality_level
+            .map(runtime_rx_quality_label)
+            .unwrap_or_default();
+    }
+}
+
+fn runtime_rx_quality_level(rssi_dbm: i8) -> u8 {
+    match rssi_dbm {
+        -50..=i8::MAX => 4,
+        -60..=-51 => 3,
+        -70..=-61 => 2,
+        -80..=-71 => 1,
+        _ => 0,
+    }
+}
+
+fn runtime_rx_quality_label(level: u8) -> RuntimeRxSignalQualityLabel {
+    match level {
+        4 => RuntimeRxSignalQualityLabel::Excellent,
+        3 => RuntimeRxSignalQualityLabel::Good,
+        2 => RuntimeRxSignalQualityLabel::Fair,
+        1 => RuntimeRxSignalQualityLabel::Weak,
+        _ => RuntimeRxSignalQualityLabel::Poor,
     }
 }
 
@@ -1132,6 +1404,7 @@ pub struct ProductionRuntimeRxForwardRuntime {
     pub forwarded_bytes: u64,
     pub counters: RxCounters,
     pub last_rx_unix_ms: Option<u64>,
+    pub signal: RuntimeRxSignalSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1142,6 +1415,7 @@ pub struct ProductionRuntimeRxForwardSnapshot {
     pub forwarded_bytes: u64,
     pub counters: RxCounters,
     pub last_rx_unix_ms: Option<u64>,
+    pub signal: RuntimeRxSignalSummary,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -1191,6 +1465,7 @@ pub fn create_production_rx_forward_runtimes(
                 forwarded_bytes: 0,
                 counters: RxCounters::default(),
                 last_rx_unix_ms: None,
+                signal: RuntimeRxSignalSummary::default(),
             })
         })
         .collect()
@@ -1207,6 +1482,7 @@ pub fn production_rx_forward_snapshots(
             forwarded_bytes: runtime.forwarded_bytes,
             counters: runtime.counters.clone(),
             last_rx_unix_ms: runtime.last_rx_unix_ms,
+            signal: runtime.signal,
         })
         .collect()
 }
@@ -1303,6 +1579,8 @@ fn process_production_wfb_rx_forward(
     else {
         return Ok(());
     };
+    let now_unix_ms = runtime_unix_ms();
+    runtime.signal.observe_frame_at(frame, now_unix_ms);
     if let (Some(socket), Some(aggregator)) = (runtime.socket.as_ref(), runtime.aggregator) {
         let bytes = match socket.send_to(&packet, aggregator) {
             Ok(bytes) => bytes,
@@ -1313,7 +1591,7 @@ fn process_production_wfb_rx_forward(
         };
         runtime.counters.forwarded = runtime.counters.forwarded.saturating_add(1);
         runtime.forwarded_bytes = runtime.forwarded_bytes.saturating_add(bytes as u64);
-        runtime.last_rx_unix_ms = Some(runtime_unix_ms());
+        runtime.last_rx_unix_ms = Some(now_unix_ms);
     }
     Ok(())
 }
@@ -2592,6 +2870,71 @@ pub fn write_production_runtime_service_health(
             format!("{}: {error}", path.display()),
         )
     })
+}
+
+#[derive(Debug, Clone)]
+struct ProductionRuntimeHealthSnapshotCadence {
+    interval: Duration,
+    last_write: Option<std::time::Instant>,
+}
+
+impl ProductionRuntimeHealthSnapshotCadence {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_write: None,
+        }
+    }
+
+    fn should_write(&mut self, now: std::time::Instant) -> bool {
+        if self.interval.is_zero() {
+            return false;
+        }
+        if self
+            .last_write
+            .map_or(false, |last| now.duration_since(last) < self.interval)
+        {
+            return false;
+        }
+        self.last_write = Some(now);
+        true
+    }
+}
+
+fn maybe_write_running_production_health<T>(
+    config: &ProductionRuntimeFlowConfig,
+    session: &RuntimeRadioSession<T>,
+    init: ProductionRuntimeInitTelemetry,
+    pre_loop: &ProductionRuntimePreLoopReports,
+    rx: &RuntimeFlowRxTelemetry,
+    tx: &RuntimeFlowTxTelemetry,
+    cadence: &mut ProductionRuntimeHealthSnapshotCadence,
+) {
+    if config.health_file.is_none() {
+        return;
+    }
+    if !cadence.should_write(std::time::Instant::now()) {
+        return;
+    }
+    let report = production_runtime_flow_report_from_state(
+        config,
+        session,
+        "running",
+        init,
+        pre_loop.clone(),
+        None,
+        rx.clone(),
+        tx.clone(),
+        ProductionRuntimeFlowResult::Pass,
+        None,
+    );
+    let health = ProductionRuntimeServiceHealth::from_report(
+        &report,
+        ProductionRuntimeServiceLifecycle::Running,
+        config.health_file.clone(),
+        None,
+    );
+    let _ = write_production_runtime_service_health(config.health_file.as_deref(), &health);
 }
 
 fn production_service_operator_action(
@@ -6598,6 +6941,9 @@ where
     let mut rx_buf = vec![0u8; 16 * 1024];
     let session_cell = RefCell::new(session);
     let mut heartbeat = LedHeartbeat::new(inputs.heartbeat_led, std::time::Instant::now());
+    let mut health_snapshot_cadence = ProductionRuntimeHealthSnapshotCadence::new(
+        Duration::from_millis(PRODUCTION_RUNTIME_HEALTH_SNAPSHOT_INTERVAL_MS),
+    );
     let loop_outcome = run_production_bridge_loop(
         ProductionRuntimeBridgeLoopRunConfig::from_bounds(
             config.duration_ms,
@@ -6623,17 +6969,21 @@ where
                     Ok(queued) => {
                         tx.datagrams_received = tx.datagrams_received.saturating_add(1);
                         apply_production_runtime_tx_bind_datagram(&mut tx, queued.report_index);
-                        match handle_production_bridge_tx_datagram(
-                            &mut **session_cell.borrow_mut(),
-                            &queued,
-                            ProductionRuntimeBridgeTxConfig {
-                                channel: config.channel,
-                                channel_bandwidth: config.bandwidth,
-                                overrides: ProductionRuntimeBridgeTxOverrides::default(),
-                            },
-                            &mut bridge_counters,
-                            &mut submit_counters,
-                        ) {
+                        let tx_result = {
+                            let mut session = session_cell.borrow_mut();
+                            handle_production_bridge_tx_datagram(
+                                &mut **session,
+                                &queued,
+                                ProductionRuntimeBridgeTxConfig {
+                                    channel: config.channel,
+                                    channel_bandwidth: config.bandwidth,
+                                    overrides: ProductionRuntimeBridgeTxOverrides::default(),
+                                },
+                                &mut bridge_counters,
+                                &mut submit_counters,
+                            )
+                        };
+                        match tx_result {
                             Ok(outcome) => {
                                 apply_production_runtime_tx_bind_outcome(
                                     &mut tx,
@@ -6652,6 +7002,15 @@ where
                                     &mut tx,
                                     &bridge_counters,
                                     &submit_counters,
+                                );
+                                maybe_write_running_production_health(
+                                    &config,
+                                    &**session_cell.borrow(),
+                                    init_telemetry,
+                                    &pre_loop,
+                                    &rx,
+                                    &tx,
+                                    &mut health_snapshot_cadence,
                                 );
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
                             }
@@ -6674,6 +7033,15 @@ where
                                     &bridge_counters,
                                     &submit_counters,
                                 );
+                                maybe_write_running_production_health(
+                                    &config,
+                                    &**session_cell.borrow(),
+                                    init_telemetry,
+                                    &pre_loop,
+                                    &rx,
+                                    &tx,
+                                    &mut health_snapshot_cadence,
+                                );
                                 Ok(ProductionRuntimeBridgeLoopStepOutcome::TxProcessed)
                             }
                         }
@@ -6685,57 +7053,89 @@ where
                         Ok(ProductionRuntimeBridgeLoopStepOutcome::TxDisconnected)
                     }
                 },
-                ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => match session_cell
-                    .borrow_mut()
-                    .read_rx_packets(config.channel, &mut rx_buf, timeout)
-                {
-                    Ok(read) if read.bytes_read == 0 => {
-                        rx.buffers_read = rx.buffers_read.saturating_add(1);
-                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
-                    }
-                    Ok(read) => {
-                        rx.buffers_read = rx.buffers_read.saturating_add(1);
-                        match process_production_rx_packet_outcomes(&read.packets, &mut rx_forwards)
-                        {
-                            Ok(outcome) => {
-                                apply_production_runtime_rx_packet_telemetry(
-                                    &mut rx,
-                                    outcome.telemetry,
-                                );
-                                rx.rx_forwards = outcome.rx_forwards;
-                                rx.forwarded_payloads = rx
-                                    .rx_forwards
-                                    .iter()
-                                    .map(|forward| forward.counters.forwarded)
-                                    .sum();
-                                rx.last_rx_unix_ms = rx
-                                    .rx_forwards
-                                    .iter()
-                                    .filter_map(|forward| forward.last_rx_unix_ms)
-                                    .max();
-                                Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
-                            }
-                            Err(error) => Err(error),
+                ProductionRuntimeBridgeLoopStep::ReadRx { timeout } => {
+                    let read_result = {
+                        let mut session = session_cell.borrow_mut();
+                        session.read_rx_packets(config.channel, &mut rx_buf, timeout)
+                    };
+                    match read_result {
+                        Ok(read) if read.bytes_read == 0 => {
+                            rx.buffers_read = rx.buffers_read.saturating_add(1);
+                            maybe_write_running_production_health(
+                                &config,
+                                &**session_cell.borrow(),
+                                init_telemetry,
+                                &pre_loop,
+                                &rx,
+                                &tx,
+                                &mut health_snapshot_cadence,
+                            );
+                            Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
                         }
+                        Ok(read) => {
+                            rx.buffers_read = rx.buffers_read.saturating_add(1);
+                            match process_production_rx_packet_outcomes(
+                                &read.packets,
+                                &mut rx_forwards,
+                            ) {
+                                Ok(outcome) => {
+                                    apply_production_runtime_rx_packet_telemetry(
+                                        &mut rx,
+                                        outcome.telemetry,
+                                    );
+                                    rx.rx_forwards = outcome.rx_forwards;
+                                    rx.forwarded_payloads = rx
+                                        .rx_forwards
+                                        .iter()
+                                        .map(|forward| forward.counters.forwarded)
+                                        .sum();
+                                    rx.last_rx_unix_ms = rx
+                                        .rx_forwards
+                                        .iter()
+                                        .filter_map(|forward| forward.last_rx_unix_ms)
+                                        .max();
+                                    maybe_write_running_production_health(
+                                        &config,
+                                        &**session_cell.borrow(),
+                                        init_telemetry,
+                                        &pre_loop,
+                                        &rx,
+                                        &tx,
+                                        &mut health_snapshot_cadence,
+                                    );
+                                    Ok(ProductionRuntimeBridgeLoopStepOutcome::RxRead)
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) if error.timeout => {
+                            rx.read_timeouts = rx.read_timeouts.saturating_add(1);
+                            maybe_write_running_production_health(
+                                &config,
+                                &**session_cell.borrow(),
+                                init_telemetry,
+                                &pre_loop,
+                                &rx,
+                                &tx,
+                                &mut health_snapshot_cadence,
+                            );
+                            Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
+                        }
+                        Err(_error)
+                            if (inputs.process_signal_stop
+                                && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst))
+                                || inputs
+                                    .external_stop_requested
+                                    .as_ref()
+                                    .is_some_and(|stop| stop.load(Ordering::SeqCst)) =>
+                        {
+                            Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
+                                ProductionRuntimeBridgeLoopStopReason::Signal,
+                            ))
+                        }
+                        Err(error) => Err(error),
                     }
-                    Err(error) if error.timeout => {
-                        rx.read_timeouts = rx.read_timeouts.saturating_add(1);
-                        Ok(ProductionRuntimeBridgeLoopStepOutcome::RxTimeout)
-                    }
-                    Err(_error)
-                        if (inputs.process_signal_stop
-                            && PRODUCTION_RUNTIME_STOP_REQUESTED.load(Ordering::SeqCst))
-                            || inputs
-                                .external_stop_requested
-                                .as_ref()
-                                .is_some_and(|stop| stop.load(Ordering::SeqCst)) =>
-                    {
-                        Ok(ProductionRuntimeBridgeLoopStepOutcome::Stop(
-                            ProductionRuntimeBridgeLoopStopReason::Signal,
-                        ))
-                    }
-                    Err(error) => Err(error),
-                },
+                }
             }
         },
     );
@@ -7246,12 +7646,13 @@ fn production_runtime_flow_report_from_state_with_airtime<T>(
     init: ProductionRuntimeInitTelemetry,
     pre_loop: ProductionRuntimePreLoopReports,
     heartbeat_led: Option<ProductionRuntimeHeartbeatLedReport>,
-    rx: RuntimeFlowRxTelemetry,
+    mut rx: RuntimeFlowRxTelemetry,
     tx: RuntimeFlowTxTelemetry,
     airtime: ProductionRuntimeAirtimeReport,
     result: ProductionRuntimeFlowResult,
     error: Option<RuntimeRadioError>,
 ) -> ProductionRuntimeFlowReport {
+    rx.refresh_signal_state(runtime_unix_ms());
     let calibration_class = config
         .calibration_profile
         .before_tx_class(config.captured_tail_applied);
@@ -15485,6 +15886,7 @@ mod tests {
                 ..RxCounters::default()
             },
             last_rx_unix_ms: None,
+            signal: super::RuntimeRxSignalSummary::default(),
         }];
         let degraded = ProductionRuntimeServiceHealth::from_report(
             &report,
@@ -15496,6 +15898,79 @@ mod tests {
             degraded.operator_action,
             ProductionRuntimeServiceOperatorAction::Investigate
         );
+    }
+
+    #[test]
+    fn running_health_snapshot_writes_current_signal_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "wfb-radio-runtime-running-health-{}-{}.json",
+            std::process::id(),
+            runtime_unix_ms()
+        ));
+        let mut config = production_runtime_flow_config();
+        config.health_file = Some(path.clone());
+        let session = runtime_tx_session(MockTransport::default());
+        let mut rx = RuntimeFlowRxTelemetry::default();
+        let frame = runtime_rx_frame(vec![0x08; 24]);
+        rx.signal.observe_frame_at(&frame, runtime_unix_ms());
+        let tx = RuntimeFlowTxTelemetry::default();
+        let mut cadence =
+            super::ProductionRuntimeHealthSnapshotCadence::new(Duration::from_secs(1));
+
+        super::maybe_write_running_production_health(
+            &config,
+            &session,
+            ProductionRuntimeInitTelemetry {
+                readiness: ProductionRuntimeInitReadiness::Ready,
+                phase_count: 1,
+                completed_phase_count: 1,
+            },
+            &super::ProductionRuntimePreLoopReports::default(),
+            &rx,
+            &tx,
+            &mut cadence,
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("health artifact"))
+                .expect("health JSON");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(value["lifecycle"], "running");
+        assert_eq!(value["rx"]["signal"]["rssi_dbm"]["last"], -47);
+        assert_eq!(value["rx"]["signal"]["quality_level"], 4);
+        assert_eq!(value["rx"]["signal"]["metadata"]["last_mcs_index"], 1);
+    }
+
+    #[test]
+    fn running_health_snapshot_is_noop_without_health_file() {
+        let config = production_runtime_flow_config();
+        let session = runtime_tx_session(MockTransport::default());
+        let mut cadence =
+            super::ProductionRuntimeHealthSnapshotCadence::new(Duration::from_secs(1));
+
+        super::maybe_write_running_production_health(
+            &config,
+            &session,
+            ProductionRuntimeInitTelemetry::default(),
+            &super::ProductionRuntimePreLoopReports::default(),
+            &RuntimeFlowRxTelemetry::default(),
+            &RuntimeFlowTxTelemetry::default(),
+            &mut cadence,
+        );
+
+        assert!(cadence.last_write.is_none());
+    }
+
+    #[test]
+    fn running_health_snapshot_cadence_limits_rewrites() {
+        let mut cadence =
+            super::ProductionRuntimeHealthSnapshotCadence::new(Duration::from_secs(1));
+        let start = std::time::Instant::now();
+
+        assert!(cadence.should_write(start));
+        assert!(!cadence.should_write(start + Duration::from_millis(999)));
+        assert!(cadence.should_write(start + Duration::from_secs(1)));
     }
 
     #[test]
@@ -15990,11 +16465,21 @@ mod tests {
         assert_eq!(outcome.telemetry.snr_frames, 1);
         assert_eq!(outcome.telemetry.noise_frames, 1);
         assert_eq!(outcome.telemetry.signal.rssi_dbm.sample_count, 1);
+        assert_eq!(outcome.telemetry.signal.rssi_dbm.last, Some(-47));
         assert_eq!(outcome.telemetry.signal.rssi_dbm.min, Some(-47));
         assert_eq!(outcome.telemetry.signal.rssi_dbm.max, Some(-47));
         assert_eq!(outcome.telemetry.signal.rssi_dbm.average, Some(-47));
         assert_eq!(outcome.telemetry.signal.snr_db.average, Some(45));
         assert_eq!(outcome.telemetry.signal.noise_dbm.average, Some(-92));
+        assert_eq!(
+            outcome.telemetry.signal.state,
+            super::RuntimeRxSignalState::Fresh
+        );
+        assert_eq!(outcome.telemetry.signal.quality_level, Some(4));
+        assert_eq!(
+            outcome.telemetry.signal.quality_label,
+            super::RuntimeRxSignalQualityLabel::Excellent
+        );
         assert_eq!(outcome.telemetry.data_frames, 1);
         assert_eq!(outcome.telemetry.dropped_packets, 1);
         assert_eq!(outcome.telemetry.need_more_data, 1);
@@ -16048,15 +16533,68 @@ mod tests {
         let signal = outcome.telemetry.signal;
 
         assert_eq!(signal.rssi_dbm.sample_count, 2);
+        assert_eq!(signal.rssi_dbm.last, Some(-55));
         assert_eq!(signal.rssi_dbm.min, Some(-55));
         assert_eq!(signal.rssi_dbm.max, Some(-47));
         assert_eq!(signal.rssi_dbm.average, Some(-51));
+        assert_eq!(signal.quality_level, Some(3));
         assert_eq!(signal.snr_db.min, Some(25));
         assert_eq!(signal.snr_db.max, Some(45));
         assert_eq!(signal.snr_db.average, Some(35));
         assert_eq!(signal.noise_dbm.min, Some(-92));
         assert_eq!(signal.noise_dbm.max, Some(-90));
         assert_eq!(signal.noise_dbm.average, Some(-91));
+    }
+
+    #[test]
+    fn runtime_signal_ignores_invalid_fallback_rssi_for_quality() {
+        let mut frame = runtime_rx_frame(vec![0x08; 24]);
+        frame.rssi_dbm_valid = false;
+        frame.rssi_dbm_source = radio_core::RxRssiSource::FallbackNoPhyStatus;
+        frame.snr_db = None;
+        frame.noise_dbm = None;
+        let mut signal = super::RuntimeRxSignalSummary::default();
+
+        signal.observe_frame_at(&frame, 1_000);
+
+        assert_eq!(signal.rssi_dbm.sample_count, 0);
+        assert_eq!(signal.metadata.rssi_valid_frames, 0);
+        assert_eq!(
+            signal.metadata.rssi_source,
+            Some(radio_core::RxRssiSource::FallbackNoPhyStatus)
+        );
+        assert_eq!(signal.quality_level, None);
+        assert_eq!(
+            signal.quality_basis,
+            super::RuntimeRxSignalQualityBasis::NoValidSamples
+        );
+        assert_eq!(signal.state, super::RuntimeRxSignalState::Unknown);
+    }
+
+    #[test]
+    fn runtime_signal_quality_thresholds_and_stale_state() {
+        let samples = [
+            (-45, 4, super::RuntimeRxSignalQualityLabel::Excellent),
+            (-55, 3, super::RuntimeRxSignalQualityLabel::Good),
+            (-65, 2, super::RuntimeRxSignalQualityLabel::Fair),
+            (-75, 1, super::RuntimeRxSignalQualityLabel::Weak),
+            (-85, 0, super::RuntimeRxSignalQualityLabel::Poor),
+        ];
+
+        for (rssi, level, label) in samples {
+            let mut frame = runtime_rx_frame(vec![0x08; 24]);
+            frame.rssi_dbm = rssi;
+            let mut signal = super::RuntimeRxSignalSummary::default();
+            signal.stale_after_ms = 10;
+
+            signal.observe_frame_at(&frame, 1_000);
+            assert_eq!(signal.quality_level, Some(level));
+            assert_eq!(signal.quality_label, label);
+            assert_eq!(signal.state, super::RuntimeRxSignalState::Fresh);
+
+            signal.refresh_state(1_011);
+            assert_eq!(signal.state, super::RuntimeRxSignalState::Stale);
+        }
     }
 
     #[test]
@@ -16088,6 +16626,12 @@ mod tests {
         assert_eq!(outcome.rx_forwards[0].counters.matched, 1);
         assert_eq!(outcome.rx_forwards[0].counters.forwarded, 1);
         assert_eq!(outcome.rx_forwards[0].forwarded_bytes, bytes as u64);
+        assert_eq!(outcome.rx_forwards[0].signal.rssi_dbm.sample_count, 1);
+        assert_eq!(outcome.rx_forwards[0].signal.rssi_dbm.last, Some(-47));
+        assert_eq!(
+            outcome.rx_forwards[0].signal.metadata.last_mcs_index,
+            Some(1)
+        );
     }
 
     #[test]
@@ -16111,6 +16655,7 @@ mod tests {
         assert_eq!(outcome.rx_forwards[0].counters.filtered, 1);
         assert_eq!(outcome.rx_forwards[0].counters.forwarded, 0);
         assert_eq!(outcome.rx_forwards[0].forwarded_bytes, 0);
+        assert_eq!(outcome.rx_forwards[0].signal.rssi_dbm.sample_count, 0);
     }
 
     #[test]

@@ -209,9 +209,17 @@ best-effort tunnel failure also adds `__tunnel` to `degraded_streams`.
 `LinkHealth` and `LinkReport` include `streams[]` keyed by these names. TX
 entries expose submitted frames, failed submissions, dropped datagrams, and
 last successful submit time when the runtime owns the TX bind. RX entries
-expose forwarded frames/bytes and the last RX-forward time. `degraded_streams`
-lists best-effort streams that were skipped or degraded during startup, plus
-the `__tunnel` sentinel for a best-effort managed tunnel failure.
+expose forwarded frames/bytes, the last RX-forward time, and a structured
+`signal` summary when runtime radio metadata is available. The aggregate
+`LinkHealth.rx.signal` and per-stream `LinkStreamRxHealth.signal` include raw
+RSSI/SNR/noise metrics, sample counts, last/min/max/average values, signal
+state, a normalized `quality_level`/`quality_label`, and RF context such as
+channel, frequency, bandwidth, MCS, and PHY-status coverage. Local RSSI is
+receiver-side metadata for inbound frames observed by this device; remote or
+uplink RSSI requires peer-reported metadata and is not fabricated locally.
+`degraded_streams` lists best-effort streams that were skipped or degraded
+during startup, plus the `__tunnel` sentinel for a best-effort managed tunnel
+failure.
 
 For the current userspace radio backend, `BestEffort` is implemented for
 TX UDP bind preflight: an unavailable best-effort TX socket is removed from the

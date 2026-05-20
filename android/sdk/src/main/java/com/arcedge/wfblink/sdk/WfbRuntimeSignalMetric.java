@@ -5,15 +5,17 @@ import org.json.JSONObject;
 /** Min/max/average signal metric parsed from the runtime RX report. */
 public final class WfbRuntimeSignalMetric {
     public static final WfbRuntimeSignalMetric EMPTY =
-            new WfbRuntimeSignalMetric(0, null, null, null);
+            new WfbRuntimeSignalMetric(0, null, null, null, null);
 
     public final long sampleCount;
+    public final Long last;
     public final Long min;
     public final Long max;
     public final Long average;
 
-    WfbRuntimeSignalMetric(long sampleCount, Long min, Long max, Long average) {
+    WfbRuntimeSignalMetric(long sampleCount, Long last, Long min, Long max, Long average) {
         this.sampleCount = sampleCount;
+        this.last = last;
         this.min = min;
         this.max = max;
         this.average = average;
@@ -25,6 +27,7 @@ public final class WfbRuntimeSignalMetric {
         }
         return new WfbRuntimeSignalMetric(
                 value.optLong("sample_count", 0),
+                optionalLong(value, "last"),
                 optionalLong(value, "min"),
                 optionalLong(value, "max"),
                 optionalLong(value, "average"));

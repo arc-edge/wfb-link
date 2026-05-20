@@ -279,10 +279,16 @@ injected. Artifact: `/tmp/wfb-radio-run-rx-handler-smoke.json` on the hardware
 Mac deploy checkout.
 
 Production RX telemetry now also emits `rx.signal` with RSSI, SNR, and noise
-sample counts plus min/max/rounded-average dB values. The summary is computed
-from the same RTL8812AU PHY-status metadata used by `rx-scan` frame JSONL and
-is present in both diagnostic bridge reports and runtime-owned `radio-run`
-reports. Live validation at
+sample counts plus last/min/max/rounded-average dB values, explicit
+fresh/unknown/stale state, a normalized quality indicator, and RF metadata
+coverage. Matching RX forward snapshots also carry their own `signal` block so
+named telemetry/video streams can expose per-radio-port link quality when WFB
+frames can be attributed. The summary is computed from the same RTL8812AU
+PHY-status metadata used by `rx-scan` frame JSONL and is present in both
+diagnostic bridge reports and runtime-owned `radio-run` reports. While running,
+configured production health files are refreshed at a bounded cadence so
+downstream consumers can poll current quality without consuming per-packet
+metadata. Live validation at
 `/tmp/wfb-radio-run-duplex-signal-summary-20260504-155712` populated
 `rx.signal` over `6991` samples while both peer counters recovered `20/20`.
 The production-shaped RX report also carries runtime-owned RX outcome detail
