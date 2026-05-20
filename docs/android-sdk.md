@@ -160,11 +160,21 @@ boolean healthy = result.isProductionHealthy();
 long uplinkSubmitted = result.uplink.submittedFrames;
 long downlinkForwardedToHelper = result.downlink.forwardedPayloads;
 Long avgRssi = result.rxSignal.rssiDbm.average;
+Integer signalBars = result.rxSignal.qualityLevel;
+String signalState = result.rxSignal.state;
 ```
 
 In production mode the product app should count its own raw downlink payloads
 from the UDP socket. `downlink.rawPackets` is populated only when SDK
 validation traffic is enabled.
+
+`result.rxSignal` is the local receiver's view of inbound RF frames. It exposes
+raw RSSI/SNR/noise metrics with sample counts, last/min/max/average values,
+`state`, `qualityLevel`, `qualityLabel`, and `metadata` fields for RF context
+such as PHY-status coverage, channel, frequency, bandwidth, and MCS. Use
+`qualityLevel` for simple UI bars and keep the raw values for diagnostics.
+Unknown or unsupported signal states do not fabricate RSSI. Remote/uplink RSSI
+requires the peer to report what it receives from this device.
 
 `startManagedStreams` validates the config, runs the existing blocking native
 runtime on the caller-provided `ExecutorService`, and returns a

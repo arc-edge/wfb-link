@@ -20639,6 +20639,7 @@ fn runtime_rx_forward_snapshots_from_bridge_report(
                 forwarded_bytes: forward.forwarded_bytes,
                 counters: forward.counters.clone(),
                 last_rx_unix_ms: None,
+                signal: RuntimeRxSignalSummary::default(),
             })
         })
         .collect()

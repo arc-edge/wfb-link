@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::channel::{Band, Bandwidth, Channel};
@@ -75,7 +75,7 @@ pub enum Rtl8812auRegisterError {
     },
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxRate {
     Cck1m,
@@ -98,7 +98,7 @@ pub enum TxRate {
     },
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxQueue {
     #[default]
@@ -111,7 +111,7 @@ pub enum TxQueue {
     Mgnt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxOptions {
     pub rate: TxRate,
     pub bandwidth: Bandwidth,
@@ -166,7 +166,7 @@ impl Default for TxOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RxRssiSource {
     Rtl8812PhyStatusBestPath,
@@ -174,7 +174,7 @@ pub enum RxRssiSource {
     FallbackNoPhyStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RxSnrSource {
     Rtl8812PhyStatusBestPath,

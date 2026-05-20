@@ -26,6 +26,7 @@ use wfb_radio_runtime::{
     run_production_runtime_flow, ProductionRuntimeFlowConfig, ProductionRuntimeFlowExecutionInputs,
     ProductionRuntimeFlowReport, ProductionRuntimeFlowResult,
     ProductionRuntimePrimaryRxForwardConfig, ProductionRuntimeRxForwardConfig, RuntimeRadioError,
+    RuntimeRxSignalSummary,
 };
 use wfb_radio_service::{
     resolve_service_run, service_runtime_config_from_resolved,
@@ -1111,6 +1112,7 @@ pub struct LinkRxHealth {
     pub parsed_frames: u64,
     pub forwarded_payloads: u64,
     pub dropped_packets: u64,
+    pub signal: RuntimeRxSignalSummary,
     pub rssi_average_dbm: Option<i64>,
     pub snr_average_db: Option<i64>,
     pub noise_average_dbm: Option<i64>,
@@ -1150,6 +1152,7 @@ pub struct LinkStreamRxHealth {
     pub forwarded_frames: u64,
     pub forwarded_bytes: u64,
     pub last_rx_unix_ms: Option<u64>,
+    pub signal: RuntimeRxSignalSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3047,6 +3050,7 @@ fn link_rx_health_from_json(rx: Option<&Value>) -> LinkRxHealth {
         parsed_frames: json_u64(rx, "parsed_frames"),
         forwarded_payloads: json_u64(rx, "forwarded_payloads"),
         dropped_packets: json_u64(rx, "dropped_packets"),
+        signal: rx_signal_summary_from_json(rx.get("signal")),
         rssi_average_dbm: rx_signal_average(rx, "rssi_dbm"),
         snr_average_db: rx_signal_average(rx, "snr_db"),
         noise_average_dbm: rx_signal_average(rx, "noise_dbm"),
@@ -3267,6 +3271,7 @@ fn link_stream_rx_health_from_json(
             .unwrap_or(0),
         forwarded_bytes: json_u64(forward, "forwarded_bytes"),
         last_rx_unix_ms: forward.get("last_rx_unix_ms").and_then(Value::as_u64),
+        signal: rx_signal_summary_from_json(forward.get("signal")),
     }
 }
 
@@ -3305,6 +3310,13 @@ fn wfb_observation_side_matches_stream(
 
 fn rx_signal_average(rx: &Value, metric: &str) -> Option<i64> {
     rx.get("signal")?.get(metric)?.get("average")?.as_i64()
+}
+
+fn rx_signal_summary_from_json(signal: Option<&Value>) -> RuntimeRxSignalSummary {
+    signal
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 fn json_u64(value: &Value, key: &str) -> u64 {
@@ -3526,10 +3538,96 @@ mod tests {
                 forwarded_frames: 8,
                 forwarded_bytes: 4096,
                 last_rx_unix_ms: Some(5678),
+                signal: RuntimeRxSignalSummary::default(),
             })
         );
         assert!(streams[1].degraded);
         assert_eq!(degraded_stream_names(&streams), vec!["video-down"]);
+    }
+
+    #[test]
+    fn link_health_maps_structured_signal_metadata() {
+        let endpoints = LinkEndpoints {
+            tunnel: None,
+            streams: vec![LinkStreamEndpoint {
+                name: "telemetry-down".to_string(),
+                direction: LinkDirection::Rx,
+                local_udp: "127.0.0.1:5801".parse().unwrap(),
+                payload_kind: PayloadKind::RawApplicationDatagram,
+                criticality: StreamCriticality::Required,
+                stream: Some(WfbStreamId {
+                    link_id: Some(1),
+                    radio_port: 1,
+                }),
+            }],
+        };
+        let backend = serde_json::json!({
+            "rx": {
+                "signal": {
+                    "rssi_dbm": {
+                        "sample_count": 2,
+                        "last": -58,
+                        "min": -62,
+                        "max": -55,
+                        "average": -59
+                    },
+                    "snr_db": { "sample_count": 1, "last": 22, "min": 22, "max": 22, "average": 22 },
+                    "noise_dbm": { "sample_count": 1, "last": -81, "min": -81, "max": -81, "average": -81 },
+                    "state": "fresh",
+                    "quality_level": 3,
+                    "quality_label": "good",
+                    "quality_basis": "rssi_dbm_average",
+                    "last_sample_unix_ms": 12345,
+                    "stale_after_ms": 3000,
+                    "metadata": {
+                        "rssi_source": "rtl8812_phy_status_best_path",
+                        "phy_status_frames": 2,
+                        "rssi_valid_frames": 2,
+                        "last_channel": 36,
+                        "last_frequency_mhz": 5180,
+                        "last_bandwidth_mhz": 20,
+                        "last_mcs_index": 1
+                    }
+                },
+                "rx_forwards": [{
+                    "config": {
+                        "channel_id": { "link_id": 1, "radio_port": 1 }
+                    },
+                    "forwarded_bytes": 128,
+                    "last_rx_unix_ms": 12345,
+                    "counters": { "forwarded": 4 },
+                    "signal": {
+                        "rssi_dbm": {
+                            "sample_count": 1,
+                            "last": -67,
+                            "min": -67,
+                            "max": -67,
+                            "average": -67
+                        },
+                        "snr_db": { "sample_count": 0, "last": null, "min": null, "max": null, "average": null },
+                        "noise_dbm": { "sample_count": 0, "last": null, "min": null, "max": null, "average": null },
+                        "state": "fresh",
+                        "quality_level": 2,
+                        "quality_label": "fair",
+                        "quality_basis": "rssi_dbm_average",
+                        "last_sample_unix_ms": 12345,
+                        "stale_after_ms": 3000,
+                        "metadata": { "rssi_valid_frames": 1 }
+                    }
+                }]
+            }
+        });
+
+        let rx = link_rx_health_from_json(backend.get("rx"));
+        let streams = link_stream_health_from_backend_json(&endpoints, &backend, &[]);
+
+        assert_eq!(rx.rssi_average_dbm, Some(-59));
+        assert_eq!(rx.signal.rssi_dbm.last, Some(-58));
+        assert_eq!(rx.signal.quality_level, Some(3));
+        assert_eq!(rx.signal.metadata.last_frequency_mhz, Some(5180));
+        let stream_rx = streams[0].rx.expect("stream rx health");
+        assert_eq!(stream_rx.signal.rssi_dbm.average, Some(-67));
+        assert_eq!(stream_rx.signal.quality_level, Some(2));
     }
 
     #[test]

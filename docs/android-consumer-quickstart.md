@@ -154,6 +154,8 @@ boolean healthy = result.isProductionHealthy();
 String finalLabel = result.health.summaryLabel();
 boolean txDrops = result.health.hasTxDrops();
 Long avgRssi = result.rxSignal.rssiDbm.average;
+Integer signalBars = result.rxSignal.qualityLevel;
+String signalState = result.rxSignal.state;
 ```
 
 For UI and logs, surface:
@@ -165,6 +167,12 @@ For UI and logs, surface:
 - `result.health.hasTxDrops()`
 - `result.rxSignal`
 - `result.stopReason`
+
+`result.rxSignal` describes local inbound RF reception. Use
+`qualityLevel`/`qualityLabel` for bars or badges, and use RSSI/SNR/noise plus
+`metadata` for debug logs. `unknown`, `unsupported`, or stale states should be
+rendered explicitly; remote/uplink RSSI is only available when the peer reports
+its receiver-side metadata back.
 
 ## Android Policy Requirement
 
